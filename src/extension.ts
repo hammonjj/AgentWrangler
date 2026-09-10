@@ -1,12 +1,20 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ClaudeProvider } from './claude/claudeProvider';
+import {
+  currentState,
+  installHooks,
+  settingsModifiedAtMs,
+  settingsPath,
+  uninstallHooks,
+} from './claude/hookInstall';
+import { hookLogDir } from './claude/hookLog';
 import { ArchiveService } from './core/archive';
 import { DEFAULT_CONFIG, type ConfigGetter, type WranglerConfig } from './core/config';
 import { SessionStore } from './core/sessionStore';
+import { TurnStats } from './core/turnStats';
 import { STATUS_LABEL, type AgentSession, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
+import { DASHBOARD_PANEL_TYPE, DashboardPanelManager, DashboardPanelSerializer } from './ui/dashboardPanel';
 import { DashboardViewProvider } from './ui/dashboardView';
 import { CrossWindowRelay } from './ui/relay';
 import { createStatusBar } from './ui/statusBar';
@@ -14,7 +22,18 @@ import { resumeInTerminal } from './ui/terminal';
 import { ViewerPanelManager } from './ui/viewerPanel';
 import { isInThisWorkspace } from './ui/workspace';
 
+/** How long to let a session emit its first hook event before calling hooks broken. */
+const HOOK_HEALTH_GRACE_MS = 90_000;
+
+/**
+ * Grace period before the startup auto-open. VSCode restores editor tabs (and
+ * hands ours back through the serializer) shortly after activation, so waiting
+ * keeps us from opening a second dashboard next to the restored one.
+ */
+const STARTUP_OPEN_DELAY_MS = 1500;
+
 const QUICKPICK_ICON: Record<SessionStatus, string> = {
+  blocked: '$(shield)',
   waiting: '$(bell)',
   busy: '$(play)',
   stuck: '$(warning)',
@@ -40,7 +59,10 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const store = new SessionStore();
-  const provider = new ClaudeProvider(getConfig, log);
+  // Turn durations are a property of how this person works, not of one folder,
+  // so the baseline is global state shared across windows.
+  const turnStats = new TurnStats(context.globalState);
+  const provider = new ClaudeProvider(getConfig, log, turnStats);
   const archive = new ArchiveService(context.globalState);
   context.subscriptions.push({ dispose: () => store.dispose() }); // store disposes providers
 
@@ -123,13 +145,26 @@ export function activate(context: vscode.ExtensionContext): void {
   const viewers = new ViewerPanelManager(context.extensionUri, store, provider, actions);
   context.subscriptions.push(viewers);
 
+  // The dashboard has two homes: an editor tab (default) and the bottom panel.
+  // Both are always registered; the setting only decides where opening it goes.
+  const dashboardPanel = new DashboardPanelManager(context.extensionUri, store, archive, actions);
   context.subscriptions.push(
+    dashboardPanel,
+    vscode.window.registerWebviewPanelSerializer(DASHBOARD_PANEL_TYPE, new DashboardPanelSerializer(dashboardPanel)),
     vscode.window.registerWebviewViewProvider(
       DashboardViewProvider.viewId,
       new DashboardViewProvider(context.extensionUri, store, archive, actions),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );
+
+  const dashboardInEditor = () =>
+    vscode.workspace.getConfiguration('agentWrangler').get<string>('dashboardLocation', 'editor') !== 'panel';
+
+  const openDashboard = (opts?: { preserveFocus?: boolean }) => {
+    if (dashboardInEditor()) dashboardPanel.open(opts);
+    else void vscode.commands.executeCommand('agentWrangler.dashboard.focus');
+  };
 
   createStatusBar(store, archive, context);
 
@@ -143,8 +178,12 @@ export function activate(context: vscode.ExtensionContext): void {
         if (archive.isArchived(s.key)) continue; // archived sessions stay quiet
         if (now - (lastToastAt.get(s.key) ?? 0) < 30_000) continue;
         lastToastAt.set(s.key, now);
+        const msg =
+          s.status === 'blocked'
+            ? `${s.title} needs your permission${s.blockedReason ? ` for ${s.blockedReason}` : ''}`
+            : `${s.title} is waiting on you`;
         void vscode.window
-          .showInformationMessage(`${s.title} is waiting on you`, 'Open Viewer', 'Dashboard')
+          .showInformationMessage(msg, 'Open Viewer', 'Dashboard')
           .then((choice) => {
             if (choice === 'Open Viewer') actions.openViewer(s.key);
             else if (choice === 'Dashboard') void vscode.commands.executeCommand('agentWrangler.openDashboard');
@@ -184,9 +223,7 @@ export function activate(context: vscode.ExtensionContext): void {
     };
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('agentWrangler.openDashboard', () =>
-      vscode.commands.executeCommand('agentWrangler.dashboard.focus'),
-    ),
+    vscode.commands.registerCommand('agentWrangler.openDashboard', () => openDashboard()),
     vscode.commands.registerCommand('agentWrangler.refresh', () => actions.refreshAll()),
     vscode.commands.registerCommand(
       'agentWrangler.openViewer',
@@ -201,15 +238,77 @@ export function activate(context: vscode.ExtensionContext): void {
       'agentWrangler.revealTranscript',
       withSession((k) => actions.reveal(k), (s) => s.transcriptPath !== undefined),
     ),
+    vscode.commands.registerCommand('agentWrangler.installHooks', async () => {
+      const dir = hookLogDir();
+      const choice = await vscode.window.showWarningMessage(
+        'Install Agent Wrangler status hooks?',
+        {
+          modal: true,
+          detail:
+            `This adds an Agent Wrangler block to ${settingsPath()} so Claude Code reports exact status ` +
+            `(a permission prompt becomes "Blocked" instead of a guess). Your existing hooks and settings ` +
+            `are preserved and the file is backed up first.\n\n` +
+            `Claude Code reads hook config when a session starts, so only sessions you start afterwards will report.`,
+        },
+        'Install',
+      );
+      if (choice !== 'Install') return;
+      const res = await installHooks(dir);
+      log(`installHooks: ${res.message}`);
+      if (res.ok) void vscode.window.showInformationMessage(`Agent Wrangler: ${res.message}`);
+      else void vscode.window.showErrorMessage(`Agent Wrangler: ${res.message}`);
+      void store.forceRefresh();
+    }),
+    vscode.commands.registerCommand('agentWrangler.uninstallHooks', async () => {
+      const res = await uninstallHooks();
+      log(`uninstallHooks: ${res.message}`);
+      if (res.ok) void vscode.window.showInformationMessage(`Agent Wrangler: ${res.message}`);
+      else void vscode.window.showErrorMessage(`Agent Wrangler: ${res.message}`);
+      void store.forceRefresh();
+    }),
   );
 
   void store.register(provider).catch((err) => log(`provider start failed: ${String(err)}`));
   log('Agent Wrangler activated');
 
-  // Dev convenience: `touch .dev-auto-open` in the extension folder to have the
-  // dashboard panel open itself on every launch of the dev host.
-  if (fs.existsSync(path.join(context.extensionPath, '.dev-auto-open'))) {
-    setTimeout(() => void vscode.commands.executeCommand('agentWrangler.dashboard.focus'), 1200);
+  // Hooks can be suppressed with no error we'd ever see: `disableAllHooks`,
+  // safe mode, an org policy allowing only managed hooks, or unaccepted
+  // workspace trust. Left undetected that looks exactly like a broken feature,
+  // so say so instead of showing every session as estimated forever.
+  void (async () => {
+    const state = await currentState(hookLogDir());
+    log(`hook install state: ${state.kind}${'why' in state ? ` (${state.why})` : ''}`);
+    if (state.kind === 'disabled') {
+      void vscode.window.showWarningMessage(`Agent Wrangler: hooks cannot run — ${state.why}.`);
+      return;
+    }
+    if (state.kind !== 'installed') return;
+
+    const installedAt = await settingsModifiedAtMs();
+    setTimeout(() => {
+      if (provider.hooksReporting) return;
+      // Only complain about sessions that started after the hooks were written;
+      // older ones are expected to be silent, since hook config is snapshotted
+      // when a session starts.
+      const shouldReport = store.sessions.filter(
+        (s) => s.status !== 'ended' && installedAt !== undefined && (s.startedAt ?? 0) > installedAt,
+      );
+      if (shouldReport.length === 0) return;
+      log(`hooks installed but ${shouldReport.length} newer session(s) have reported nothing`);
+      void vscode.window.showWarningMessage(
+        'Agent Wrangler: status hooks are installed but no session is reporting. Check safe mode, workspace trust, and `disableAllHooks` in settings.json.',
+      );
+    }, HOOK_HEALTH_GRACE_MS);
+  })();
+
+  // Open the dashboard for the window, so a day spent with agents starts on
+  // the agents. A tab VSCode restored for us already counts: leave it exactly
+  // where and how it came back rather than adding a second one.
+  if (vscode.workspace.getConfiguration('agentWrangler').get<boolean>('openOnStartup', true)) {
+    setTimeout(() => {
+      if (dashboardInEditor() && dashboardPanel.isOpen) return;
+      openDashboard();
+    }, STARTUP_OPEN_DELAY_MS);
   }
 }
 

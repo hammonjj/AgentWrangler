@@ -3,7 +3,10 @@ import * as path from 'node:path';
 import type { ConfigGetter } from '../core/config';
 import { Emitter, type Disposable } from '../core/events';
 import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
-import type { AgentSession } from '../shared/model';
+import type { TurnStats } from '../core/turnStats';
+import type { AgentSession, TurnProgress } from '../shared/model';
+import { statusFromHookState, turnBlockedMsAt, type HookSessionState } from './hookEvents';
+import { HookLog } from './hookLog';
 import { isSessionJsonlName, projectsDir, sessionsDir } from './paths';
 import { readRegistry, type RegistryEntry } from './registry';
 import { deriveStatus } from './status';
@@ -20,6 +23,7 @@ export class ClaudeProvider implements AgentProvider {
 
   private registry: RegistryEntry[] = [];
   private index = new TranscriptIndex();
+  private hooks: HookLog;
   private changeEmitter = new Emitter<void>();
   private appendEmitter = new Emitter<TranscriptAppendEvent>();
 
@@ -35,17 +39,29 @@ export class ClaudeProvider implements AgentProvider {
   constructor(
     private getConfig: ConfigGetter,
     private log: (msg: string) => void = () => undefined,
-  ) {}
+    /** Absent in tests; progress then carries elapsed and tool counts but no pace band. */
+    private turnStats?: TurnStats,
+  ) {
+    this.hooks = new HookLog(log);
+  }
 
   onDidChange = (listener: () => void): Disposable => this.changeEmitter.event(listener);
   onTranscriptAppended = (listener: (e: TranscriptAppendEvent) => void): Disposable =>
     this.appendEmitter.event(listener);
+
+  /** True once any hook event has been seen — the dashboard warns when hooks are installed but silent. */
+  get hooksReporting(): boolean {
+    return this.hooks.hasEverReported;
+  }
 
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
     await this.refreshRegistry();
     await this.fullScan();
+    await this.hooks.start();
+    this.hooks.onDidChange(() => this.changeEmitter.fire());
+    this.hooks.onTurnCompleted((ms) => this.turnStats?.record(ms));
     this.ensureWatchers();
     this.schedulePoll();
     this.log(`claude provider started: ${this.registry.length} live session(s), ${this.index.all().length} transcript(s) indexed`);
@@ -54,6 +70,7 @@ export class ClaudeProvider implements AgentProvider {
   async refresh(): Promise<void> {
     await this.refreshRegistry();
     await this.fullScan();
+    await this.hooks.scanAll();
     this.changeEmitter.fire();
   }
 
@@ -63,19 +80,29 @@ export class ClaudeProvider implements AgentProvider {
     const sessions: AgentSession[] = [];
     const liveIds = new Set<string>();
 
+    const stuckThresholdMs = cfg.stuckThresholdSeconds * 1000;
+
     for (const r of this.registry) {
       const id = r.sessionId.toLowerCase();
       liveIds.add(id);
       const idx = this.index.get(id);
       const s = idx?.summary;
-      const status = deriveStatus({
-        pidAlive: true,
-        lastMeaningful: s?.lastMeaningful,
-        transcriptMtimeMs: s?.mtimeMs,
-        nowMs: now,
-        stuckThresholdMs: cfg.stuckThresholdSeconds * 1000,
-      });
-      sessions.push(this.buildSession(r, idx, status, now));
+
+      // Hooks are ground truth when this session reports them. Sessions started
+      // before the hooks were installed have none (Claude Code snapshots hook
+      // config at startup), so they fall back to transcript inference and are
+      // flagged estimated rather than silently presented as fact.
+      const hook = this.hooks.get(id);
+      const status = hook
+        ? statusFromHookState(hook, now, stuckThresholdMs)
+        : deriveStatus({
+            pidAlive: true,
+            lastMeaningful: s?.lastMeaningful,
+            transcriptMtimeMs: s?.mtimeMs,
+            nowMs: now,
+            stuckThresholdMs,
+          });
+      sessions.push(this.buildSession(r, idx, status, now, hook));
     }
 
     const endedCutoff = now - cfg.endedWindowHours * 3_600_000;
@@ -94,10 +121,15 @@ export class ClaudeProvider implements AgentProvider {
     idx: IndexedTranscript | undefined,
     status: AgentSession['status'],
     now: number,
+    hook?: HookSessionState,
   ): AgentSession {
     const s = idx?.summary;
     const cwd = r.cwd ?? s?.cwd;
     return {
+      statusIsEstimated: hook === undefined,
+      blockedReason: status === 'blocked' ? hook?.blockedReason : undefined,
+      activeTool: status === 'busy' ? hook?.activeTool : undefined,
+      progress: status === 'busy' && hook ? this.buildProgress(hook, now) : undefined,
       provider: this.id,
       sessionId: r.sessionId,
       key: `${this.id}:${r.sessionId.toLowerCase()}`,
@@ -115,6 +147,24 @@ export class ClaudeProvider implements AgentProvider {
       transcriptPath: idx?.path,
       pid: r.pid,
       prLink: s?.prLink,
+    };
+  }
+
+  /**
+   * Progress for the turn in flight. Returns undefined unless we watched the
+   * turn start — a backlog-replayed start has no knowable age, and inventing
+   * one would be worse than the blank the caller renders instead.
+   */
+  private buildProgress(hook: HookSessionState, now: number): TurnProgress | undefined {
+    if (hook.turnStartedAtMs === undefined || hook.turnStartUncertain) return undefined;
+    const blockedMs = turnBlockedMsAt(hook, now);
+    const elapsedMs = Math.max(0, now - hook.turnStartedAtMs - blockedMs);
+    return {
+      startedAtMs: hook.turnStartedAtMs,
+      blockedMs,
+      toolCalls: hook.turnToolCalls,
+      todo: hook.todo,
+      pace: this.turnStats?.classify(elapsedMs),
     };
   }
 
@@ -228,8 +278,11 @@ export class ClaudeProvider implements AgentProvider {
       try {
         await this.refreshRegistry(); // catches pid deaths (no fs event fires for those)
         this.ensureWatchers(); // recreate if dirs appeared or a watcher died
+        this.hooks.ensureWatcher(); // the log dir appears when hooks are installed
         if (Date.now() - this.lastFullScanMs > FULL_RESCAN_EVERY_MS) {
           await this.fullScan(); // safety net for missed watcher events
+          await this.hooks.scanAll(); // safety net for missed hook-log events
+          await this.hooks.prune(this.getConfig().endedWindowHours * 3_600_000);
         }
         // Fire every tick: staleness (busy→stuck) is clock-driven; the store
         // diffs and only forwards material changes.
@@ -250,6 +303,7 @@ export class ClaudeProvider implements AgentProvider {
     this.fileTimers.clear();
     this.sessionsWatcher?.close();
     this.projectsWatcher?.close();
+    this.hooks.dispose();
     this.changeEmitter.dispose();
     this.appendEmitter.dispose();
   }

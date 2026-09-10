@@ -13,7 +13,8 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:agentWrangler.dashboardPanel"
   ],
   "contributes": {
     "viewsContainers": {
@@ -59,6 +60,14 @@
       {
         "command": "agentWrangler.revealTranscript",
         "title": "Agent Wrangler: Reveal Transcript in Finder…"
+      },
+      {
+        "command": "agentWrangler.installHooks",
+        "title": "Agent Wrangler: Install Status Hooks…"
+      },
+      {
+        "command": "agentWrangler.uninstallHooks",
+        "title": "Agent Wrangler: Remove Status Hooks"
       }
     ],
     "menus": {
@@ -68,11 +77,36 @@
           "when": "view == agentWrangler.dashboard",
           "group": "navigation"
         }
+      ],
+      "editor/title": [
+        {
+          "command": "agentWrangler.refresh",
+          "when": "activeWebviewPanelViewType == agentWrangler.dashboardPanel",
+          "group": "navigation"
+        }
       ]
     },
     "configuration": {
       "title": "Agent Wrangler",
       "properties": {
+        "agentWrangler.dashboardLocation": {
+          "type": "string",
+          "enum": [
+            "editor",
+            "panel"
+          ],
+          "enumDescriptions": [
+            "Open the dashboard as an editor tab, in the main editor area.",
+            "Open the dashboard in the bottom panel, next to Terminal."
+          ],
+          "default": "editor",
+          "description": "Where the dashboard opens. The other location stays available: the bottom panel view is always contributed, and the editor tab can be reopened from the command palette."
+        },
+        "agentWrangler.openOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the dashboard automatically when a window starts. A dashboard tab restored by VSCode is left as it came back."
+        },
         "agentWrangler.claudeBinaryPath": {
           "type": "string",
           "default": "claude",

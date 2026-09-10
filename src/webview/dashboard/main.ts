@@ -1,6 +1,16 @@
 import './dashboard.css';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
-import { formatAge, SECTION_LABEL, SECTION_ORDER, sectionOf, type SectionId, type SessionDTO } from '../../shared/model';
+import {
+  formatAge,
+  formatDuration,
+  paceText,
+  SECTION_LABEL,
+  SECTION_ORDER,
+  sectionOf,
+  workingElapsedMs,
+  type SectionId,
+  type SessionDTO,
+} from '../../shared/model';
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -52,6 +62,96 @@ function actionButtons(s: SessionDTO): string {
   return btns.join('');
 }
 
+/**
+ * What the agent is actually doing, when hooks told us. `blocked` names the tool
+ * it wants; `busy` names the tool in flight and how long it has been running —
+ * that elapsed time is what tells a 20-minute test suite apart from a stall.
+ *
+ * Busy rows then add, when the data exists: the agent's own checklist (the only
+ * honest percentage in the whole pipeline) and a pace chip, which stays hidden
+ * until the turn has outrun the median and so has something real to say.
+ */
+function statusChip(s: SessionDTO): string {
+  if (s.status === 'blocked' && s.blockedReason) {
+    return `<span class="chip blk">needs ${esc(s.blockedReason)}</span>`;
+  }
+  if (s.status !== 'busy') return '';
+
+  const chips: string[] = [];
+  if (s.activeTool) {
+    chips.push(
+      `<span class="chip tool">${esc(s.activeTool.name)} · <span data-age-ts="${s.activeTool.sinceMs}">${formatAge(Date.now(), s.activeTool.sinceMs)}</span></span>`,
+    );
+  }
+
+  const todo = s.progress?.todo;
+  if (todo) {
+    // Width of the fill is the real ratio; the label repeats it for anyone who
+    // can't read the bar (and for the ~4% of sessions where this appears at all).
+    const pct = todo.total > 0 ? Math.round((todo.completed / todo.total) * 100) : 0;
+    const label = todo.active ? ` title="${esc(todo.active)}"` : '';
+    chips.push(
+      `<span class="chip todo"${label}><span class="fill" style="width:${pct}%"></span><span class="txt">${todo.completed}/${todo.total}</span></span>`,
+    );
+  }
+
+  const p = s.progress;
+  if (p?.pace) {
+    // Rendered even when currently empty: the chip ticks itself, so it needs to
+    // already be in the DOM when the turn crosses the median.
+    const { p50Ms, p75Ms, p90Ms, band, provisional } = p.pace;
+    const text = paceText(workingElapsedMs(p, Date.now()), p50Ms, p75Ms, p90Ms);
+    chips.push(
+      `<span class="chip pace ${band}${provisional ? ' prov' : ''}${text ? '' : ' quiet'}" data-pace="${p.startedAtMs},${p.blockedMs},${p50Ms},${p75Ms},${p90Ms}">${text}</span>`,
+    );
+  }
+  return chips.join('');
+}
+
+/**
+ * The turn block of the row tooltip: elapsed working time, evidence that work is
+ * happening, and the closest thing to a remaining estimate the data supports —
+ * when most turns are done by, phrased as the comparison it actually is.
+ */
+function progressTooltip(s: SessionDTO): string {
+  const p = s.progress;
+  if (!p) return '';
+
+  const elapsed = workingElapsedMs(p, Date.now());
+  const lines = [`Turn: ${formatDuration(elapsed)} of work, ${p.toolCalls} tool call${p.toolCalls === 1 ? '' : 's'}`];
+  if (p.blockedMs > 0) lines.push(`(plus ${formatDuration(p.blockedMs)} waiting on you, not counted)`);
+  if (p.todo) {
+    lines.push(`Checklist: ${p.todo.completed} of ${p.todo.total} done${p.todo.active ? ` — ${p.todo.active}` : ''}`);
+  }
+
+  const pace = p.pace;
+  if (pace) {
+    const basis = pace.provisional
+      ? 'typical timings (still learning yours)'
+      : `your last ${pace.samples} turns`;
+    if (elapsed >= pace.p90Ms) {
+      lines.push(
+        `Pace: past the 90th percentile of ${basis} (${formatDuration(pace.p90Ms)}). No estimate left to give — it may be a long one, or it may be wedged.`,
+      );
+    } else {
+      const outran = elapsed >= pace.p75Ms ? 'longer than 3 in 4' : elapsed >= pace.p50Ms ? 'longer than half' : 'typical so far';
+      lines.push(
+        `Pace: ${outran} of ${basis}. 9 in 10 finish within ${formatDuration(pace.p90Ms)} — ${formatDuration(pace.p90Ms - elapsed)} from now.`,
+      );
+    }
+  }
+  return `\n\n${lines.join('\n')}`;
+}
+
+function rowTitle(s: SessionDTO): string {
+  const hint = clickHint(s);
+  const est =
+    s.statusIsEstimated && s.status !== 'ended'
+      ? '\n\nStatus is estimated from the transcript — this session started before hooks were installed. Restart it for exact status.'
+      : '';
+  return `${hint}${est}${progressTooltip(s)}`;
+}
+
 function rowHtml(s: SessionDTO): string {
   const titleLine =
     s.name && s.title !== s.name
@@ -63,10 +163,11 @@ function rowHtml(s: SessionDTO): string {
     ? `<span class="pr" role="link" data-url="${esc(s.prLink.prUrl)}" title="${esc(s.prLink.prUrl)}">#${s.prLink.prNumber}</span>`
     : '';
 
-  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}" data-key="${esc(s.key)}" title="${esc(clickHint(s))}">
+  const est = s.statusIsEstimated && s.status !== 'ended' ? ' est' : '';
+  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent">
-    <div class="title">${titleLine}${kindChip}</div>
+    <div class="title">${titleLine}${kindChip}${statusChip(s)}</div>
     ${s.subtitle ? `<div class="sub">${esc(s.subtitle)}</div>` : ''}
   </td>
   <td class="c-proj"${s.cwd ? ` title="${esc(s.cwd)}"` : ''}>${esc(s.projectName ?? '')}</td>
@@ -151,10 +252,19 @@ app.addEventListener('click', (e) => {
   }
 });
 
-// Ages tick locally; data itself is pushed by the host.
+// Ages and the pace countdown tick locally; data itself is pushed by the host.
+// Crossing a percentile also changes the chip's class, which arrives with the
+// next host snapshot — the text leads it by a few seconds at most.
 setInterval(() => {
+  const now = Date.now();
   for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-age-ts]'))) {
-    el.textContent = formatAge(Date.now(), Number(el.dataset.ageTs));
+    el.textContent = formatAge(now, Number(el.dataset.ageTs));
+  }
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-pace]'))) {
+    const [startedAtMs, blockedMs, p50Ms, p75Ms, p90Ms] = el.dataset.pace!.split(',').map(Number);
+    const text = paceText(workingElapsedMs({ startedAtMs, blockedMs, toolCalls: 0 }, now), p50Ms, p75Ms, p90Ms);
+    el.textContent = text;
+    el.classList.toggle('quiet', text === '');
   }
 }, 10_000);
 
