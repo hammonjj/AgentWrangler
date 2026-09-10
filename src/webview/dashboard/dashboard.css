@@ -1,4 +1,5 @@
 :root {
+  --aw-blocked: var(--vscode-charts-orange, #d18616);
   --aw-waiting: var(--vscode-charts-yellow, #d7ba7d);
   --aw-busy: var(--vscode-charts-blue, #569cd6);
   --aw-stuck: var(--vscode-charts-red, #f14c4c);
@@ -96,6 +97,9 @@ tr.sec td {
 tr.sec:hover td {
   color: var(--vscode-foreground);
 }
+tr.sec.st-blocked td {
+  color: var(--aw-blocked);
+}
 tr.sec.st-waiting td {
   color: var(--aw-waiting);
 }
@@ -139,6 +143,10 @@ tr.row.archived:hover td {
   border-radius: 50%;
   margin: 0 auto;
 }
+.st-blocked .dot {
+  background: var(--aw-blocked);
+  animation: aw-pulse 1.6s ease-in-out infinite;
+}
 .st-waiting .dot {
   background: var(--aw-waiting);
   animation: aw-pulse 1.6s ease-in-out infinite;
@@ -155,6 +163,26 @@ tr.row.archived:hover td {
 }
 tr.row.archived .dot {
   animation: none;
+}
+
+/* Inferred from the transcript rather than pushed by a hook: hollow the dot and
+   stop the pulse, so a guess never reads as ground truth. */
+tr.row.est .dot {
+  background: transparent;
+  border: 1.5px solid currentColor;
+  animation: none;
+}
+tr.row.est.st-blocked .dot {
+  color: var(--aw-blocked);
+}
+tr.row.est.st-waiting .dot {
+  color: var(--aw-waiting);
+}
+tr.row.est.st-busy .dot {
+  color: var(--aw-busy);
+}
+tr.row.est.st-stuck .dot {
+  color: var(--aw-stuck);
 }
 
 @keyframes aw-pulse {
@@ -199,6 +227,58 @@ tr.st-ended .title {
   border-radius: 9px;
   font-size: 0.78em;
   color: var(--vscode-descriptionForeground);
+}
+.chip.blk {
+  border-color: var(--aw-blocked);
+  color: var(--aw-blocked);
+}
+.chip.tool {
+  border-color: var(--aw-busy);
+  color: var(--aw-busy);
+}
+
+/* The agent's own checklist — the one place a real percentage exists, so it is
+   the one place that gets a bar. The fill sits behind the ratio text. */
+.chip.todo {
+  position: relative;
+  overflow: hidden;
+  border-color: var(--aw-busy);
+  color: var(--aw-busy);
+  font-variant-numeric: tabular-nums;
+}
+.chip.todo .fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--aw-busy);
+  opacity: 0.22;
+  transition: width 0.3s ease-out;
+}
+.chip.todo .txt {
+  position: relative;
+}
+
+/* Pace is a comparison against past turns, never a prediction of this one, so
+   it stays quiet until a turn is genuinely running long. */
+.chip.pace {
+  font-variant-numeric: tabular-nums;
+}
+/* Yellow, not red: a turn past p75 is slow, not broken. `stuck` owns red. */
+.chip.pace.long {
+  border-color: var(--aw-waiting);
+  color: var(--aw-waiting);
+}
+.chip.pace.very-long {
+  border-color: var(--aw-blocked);
+  color: var(--aw-blocked);
+}
+/* Still on the seeded baseline: shown, but visibly less sure of itself. */
+.chip.pace.prov {
+  opacity: 0.7;
+  border-style: dashed;
+}
+/* Turn hasn't outrun the median yet — nothing worth saying, so take no space. */
+.chip.pace.quiet {
+  display: none;
 }
 
 .c-proj,
