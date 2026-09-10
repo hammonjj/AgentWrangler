@@ -2,11 +2,12 @@
  * Typed message protocol between the extension host and the webviews.
  * Imported by both bundles — keep free of `vscode`/Node/DOM imports.
  */
-import type { SessionDTO, SessionStatus, ViewerBlock } from './model';
+import type { HookHealth, SessionDTO, SessionStatus, ViewerBlock } from './model';
 
 // ---- Dashboard ----
 
-export type HostToDashboard = { type: 'snapshot'; sessions: SessionDTO[]; nowMs: number };
+/** `hooks` is absent until the host has checked settings.json once. */
+export type HostToDashboard = { type: 'snapshot'; sessions: SessionDTO[]; nowMs: number; hooks?: HookHealth };
 
 export type DashboardAction = 'viewer' | 'resume' | 'archive';
 
@@ -15,7 +16,9 @@ export type DashboardToHost =
   | { type: 'rowClick'; key: string }
   | { type: 'action'; key: string; action: DashboardAction }
   | { type: 'openExternal'; url: string }
-  | { type: 'refresh' };
+  | { type: 'refresh' }
+  /** Banner button: runs the same confirm-then-install flow as the palette command. */
+  | { type: 'installHooks' };
 
 // ---- Transcript viewer ----
 

@@ -4,9 +4,10 @@ import type { ConfigGetter } from '../core/config';
 import { Emitter, type Disposable } from '../core/events';
 import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import type { TurnStats } from '../core/turnStats';
-import type { AgentSession, TurnProgress } from '../shared/model';
+import type { AgentSession, HookHealth, TurnProgress } from '../shared/model';
 import { statusFromHookState, turnBlockedMsAt, type HookSessionState } from './hookEvents';
-import { HookLog } from './hookLog';
+import { currentState, type InstallState } from './hookInstall';
+import { HookLog, hookLogDir } from './hookLog';
 import { isSessionJsonlName, projectsDir, sessionsDir } from './paths';
 import { readRegistry, type RegistryEntry } from './registry';
 import { deriveStatus } from './status';
@@ -24,8 +25,11 @@ export class ClaudeProvider implements AgentProvider {
   private registry: RegistryEntry[] = [];
   private index = new TranscriptIndex();
   private hooks: HookLog;
+  /** Last read of the hook block in settings.json; undefined until the first check. */
+  private installState?: InstallState;
   private changeEmitter = new Emitter<void>();
   private appendEmitter = new Emitter<TranscriptAppendEvent>();
+  private hookHealthEmitter = new Emitter<void>();
 
   private sessionsWatcher?: fsSync.FSWatcher;
   private projectsWatcher?: fsSync.FSWatcher;
@@ -54,11 +58,33 @@ export class ClaudeProvider implements AgentProvider {
     return this.hooks.hasEverReported;
   }
 
+  /** Hook install state for the dashboard banner; undefined until settings.json has been read once. */
+  get hookHealth(): HookHealth | undefined {
+    const st = this.installState;
+    if (!st) return undefined;
+    return { kind: st.kind, reporting: this.hooks.hasEverReported, why: 'why' in st ? st.why : undefined };
+  }
+
+  onDidChangeHookHealth = (listener: () => void): Disposable => this.hookHealthEmitter.event(listener);
+
+  /**
+   * Re-read the hook block in settings.json. Fires only on a real change, so it
+   * is safe to call from every refresh and poll — the file is small and the
+   * user may edit it by hand, or another window may run the installer.
+   */
+  async refreshHookHealth(): Promise<void> {
+    const next = await currentState(hookLogDir());
+    const changed = JSON.stringify(next) !== JSON.stringify(this.installState);
+    this.installState = next;
+    if (changed) this.hookHealthEmitter.fire();
+  }
+
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
     await this.refreshRegistry();
     await this.fullScan();
+    await this.refreshHookHealth();
     await this.hooks.start();
     this.hooks.onDidChange(() => this.changeEmitter.fire());
     this.hooks.onTurnCompleted((ms) => this.turnStats?.record(ms));
@@ -70,6 +96,8 @@ export class ClaudeProvider implements AgentProvider {
   async refresh(): Promise<void> {
     await this.refreshRegistry();
     await this.fullScan();
+    await this.refreshHookHealth();
+    this.hooks.ensureWatcher(); // an install that just ran created the log dir
     await this.hooks.scanAll();
     this.changeEmitter.fire();
   }
@@ -281,6 +309,7 @@ export class ClaudeProvider implements AgentProvider {
         this.hooks.ensureWatcher(); // the log dir appears when hooks are installed
         if (Date.now() - this.lastFullScanMs > FULL_RESCAN_EVERY_MS) {
           await this.fullScan(); // safety net for missed watcher events
+          await this.refreshHookHealth(); // settings.json edited by hand, or by another window
           await this.hooks.scanAll(); // safety net for missed hook-log events
           await this.hooks.prune(this.getConfig().endedWindowHours * 3_600_000);
         }
@@ -306,5 +335,6 @@ export class ClaudeProvider implements AgentProvider {
     this.hooks.dispose();
     this.changeEmitter.dispose();
     this.appendEmitter.dispose();
+    this.hookHealthEmitter.dispose();
   }
 }

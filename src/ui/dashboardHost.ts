@@ -1,10 +1,21 @@
 import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
+import type { Disposable } from '../core/events';
 import type { SessionStore } from '../core/sessionStore';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
+import type { HookHealth } from '../shared/model';
 import type { SessionActions } from './actions';
 import { buildWebviewHtml } from './html';
 import { isInThisWorkspace } from './workspace';
+
+/**
+ * Where the banner's facts come from — the Claude provider, in practice. Kept
+ * as an interface so the dashboard never imports provider internals.
+ */
+export interface HookHealthSource {
+  readonly hookHealth: HookHealth | undefined;
+  onDidChangeHookHealth(listener: () => void): Disposable;
+}
 
 /**
  * The dashboard's behavior, independent of where it is docked. VSCode has two
@@ -21,6 +32,7 @@ export class DashboardHost {
     private store: SessionStore,
     private archive: ArchiveService,
     private actions: SessionActions,
+    private health: HookHealthSource,
   ) {
     webview.options = {
       enableScripts: true,
@@ -40,6 +52,9 @@ export class DashboardHost {
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
       this.store.onDidUpdate(() => this.pushSnapshot()),
       this.archive.onDidChange(() => this.pushSnapshot()),
+      // The store only fires on material session changes, so an install that
+      // changes nothing about any session still has to reach the banner.
+      this.health.onDidChangeHookHealth(() => this.pushSnapshot()),
     );
   }
 
@@ -54,7 +69,7 @@ export class DashboardHost {
       archived: this.archive.isArchived(s.key),
       inWorkspace: isInThisWorkspace(s.cwd),
     }));
-    const msg: HostToDashboard = { type: 'snapshot', sessions, nowMs: Date.now() };
+    const msg: HostToDashboard = { type: 'snapshot', sessions, nowMs: Date.now(), hooks: this.health.hookHealth };
     void this.webview.postMessage(msg);
   }
 
@@ -76,6 +91,9 @@ export class DashboardHost {
         break;
       case 'refresh':
         this.actions.refreshAll();
+        break;
+      case 'installHooks':
+        this.actions.installHooks();
         break;
     }
   }

@@ -114,9 +114,9 @@
         },
         "agentWrangler.stuckThresholdSeconds": {
           "type": "number",
-          "default": 60,
+          "default": 600,
           "minimum": 10,
-          "description": "A busy session with no transcript writes for this long is shown as POSSIBLY STUCK (permission prompt or long tool run)."
+          "description": "A busy session with no transcript writes or hook events for this long is shown as POSSIBLY STUCK. Keep it generous: the model is silent while thinking or writing a large file, routinely for 2–6 minutes."
         },
         "agentWrangler.endedWindowHours": {
           "type": "number",

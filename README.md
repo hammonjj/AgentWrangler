@@ -32,6 +32,8 @@ The VSCode CLI is assumed to live in `/Applications/Visual Studio Code.app`; ove
 ## Behavior
 
 - The dashboard is a column-aligned table with collapsible sections (*Blocked on you / Waiting on you / Possibly stuck / Busy / Ended / Archived*); collapse state is remembered.
+- **Narrow docking works.** Below ~720px (a sidebar or a split bottom panel) the Project, Branch and PR columns fold into the row's second line, so the session title, status chips and age stay visible instead of being pushed off-screen.
+- **A banner at the top says when status is only estimated** — hooks not installed, disabled, or stale — with an *Install hooks* button. Once installed, it lists the live sessions that predate the install and still need a restart.
 - **Click a session belonging to this window's workspace** → opens it in the official Claude Code panel (`claude-vscode.editor.open <sessionId>`), revealing the existing panel or resuming with `--resume=<id>` — fully interactive immediately.
 - **Click a live panel session owned by another window** → cross-window relay: a note is written to a shared mailbox (extension globalStorage) watched by every Agent Wrangler instance, and the owning window is focused via VSCode's own CLI; that window's instance opens the conversation in its Claude panel. If the project isn't open anywhere, a new window opens and claims the note on activation. (Requires the extension to be running in the target window — during F5-only iteration that means only dev-host windows participate; other windows still get focused.)
 - **Click anything else from another project/window** → ended: terminal at the project folder running `claude --resume <id>`; live terminal sessions: read-only viewer.
@@ -45,15 +47,17 @@ Two sources, in priority order. Hooks are ground truth; the transcript is a fall
 
 ### 1. Hooks (exact, opt-in)
 
-Run **`Agent Wrangler: Install Status Hooks…`**. It merges a block into `~/.claude/settings.json` in which every hook appends its stdin payload to `~/.claude/agentwrangler/$PPID.jsonl`; the extension tails those logs.
+Run **`Agent Wrangler: Install Status Hooks…`** (or click *Install hooks* in the dashboard banner). It merges a block into `~/.claude/settings.json` in which every hook appends its stdin payload to `~/.claude/agentwrangler/$PPID.jsonl`; the extension tails those logs.
 
 | Signal | Meaning |
 |---|---|
 | `PermissionRequest` · `Elicitation` · `Notification`/`agent_needs_input` | **Blocked on you** (row names the tool) |
 | `Stop` · `StopFailure` | **Waiting on you** |
 | `UserPromptSubmit` · `PreToolUse` · `PostToolUse`/`PostToolBatch` | **Busy** (row shows the in-flight tool and its elapsed time) |
-| no events at all past `stuckThresholdSeconds`, nothing in flight | **Possibly stuck** |
+| no events at all past `stuckThresholdSeconds` (default 10 min), nothing in flight | **Possibly stuck** |
 | `SessionEnd`, or pid gone | **Ended** |
+
+*Possibly stuck* is deliberately slow to trigger. Hooks fire on tool calls and prompts, not while the model is generating, so a long think or a large `Write` is silent for minutes (measured in one ordinary turn: 121s, 388s, 79s, 104s). The pace chip is what says "running long"; *stuck* means nothing at all for ten minutes.
 
 Notes on the install, all verified against the shipped Claude Code:
 
@@ -71,7 +75,7 @@ Sessions with no hook data — anything started before installing them — are d
 | `~/.claude/sessions/<pid>.json` + pid alive | session is live (registry gives cwd + friendly name) |
 | last transcript line: assistant `stop_reason: end_turn` | **Waiting on you** |
 | last transcript line: assistant `tool_use` / user / queue-op | **Busy** |
-| busy but transcript silent > `stuckThresholdSeconds` | **Possibly stuck** |
+| busy but transcript silent > `stuckThresholdSeconds` (default 10 min) | **Possibly stuck** |
 | pid gone | **Ended** |
 
 Inference cannot distinguish a permission prompt from a long tool call from a wedged session — all three look like a silent transcript. That limitation is the reason hooks exist; without them, *Possibly stuck* is a guess.
@@ -80,7 +84,7 @@ Transcripts and hook logs are both read incrementally (bounded tail reads with a
 
 ## Settings
 
-`agentWrangler.dashboardLocation` (`editor` — or `panel` for the bottom panel) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (60) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting or blocked) · `pollIntervalSeconds` (5)
+`agentWrangler.dashboardLocation` (`editor` — or `panel` for the bottom panel) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting or blocked) · `pollIntervalSeconds` (5)
 
 ## Development
 

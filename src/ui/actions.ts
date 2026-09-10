@@ -8,4 +8,6 @@ export interface SessionActions {
   reveal(key: string): void;
   refreshAll(): void;
   openExternal(url: string): void;
+  /** Dashboard banner → the `agentWrangler.installHooks` command (modal confirm included). */
+  installHooks(): void;
 }

@@ -36,23 +36,27 @@ table {
   table-layout: fixed;
 }
 
-col.c-dot {
+/* Widths live on the header cells, not <col>s. With `table-layout: fixed` the
+   first row defines the columns, so a header the narrow-layout media query
+   hides takes its whole column with it; a <col> would have kept the width
+   reserved. The Agent column is the one without a width and takes the rest. */
+th.h-dot {
   width: 26px;
 }
-col.c-proj {
-  width: 170px;
+th.h-proj {
+  width: 150px;
 }
-col.c-branch {
-  width: 130px;
+th.h-branch {
+  width: 120px;
 }
-col.c-pr {
-  width: 64px;
+th.h-pr {
+  width: 56px;
 }
-col.c-age {
-  width: 52px;
+th.h-age {
+  width: 48px;
 }
-col.c-act {
-  width: 72px;
+th.h-act {
+  width: 60px;
 }
 
 thead th {
@@ -198,9 +202,27 @@ tr.row.est.st-stuck .dot {
 }
 
 .c-agent .title {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+}
+.c-agent .ttl {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Chips never shrink. A "needs Bash" the title's ellipsis has eaten is the one
+   thing the row exists to show, so the title gives way first. */
+.c-agent .chips {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* Project · branch · PR inline — shown only when the columns are hidden. */
+.c-agent .meta,
+.c-agent .msep {
+  display: none;
 }
 .c-agent .nm {
   font-weight: 600;
@@ -328,4 +350,131 @@ button.act svg {
   width: 16px;
   height: 16px;
   display: block;
+}
+
+/* ---- narrow docking ----
+   In a sidebar or a split bottom panel the webview is 300–400px wide. The
+   fixed location columns used to total 514px there, which left the Agent
+   column zero pixels and pushed Age off-screen: the dashboard showed a dot, a
+   project name and nothing else. Below this width the location moves into the
+   row's second line and the title, chips and age keep their space. */
+@media (max-width: 719px) {
+  /* Zero-width, not display:none. The section rows span all seven columns, so
+     a column whose cells are gone still exists as an auto-width column and
+     takes an equal share of the leftover — at 300px that left the Agent column
+     39px. A zero width keeps the column in the grid and gives it nothing. */
+  th.h-proj,
+  th.h-branch,
+  th.h-pr,
+  td.c-proj,
+  td.c-branch,
+  td.c-pr {
+    width: 0;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    overflow: hidden;
+    visibility: hidden;
+  }
+  /* Tighter gutters and fixed columns: every pixel saved here is title. */
+  td,
+  thead th {
+    padding-left: 5px;
+    padding-right: 5px;
+  }
+  th.h-dot {
+    width: 22px;
+  }
+  th.h-age {
+    width: 40px;
+  }
+  th.h-act {
+    width: 52px;
+  }
+  /* Two lines: the title alone on the first, chips leading the location and
+     prompt on the second. At 300px a title and a "needs Bash" chip cannot share
+     a line without one of them disappearing. */
+  .c-agent .agent {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      'ttl ttl'
+      'chips sub';
+    align-items: baseline;
+  }
+  .c-agent .title {
+    display: contents;
+  }
+  .c-agent .ttl {
+    grid-area: ttl;
+  }
+  .c-agent .chips {
+    grid-area: chips;
+  }
+  .c-agent .chips .chip {
+    margin-left: 0;
+    margin-right: 6px;
+  }
+  .c-agent .sub {
+    grid-area: sub;
+    min-width: 0;
+  }
+  .c-agent .meta,
+  .c-agent .msep {
+    display: inline;
+  }
+  .c-agent .meta {
+    color: var(--vscode-foreground);
+    opacity: 0.85;
+  }
+}
+
+/* ---- hook status banner ---- */
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-editorWidget-background, transparent);
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+  border-left: 3px solid var(--aw-busy);
+}
+.banner.warn {
+  border-left-color: var(--aw-blocked);
+}
+.banner .txt {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: normal;
+  line-height: 1.35;
+}
+.banner button {
+  flex: 0 0 auto;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}
+.banner button.bact {
+  border: none;
+  border-radius: 2px;
+  padding: 3px 10px;
+  color: var(--vscode-button-foreground, #fff);
+  background: var(--vscode-button-background, #0e639c);
+}
+.banner button.bact:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+}
+.banner button.bx {
+  border: none;
+  background: transparent;
+  padding: 0 4px;
+  font-size: 1.15em;
+  line-height: 1;
+  color: var(--vscode-descriptionForeground);
+}
+.banner button.bx:hover {
+  color: var(--vscode-foreground);
 }

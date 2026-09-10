@@ -140,6 +140,9 @@ export function activate(context: vscode.ExtensionContext): void {
     openExternal(url) {
       if (/^https?:\/\//i.test(url)) void vscode.env.openExternal(vscode.Uri.parse(url));
     },
+    installHooks() {
+      void vscode.commands.executeCommand('agentWrangler.installHooks');
+    },
   };
 
   const viewers = new ViewerPanelManager(context.extensionUri, store, provider, actions);
@@ -147,13 +150,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The dashboard has two homes: an editor tab (default) and the bottom panel.
   // Both are always registered; the setting only decides where opening it goes.
-  const dashboardPanel = new DashboardPanelManager(context.extensionUri, store, archive, actions);
+  const dashboardPanel = new DashboardPanelManager(context.extensionUri, store, archive, actions, provider);
   context.subscriptions.push(
     dashboardPanel,
     vscode.window.registerWebviewPanelSerializer(DASHBOARD_PANEL_TYPE, new DashboardPanelSerializer(dashboardPanel)),
     vscode.window.registerWebviewViewProvider(
       DashboardViewProvider.viewId,
-      new DashboardViewProvider(context.extensionUri, store, archive, actions),
+      new DashboardViewProvider(context.extensionUri, store, archive, actions, provider),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );

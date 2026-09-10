@@ -168,6 +168,83 @@ export function formatAge(nowMs: number, thenMs: number): string {
   return formatDuration(nowMs - thenMs);
 }
 
+// ---- hook health (the dashboard banner) ----
+
+/** Mirrors `InstallState.kind` in the extension host, minus the host-only payload. */
+export type HookInstallKind = 'installed' | 'stale' | 'absent' | 'disabled' | 'unreadable';
+
+export interface HookHealth {
+  kind: HookInstallKind;
+  /** True once any hook event has been read — proves the installed hooks are live. */
+  reporting: boolean;
+  /** Reason text for `disabled` / `unreadable`. */
+  why?: string;
+}
+
+export interface HookBanner {
+  tone: 'info' | 'warn';
+  text: string;
+  /** Present when a button should run the installer (`update` re-runs it over a stale block). */
+  action?: 'install' | 'update';
+  /** Hideable by the user. The self-resolving notes (old sessions) are not. */
+  dismissible: boolean;
+}
+
+/**
+ * What the dashboard should say about hook status, or undefined for nothing.
+ *
+ * The exact-status feature is opt-in and otherwise invisible: without hooks a
+ * permission prompt reads as Busy and no progress exists to show, and the only
+ * hint is a hollow dot. So `absent` gets a banner with the install button
+ * rather than a silent log line. `estimatedLive` is the number of live sessions
+ * still on transcript inference — after an install, that's the ones started
+ * before it, which need a restart and nothing else.
+ */
+export function hookBanner(h: HookHealth | undefined, estimatedLive: number): HookBanner | undefined {
+  if (!h) return undefined;
+  switch (h.kind) {
+    case 'absent':
+      return {
+        tone: 'warn',
+        text:
+          'Status is estimated from transcripts: a permission prompt shows as Busy, and there is no turn progress. ' +
+          'Install the Claude Code status hooks for exact status.',
+        action: 'install',
+        dismissible: true,
+      };
+    case 'stale':
+      return {
+        tone: 'warn',
+        text: 'The Agent Wrangler hooks in settings.json are out of date. Update them to keep exact status.',
+        action: 'update',
+        dismissible: false,
+      };
+    case 'disabled':
+      return {
+        tone: 'warn',
+        text: `Status hooks cannot run (${h.why ?? 'hooks are disabled'}). All status is estimated.`,
+        dismissible: false,
+      };
+    case 'unreadable':
+      return {
+        tone: 'warn',
+        text: `Cannot check hook status: ${h.why ?? 'settings.json is unreadable'}.`,
+        dismissible: true,
+      };
+    case 'installed':
+      if (estimatedLive === 0) return undefined;
+      return {
+        tone: 'info',
+        text:
+          `${estimatedLive} live session${estimatedLive === 1 ? '' : 's'} started before the hooks were installed ` +
+          `and still report${estimatedLive === 1 ? 's' : ''} estimated status. Restart ${estimatedLive === 1 ? 'it' : 'them'} for exact status.`,
+        dismissible: false,
+      };
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Label for the pace chip, or '' to show nothing.
  *

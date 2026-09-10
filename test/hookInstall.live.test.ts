@@ -53,6 +53,23 @@ describe.runIf(hasSettings)('installer against the real settings.json (on a copy
         ]),
       );
 
+      // Once hooks are genuinely installed on this machine, `before` already
+      // contains our block (pointing at the real log dir). Uninstall can then
+      // only land on "the user's own hooks", never on `before` verbatim, so
+      // compute that target the way `removeHooks` defines it: keys we emptied
+      // are dropped, an already-empty array the user wrote stays.
+      const theirHooksOnly: Record<string, unknown[]> = {};
+      for (const [event, entries] of Object.entries(hooksBefore)) {
+        const all = Array.isArray(entries) ? entries : [];
+        const kept = theirEntries[event] ?? [];
+        if (kept.length > 0 || all.length === 0) theirHooksOnly[event] = kept;
+      }
+      const hadOurs = Object.values(hooksBefore).some(
+        (entries) => Array.isArray(entries) && entries.some((e) => isOurEntry(e as never)),
+      );
+      const afterUninstall: Record<string, unknown> = { ...before };
+      if (before.hooks !== undefined || hadOurs) afterUninstall.hooks = theirHooksOnly;
+
       const res = await installHooks(logDir, copy);
       expect(res.ok, res.message).toBe(true);
 
@@ -77,10 +94,11 @@ describe.runIf(hasSettings)('installer against the real settings.json (on a copy
       }
       expect(await currentState(logDir, copy)).toEqual({ kind: 'installed', logDir });
 
-      // Uninstall must land exactly back on the original parsed content.
+      // Uninstall must land exactly on the original content minus our block —
+      // which is the original itself when the real file had none installed.
       const un = await uninstallHooks(copy);
       expect(un.ok).toBe(true);
-      expect(JSON.parse(await fsp.readFile(copy, 'utf8'))).toEqual(before);
+      expect(JSON.parse(await fsp.readFile(copy, 'utf8'))).toEqual(afterUninstall);
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }

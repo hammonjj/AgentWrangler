@@ -3,30 +3,41 @@ import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../sh
 import {
   formatAge,
   formatDuration,
+  hookBanner,
   paceText,
   SECTION_LABEL,
   SECTION_ORDER,
   sectionOf,
   workingElapsedMs,
+  type HookHealth,
   type SectionId,
   type SessionDTO,
 } from '../../shared/model';
 
+interface WebviewState {
+  collapsed?: string[];
+  /** Hook-health kind whose banner the user hid. A different kind brings the banner back. */
+  bannerDismissed?: string;
+}
+
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
-  getState(): { collapsed?: string[] } | undefined;
-  setState(state: { collapsed?: string[] }): void;
+  getState(): WebviewState | undefined;
+  setState(state: WebviewState): void;
 };
 const vscodeApi = acquireVsCodeApi();
 const post = (msg: DashboardToHost) => vscodeApi.postMessage(msg);
 
 const app = document.getElementById('app')!;
 let sessions: SessionDTO[] = [];
+let hooks: HookHealth | undefined;
 // Collapse state survives reloads via webview state; Archived starts collapsed.
-const collapsed = new Set<string>(vscodeApi.getState()?.collapsed ?? ['archived']);
+const saved = vscodeApi.getState();
+const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
+let bannerDismissed = saved?.bannerDismissed;
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed] });
+  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed });
 }
 
 function esc(s: string): string {
@@ -149,7 +160,13 @@ function rowTitle(s: SessionDTO): string {
     s.statusIsEstimated && s.status !== 'ended'
       ? '\n\nStatus is estimated from the transcript — this session started before hooks were installed. Restart it for exact status.'
       : '';
-  return `${hint}${est}${progressTooltip(s)}`;
+  // "Stuck" is a silence, and generation is silent too; say so where the label
+  // is read, so a red row prompts a look rather than a restart.
+  const stuck =
+    s.status === 'stuck'
+      ? `\n\nNo transcript or hook activity for ${formatAge(Date.now(), s.lastActivityAt)}. A long think or a large file write is silent like this too — check the session before assuming it is wedged.`
+      : '';
+  return `${hint}${est}${stuck}${progressTooltip(s)}`;
 }
 
 function rowHtml(s: SessionDTO): string {
@@ -163,13 +180,24 @@ function rowHtml(s: SessionDTO): string {
     ? `<span class="pr" role="link" data-url="${esc(s.prLink.prUrl)}" title="${esc(s.prLink.prUrl)}">#${s.prLink.prNumber}</span>`
     : '';
 
+  // Narrow layouts hide the Project/Branch/PR columns and show this instead
+  // (CSS decides which), so the row still says where the agent is working.
+  const meta = [s.projectName ? esc(s.projectName) : '', branch, pr]
+    .filter(Boolean)
+    .join('<span class="sep">·</span>');
+  const sub = s.subtitle ? esc(s.subtitle) : '';
+  const secondLine =
+    meta || sub
+      ? `<div class="sub">${meta ? `<span class="meta">${meta}</span>` : ''}${meta && sub ? '<span class="msep"> — </span>' : ''}${sub}</div>`
+      : '';
+
   const est = s.statusIsEstimated && s.status !== 'ended' ? ' est' : '';
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
-  <td class="c-agent">
-    <div class="title">${titleLine}${kindChip}${statusChip(s)}</div>
-    ${s.subtitle ? `<div class="sub">${esc(s.subtitle)}</div>` : ''}
-  </td>
+  <td class="c-agent"><div class="agent">
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${kindChip}${statusChip(s)}</span></div>
+    ${secondLine}
+  </div></td>
   <td class="c-proj"${s.cwd ? ` title="${esc(s.cwd)}"` : ''}>${esc(s.projectName ?? '')}</td>
   <td class="c-branch"${branch ? ` title="${branch}"` : ''}>${branch}</td>
   <td class="c-pr">${pr}</td>
@@ -178,9 +206,25 @@ function rowHtml(s: SessionDTO): string {
 </tr>`;
 }
 
+/**
+ * Hook status, when it needs saying: hooks absent/stale/disabled (all status is
+ * a guess), or installed while some live sessions still predate the install.
+ */
+function bannerHtml(): string {
+  const estimatedLive = sessions.filter((s) => s.status !== 'ended' && s.statusIsEstimated && !s.archived).length;
+  const b = hookBanner(hooks, estimatedLive);
+  if (!b) return '';
+  if (b.dismissible && bannerDismissed === hooks?.kind) return '';
+  const action = b.action
+    ? `<button class="bact" data-banner="install">${b.action === 'update' ? 'Update hooks' : 'Install hooks'}</button>`
+    : '';
+  const close = b.dismissible ? `<button class="bx" data-banner="dismiss" title="Hide">×</button>` : '';
+  return `<div class="banner ${b.tone}" role="status"><span class="txt">${esc(b.text)}</span>${action}${close}</div>`;
+}
+
 function render(): void {
   if (sessions.length === 0) {
-    app.innerHTML = `<div class="empty">No agent sessions found.
+    app.innerHTML = `${bannerHtml()}<div class="empty">No agent sessions found.
 <div class="hint">Sessions are discovered from <code>~/.claude</code>. Start a Claude Code session anywhere and it will appear here.</div></div>`;
     return;
   }
@@ -193,12 +237,11 @@ function render(): void {
     else groups.set(sec, [s]);
   }
 
-  let html = `<table>
-<colgroup>
-  <col class="c-dot"><col class="c-agent"><col class="c-proj"><col class="c-branch"><col class="c-pr"><col class="c-age"><col class="c-act">
-</colgroup>
+  // No <colgroup>: widths sit on the header cells so a column hidden by the
+  // narrow-layout media query disappears entirely instead of leaving a gap.
+  let html = `${bannerHtml()}<table>
 <thead><tr>
-  <th></th><th>Agent</th><th>Project</th><th>Branch</th><th>PR</th><th class="h-age">Age</th><th></th>
+  <th class="h-dot"></th><th class="h-agent">Agent</th><th class="h-proj">Project</th><th class="h-branch">Branch</th><th class="h-pr">PR</th><th class="h-age">Age</th><th class="h-act"></th>
 </tr></thead>`;
 
   for (const sec of SECTION_ORDER) {
@@ -219,17 +262,29 @@ window.addEventListener('message', (e: MessageEvent) => {
   const m = e.data as HostToDashboard;
   if (m.type === 'snapshot') {
     sessions = m.sessions;
+    hooks = m.hooks;
     render();
   }
 });
 
 app.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
+  const bannerBtn = target.closest('button[data-banner]') as HTMLElement | null;
   const btn = target.closest('button.act') as HTMLElement | null;
   const pr = target.closest('.pr') as HTMLElement | null;
   const row = target.closest('tr.row') as HTMLElement | null;
   const secRow = target.closest('tr.sec') as HTMLElement | null;
 
+  if (bannerBtn) {
+    if (bannerBtn.dataset.banner === 'install') {
+      post({ type: 'installHooks' });
+    } else {
+      bannerDismissed = hooks?.kind;
+      saveState();
+      render();
+    }
+    return;
+  }
   if (btn && row) {
     post({ type: 'action', key: row.dataset.key!, action: btn.dataset.action as DashboardAction });
     e.stopPropagation();
