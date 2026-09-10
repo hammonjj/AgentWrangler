@@ -1,0 +1,128 @@
+{
+  "name": "agent-wrangler",
+  "displayName": "Agent Wrangler",
+  "description": "Monitor all your AI agent sessions (Claude Code, more later): who is busy, who is waiting on you, who is done. Click to view live or resume.",
+  "publisher": "local",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "agentWrangler",
+          "title": "Agent Wrangler",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentWrangler": [
+        {
+          "type": "webview",
+          "id": "agentWrangler.dashboard",
+          "name": "Agents"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agentWrangler.openDashboard",
+        "title": "Agent Wrangler: Open Dashboard"
+      },
+      {
+        "command": "agentWrangler.refresh",
+        "title": "Agent Wrangler: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agentWrangler.openViewer",
+        "title": "Agent Wrangler: Open Transcript Viewer…"
+      },
+      {
+        "command": "agentWrangler.resumeInTerminal",
+        "title": "Agent Wrangler: Resume Session in Terminal…"
+      },
+      {
+        "command": "agentWrangler.copySessionId",
+        "title": "Agent Wrangler: Copy Session ID…"
+      },
+      {
+        "command": "agentWrangler.revealTranscript",
+        "title": "Agent Wrangler: Reveal Transcript in Finder…"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentWrangler.refresh",
+          "when": "view == agentWrangler.dashboard",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Agent Wrangler",
+      "properties": {
+        "agentWrangler.claudeBinaryPath": {
+          "type": "string",
+          "default": "claude",
+          "description": "Binary used when resuming a session in a terminal (claude --resume <id>)."
+        },
+        "agentWrangler.stuckThresholdSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "description": "A busy session with no transcript writes for this long is shown as POSSIBLY STUCK (permission prompt or long tool run)."
+        },
+        "agentWrangler.endedWindowHours": {
+          "type": "number",
+          "default": 48,
+          "minimum": 1,
+          "description": "Show ended sessions whose last activity is within this window."
+        },
+        "agentWrangler.maxEndedSessions": {
+          "type": "number",
+          "default": 50,
+          "minimum": 0,
+          "description": "Maximum number of ended sessions to show."
+        },
+        "agentWrangler.notifyOnWaiting": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show a toast notification when a session flips to WAITING ON YOU."
+        },
+        "agentWrangler.pollIntervalSeconds": {
+          "type": "number",
+          "default": 5,
+          "minimum": 2,
+          "description": "Reconciliation poll interval (pid liveness, staleness, missed file events)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "npm run build && npx --yes @vscode/vsce package --allow-missing-repository --skip-license",
+    "install-local": "npm run package && \"${VSCODE_CLI:-/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code}\" --install-extension agent-wrangler-$npm_package_version.vsix --force"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "1.90.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0"
+  }
+}

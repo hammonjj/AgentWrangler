@@ -1,0 +1,251 @@
+:root {
+  --aw-waiting: var(--vscode-charts-yellow, #d7ba7d);
+  --aw-busy: var(--vscode-charts-blue, #569cd6);
+  --aw-stuck: var(--vscode-charts-red, #f14c4c);
+  --aw-ended: var(--vscode-disabledForeground, #888);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+}
+
+.empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+}
+.empty .hint {
+  margin-top: 8px;
+  font-size: 0.9em;
+}
+.empty code {
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+/* ---- table ---- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+col.c-dot {
+  width: 26px;
+}
+col.c-proj {
+  width: 170px;
+}
+col.c-branch {
+  width: 130px;
+}
+col.c-pr {
+  width: 64px;
+}
+col.c-age {
+  width: 52px;
+}
+col.c-act {
+  width: 72px;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  text-align: left;
+  padding: 5px 8px 4px;
+  font-size: 0.78em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-panel-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+thead th.h-age {
+  text-align: right;
+}
+
+td {
+  padding: 4px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* ---- section rows ---- */
+
+tr.sec td {
+  cursor: pointer;
+  user-select: none;
+  padding: 7px 8px 4px;
+  font-size: 0.82em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+tr.sec:hover td {
+  color: var(--vscode-foreground);
+}
+tr.sec.st-waiting td {
+  color: var(--aw-waiting);
+}
+tr.sec.st-stuck td {
+  color: var(--aw-stuck);
+}
+tr.sec .twist {
+  display: inline-block;
+  width: 15px;
+  color: var(--vscode-descriptionForeground);
+}
+tr.sec .count {
+  margin-left: 7px;
+  font-weight: 400;
+  opacity: 0.8;
+}
+
+tbody.collapsed tr.row {
+  display: none;
+}
+
+/* ---- session rows ---- */
+
+tr.row {
+  cursor: pointer;
+}
+tr.row:hover td {
+  background: var(--vscode-list-hoverBackground);
+}
+tr.row.archived td {
+  opacity: 0.55;
+}
+tr.row.archived:hover td {
+  opacity: 1;
+}
+
+.dot {
+  display: block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin: 0 auto;
+}
+.st-waiting .dot {
+  background: var(--aw-waiting);
+  animation: aw-pulse 1.6s ease-in-out infinite;
+}
+.st-busy .dot {
+  background: var(--aw-busy);
+}
+.st-stuck .dot {
+  background: var(--aw-stuck);
+}
+.st-ended .dot {
+  background: transparent;
+  border: 1.5px solid var(--aw-ended);
+}
+tr.row.archived .dot {
+  animation: none;
+}
+
+@keyframes aw-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+}
+
+.c-agent .title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.c-agent .nm {
+  font-weight: 600;
+}
+.c-agent .sep {
+  margin: 0 5px;
+  color: var(--vscode-descriptionForeground);
+}
+.c-agent .sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88em;
+  color: var(--vscode-descriptionForeground);
+}
+tr.st-ended .title {
+  color: var(--vscode-descriptionForeground);
+}
+
+.chip {
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, #555));
+  border-radius: 9px;
+  font-size: 0.78em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.c-proj,
+.c-branch {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.92em;
+}
+
+.c-pr .pr {
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+}
+.c-pr .pr:hover {
+  text-decoration: underline;
+}
+
+.c-age {
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- action buttons ---- */
+
+.c-act {
+  text-align: right;
+}
+button.act {
+  background: transparent;
+  border: none;
+  padding: 3px 4px;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  opacity: 0.6;
+  vertical-align: middle;
+}
+tr.row:hover button.act {
+  opacity: 1;
+}
+button.act:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-foreground);
+}
+button.act svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
