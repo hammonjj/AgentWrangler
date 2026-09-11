@@ -261,6 +261,10 @@ body,
   font-weight: 600;
   margin-bottom: 4px;
 }
+.askdetail.cmd::before {
+  content: '$ ';
+  opacity: 0.6;
+}
 .askdetail {
   margin: 4px 0;
   padding: 6px 8px;

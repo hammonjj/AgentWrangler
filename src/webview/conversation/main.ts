@@ -213,21 +213,23 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       el.innerHTML = '';
       const head = document.createElement('div');
       head.className = 'askhead';
-      setText(head, `Permission needed: ${b.toolName}`);
+      // Claude's own description if it gave one, since it says why; the tool
+      // name alone only says what.
+      setText(head, b.summary ?? `${b.toolName} needs permission`);
       el.appendChild(head);
-      if (b.title) {
-        const t = document.createElement('div');
-        t.className = 'body';
-        setText(t, b.title);
-        el.appendChild(t);
+      if (b.summary) {
+        const tool = document.createElement('div');
+        tool.className = 'sub';
+        setText(tool, b.toolName);
+        el.appendChild(tool);
       }
-      if (b.detail) {
+      if (b.body) {
         const pre = document.createElement('pre');
-        pre.className = 'askdetail';
-        setText(pre, b.detail);
+        pre.className = b.isCommand ? 'askdetail cmd' : 'askdetail';
+        setText(pre, b.body);
         el.appendChild(pre);
       }
-      el.appendChild(askActions(b.requestId, b.state, b.canAlwaysAllow));
+      el.appendChild(askActions(b.requestId, b.state, b.alwaysAllowRule));
       break;
     }
     case 'question': {
@@ -307,7 +309,7 @@ function answeredLabel(state: AskState): string {
   }
 }
 
-function askActions(requestId: string, state: AskState, canAlwaysAllow: boolean): HTMLElement {
+function askActions(requestId: string, state: AskState, alwaysAllowRule: string | undefined): HTMLElement {
   const row = document.createElement('div');
   row.className = 'askrow';
   if (state !== 'pending') {
@@ -330,7 +332,12 @@ function askActions(requestId: string, state: AskState, canAlwaysAllow: boolean)
     return b;
   };
   row.appendChild(mk('Allow', 'allow', 'primary'));
-  if (canAlwaysAllow) row.appendChild(mk('Always allow', 'always', ''));
+  if (alwaysAllowRule) {
+    const always = mk('Always allow', 'always', '');
+    // Say exactly which rule gets written, so "always" is never a blank cheque.
+    always.title = `Adds the rule ${alwaysAllowRule}`;
+    row.appendChild(always);
+  }
   row.appendChild(mk('Deny', 'deny', ''));
   return row;
 }

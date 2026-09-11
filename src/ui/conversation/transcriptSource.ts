@@ -31,7 +31,10 @@ export interface TranscriptFeed {
 }
 
 /** Answers a permission prompt through the hook. Resolves false when it is too late. */
-export type DecidePermission = (sessionId: string, behavior: 'allow' | 'deny') => Promise<boolean>;
+export type DecidePermission = (
+  sessionId: string,
+  behavior: 'allow' | 'deny' | 'always',
+) => Promise<boolean>;
 
 export class TranscriptSource implements ConversationSource {
   readonly kind = 'transcript' as const;
@@ -115,15 +118,12 @@ export class TranscriptSource implements ConversationSource {
 
   async decide(requestId: string, decision: 'allow' | 'always' | 'deny'): Promise<boolean> {
     if (!this.ask || this.ask.requestId !== requestId || !this.ask.pending) return false;
-    // The hook protocol carries allow and deny only; an "always" rule would
-    // have to be written into settings.json, which this path does not do.
-    const behavior = decision === 'deny' ? 'deny' : 'allow';
-    const sent = await this.decidePermission(this.session.sessionId, behavior);
+    const sent = await this.decidePermission(this.session.sessionId, decision);
     if (!this.ask) return sent;
     this.ask.pending = false;
     this.patchEmitter.fire({
       id: this.ask.id,
-      block: { state: sent ? (behavior === 'allow' ? 'allowed' : 'denied') : 'expired' },
+      block: { state: sent ? (decision === 'deny' ? 'denied' : 'allowed') : 'expired' },
     });
     return sent;
   }
@@ -150,9 +150,12 @@ export class TranscriptSource implements ConversationSource {
       id,
       requestId: s.permissionRequestId,
       toolName: s.blockedReason ?? 'a tool',
-      detail: s.blockedDetail,
-      // The hook decision file supports allow and deny; there is no rule to write.
-      canAlwaysAllow: false,
+      summary: s.blockedAsk?.summary,
+      body: s.blockedAsk?.body,
+      isCommand: s.blockedAsk?.isCommand,
+      // Always allow is Claude Code's own "don't ask again", carried by the
+      // prompt's own suggestion; with no suggestion there is no rule to offer.
+      alwaysAllowRule: s.alwaysAllow?.rules.join(', '),
       state: 'pending',
     };
   }

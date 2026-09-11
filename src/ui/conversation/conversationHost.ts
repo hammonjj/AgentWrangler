@@ -30,7 +30,7 @@ const SECONDARY_TARGET: Record<SecondaryAction, NonNullable<ConversationCapabili
 
 /** Provider surface the pane needs: transcript growth, and answering a permission prompt. */
 export interface ConversationProvider extends AgentProvider {
-  decidePermission(sessionId: string, behavior: 'allow' | 'deny'): Promise<boolean>;
+  decidePermission(sessionId: string, behavior: 'allow' | 'deny' | 'always'): Promise<boolean>;
 }
 
 export class ConversationHost {

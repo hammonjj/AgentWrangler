@@ -81,13 +81,19 @@ export type ConvBlock =
       /** Opaque handle the source needs to answer this ask. */
       requestId: string;
       toolName: string;
-      title?: string;
-      description?: string;
-      /** One line saying what the permission is actually for. */
-      detail?: string;
+      /** Claude's own one-line description of what it is about to do. */
+      summary?: string;
+      /** The literal thing that will happen: the command, the file, the URL. */
+      body?: string;
+      /** `body` is a shell command, so render it monospaced and say so. */
+      isCommand?: boolean;
       input?: unknown;
-      /** Whether an "always allow" rule can be written for this ask. */
-      canAlwaysAllow: boolean;
+      /**
+       * The rule an *Always allow* would add, as Claude Code phrases it
+       * (`Bash(npm test:*)`). Absent when the ask offered no suggestion, which
+       * is what decides whether the button appears at all.
+       */
+      alwaysAllowRule?: string;
       state: AskState;
     }
   | { kind: 'question'; id: string; requestId: string; questions: QuestionView[]; state: AskState; answers?: Record<string, string> }
