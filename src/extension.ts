@@ -16,7 +16,10 @@ import { STATUS_LABEL, type AgentSession, type SessionStatus } from './shared/mo
 import type { SessionActions } from './ui/actions';
 import { DASHBOARD_PANEL_TYPE, DashboardPanelManager, DashboardPanelSerializer } from './ui/dashboardPanel';
 import { DashboardViewProvider } from './ui/dashboardView';
+import { watchForDevReload } from './ui/devReload';
+import { openTargetFor } from './ui/openTarget';
 import { CrossWindowRelay } from './ui/relay';
+import { SessionLocator } from './ui/sessionLocator';
 import { createStatusBar } from './ui/statusBar';
 import { resumeInTerminal } from './ui/terminal';
 import { ViewerPanelManager } from './ui/viewerPanel';
@@ -35,6 +38,7 @@ const STARTUP_OPEN_DELAY_MS = 1500;
 const QUICKPICK_ICON: Record<SessionStatus, string> = {
   blocked: '$(shield)',
   waiting: '$(bell)',
+  done: '$(check)',
   busy: '$(play)',
   stuck: '$(warning)',
   ended: '$(circle-slash)',
@@ -68,48 +72,84 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const openViewerFor = (session: AgentSession) => viewers.open(session);
 
+  const fallbackOpen = (s: AgentSession) => {
+    if (s.status === 'ended') resumeInTerminal(s, getConfig);
+    else openViewerFor(s);
+  };
+
+  /**
+   * The Claude Code panel for a session: reveals the existing one, or starts one
+   * with --resume=<id>. Only ever called for a session this window owns (or an
+   * ended one), because resuming a session that is still running elsewhere
+   * forks the conversation.
+   */
+  const openInPanel = (s: AgentSession) => {
+    vscode.commands.executeCommand('claude-vscode.editor.open', s.sessionId).then(undefined, (err) => {
+      log(`claude-vscode.editor.open failed (${String(err)}); falling back`);
+      fallbackOpen(s);
+    });
+  };
+
+  // Where each live session's process lives relative to this window: its own
+  // panel, one of its terminals, another window, or outside VSCode entirely.
+  const locator = new SessionLocator();
+
   const relay = new CrossWindowRelay(
     vscode.Uri.joinPath(context.globalStorageUri, 'relay').fsPath,
-    (sessionId) => {
-      vscode.commands.executeCommand('claude-vscode.editor.open', sessionId).then(undefined, (err) => {
-        log(`relay: claude-vscode.editor.open failed (${String(err)})`);
-        const s = store.get(`claude:${sessionId.toLowerCase()}`);
-        if (s) openViewerFor(s);
-      });
+    async (note) => {
+      const s = store.get(`claude:${note.sessionId.toLowerCase()}`);
+      const loc = await locator.locate(note.pid ?? s?.pid, { fresh: true });
+      if (loc.kind === 'terminal') {
+        loc.terminal.show();
+        return true;
+      }
+      if (loc.kind === 'panel') {
+        if (s) openInPanel(s);
+        else void vscode.commands.executeCommand('claude-vscode.editor.open', note.sessionId);
+        return true;
+      }
+      // No process tree to consult: the old rule, ownership by workspace folder.
+      if (loc.kind === 'unavailable' && isInThisWorkspace(note.cwd)) {
+        if (s) openInPanel(s);
+        else void vscode.commands.executeCommand('claude-vscode.editor.open', note.sessionId);
+        return true;
+      }
+      return false;
     },
     log,
   );
   context.subscriptions.push(relay);
   void relay.start();
 
-  const fallbackOpen = (s: AgentSession) => {
-    if (s.status === 'ended') resumeInTerminal(s, getConfig);
-    else openViewerFor(s);
-  };
-
   const actions: SessionActions = {
     smartOpen(key) {
       const s = store.get(key);
       if (!s) return;
-      // In this window's workspace → open straight into the Claude Code panel
-      // (reveals the existing panel for that session, or starts one with
-      // --resume=<id>) so the user can talk to the agent immediately.
-      if (s.provider === 'claude' && isInThisWorkspace(s.cwd)) {
-        vscode.commands.executeCommand('claude-vscode.editor.open', s.sessionId).then(undefined, (err) => {
-          log(`claude-vscode.editor.open failed (${String(err)}); falling back`);
-          fallbackOpen(s);
-        });
-        return;
-      }
-      // Live panel session owned by another window → relay: focus that window
-      // and have its Agent Wrangler instance open the conversation there.
-      if (s.provider === 'claude' && s.status !== 'ended' && s.entrypoint === 'claude-vscode' && s.cwd) {
-        void relay.request(s.sessionId, s.cwd);
-        vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${s.name ?? s.title} in its window…`, 4000);
-        return;
-      }
-      // Everything else: ended → terminal resume; live terminal/unknown → viewer.
-      fallbackOpen(s);
+      void (async () => {
+        const loc = await locator.locate(s.pid, { fresh: true });
+        const target = openTargetFor(s, loc.kind, isInThisWorkspace(s.cwd));
+        log(`open ${s.name ?? s.sessionId}: process ${loc.kind} → ${target}`);
+        switch (target) {
+          case 'panel':
+            openInPanel(s);
+            return;
+          case 'terminal':
+            if (loc.kind === 'terminal') loc.terminal.show();
+            return;
+          case 'window':
+            // Owned by another window of this VSCode: focus it and have its
+            // Agent Wrangler instance reveal the panel or terminal there.
+            void relay.request(s.sessionId, s.cwd ?? '', s.pid);
+            vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${s.name ?? s.title} in its window…`, 4000);
+            return;
+          case 'resume':
+            resumeInTerminal(s, getConfig);
+            return;
+          case 'viewer':
+            openViewerFor(s);
+            return;
+        }
+      })();
     },
     openViewer(key) {
       const s = store.get(key);
@@ -143,6 +183,22 @@ export function activate(context: vscode.ExtensionContext): void {
     installHooks() {
       void vscode.commands.executeCommand('agentWrangler.installHooks');
     },
+    decidePermission(key, behavior) {
+      const s = store.get(key);
+      if (!s || s.provider !== 'claude') return;
+      void provider.decidePermission(s.sessionId, behavior).then((sent) => {
+        if (sent) {
+          log(`permission ${behavior} sent to ${s.name ?? s.sessionId}`);
+          return;
+        }
+        // The prompt was answered in Claude Code first, or the hook gave up
+        // waiting; either way there is nothing left to decide from here.
+        vscode.window.setStatusBarMessage(
+          `Agent Wrangler: ${s.name ?? s.title} is no longer waiting on that permission.`,
+          4000,
+        );
+      });
+    },
   };
 
   const viewers = new ViewerPanelManager(context.extensionUri, store, provider, actions);
@@ -150,13 +206,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The dashboard has two homes: an editor tab (default) and the bottom panel.
   // Both are always registered; the setting only decides where opening it goes.
-  const dashboardPanel = new DashboardPanelManager(context.extensionUri, store, archive, actions, provider);
+  const dashboardPanel = new DashboardPanelManager(context.extensionUri, store, archive, actions, provider, locator);
   context.subscriptions.push(
     dashboardPanel,
     vscode.window.registerWebviewPanelSerializer(DASHBOARD_PANEL_TYPE, new DashboardPanelSerializer(dashboardPanel)),
     vscode.window.registerWebviewViewProvider(
       DashboardViewProvider.viewId,
-      new DashboardViewProvider(context.extensionUri, store, archive, actions, provider),
+      new DashboardViewProvider(context.extensionUri, store, archive, actions, provider, locator),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );
@@ -184,7 +240,9 @@ export function activate(context: vscode.ExtensionContext): void {
         const msg =
           s.status === 'blocked'
             ? `${s.title} needs your permission${s.blockedReason ? ` for ${s.blockedReason}` : ''}`
-            : `${s.title} is waiting on you`;
+            : s.status === 'done'
+              ? `${s.title} is done`
+              : `${s.title} is waiting on you`;
         void vscode.window
           .showInformationMessage(msg, 'Open Viewer', 'Dashboard')
           .then((choice) => {
@@ -273,6 +331,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   void store.register(provider).catch((err) => log(`provider start failed: ${String(err)}`));
   log('Agent Wrangler activated');
+  watchForDevReload(context, log);
 
   // Hooks can be suppressed with no error we'd ever see: `disableAllHooks`,
   // safe mode, an org policy allowing only managed hooks, or unaccepted

@@ -14,7 +14,7 @@ npm install
 
 Then open this folder in VSCode and press **F5** (Run Agent Wrangler). A new Extension Development Host window opens with:
 
-- **Agent Wrangler dashboard**, opened for you at startup as an editor tab in the main editor area: all sessions grouped *Waiting on you → Possibly stuck → Busy → Ended*. Set `agentWrangler.dashboardLocation` to `panel` to dock it in the bottom panel next to Terminal instead, or turn `agentWrangler.openOnStartup` off to open it yourself.
+- **Agent Wrangler dashboard**, opened for you at startup as an editor tab in the main editor area: all sessions grouped *Blocked on you → Waiting on you → Possibly stuck → Done → Busy → Ended*. Set `agentWrangler.dashboardLocation` to `panel` to dock it in the bottom panel next to Terminal instead, or turn `agentWrangler.openOnStartup` off to open it yourself.
 - **Status bar bell**: `$(bell-dot) N waiting` when agents are blocked on you; click to open the dashboard.
 
 ## Install it for real (dogfooding)
@@ -25,18 +25,26 @@ F5 only loads the extension into a dev-host window, so the cross-window relay ca
 npm run install-local    # build → package .vsix → code --install-extension --force
 ```
 
-Then **Cmd+Shift+P → Developer: Reload Window** in each open window (or restart VSCode) to pick up the new build. Repeat the same command after every change — `--force` reinstalls over the same version, so no version bump is needed.
+The window that has this repo open reloads itself when the install finishes (the script touches `.dev-reload`, which the running extension watches in the Agent Wrangler workspace only), so the change is on screen immediately. Every other window keeps the old build until **Cmd+Shift+P → Developer: Reload Window** or a VSCode restart. Repeat the same command after every change — `--force` reinstalls over the same version, so no version bump is needed.
 
 The VSCode CLI is assumed to live in `/Applications/Visual Studio Code.app`; override with `VSCODE_CLI=/path/to/code npm run install-local`. To go back to F5-only iteration: `code --uninstall-extension local.agent-wrangler`.
 
 ## Behavior
 
-- The dashboard is a column-aligned table with collapsible sections (*Blocked on you / Waiting on you / Possibly stuck / Busy / Ended / Archived*); collapse state is remembered.
-- **Narrow docking works.** Below ~720px (a sidebar or a split bottom panel) the Project, Branch and PR columns fold into the row's second line, so the session title, status chips and age stay visible instead of being pushed off-screen.
+- The dashboard is a column-aligned table with collapsible sections (*Blocked on you / Waiting on you / Possibly stuck / Done / Busy / Ended / Archived*); collapse state is remembered.
+- **Waiting on you vs Done.** Both mean the agent finished its turn and is idle. *Waiting on you* means its last message asked you something — a question, a choice, "let me know". *Done* means it reported and stopped. The split is read off the reply text (a question mark closing the last paragraph, or a decision phrase), so it is a heuristic that errs towards *Waiting*: unknown or failed turns are always *Waiting*. Done sessions get a green dot, do not light the status-bar bell, and do toast when `notifyOnWaiting` is on.
+- **Blocked rows say what for.** Under the title a *Blocked on you* row shows the permission's subject — the Bash command and its description, the file an Edit touches, the question an `AskUserQuestion` asks — and, while Claude Code's dialog is still open, **Allow** and **Deny** buttons that answer it from the dashboard. The row is taller for it on purpose. Claude Code's own dialog keeps working; whichever is answered first wins. (Hooks required; see below for how the buttons reach Claude Code.)
+- **Conversations nobody has typed into yet are hidden.** A new Claude panel or a `/clear` registers a live process with no transcript; it appears the moment the first prompt lands, not as a *Waiting on you* row with nothing in it.
+- **Narrow docking works.** Below ~720px (a sidebar or a split bottom panel) the Project, Branch and PR columns fold into the row's second line, so the session title, status chips, ETA and age stay visible instead of being pushed off-screen.
+- **An ETA column** on every busy row (hooks required). It counts down against your own turn history: until the median while the turn is still typical, then until the 90th percentile once it has outlived half its peers (yellow past p75, orange past p90, where it shows `>Xm` instead of a countdown). Italic means the baseline is still the seeded one, before 20 of your turns have been recorded. A dash means the turn's start was not observed; the cell's tooltip says why.
 - **A banner at the top says when status is only estimated** — hooks not installed, disabled, or stale — with an *Install hooks* button. Once installed, it lists the live sessions that predate the install and still need a restart.
-- **Click a session belonging to this window's workspace** → opens it in the official Claude Code panel (`claude-vscode.editor.open <sessionId>`), revealing the existing panel or resuming with `--resume=<id>` — fully interactive immediately.
-- **Click a live panel session owned by another window** → cross-window relay: a note is written to a shared mailbox (extension globalStorage) watched by every Agent Wrangler instance, and the owning window is focused via VSCode's own CLI; that window's instance opens the conversation in its Claude panel. If the project isn't open anywhere, a new window opens and claims the note on activation. (Requires the extension to be running in the target window — during F5-only iteration that means only dev-host windows participate; other windows still get focused.)
-- **Click anything else from another project/window** → ended: terminal at the project folder running `claude --resume <id>`; live terminal sessions: read-only viewer.
+- **Clicking a row goes to wherever the session actually lives.** Ownership is decided from the process tree, not the folder: every live session's pid is in Claude's registry, and walking its parents says whether it sits under this window's extension host (a Claude Code panel), under one of this window's terminal shells, under another window of this VSCode, or outside VSCode altogether. The row tooltip says what a click will do.
+  - **Panel session in this window** → reveals it in the official Claude Code panel (`claude-vscode.editor.open <sessionId>`) — fully interactive immediately.
+  - **Terminal session in this window** → shows the integrated terminal running it. A terminal session cannot be moved into the panel: it is one process, and resuming its id in a panel would start a second copy and fork the conversation, so the extension never does that.
+  - **Live session in another window of this VSCode** → cross-window relay: a note (session id, cwd, pid) is written to a shared mailbox (extension globalStorage) watched by every Agent Wrangler instance, and the owning window is focused via VSCode's own CLI; the instance that owns the process claims the note and reveals the panel or terminal there. (Requires the extension to be running in the target window — during F5-only iteration that means only dev-host windows participate; other windows still get focused.)
+  - **Live session nothing here can reveal** (an iTerm session, a pid that has just died) → read-only viewer.
+  - **Ended session** → in this window's workspace: resumed into the Claude Code panel; elsewhere: a terminal at the project folder running `claude --resume <id>`.
+  - Without a readable process table (no `ps`) the old folder-based rule applies: in this workspace → panel, other window's panel session → relay, else viewer.
 - The eye button opens the read-only viewer for any session with a transcript.
 - Row buttons: view transcript (ended sessions) and **archive** — archived sessions move to the always-last Archived section (collapsed by default), stop counting toward the status-bar bell, and never toast. The same button unarchives.
 - Command palette: `Agent Wrangler: …` commands (dashboard, refresh, viewer, resume, copy id, reveal transcript, install/remove status hooks).
@@ -47,17 +55,21 @@ Two sources, in priority order. Hooks are ground truth; the transcript is a fall
 
 ### 1. Hooks (exact, opt-in)
 
-Run **`Agent Wrangler: Install Status Hooks…`** (or click *Install hooks* in the dashboard banner). It merges a block into `~/.claude/settings.json` in which every hook appends its stdin payload to `~/.claude/agentwrangler/$PPID.jsonl`; the extension tails those logs.
+Run **`Agent Wrangler: Install Status Hooks…`** (or click *Install hooks* in the dashboard banner). It merges a block into `~/.claude/settings.json` in which every hook appends its stdin payload to `~/.claude/agentwrangler/$PPID.jsonl`; the extension tails those logs. The one exception is `PermissionRequest`, which runs `~/.claude/agentwrangler/permission-hook.sh` (written by the installer) — see *Allow / Deny* below.
 
 | Signal | Meaning |
 |---|---|
-| `PermissionRequest` · `Elicitation` · `Notification`/`agent_needs_input` | **Blocked on you** (row names the tool) |
-| `Stop` · `StopFailure` | **Waiting on you** |
+| `PermissionRequest` · `Elicitation` · `Notification`/`agent_needs_input` · `PreToolUse` for `AskUserQuestion` / `ExitPlanMode` | **Blocked on you** (row names the tool, and what for) |
+| `Stop` with a reply that asks something · `StopFailure` | **Waiting on you** |
+| `Stop` with a reply that just reports | **Done** |
 | `UserPromptSubmit` · `PreToolUse` · `PostToolUse`/`PostToolBatch` | **Busy** (row shows the in-flight tool and its elapsed time) |
 | no events at all past `stuckThresholdSeconds` (default 10 min), nothing in flight | **Possibly stuck** |
 | `SessionEnd`, or pid gone | **Ended** |
+| `SessionStart` with no transcript yet | *hidden* (an empty conversation) |
 
-*Possibly stuck* is deliberately slow to trigger. Hooks fire on tool calls and prompts, not while the model is generating, so a long think or a large `Write` is silent for minutes (measured in one ordinary turn: 121s, 388s, 79s, 104s). The pace chip is what says "running long"; *stuck* means nothing at all for ten minutes.
+**Allow / Deny from the dashboard.** Claude Code runs `PermissionRequest` hooks and shows its permission dialog *at the same time*, then takes whichever answers first (verified in the 2.1.267 binary: the hook generator and the dialog promise are started together and raced). The installed script logs the payload like every other hook, leaves a marker in `~/.claude/agentwrangler/requests/`, and then polls for `decisions/<id>.json` for up to ~28 minutes (its hook `timeout` is 30 minutes). Clicking **Allow** or **Deny** writes that file with Claude Code's own decision shape (`hookSpecificOutput.decision.behavior`); the script prints it and exits, and Claude Code applies it. If you answer in Claude Code instead, the next event (`PreToolUse` or `PermissionDenied`) removes the marker and the script exits within half a second. The buttons only render while the marker exists, so they never offer a decision that can no longer land. Tools that require interaction by design (`AskUserQuestion`, `ExitPlanMode`) cannot be answered this way and show no buttons.
+
+*Possibly stuck* is deliberately slow to trigger. Hooks fire on tool calls and prompts, not while the model is generating, so a long think or a large `Write` is silent for minutes (measured in one ordinary turn: 121s, 388s, 79s, 104s). The ETA column is what says "running long"; *stuck* means nothing at all for ten minutes.
 
 Notes on the install, all verified against the shipped Claude Code:
 
@@ -73,7 +85,9 @@ Sessions with no hook data — anything started before installing them — are d
 | Signal | Meaning |
 |---|---|
 | `~/.claude/sessions/<pid>.json` + pid alive | session is live (registry gives cwd + friendly name) |
-| last transcript line: assistant `stop_reason: end_turn` | **Waiting on you** |
+| registry entry, no transcript file | *hidden* (nothing typed yet) |
+| last transcript line: assistant `stop_reason: end_turn`, reply asks something | **Waiting on you** |
+| last transcript line: assistant `stop_reason: end_turn`, reply just reports | **Done** |
 | last transcript line: assistant `tool_use` / user / queue-op | **Busy** |
 | busy but transcript silent > `stuckThresholdSeconds` (default 10 min) | **Possibly stuck** |
 | pid gone | **Ended** |
@@ -84,7 +98,7 @@ Transcripts and hook logs are both read incrementally (bounded tail reads with a
 
 ## Settings
 
-`agentWrangler.dashboardLocation` (`editor` — or `panel` for the bottom panel) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting or blocked) · `pollIntervalSeconds` (5)
+`agentWrangler.dashboardLocation` (`editor` — or `panel` for the bottom panel) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting, blocked or done) · `pollIntervalSeconds` (5)
 
 ## Development
 

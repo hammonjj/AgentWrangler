@@ -73,6 +73,23 @@ describe('parseSummaryLines', () => {
     expect(p.lastMeaningful).toMatchObject({ kind: 'assistant', stopReason: 'tool_use' });
   });
 
+  it('keeps the text of the latest reply, across the tool_use lines of the same turn', () => {
+    const p = parseSummaryLines([
+      mkUser('please fix it'),
+      mkAssistant([mkText('Looking.')], 'tool_use'),
+      mkAssistant([mkToolUse('Bash', { command: 'ls' })], 'tool_use'),
+      mkUser([mkToolResult('out')]), // a tool result is not a new prompt
+      mkAssistant([mkText('Fixed. Should I push?')], 'end_turn'),
+    ]);
+    expect(p.lastAssistantText).toBe('Fixed. Should I push?');
+  });
+
+  it('forgets the reply once a new prompt arrives', () => {
+    const p = parseSummaryLines([mkAssistant([mkText('Fixed.')], 'end_turn'), mkUser('now do the other one')]);
+    expect(p.lastAssistantText).toBeUndefined();
+    expect(p.lastMeaningful?.kind).toBe('user');
+  });
+
   it('treats user tool-result and queue-operation lines as meaningful', () => {
     expect(parseSummaryLines([mkUser([mkToolResult('out')])]).lastMeaningful?.kind).toBe('user');
     expect(parseSummaryLines([mkQueueOp()]).lastMeaningful?.kind).toBe('queue-operation');
@@ -145,6 +162,22 @@ describe('mergeSummaries', () => {
     expect(merged.slug).toBe('old-slug');
     expect(merged.headReadDone).toBe(true);
     expect(merged.byteOffset).toBe(200);
+  });
+
+  it('keeps the old reply text only when the new chunk saw no turn activity', () => {
+    const prev: TranscriptSummary = {
+      lastMeaningful: { kind: 'assistant', stopReason: 'end_turn' },
+      lastAssistantText: 'Old reply.',
+      headReadDone: true,
+      byteOffset: 100,
+      mtimeMs: 1,
+      sizeBytes: 100,
+    };
+    const stat = { sizeBytes: 200, mtimeMs: 2, byteOffset: 200 };
+    // Only metadata lines appended (ai-title etc.): the reply still stands.
+    expect(mergeSummaries(prev, { aiTitle: 'T' }, stat).lastAssistantText).toBe('Old reply.');
+    // A new prompt appended: the chunk cleared the reply, and that wins.
+    expect(mergeSummaries(prev, { lastMeaningful: { kind: 'user' } }, stat).lastAssistantText).toBeUndefined();
   });
 });
 

@@ -10,7 +10,7 @@ import { currentState, type InstallState } from './hookInstall';
 import { HookLog, hookLogDir } from './hookLog';
 import { isSessionJsonlName, projectsDir, sessionsDir } from './paths';
 import { readRegistry, type RegistryEntry } from './registry';
-import { deriveStatus } from './status';
+import { deriveStatus, turnOver } from './status';
 import { TranscriptIndex, type IndexedTranscript } from './transcriptIndex';
 import type { TranscriptSummary } from './transcriptTail';
 
@@ -121,15 +121,28 @@ export class ClaudeProvider implements AgentProvider {
       // config at startup), so they fall back to transcript inference and are
       // flagged estimated rather than silently presented as fact.
       const hook = this.hooks.get(id);
-      const status = hook
+      let status = hook
         ? statusFromHookState(hook, now, stuckThresholdMs)
         : deriveStatus({
             pidAlive: true,
             lastMeaningful: s?.lastMeaningful,
             transcriptMtimeMs: s?.mtimeMs,
+            lastAssistantText: s?.lastAssistantText,
             nowMs: now,
             stuckThresholdMs,
           });
+
+      // A conversation nobody has typed into yet: the process exists (a new
+      // panel, a /clear) but there is no transcript and nothing to wait for.
+      // It appears the moment the first prompt lands.
+      if (idx === undefined && status === 'waiting') continue;
+
+      // Hooks say "turn over, idle"; whether that is Waiting-on-you or Done
+      // depends on what the reply said, which the hook carries on Stop. A
+      // resumed session has no Stop of ours yet, so the transcript's last
+      // reply stands in.
+      if (hook && status === 'waiting') status = this.idleStatus(hook, s);
+
       sessions.push(this.buildSession(r, idx, status, now, hook));
     }
 
@@ -153,9 +166,16 @@ export class ClaudeProvider implements AgentProvider {
   ): AgentSession {
     const s = idx?.summary;
     const cwd = r.cwd ?? s?.cwd;
+    const blocked = status === 'blocked';
     return {
       statusIsEstimated: hook === undefined,
-      blockedReason: status === 'blocked' ? hook?.blockedReason : undefined,
+      blockedReason: blocked ? hook?.blockedReason : undefined,
+      blockedDetail: blocked ? hook?.blockedDetail : undefined,
+      // Buttons only while the hook script is provably still waiting.
+      permissionRequestId:
+        blocked && this.hooks.pendingRequestExists(hook?.permissionRequestId)
+          ? hook?.permissionRequestId
+          : undefined,
       activeTool: status === 'busy' ? hook?.activeTool : undefined,
       progress: status === 'busy' && hook ? this.buildProgress(hook, now) : undefined,
       provider: this.id,
@@ -176,6 +196,31 @@ export class ClaudeProvider implements AgentProvider {
       pid: r.pid,
       prLink: s?.prLink,
     };
+  }
+
+  /**
+   * Waiting-on-you or Done for a hook-reporting session idle at its prompt.
+   * A failed turn is always waiting: an error is for the human to read. The
+   * reply text comes from the Stop event when we saw one, else from the
+   * transcript — but only a transcript whose last line is a finished reply,
+   * since a resumed mid-turn session has no reply to judge.
+   */
+  private idleStatus(hook: HookSessionState, s: TranscriptSummary | undefined): AgentSession['status'] {
+    if (hook.turnFailed) return 'waiting';
+    if (hook.lastReply !== undefined) return turnOver(hook.lastReply);
+    const lm = s?.lastMeaningful;
+    const finished = lm?.kind === 'assistant' && lm.stopReason != null && lm.stopReason !== 'tool_use';
+    return turnOver(finished ? s?.lastAssistantText : undefined);
+  }
+
+  /**
+   * Answer the permission prompt a session is blocked on. Resolves false when
+   * there is no prompt left to answer (see `HookLog.decide`).
+   */
+  async decidePermission(sessionId: string, behavior: 'allow' | 'deny'): Promise<boolean> {
+    const sent = await this.hooks.decide(sessionId, behavior);
+    if (sent) this.changeEmitter.fire();
+    return sent;
   }
 
   /**

@@ -9,7 +9,8 @@ import type { HookHealth, SessionDTO, SessionStatus, ViewerBlock } from './model
 /** `hooks` is absent until the host has checked settings.json once. */
 export type HostToDashboard = { type: 'snapshot'; sessions: SessionDTO[]; nowMs: number; hooks?: HookHealth };
 
-export type DashboardAction = 'viewer' | 'resume' | 'archive';
+/** `allow` / `deny` answer the permission prompt a blocked row is sitting on. */
+export type DashboardAction = 'viewer' | 'resume' | 'archive' | 'allow' | 'deny';
 
 export type DashboardToHost =
   | { type: 'ready' }

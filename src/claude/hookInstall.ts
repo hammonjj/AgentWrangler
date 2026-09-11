@@ -29,6 +29,73 @@ export const HOOK_MARKER = 'agentwrangler';
 /** Per-hook timeout (seconds). An append needs milliseconds; this is just a guard. */
 const HOOK_TIMEOUT_SECONDS = 5;
 
+/**
+ * The PermissionRequest hook is the one that waits. Claude Code shows its own
+ * dialog while the hook runs and takes whichever answers first (verified in the
+ * 2.1.267 binary: hooks and the prompt are started together and raced), so a
+ * long wait costs nothing — the dialog is not delayed — and it is what lets the
+ * dashboard answer instead. The script gives up a little before this ceiling.
+ */
+export const PERMISSION_HOOK_TIMEOUT_SECONDS = 1800;
+const PERMISSION_HOOK_MAX_POLLS = 3400; // × 0.5 s ≈ 28 min
+
+export const PERMISSION_SCRIPT_NAME = 'permission-hook.sh';
+/** Bumped whenever the script text changes; `currentState` reports the old file as stale. */
+export const PERMISSION_SCRIPT_VERSION = 1;
+
+export function permissionScriptPath(logDir: string): string {
+  return path.join(logDir, PERMISSION_SCRIPT_NAME);
+}
+
+/**
+ * The PermissionRequest hook. POSIX sh, no interpreter start-up beyond the
+ * shell itself, no dependency past `sed` and `sleep`.
+ *
+ *  1. Append the payload to the per-process log exactly as the other hooks do.
+ *  2. Leave an empty marker in `requests/` and announce it in the log with a
+ *     synthetic `AgentWranglerPermissionPending` line, so the dashboard knows
+ *     which prompt it can answer.
+ *  3. Poll for `decisions/<id>.json`. The dashboard writes it when Allow or
+ *     Deny is clicked; the script prints it — Claude Code reads the decision
+ *     off stdout — and exits. If the marker disappears instead (the dashboard
+ *     removes it once the prompt was answered in Claude Code), exit quietly.
+ *
+ * `$PPID` is the Claude process and `$$` this hook's shell, so the id is
+ * unique per prompt without parsing anything. The session id is the one field
+ * pulled out of the JSON, and it is a UUID, so a `sed` capture is safe.
+ */
+export function permissionScript(): string {
+  return [
+    '#!/bin/sh',
+    `# Agent Wrangler PermissionRequest hook, v${PERMISSION_SCRIPT_VERSION}. Installed by the Agent Wrangler`,
+    '# VSCode extension; re-run "Agent Wrangler: Install Status Hooks" to restore it.',
+    '# Logs the permission prompt like every other hook, then waits for a decision',
+    '# from the dashboard. Claude Code shows its own dialog meanwhile and takes',
+    '# whichever answer comes first, so this wait never delays the prompt.',
+    'dir=$(dirname "$0")',
+    'payload=$(cat)',
+    'printf \'%s\\n\' "$payload" >> "$dir/$PPID.jsonl"',
+    'sid=$(printf \'%s\' "$payload" | sed -n \'s/.*"session_id":"\\([^"]*\\)".*/\\1/p\' | head -n 1)',
+    '[ -n "$sid" ] || exit 0',
+    'id="$PPID-$$"',
+    'req="$dir/requests/$id"',
+    'dec="$dir/decisions/$id.json"',
+    'mkdir -p "$dir/requests" "$dir/decisions" || exit 0',
+    ': > "$req" || exit 0',
+    `printf '{"hook_event_name":"AgentWranglerPermissionPending","session_id":"%s","request_id":"%s"}\\n' "$sid" "$id" >> "$dir/$PPID.jsonl"`,
+    'i=0',
+    `while [ "$i" -lt ${PERMISSION_HOOK_MAX_POLLS} ]; do`,
+    '  if [ -f "$dec" ]; then cat "$dec"; rm -f "$dec" "$req"; exit 0; fi',
+    '  [ -e "$req" ] || exit 0',
+    '  sleep 0.5',
+    '  i=$((i+1))',
+    'done',
+    'rm -f "$req"',
+    'exit 0',
+    '',
+  ].join('\n');
+}
+
 export interface HookCommand {
   type: string;
   command?: string;
@@ -54,7 +121,8 @@ export function settingsPath(): string {
  * process, which shards the log so concurrent sessions can't tear each other's
  * lines.
  */
-export function hookCommandFor(logDir: string): string {
+export function hookCommandFor(logDir: string, event: string = 'Stop'): string {
+  if (event === 'PermissionRequest') return `"${permissionScriptPath(logDir)}"`;
   return `cat >> "${logDir}/$PPID.jsonl"`;
 }
 
@@ -62,12 +130,13 @@ export function isOurEntry(entry: HookMatcherEntry): boolean {
   return (entry.hooks ?? []).some((h) => typeof h.command === 'string' && h.command.includes(HOOK_MARKER));
 }
 
-function ourEntry(logDir: string): HookMatcherEntry {
+function ourEntry(logDir: string, event: string): HookMatcherEntry {
   // No `matcher` key = match everything for this event. We filter by
   // notification_type etc. in our own parser rather than registering many
   // matchers, which keeps the block small and easy to verify by eye.
+  const timeout = event === 'PermissionRequest' ? PERMISSION_HOOK_TIMEOUT_SECONDS : HOOK_TIMEOUT_SECONDS;
   return {
-    hooks: [{ type: 'command', command: hookCommandFor(logDir), timeout: HOOK_TIMEOUT_SECONDS }],
+    hooks: [{ type: 'command', command: hookCommandFor(logDir, event), timeout }],
   };
 }
 
@@ -89,7 +158,7 @@ export function mergeHooks(
   for (const event of HOOK_EVENTS) {
     const entries = Array.isArray(next[event]) ? [...next[event]] : [];
     const mineAt = entries.findIndex(isOurEntry);
-    const desired = ourEntry(logDir);
+    const desired = ourEntry(logDir, event);
     if (mineAt === -1) {
       entries.push(desired);
       changed = true;
@@ -186,20 +255,40 @@ export async function currentState(logDir: string, file = settingsPath()): Promi
 
   const hooks = res.obj.hooks ?? {};
   const found: string[] = [];
-  let staleDir: string | undefined;
+  let stale = false;
   for (const event of HOOK_EVENTS) {
     const entries = hooks[event];
     if (!Array.isArray(entries)) continue;
     const mine = entries.find(isOurEntry);
     if (!mine) continue;
     found.push(event);
-    const cmd = (mine.hooks ?? []).find((h) => typeof h.command === 'string')?.command;
-    if (cmd !== hookCommandFor(logDir)) staleDir = cmd;
+    // Compare the whole entry, not just the command: a timeout change (the
+    // PermissionRequest wait) is a real difference the reinstall must fix.
+    if (JSON.stringify(mine) !== JSON.stringify(ourEntry(logDir, event))) stale = true;
   }
 
   if (found.length === 0) return { kind: 'absent' };
-  if (staleDir !== undefined || found.length !== HOOK_EVENTS.length) return { kind: 'stale', logDir };
+  if (stale || found.length !== HOOK_EVENTS.length) return { kind: 'stale', logDir };
+  // The block can be current while the script it points at is old or gone.
+  if (!(await permissionScriptCurrent(logDir))) return { kind: 'stale', logDir };
   return { kind: 'installed', logDir };
+}
+
+async function permissionScriptCurrent(logDir: string): Promise<boolean> {
+  try {
+    return (await fsp.readFile(permissionScriptPath(logDir), 'utf8')) === permissionScript();
+  } catch {
+    return false;
+  }
+}
+
+/** Write the PermissionRequest script (tmp + rename, executable). */
+async function writePermissionScript(logDir: string): Promise<void> {
+  const target = permissionScriptPath(logDir);
+  const tmp = `${target}.tmp`;
+  await fsp.writeFile(tmp, permissionScript(), { encoding: 'utf8', mode: 0o755 });
+  await fsp.chmod(tmp, 0o755);
+  await fsp.rename(tmp, target);
 }
 
 async function writeWithBackup(file: string, raw: string, next: RawSettings): Promise<void> {
@@ -224,10 +313,20 @@ export async function installHooks(logDir: string, file = settingsPath()): Promi
   if ('error' in res) return { ok: false, changed: false, message: res.error };
 
   await fsp.mkdir(logDir, { recursive: true });
+  const scriptWasCurrent = await permissionScriptCurrent(logDir);
+  if (!scriptWasCurrent) await writePermissionScript(logDir);
 
   const { hooks, changed } = mergeHooks(res.obj.hooks, logDir);
   if (!changed) {
-    return { ok: true, changed: false, message: 'Agent Wrangler hooks were already installed and up to date.' };
+    return scriptWasCurrent
+      ? { ok: true, changed: false, message: 'Agent Wrangler hooks were already installed and up to date.' }
+      : {
+          ok: true,
+          changed: true,
+          message:
+            'Agent Wrangler permission hook script updated; settings.json was already current. ' +
+            'Sessions started from now on use the new script.',
+        };
   }
   await writeWithBackup(file, res.raw, { ...res.obj, hooks });
 

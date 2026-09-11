@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
 import type { SessionStore } from '../core/sessionStore';
-import { formatDuration, paceText, workingElapsedMs, type AgentSession } from '../shared/model';
+import { etaText, formatDuration, workingElapsedMs, type AgentSession } from '../shared/model';
 
 /** How far into its turn a busy agent is, for the "nothing needs you" tooltip. */
 function progressNote(s: AgentSession): string {
@@ -11,11 +11,16 @@ function progressNote(s: AgentSession): string {
   const parts = [`${formatDuration(elapsed)} in`];
   if (p.todo) parts.push(`${p.todo.completed}/${p.todo.total} done`);
   if (p.pace) {
-    // Same threshold as the dashboard chip: quiet until the turn outruns the median.
-    const pace = paceText(elapsed, p.pace.p50Ms, p.pace.p75Ms, p.pace.p90Ms);
-    if (pace) parts.push(pace);
+    // Same figure as the dashboard's ETA column.
+    parts.push(`ETA ${etaText(elapsed, p.pace.p50Ms, p.pace.p90Ms)}`);
   }
   return ` *(${parts.join(', ')})*`;
+}
+
+function appendDone(md: vscode.MarkdownString, done: AgentSession[], line: (s: AgentSession) => string): void {
+  if (done.length === 0) return;
+  md.appendMarkdown('\n**Done:**\n\n');
+  for (const s of done.slice(0, 10)) md.appendMarkdown(`${line(s)}\n`);
 }
 
 export function createStatusBar(store: SessionStore, archive: ArchiveService, context: vscode.ExtensionContext): void {
@@ -28,6 +33,7 @@ export function createStatusBar(store: SessionStore, archive: ArchiveService, co
     const visible = store.sessions.filter((s) => !archive.isArchived(s.key));
     const blocked = visible.filter((s) => s.status === 'blocked');
     const waiting = visible.filter((s) => s.status === 'waiting');
+    const done = visible.filter((s) => s.status === 'done');
     const live = visible.filter((s) => s.status !== 'ended').length;
     if (live === 0) {
       item.hide();
@@ -57,15 +63,23 @@ export function createStatusBar(store: SessionStore, archive: ArchiveService, co
         md.appendMarkdown('**Waiting on you:**\n\n');
         for (const s of waiting.slice(0, 10)) md.appendMarkdown(`${line(s)}\n`);
       }
+      appendDone(md, done, line);
       item.tooltip = md;
     } else {
+      // Done sessions are not "waiting on you" — a finished report needs
+      // reading, not answering — so they never light the bell, but the tooltip
+      // still says they are there.
       item.text = `$(bell) 0`;
       item.backgroundColor = undefined;
       const md = new vscode.MarkdownString();
-      md.appendMarkdown(`**${live} agent${live === 1 ? '' : 's'} busy** — none waiting on you\n\n`);
-      for (const s of visible.filter((x) => x.status === 'busy').slice(0, 10)) {
+      const busy = visible.filter((x) => x.status === 'busy');
+      md.appendMarkdown(
+        `**${busy.length} agent${busy.length === 1 ? '' : 's'} busy** — none waiting on you\n\n`,
+      );
+      for (const s of busy.slice(0, 10)) {
         md.appendMarkdown(`- ${s.name ?? s.title}${progressNote(s)}\n`);
       }
+      appendDone(md, done, (s) => `- ${s.name ?? s.title}${s.name && s.title !== s.name ? ` — ${s.title}` : ''}`);
       item.tooltip = md;
     }
     item.show();

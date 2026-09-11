@@ -6,6 +6,8 @@ import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { HookHealth } from '../shared/model';
 import type { SessionActions } from './actions';
 import { buildWebviewHtml } from './html';
+import { openTargetFor } from './openTarget';
+import type { SessionLocator } from './sessionLocator';
 import { isInThisWorkspace } from './workspace';
 
 /**
@@ -33,6 +35,7 @@ export class DashboardHost {
     private archive: ArchiveService,
     private actions: SessionActions,
     private health: HookHealthSource,
+    private locator: SessionLocator,
   ) {
     webview.options = {
       enableScripts: true,
@@ -63,11 +66,30 @@ export class DashboardHost {
     this.subs = [];
   }
 
+  /** Snapshots race the locator's process-table read; only the newest one lands. */
+  private snapshotSeq = 0;
+
   private pushSnapshot(): void {
-    const sessions = this.store.sessions.map((s) => ({
+    void this.pushSnapshotAsync();
+  }
+
+  private async pushSnapshotAsync(): Promise<void> {
+    const seq = ++this.snapshotSeq;
+    const raw = this.store.sessions;
+    const livePids = raw
+      .filter((s) => s.provider === 'claude' && s.status !== 'ended' && s.pid !== undefined)
+      .map((s) => s.pid as number);
+    const locations = await this.locator.locateMany(livePids);
+    if (seq !== this.snapshotSeq) return; // superseded while we waited
+
+    const sessions = raw.map((s) => ({
       ...s,
       archived: this.archive.isArchived(s.key),
-      inWorkspace: isInThisWorkspace(s.cwd),
+      openTarget: openTargetFor(
+        s,
+        s.pid === undefined ? 'unavailable' : (locations.get(s.pid) ?? 'unavailable'),
+        isInThisWorkspace(s.cwd),
+      ),
     }));
     const msg: HostToDashboard = { type: 'snapshot', sessions, nowMs: Date.now(), hooks: this.health.hookHealth };
     void this.webview.postMessage(msg);
@@ -85,6 +107,7 @@ export class DashboardHost {
         if (m.action === 'viewer') this.actions.openViewer(m.key);
         else if (m.action === 'resume') this.actions.resume(m.key);
         else if (m.action === 'archive') this.archive.toggle(m.key);
+        else if (m.action === 'allow' || m.action === 'deny') this.actions.decidePermission(m.key, m.action);
         break;
       case 'openExternal':
         this.actions.openExternal(m.url);

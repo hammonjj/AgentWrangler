@@ -1,3 +1,4 @@
+import * as cp from 'node:child_process';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -8,6 +9,10 @@ import {
   hookCommandFor,
   installHooks,
   mergeHooks,
+  PERMISSION_HOOK_TIMEOUT_SECONDS,
+  PERMISSION_SCRIPT_NAME,
+  permissionScript,
+  permissionScriptPath,
   removeHooks,
   uninstallHooks,
   type HooksConfig,
@@ -47,6 +52,15 @@ describe('mergeHooks', () => {
     expect(cmd).not.toHaveProperty('args');
   });
 
+  it('routes PermissionRequest through the waiting script, with a timeout to match', () => {
+    const { hooks } = mergeHooks(undefined, LOG_DIR);
+    const cmd = hooks.PermissionRequest[0].hooks![0];
+    expect(cmd.command).toBe(`"${LOG_DIR}/${PERMISSION_SCRIPT_NAME}"`);
+    expect(cmd.timeout).toBe(PERMISSION_HOOK_TIMEOUT_SECONDS);
+    // Still recognisably ours, so uninstall finds it.
+    expect(cmd.command).toContain('agentwrangler');
+  });
+
   it('shards the log by $PPID rather than a single shared file', () => {
     // A shared log tears once a payload exceeds one write(): measured on macOS,
     // 30 concurrent 64 KB appends corrupt 6 lines, 128 KB corrupts most. A
@@ -80,8 +94,124 @@ describe('mergeHooks', () => {
     expect(second.changed).toBe(true);
     expect(second.hooks.PreToolUse).toHaveLength(2); // replaced, not appended
     expect(second.hooks.PreToolUse[0]).toEqual(USER_HOOK.PreToolUse[0]);
-    expect(second.hooks.PreToolUse[1].hooks![0].command).toBe(hookCommandFor(LOG_DIR));
+    expect(second.hooks.PreToolUse[1].hooks![0].command).toBe(hookCommandFor(LOG_DIR, 'PreToolUse'));
   });
+});
+
+describe('permissionScript', () => {
+  const script = permissionScript();
+
+  it('is a POSIX sh script that logs, marks, polls and prints the decision', () => {
+    expect(script.startsWith('#!/bin/sh\n')).toBe(true);
+    expect(script).toContain('>> "$dir/$PPID.jsonl"');
+    expect(script).toContain('"hook_event_name":"AgentWranglerPermissionPending"');
+    expect(script).toContain('cat "$dec"');
+    // Gives up when the dashboard withdraws the marker (prompt answered in Claude Code).
+    expect(script).toContain('[ -e "$req" ] || exit 0');
+  });
+
+  it('stops polling before the hook timeout would kill it', () => {
+    const polls = Number(/-lt (\d+)/.exec(script)![1]);
+    expect(polls * 0.5).toBeLessThan(PERMISSION_HOOK_TIMEOUT_SECONDS);
+  });
+
+  it('parses with the system shell', async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aw-script-'));
+    try {
+      const file = path.join(dir, 'permission-hook.sh');
+      await fsp.writeFile(file, script, 'utf8');
+      const res = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+        const p = cp.spawn('/bin/sh', ['-n', file]);
+        let stderr = '';
+        p.stderr.on('data', (d) => (stderr += String(d)));
+        p.on('close', (code) => resolve({ code, stderr }));
+      });
+      expect(res.stderr).toBe('');
+      expect(res.code).toBe(0);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('end to end: logs the payload, waits, and prints the decision it is given', async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aw-script-e2e-'));
+    try {
+      const file = path.join(dir, 'permission-hook.sh');
+      await fsp.writeFile(file, script, { encoding: 'utf8', mode: 0o755 });
+      const payload = JSON.stringify({
+        session_id: 'aaaaaaaa-2222-3333-4444-555555555555',
+        hook_event_name: 'PermissionRequest',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls' },
+      });
+
+      const child = cp.spawn('/bin/sh', [file], { cwd: dir });
+      let stdout = '';
+      child.stdout.on('data', (d) => (stdout += String(d)));
+      child.stdin.end(`${payload}\n`);
+
+      // The script leaves its marker, then polls. Find the marker and answer it.
+      const requests = path.join(dir, 'requests');
+      let ids: string[] = [];
+      for (let i = 0; i < 40 && ids.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        ids = await fsp.readdir(requests).catch(() => []);
+      }
+      expect(ids).toHaveLength(1);
+      expect(ids[0]).toMatch(/^\d+-\d+$/);
+
+      // The log is named after the script's parent (`$PPID`), which is this test process.
+      const logName = (await fsp.readdir(dir)).find((n) => n.endsWith('.jsonl'));
+      expect(logName).toBe(`${process.pid}.jsonl`);
+      const lines = (await fsp.readFile(path.join(dir, logName!), 'utf8')).trim().split('\n');
+      expect(JSON.parse(lines[0])).toMatchObject({ hook_event_name: 'PermissionRequest', tool_name: 'Bash' });
+      expect(JSON.parse(lines[1])).toEqual({
+        hook_event_name: 'AgentWranglerPermissionPending',
+        session_id: 'aaaaaaaa-2222-3333-4444-555555555555',
+        request_id: ids[0],
+      });
+
+      const decision = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}\n';
+      await fsp.mkdir(path.join(dir, 'decisions'), { recursive: true });
+      await fsp.writeFile(path.join(dir, 'decisions', `${ids[0]}.json`), decision, 'utf8');
+
+      const code = await new Promise<number | null>((resolve) => child.on('close', resolve));
+      expect(code).toBe(0);
+      expect(stdout).toBe(decision);
+      // Cleaned up after itself.
+      expect(await fsp.readdir(requests)).toEqual([]);
+      expect(await fsp.readdir(path.join(dir, 'decisions'))).toEqual([]);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it('end to end: exits quietly when its marker is withdrawn', async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aw-script-e2e-'));
+    try {
+      const file = path.join(dir, 'permission-hook.sh');
+      await fsp.writeFile(file, script, { encoding: 'utf8', mode: 0o755 });
+      const child = cp.spawn('/bin/sh', [file], { cwd: dir });
+      let stdout = '';
+      child.stdout.on('data', (d) => (stdout += String(d)));
+      child.stdin.end(`${JSON.stringify({ session_id: 'bbbbbbbb-2222-3333-4444-555555555555', hook_event_name: 'PermissionRequest' })}\n`);
+
+      const requests = path.join(dir, 'requests');
+      let ids: string[] = [];
+      for (let i = 0; i < 40 && ids.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        ids = await fsp.readdir(requests).catch(() => []);
+      }
+      expect(ids).toHaveLength(1);
+      await fsp.unlink(path.join(requests, ids[0])); // what HookLog does once the prompt is answered in Claude
+
+      const code = await new Promise<number | null>((resolve) => child.on('close', resolve));
+      expect(code).toBe(0);
+      expect(stdout).toBe(''); // no decision printed: Claude Code keeps its own answer
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
 });
 
 describe('removeHooks', () => {
@@ -158,10 +288,27 @@ describe('install/uninstall against a real file', () => {
     expect(JSON.parse(await fsp.readFile(path.join(dir, backups[0]), 'utf8'))).toEqual(realistic);
   });
 
-  it('creates the log directory', async () => {
+  it('creates the log directory and the executable permission script', async () => {
     await fsp.writeFile(file, '{}', 'utf8');
     await installHooks(logDir, file);
     expect((await fsp.stat(logDir)).isDirectory()).toBe(true);
+    const script = await fsp.stat(permissionScriptPath(logDir));
+    expect(script.isFile()).toBe(true);
+    expect(script.mode & 0o111).not.toBe(0);
+    expect(await fsp.readFile(permissionScriptPath(logDir), 'utf8')).toBe(permissionScript());
+  });
+
+  it('reports stale when the script is missing or outdated, and reinstall fixes it', async () => {
+    await installHooks(logDir, file);
+    expect((await currentState(logDir, file)).kind).toBe('installed');
+
+    await fsp.writeFile(permissionScriptPath(logDir), '#!/bin/sh\n# old version\n', 'utf8');
+    expect((await currentState(logDir, file)).kind).toBe('stale');
+
+    const res = await installHooks(logDir, file);
+    expect(res.changed).toBe(true);
+    expect(res.message).toMatch(/script updated/);
+    expect((await currentState(logDir, file)).kind).toBe('installed');
   });
 
   it('works when settings.json does not exist yet', async () => {

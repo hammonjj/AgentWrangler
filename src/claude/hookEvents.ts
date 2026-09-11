@@ -12,6 +12,25 @@
  * unit-testable against synthetic lines.
  */
 import type { SessionStatus, TodoProgress } from '../shared/model';
+import { permissionDetail } from './permissionDetail';
+
+/**
+ * Written by our own PermissionRequest hook script, right after the payload it
+ * relays: names the marker file the script is now waiting on, so the dashboard
+ * can offer Allow/Deny for exactly that prompt. Not a Claude Code event.
+ */
+export const PERMISSION_PENDING_EVENT = 'AgentWranglerPermissionPending';
+
+/**
+ * Tools that block on the human by design rather than by permission: the
+ * agent has asked a question and `PreToolUse` fires while it waits for the
+ * answer. Rendered as blocked with the question as the detail, not as a
+ * long-running tool.
+ */
+const INTERACTIVE_TOOLS: Record<string, string> = {
+  AskUserQuestion: 'answer',
+  ExitPlanMode: 'plan approval',
+};
 
 /**
  * Events we register. Every one of these exists in Claude Code 2.1.227 (the
@@ -50,6 +69,17 @@ export interface HookEvent {
   notificationType?: string;
   /** `SessionEnd` only: clear | resume | logout | prompt_input_exit | other. */
   reason?: string;
+  /** `SessionStart` only: startup | resume | clear | compact. */
+  source?: string;
+  /**
+   * `Stop` only: the text of the reply that ended the turn, as Claude Code
+   * hands it to the hook. What decides Waiting-on-you vs Done.
+   */
+  lastAssistantMessage?: string;
+  /** `PermissionRequest` / interactive `PreToolUse`: one-line subject of the ask. */
+  detail?: string;
+  /** Our own pending marker (see `PERMISSION_PENDING_EVENT`). */
+  requestId?: string;
   /** Set on subagent events; those are folded into the parent, never shown as sessions. */
   agentId?: string;
   /**
@@ -69,6 +99,25 @@ export interface HookSessionState {
   status: SessionStatus;
   /** Why we're blocked (tool name / elicitation label), for the row subtitle. */
   blockedReason?: string;
+  /** What the block is for, one line (the command, the file, the question). */
+  blockedDetail?: string;
+  /** Marker our hook script is waiting on; cleared the moment anything unblocks. */
+  permissionRequestId?: string;
+  /**
+   * True from `SessionStart` until the first prompt: the session exists but
+   * nothing has happened in it yet. The dashboard hides such sessions when
+   * they also have no transcript — an empty conversation is not waiting on
+   * anyone.
+   */
+  fresh: boolean;
+  /**
+   * The reply that ended the most recent turn (`Stop.last_assistant_message`),
+   * or undefined when the turn ended without one being reported. Read once to
+   * split waiting from done; not kept across the next prompt.
+   */
+  lastReply?: string;
+  /** The last turn ended in `StopFailure`: an error the human should see, never "done". */
+  turnFailed?: boolean;
   /** Tool in flight: PreToolUse seen with no matching completion yet. */
   activeTool?: { name: string; sinceMs: number };
   /** Receipt time of the most recent event — drives genuine-stall detection. */
@@ -150,13 +199,24 @@ export function parseHookLine(line: string, receivedAtMs: number): HookEvent | u
   if (agentId) return undefined;
 
   const toolName = str(obj.tool_name);
+  const cwd = str(obj.cwd);
+  // The subject line is only ever shown for a block, so it is only computed
+  // for the events that can cause one — tool_input can be tens of KB.
+  const wantsDetail =
+    hookEventName === 'PermissionRequest' ||
+    hookEventName === 'Elicitation' ||
+    (hookEventName === 'PreToolUse' && toolName !== undefined && toolName in INTERACTIVE_TOOLS);
   return {
     hookEventName,
     sessionId: sessionId.toLowerCase(),
-    cwd: str(obj.cwd),
+    cwd,
     toolName,
     notificationType: str(obj.notification_type),
     reason: str(obj.reason),
+    source: str(obj.source),
+    lastAssistantMessage: hookEventName === 'Stop' ? str(obj.last_assistant_message) : undefined,
+    detail: wantsDetail ? permissionDetail(toolName, obj.tool_input, cwd) : undefined,
+    requestId: hookEventName === PERMISSION_PENDING_EVENT ? str(obj.request_id) : undefined,
     agentId: undefined,
     todo: toolName === TODO_TOOL ? parseTodos(obj.tool_input) : undefined,
     receivedAtMs,
@@ -205,6 +265,9 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
     lastEventAtMs: e.receivedAtMs,
     lastEventName: e.hookEventName,
     finished: false,
+    // First sight of a session mid-stream (hooks installed after it started):
+    // it has plainly done things, so it is not fresh.
+    fresh: false,
     turnToolCalls: 0,
     turnBlockedMs: 0,
   };
@@ -218,16 +281,27 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
 
   switch (e.hookEventName) {
     case 'SessionStart':
-      // A fresh session sits at its prompt until the user says something.
-      return { ...next, ...clearTurn(), status: 'waiting', blockedReason: undefined, activeTool: undefined };
+      // A fresh session sits at its prompt until the user says something. A
+      // resume is fresh too in the sense that matters here — no prompt yet —
+      // but it has a transcript, so the provider keeps it visible.
+      return {
+        ...next,
+        ...clearTurn(),
+        ...unblocked(),
+        status: 'waiting',
+        activeTool: undefined,
+        fresh: true,
+        lastReply: undefined,
+        turnFailed: false,
+      };
 
     case 'SessionEnd':
       // A turn cut short by an exit never completed, so it is not baseline data.
       return {
         ...next,
         ...clearTurn(),
+        ...unblocked(),
         status: 'ended',
-        blockedReason: undefined,
         activeTool: undefined,
         finished: true,
       };
@@ -237,9 +311,12 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
       // is what "how long has the current work been running" should mean.
       return {
         ...next,
+        ...unblocked(),
         status: 'busy',
-        blockedReason: undefined,
         activeTool: undefined,
+        fresh: false,
+        lastReply: undefined,
+        turnFailed: false,
         turnStartedAtMs: e.receivedAtMs,
         turnToolCalls: 0,
         turnBlockedMs: 0,
@@ -248,17 +325,36 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
         todo: undefined,
       };
 
-    case 'PreToolUse':
+    case 'PreToolUse': {
+      const interactive = e.toolName !== undefined ? INTERACTIVE_TOOLS[e.toolName] : undefined;
+      if (interactive !== undefined) {
+        // The tool *is* the wait: it runs until the human answers. Permission
+        // (if any) is already settled by now, so the blocked clock keeps going
+        // rather than restarting.
+        return {
+          ...next,
+          ...block(base, e.receivedAtMs),
+          status: 'blocked',
+          blockedReason: interactive,
+          blockedDetail: e.detail,
+          permissionRequestId: undefined,
+          activeTool: undefined,
+          fresh: false,
+          turnToolCalls: base.turnToolCalls + 1,
+        };
+      }
       // Reached only once permission is settled, so it also ends a blocked spell.
       return {
         ...next,
         ...unblock(base, e.receivedAtMs),
+        ...unblocked(),
         status: 'busy',
-        blockedReason: undefined,
         activeTool: { name: e.toolName ?? 'tool', sinceMs: e.receivedAtMs },
+        fresh: false,
         turnToolCalls: base.turnToolCalls + 1,
         todo: e.todo ?? base.todo,
       };
+    }
 
     // Any completion clears the in-flight tool. PostToolBatch fires once per
     // batch, so it also covers tools whose individual events we missed.
@@ -268,21 +364,43 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
       return {
         ...next,
         ...unblock(base, e.receivedAtMs),
+        ...unblocked(),
         status: 'busy',
-        blockedReason: undefined,
         activeTool: undefined,
+        fresh: false,
         todo: e.todo ?? base.todo,
       };
 
     case 'PermissionRequest':
-      return { ...next, ...block(base, e.receivedAtMs), status: 'blocked', blockedReason: e.toolName ?? 'permission' };
+      return {
+        ...next,
+        ...block(base, e.receivedAtMs),
+        status: 'blocked',
+        blockedReason: e.toolName ?? 'permission',
+        blockedDetail: e.detail,
+        // A new prompt supersedes any marker from the previous one.
+        permissionRequestId: undefined,
+        fresh: false,
+      };
+
+    case PERMISSION_PENDING_EVENT:
+      // Only meaningful while the prompt it belongs to is still open.
+      return base.status === 'blocked' ? { ...next, permissionRequestId: e.requestId } : next;
 
     case 'PermissionDenied':
       // The user answered, so we're no longer blocked; the turn continues.
-      return { ...next, ...unblock(base, e.receivedAtMs), status: 'busy', blockedReason: undefined };
+      return { ...next, ...unblock(base, e.receivedAtMs), ...unblocked(), status: 'busy' };
 
     case 'Elicitation':
-      return { ...next, ...block(base, e.receivedAtMs), status: 'blocked', blockedReason: e.toolName ?? 'input' };
+      return {
+        ...next,
+        ...block(base, e.receivedAtMs),
+        status: 'blocked',
+        blockedReason: e.toolName ?? 'input',
+        blockedDetail: e.detail,
+        permissionRequestId: undefined,
+        fresh: false,
+      };
 
     case 'Notification':
       if (e.notificationType && BLOCKING_NOTIFICATIONS.has(e.notificationType)) {
@@ -291,6 +409,7 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
           ...block(base, e.receivedAtMs),
           status: 'blocked',
           blockedReason: base.blockedReason ?? e.toolName ?? 'input',
+          fresh: false,
         };
       }
       return next; // liveness only — login/completion notices say nothing about status
@@ -307,9 +426,15 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
       return {
         ...next,
         ...clearTurn(),
+        ...unblocked(),
+        // `waiting` here means "turn over, idle at the prompt". Whether the
+        // reply asked anything — waiting vs done — is the provider's call,
+        // made from `lastReply` (or the transcript when that is missing).
         status: 'waiting',
-        blockedReason: undefined,
         activeTool: undefined,
+        fresh: false,
+        lastReply: e.lastAssistantMessage,
+        turnFailed: e.hookEventName === 'StopFailure',
         lastTurnMs,
       };
     }
@@ -317,6 +442,11 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
     default:
       return next;
   }
+}
+
+/** Fields a block sets, reset together whenever the block ends. */
+function unblocked(): Pick<HookSessionState, 'blockedReason' | 'blockedDetail' | 'permissionRequestId'> {
+  return { blockedReason: undefined, blockedDetail: undefined, permissionRequestId: undefined };
 }
 
 type TurnFields = Pick<
@@ -373,7 +503,9 @@ export function statusFromHookState(
   nowMs: number,
   stuckThresholdMs: number,
 ): SessionStatus {
-  if (st.status === 'blocked' || st.status === 'waiting' || st.status === 'ended') return st.status;
+  if (st.status === 'blocked' || st.status === 'waiting' || st.status === 'done' || st.status === 'ended') {
+    return st.status;
+  }
   if (st.activeTool) return 'busy';
   return nowMs - st.lastEventAtMs > stuckThresholdMs ? 'stuck' : 'busy';
 }

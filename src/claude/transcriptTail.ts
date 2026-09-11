@@ -24,6 +24,13 @@ export interface LastMeaningful {
 
 export interface TranscriptSummary {
   lastMeaningful?: LastMeaningful;
+  /**
+   * Text blocks of the most recent assistant line that had any. Claude Code
+   * writes one line per content block, so the final line of a finished turn is
+   * normally the reply text; this is what says whether that reply asked for
+   * anything (waiting) or just reported (done).
+   */
+  lastAssistantText?: string;
   /** Last {"type":"ai-title"} seen — the freshest model-generated title. */
   aiTitle?: string;
   /** Last {"type":"last-prompt"} seen (~200 char preview of the user's last prompt). */
@@ -70,8 +77,23 @@ export function splitCompleteLines(buf: Buffer, startsMidLine: boolean): { lines
 /** Fields extractable from a parsed chunk (forward pass, last-wins ≡ backwards scan). */
 export type SummaryPartial = Pick<
   TranscriptSummary,
-  'lastMeaningful' | 'aiTitle' | 'lastPrompt' | 'slug' | 'cwd' | 'gitBranch' | 'prLink'
+  'lastMeaningful' | 'lastAssistantText' | 'aiTitle' | 'lastPrompt' | 'slug' | 'cwd' | 'gitBranch' | 'prLink'
 >;
+
+/** Cap on the reply text kept per transcript; `needsReply` only reads the tail anyway. */
+const MAX_REPLY_CHARS = 4000;
+
+/** Joined text blocks of an assistant message's content, or undefined when there are none. */
+function assistantText(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter((b: any) => b && b.type === 'text' && typeof b.text === 'string')
+    .map((b: any) => b.text as string)
+    .join('\n')
+    .trim();
+  if (!text) return undefined;
+  return text.length > MAX_REPLY_CHARS ? text.slice(-MAX_REPLY_CHARS) : text;
+}
 
 export function parseSummaryLines(lines: string[]): SummaryPartial {
   const out: SummaryPartial = {};
@@ -91,18 +113,24 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
     if (typeof obj.slug === 'string') out.slug = obj.slug;
 
     switch (obj.type) {
-      case 'assistant':
+      case 'assistant': {
         out.lastMeaningful = {
           kind: 'assistant',
           stopReason: obj.message?.stop_reason ?? null,
           timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : undefined,
         };
+        const text = assistantText(obj.message?.content);
+        if (text !== undefined) out.lastAssistantText = text;
         break;
+      }
       case 'user':
         out.lastMeaningful = {
           kind: 'user',
           timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : undefined,
         };
+        // A real prompt starts a new turn, so the previous reply is spent. Tool
+        // results are also `user` lines but belong to the turn in progress.
+        if (!isToolResultOnly(obj.message?.content)) out.lastAssistantText = undefined;
         break;
       case 'queue-operation':
         out.lastMeaningful = {
@@ -130,6 +158,15 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
     }
   }
   return out;
+}
+
+/** True for a `user` line that only carries tool results (mid-turn plumbing, not a prompt). */
+function isToolResultOnly(content: unknown): boolean {
+  return (
+    Array.isArray(content) &&
+    content.length > 0 &&
+    content.every((b: any) => b && typeof b === 'object' && b.type === 'tool_result')
+  );
 }
 
 /** Head-chunk pass: only contributes a first-prompt fallback title (+ ids if still missing). */
@@ -178,8 +215,12 @@ export function mergeSummaries(
   next: SummaryPartial,
   stat: { sizeBytes: number; mtimeMs: number; byteOffset: number; headReadDone?: boolean },
 ): TranscriptSummary {
+  // The reply text is cleared by a new prompt, so "unset in this chunk" only
+  // means "keep the old one" when the chunk saw no prompt or reply at all.
+  const sawTurnBoundary = next.lastMeaningful !== undefined;
   return {
     lastMeaningful: next.lastMeaningful ?? prev?.lastMeaningful,
+    lastAssistantText: sawTurnBoundary ? next.lastAssistantText : prev?.lastAssistantText,
     aiTitle: next.aiTitle ?? prev?.aiTitle,
     lastPrompt: next.lastPrompt ?? prev?.lastPrompt,
     slug: next.slug ?? prev?.slug,

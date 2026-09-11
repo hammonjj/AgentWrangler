@@ -1,10 +1,11 @@
 import './dashboard.css';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
 import {
+  capitalize,
+  etaText,
   formatAge,
   formatDuration,
   hookBanner,
-  paceText,
   SECTION_LABEL,
   SECTION_ORDER,
   sectionOf,
@@ -52,12 +53,18 @@ const ICON_UNARCHIVE =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.7" y="2.5" width="12.6" height="3.2" rx="0.6"/><path d="M3.1 5.9v6.4a1.2 1.2 0 0 0 1.2 1.2h7.4a1.2 1.2 0 0 0 1.2-1.2V5.9"/><path d="M8 12.2V8.2M6.2 9.8 8 8l1.8 1.8"/></svg>';
 
 function clickHint(s: SessionDTO): string {
-  if (s.inWorkspace) return 'Click to open in the Claude Code panel';
-  if (s.status !== 'ended' && s.entrypoint === 'claude-vscode') {
-    return 'Click to jump to this session in its VSCode window';
+  switch (s.openTarget) {
+    case 'panel':
+      return 'Click to open in the Claude Code panel';
+    case 'terminal':
+      return 'Click to show the terminal running this session';
+    case 'window':
+      return 'Click to jump to this session in its VSCode window';
+    case 'resume':
+      return 'Click to resume in a terminal';
+    default:
+      return 'Click to open the live transcript viewer';
   }
-  if (s.status === 'ended') return 'Click to resume in a terminal';
-  return 'Click to open the live transcript viewer';
 }
 
 function actionButtons(s: SessionDTO): string {
@@ -78,13 +85,13 @@ function actionButtons(s: SessionDTO): string {
  * it wants; `busy` names the tool in flight and how long it has been running —
  * that elapsed time is what tells a 20-minute test suite apart from a stall.
  *
- * Busy rows then add, when the data exists: the agent's own checklist (the only
- * honest percentage in the whole pipeline) and a pace chip, which stays hidden
- * until the turn has outrun the median and so has something real to say.
+ * Busy rows then add, when the data exists, the agent's own checklist — the only
+ * honest percentage in the whole pipeline. The time estimate lives in its own
+ * column (`etaCell`), not here.
  */
 function statusChip(s: SessionDTO): string {
   if (s.status === 'blocked' && s.blockedReason) {
-    return `<span class="chip blk">needs ${esc(s.blockedReason)}</span>`;
+    return `<span class="chip blk">${esc(capitalize(`needs ${s.blockedReason}`))}</span>`;
   }
   if (s.status !== 'busy') return '';
 
@@ -105,18 +112,48 @@ function statusChip(s: SessionDTO): string {
       `<span class="chip todo"${label}><span class="fill" style="width:${pct}%"></span><span class="txt">${todo.completed}/${todo.total}</span></span>`,
     );
   }
+  return chips.join('');
+}
+
+/**
+ * Third line of a blocked row: what the permission is for, and — while our hook
+ * script is still waiting on a decision — Allow / Deny. The row grows to fit,
+ * because this is the one place a glance has to be enough to act on. Claude
+ * Code's own dialog stays open the whole time and works as before; whichever
+ * is answered first wins.
+ */
+function permissionLine(s: SessionDTO): string {
+  if (s.status !== 'blocked' || (!s.blockedDetail && !s.permissionRequestId)) return '';
+  const detail = s.blockedDetail
+    ? `<span class="pdetail" title="${esc(s.blockedDetail)}">${esc(s.blockedDetail)}</span>`
+    : `<span class="pdetail dim">${esc(capitalize(s.blockedReason ?? 'permission'))} — see the session for details</span>`;
+  const buttons = s.permissionRequestId
+    ? `<span class="pbtns"><button class="pbtn allow" data-action="allow" title="Allow this once, as if you had clicked Allow in Claude Code">Allow</button><button class="pbtn deny" data-action="deny" title="Deny, as if you had clicked Deny in Claude Code">Deny</button></span>`
+    : '';
+  return `<div class="perm">${detail}${buttons}</div>`;
+}
+
+/**
+ * The ETA column. Busy rows with a watched turn get a countdown against this
+ * user's own turn history (see `etaText`), coloured by how far past typical the
+ * turn has run. Busy rows without one show a dash that says why in its tooltip,
+ * so an empty cell never reads as "nothing to estimate". Other statuses have no
+ * turn in flight and stay blank.
+ */
+function etaCell(s: SessionDTO): string {
+  if (s.status !== 'busy') return '<td class="c-eta"></td>';
 
   const p = s.progress;
-  if (p?.pace) {
-    // Rendered even when currently empty: the chip ticks itself, so it needs to
-    // already be in the DOM when the turn crosses the median.
-    const { p50Ms, p75Ms, p90Ms, band, provisional } = p.pace;
-    const text = paceText(workingElapsedMs(p, Date.now()), p50Ms, p75Ms, p90Ms);
-    chips.push(
-      `<span class="chip pace ${band}${provisional ? ' prov' : ''}${text ? '' : ' quiet'}" data-pace="${p.startedAtMs},${p.blockedMs},${p50Ms},${p75Ms},${p90Ms}">${text}</span>`,
-    );
+  if (!p?.pace) {
+    const why = s.statusIsEstimated
+      ? 'No estimate: this session started before the status hooks were installed. Restart it for one.'
+      : 'No estimate: this turn began before the dashboard was watching, so its age is unknown.';
+    return `<td class="c-eta none" title="${esc(why)}">—</td>`;
   }
-  return chips.join('');
+
+  const { p50Ms, p90Ms, band, provisional } = p.pace;
+  const text = etaText(workingElapsedMs(p, Date.now()), p50Ms, p90Ms);
+  return `<td class="c-eta ${band}${provisional ? ' prov' : ''}" data-eta="${p.startedAtMs},${p.blockedMs},${p50Ms},${p90Ms}">${text}</td>`;
 }
 
 /**
@@ -144,8 +181,12 @@ function progressTooltip(s: SessionDTO): string {
       lines.push(
         `Pace: past the 90th percentile of ${basis} (${formatDuration(pace.p90Ms)}). No estimate left to give — it may be a long one, or it may be wedged.`,
       );
+    } else if (elapsed < pace.p50Ms) {
+      lines.push(
+        `Pace: typical so far, against ${basis}. Half finish within ${formatDuration(pace.p50Ms)} — ${formatDuration(pace.p50Ms - elapsed)} from now; 9 in 10 within ${formatDuration(pace.p90Ms)}.`,
+      );
     } else {
-      const outran = elapsed >= pace.p75Ms ? 'longer than 3 in 4' : elapsed >= pace.p50Ms ? 'longer than half' : 'typical so far';
+      const outran = elapsed >= pace.p75Ms ? 'longer than 3 in 4' : 'longer than half';
       lines.push(
         `Pace: ${outran} of ${basis}. 9 in 10 finish within ${formatDuration(pace.p90Ms)} — ${formatDuration(pace.p90Ms - elapsed)} from now.`,
       );
@@ -166,7 +207,12 @@ function rowTitle(s: SessionDTO): string {
     s.status === 'stuck'
       ? `\n\nNo transcript or hook activity for ${formatAge(Date.now(), s.lastActivityAt)}. A long think or a large file write is silent like this too — check the session before assuming it is wedged.`
       : '';
-  return `${hint}${est}${stuck}${progressTooltip(s)}`;
+  // Done vs Waiting is read off the reply text; say so, since it is a judgment.
+  const done =
+    s.status === 'done'
+      ? '\n\nFinished its turn without asking you anything — the last message reads as a report. Waiting on you would mean it ended on a question or a choice.'
+      : '';
+  return `${hint}${est}${stuck}${done}${progressTooltip(s)}`;
 }
 
 function rowHtml(s: SessionDTO): string {
@@ -174,7 +220,8 @@ function rowHtml(s: SessionDTO): string {
     s.name && s.title !== s.name
       ? `<span class="nm">${esc(s.name)}</span><span class="sep">·</span>${esc(s.title)}`
       : esc(s.title);
-  const kindChip = s.kind && s.kind !== 'interactive' ? `<span class="chip kind">${esc(s.kind)}</span>` : '';
+  const kindChip =
+    s.kind && s.kind !== 'interactive' ? `<span class="chip kind">${esc(capitalize(s.kind))}</span>` : '';
   const branch = s.gitBranch && s.gitBranch !== 'HEAD' ? esc(s.gitBranch) : '';
   const pr = s.prLink
     ? `<span class="pr" role="link" data-url="${esc(s.prLink.prUrl)}" title="${esc(s.prLink.prUrl)}">#${s.prLink.prNumber}</span>`
@@ -197,10 +244,12 @@ function rowHtml(s: SessionDTO): string {
   <td class="c-agent"><div class="agent">
     <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
+    ${permissionLine(s)}
   </div></td>
   <td class="c-proj"${s.cwd ? ` title="${esc(s.cwd)}"` : ''}>${esc(s.projectName ?? '')}</td>
   <td class="c-branch"${branch ? ` title="${branch}"` : ''}>${branch}</td>
   <td class="c-pr">${pr}</td>
+  ${etaCell(s)}
   <td class="c-age" data-age-ts="${s.lastActivityAt}">${formatAge(Date.now(), s.lastActivityAt)}</td>
   <td class="c-act">${actionButtons(s)}</td>
 </tr>`;
@@ -241,7 +290,7 @@ function render(): void {
   // narrow-layout media query disappears entirely instead of leaving a gap.
   let html = `${bannerHtml()}<table>
 <thead><tr>
-  <th class="h-dot"></th><th class="h-agent">Agent</th><th class="h-proj">Project</th><th class="h-branch">Branch</th><th class="h-pr">PR</th><th class="h-age">Age</th><th class="h-act"></th>
+  <th class="h-dot"></th><th class="h-agent">Agent</th><th class="h-proj">Project</th><th class="h-branch">Branch</th><th class="h-pr">PR</th><th class="h-eta" title="Estimated completion: when most of your past turns of this length were done. Not a prediction of this one.">ETA</th><th class="h-age">Age</th><th class="h-act"></th>
 </tr></thead>`;
 
   for (const sec of SECTION_ORDER) {
@@ -250,7 +299,7 @@ function render(): void {
     rows.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
     const isCollapsed = collapsed.has(sec);
     html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${sec}">
-<tr class="sec st-${sec}"><td colspan="7"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(SECTION_LABEL[sec])}<span class="count">${rows.length}</span></td></tr>`;
+<tr class="sec st-${sec}"><td colspan="8"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(SECTION_LABEL[sec])}<span class="count">${rows.length}</span></td></tr>`;
     for (const s of rows) html += rowHtml(s);
     html += '</tbody>';
   }
@@ -270,6 +319,7 @@ window.addEventListener('message', (e: MessageEvent) => {
 app.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
   const bannerBtn = target.closest('button[data-banner]') as HTMLElement | null;
+  const pbtn = target.closest('button.pbtn') as HTMLButtonElement | null;
   const btn = target.closest('button.act') as HTMLElement | null;
   const pr = target.closest('.pr') as HTMLElement | null;
   const row = target.closest('tr.row') as HTMLElement | null;
@@ -283,6 +333,15 @@ app.addEventListener('click', (e) => {
       saveState();
       render();
     }
+    return;
+  }
+  if (pbtn && row) {
+    // One click, one decision: disable both buttons until the next snapshot
+    // re-renders the row from what actually happened.
+    for (const b of Array.from(row.querySelectorAll<HTMLButtonElement>('button.pbtn'))) b.disabled = true;
+    pbtn.textContent = pbtn.dataset.action === 'allow' ? 'Allowing…' : 'Denying…';
+    post({ type: 'action', key: row.dataset.key!, action: pbtn.dataset.action as DashboardAction });
+    e.stopPropagation();
     return;
   }
   if (btn && row) {
@@ -307,19 +366,17 @@ app.addEventListener('click', (e) => {
   }
 });
 
-// Ages and the pace countdown tick locally; data itself is pushed by the host.
-// Crossing a percentile also changes the chip's class, which arrives with the
-// next host snapshot — the text leads it by a few seconds at most.
+// Ages and the ETA countdown tick locally; data itself is pushed by the host.
+// Crossing a percentile also changes the cell's colour class, which arrives
+// with the next host snapshot — the text leads it by a few seconds at most.
 setInterval(() => {
   const now = Date.now();
   for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-age-ts]'))) {
     el.textContent = formatAge(now, Number(el.dataset.ageTs));
   }
-  for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-pace]'))) {
-    const [startedAtMs, blockedMs, p50Ms, p75Ms, p90Ms] = el.dataset.pace!.split(',').map(Number);
-    const text = paceText(workingElapsedMs({ startedAtMs, blockedMs, toolCalls: 0 }, now), p50Ms, p75Ms, p90Ms);
-    el.textContent = text;
-    el.classList.toggle('quiet', text === '');
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-eta]'))) {
+    const [startedAtMs, blockedMs, p50Ms, p90Ms] = el.dataset.eta!.split(',').map(Number);
+    el.textContent = etaText(workingElapsedMs({ startedAtMs, blockedMs, toolCalls: 0 }, now), p50Ms, p90Ms);
   }
 }, 10_000);
 

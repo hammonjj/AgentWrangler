@@ -30,10 +30,25 @@ import { MAX_CHUNK_BYTES, readRange, splitCompleteLines, TAIL_CHUNK_BYTES } from
 
 const FILE_DEBOUNCE_MS = 120;
 const LOG_FILE_RE = /^(\d+)\.jsonl$/;
+/** `<claudePid>-<hookShellPid>`, as the PermissionRequest hook script names its marker. */
+const REQUEST_ID_RE = /^\d+-\d+$/;
 
 /** `<claudeHome>/agentwrangler` — baked into the installed hook command as an absolute path. */
 export function hookLogDir(): string {
   return path.join(claudeHome(), 'agentwrangler');
+}
+
+/**
+ * What the PermissionRequest hook script prints for Claude Code to read as its
+ * decision. The shape is Claude Code's: `decision` must be `{behavior: "allow"}`
+ * or `{behavior: "deny", message}`.
+ */
+export function permissionDecisionJson(behavior: 'allow' | 'deny'): string {
+  const decision =
+    behavior === 'allow'
+      ? { behavior: 'allow' }
+      : { behavior: 'deny', message: 'Denied from the Agent Wrangler dashboard.' };
+  return `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } })}\n`;
 }
 
 interface FileCursor {
@@ -74,6 +89,58 @@ export class HookLog implements Disposable {
   /** True once any hook event has ever been read — used to detect silently disabled hooks. */
   get hasEverReported(): boolean {
     return this.lastEventAtMs > 0;
+  }
+
+  // ---- permission decisions ----
+
+  private requestMarker(id: string): string {
+    return path.join(this.dir, 'requests', id);
+  }
+
+  /**
+   * True while the hook script for this prompt is still polling. The marker is
+   * the script's own liveness flag: it removes it when it exits, and we remove
+   * it (see `readFile`) the moment the log shows the prompt was answered.
+   */
+  pendingRequestExists(id: string | undefined): boolean {
+    if (!id || !REQUEST_ID_RE.test(id)) return false;
+    return fsSync.existsSync(this.requestMarker(id));
+  }
+
+  /**
+   * Answer a session's open permission prompt from outside Claude Code. Writes
+   * the decision file the hook script is polling for (tmp + rename, so the
+   * script never reads a partial file). Returns false when there is nothing to
+   * answer: no open prompt, or its script has already exited.
+   *
+   * The state is not flipped to busy here. Claude Code races the hook against
+   * its own dialog, so this decision may lose to an answer given there; the
+   * events that follow (PreToolUse / PermissionDenied) say what actually
+   * happened. Only the marker id is cleared, so the buttons go away at once.
+   */
+  async decide(sessionId: string, behavior: 'allow' | 'deny'): Promise<boolean> {
+    const st = this.states.get(sessionId.toLowerCase());
+    const id = st?.permissionRequestId;
+    if (!st || !id || !this.pendingRequestExists(id)) return false;
+
+    const target = path.join(this.dir, 'decisions', `${id}.json`);
+    try {
+      await fsp.mkdir(path.dirname(target), { recursive: true });
+      await fsp.writeFile(`${target}.tmp`, permissionDecisionJson(behavior), 'utf8');
+      await fsp.rename(`${target}.tmp`, target);
+    } catch (err) {
+      this.log(`permission decision write failed: ${String(err)}`);
+      return false;
+    }
+    this.states.set(st.sessionId, { ...st, permissionRequestId: undefined });
+    this.changeEmitter.fire();
+    return true;
+  }
+
+  /** The prompt is over (answered, superseded, or the turn moved on): release the script. */
+  private releaseRequest(id: string): void {
+    if (!REQUEST_ID_RE.test(id)) return;
+    fsp.unlink(this.requestMarker(id)).catch(() => undefined); // already gone is fine
   }
 
   async start(): Promise<void> {
@@ -182,6 +249,11 @@ export class HookLog implements Disposable {
       // A turn whose start we only inferred from the backlog has an unknowable
       // age; flagged here so nothing downstream renders it as elapsed time.
       if (backlog && after.turnStartedAtMs !== undefined) after.turnStartUncertain = true;
+      // The prompt this marker belonged to is no longer open: tell its hook
+      // script to stop waiting, so it does not sit in the process table until
+      // its ceiling.
+      const openId = before?.permissionRequestId;
+      if (openId !== undefined && after.permissionRequestId !== openId) this.releaseRequest(openId);
       this.states.set(event.sessionId, after);
       this.lastEventAtMs = now;
       changed = true;

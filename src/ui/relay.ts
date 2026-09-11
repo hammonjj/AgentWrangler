@@ -3,11 +3,12 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { isInThisWorkspace } from './workspace';
 
-interface RelayNote {
+export interface RelayNote {
   sessionId: string;
   cwd: string;
+  /** The Claude process, so the receiver can prove ownership instead of guessing from `cwd`. */
+  pid?: number;
   createdAt: number;
 }
 
@@ -24,8 +25,9 @@ const NOTE_STALE_MS = 5 * 60_000;
  * window writes a note file and focuses that window via the `code` CLI
  * (opening an already-open folder focuses its window; an unopened folder gets
  * a fresh window, whose instance then finds the note on activation). The
- * instance whose workspace contains the note's cwd claims the note and opens
- * the session in its Claude panel.
+ * instance that owns the session's process — or, with no process tree to
+ * consult, whose workspace contains the note's cwd — claims the note and
+ * reveals the session where it lives.
  */
 export class CrossWindowRelay implements vscode.Disposable {
   private watcher?: fs.FSWatcher;
@@ -33,9 +35,13 @@ export class CrossWindowRelay implements vscode.Disposable {
   private scanning = false;
   private disposed = false;
 
+  /**
+   * @param handle Reveal the session if this window owns it and return true;
+   *   return false to leave the note for the window that does.
+   */
   constructor(
     private dir: string,
-    private onOpenRequest: (sessionId: string) => void,
+    private handle: (note: RelayNote) => Promise<boolean>,
     private log: (msg: string) => void,
   ) {}
 
@@ -59,8 +65,8 @@ export class CrossWindowRelay implements vscode.Disposable {
   }
 
   /** Ask the window owning `cwd` to open the session, and bring it to front. */
-  async request(sessionId: string, cwd: string): Promise<void> {
-    const note: RelayNote = { sessionId, cwd, createdAt: Date.now() };
+  async request(sessionId: string, cwd: string, pid?: number): Promise<void> {
+    const note: RelayNote = { sessionId, cwd, pid, createdAt: Date.now() };
     const name = `open-${note.createdAt}-${Math.random().toString(36).slice(2, 8)}.json`;
     try {
       await fsp.mkdir(this.dir, { recursive: true });
@@ -105,11 +111,17 @@ export class CrossWindowRelay implements vscode.Disposable {
           continue;
         }
         if (age > NOTE_FRESH_MS) continue; // expired; cleanup later
-        if (!isInThisWorkspace(note.cwd)) continue; // addressed to a different window
 
+        // Only one window owns a process, so handle-then-claim cannot double up.
+        let handled = false;
+        try {
+          handled = await this.handle(note);
+        } catch (err) {
+          this.log(`relay: handler failed for ${note.sessionId}: ${String(err)}`);
+        }
+        if (!handled) continue; // addressed to a different window
         void fsp.unlink(file).catch(() => undefined); // claim
-        this.log(`relay: opening session ${note.sessionId} (requested from another window)`);
-        this.onOpenRequest(note.sessionId);
+        this.log(`relay: opened session ${note.sessionId} (requested from another window)`);
       }
     } finally {
       this.scanning = false;

@@ -3,7 +3,14 @@
  * webview bundles — it must stay free of `vscode`, Node, and DOM imports.
  */
 
-export type SessionStatus = 'blocked' | 'waiting' | 'busy' | 'stuck' | 'ended';
+/**
+ * `waiting` and `done` both mean the agent has finished its turn and is idle at
+ * its prompt. The difference is what its last message did: `waiting` asked you
+ * something (a question, a choice, "let me know"), `done` reported and stopped.
+ * Both are read off the reply text, so the split is a heuristic — see
+ * `needsReply` in core.
+ */
+export type SessionStatus = 'blocked' | 'waiting' | 'done' | 'busy' | 'stuck' | 'ended';
 
 export type SessionKind = 'interactive' | 'bg' | 'daemon' | 'daemon-worker';
 
@@ -60,6 +67,15 @@ export interface TurnProgress {
   pace?: TurnPace;
 }
 
+/**
+ * What a row click does. `panel`: the Claude Code panel in this window (reveal,
+ * or resume an ended session into one). `terminal`: show the integrated terminal
+ * running the session. `window`: hand off to the VSCode window that owns it.
+ * `resume`: a new terminal running `claude --resume`. `viewer`: the read-only
+ * transcript, for a live session nothing in this app can reveal.
+ */
+export type OpenTarget = 'panel' | 'terminal' | 'window' | 'resume' | 'viewer';
+
 export interface AgentSession {
   /** Provider id, e.g. 'claude'. */
   provider: string;
@@ -86,8 +102,8 @@ export interface AgentSession {
   prLink?: PrLink;
   /** User shoved this session out of the way (host decorates from ArchiveService). */
   archived?: boolean;
-  /** Session cwd is inside this window's workspace → click opens it in the Claude panel (host decorates). */
-  inWorkspace?: boolean;
+  /** What clicking the row does, decided by the host from where the process lives (host decorates). */
+  openTarget?: OpenTarget;
   /**
    * True when `status` was inferred from the transcript rather than pushed by a
    * hook — i.e. a session started before hooks were installed. Rendered dimmed
@@ -96,6 +112,18 @@ export interface AgentSession {
   statusIsEstimated?: boolean;
   /** For `blocked`: what Claude is asking for (tool name, or an elicitation label). */
   blockedReason?: string;
+  /**
+   * For `blocked`: what the permission is actually for, one line — the Bash
+   * command's description, the file an Edit touches, the question being asked.
+   * Read off the hook payload's `tool_input`, so absent without hooks.
+   */
+  blockedDetail?: string;
+  /**
+   * For `blocked`: set while our PermissionRequest hook is still waiting for a
+   * decision file, i.e. while Allow/Deny from the dashboard can still land.
+   * Absent once the user has answered in Claude Code itself.
+   */
+  permissionRequestId?: string;
   /** For `busy`: the tool currently in flight, so a long build reads as work, not a stall. */
   activeTool?: { name: string; sinceMs: number };
   /** For `busy`: how far into the current turn we are. Requires hooks. */
@@ -114,30 +142,43 @@ export const STATUS_RANK: Record<SessionStatus, number> = {
   blocked: 0,
   waiting: 1,
   stuck: 2,
-  busy: 3,
-  ended: 4,
+  done: 3,
+  busy: 4,
+  ended: 5,
 };
 
 export const STATUS_LABEL: Record<SessionStatus, string> = {
   blocked: 'Blocked on you',
   waiting: 'Waiting on you',
   stuck: 'Possibly stuck',
+  done: 'Done',
   busy: 'Busy',
   ended: 'Ended',
 };
 
-/** Blocked first (an agent frozen mid-task), then waiting, stuck, busy, ended;
- * within a rank, most recent activity first. */
+/** Statuses in which a human has to act before the agent can go on. `done` is
+ * deliberately not one: a finished report needs reading, not answering. */
+export function needsUser(status: SessionStatus): boolean {
+  return status === 'waiting' || status === 'blocked';
+}
+
+/** First letter upper-cased, the rest untouched: "needs Edit" → "Needs Edit", "bg" → "Bg". */
+export function capitalize(s: string): string {
+  return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
+}
+
+/** Blocked first (an agent frozen mid-task), then waiting, stuck, done (finished,
+ * worth a look), busy, ended; within a rank, most recent activity first. */
 export function compareSessions(a: AgentSession, b: AgentSession): number {
   const rank = STATUS_RANK[a.status] - STATUS_RANK[b.status];
   if (rank !== 0) return rank;
   return b.lastActivityAt - a.lastActivityAt;
 }
 
-/** Dashboard sections: the five statuses, plus Archived pinned last. */
+/** Dashboard sections: the six statuses, plus Archived pinned last. */
 export type SectionId = SessionStatus | 'archived';
 
-export const SECTION_ORDER: SectionId[] = ['blocked', 'waiting', 'stuck', 'busy', 'ended', 'archived'];
+export const SECTION_ORDER: SectionId[] = ['blocked', 'waiting', 'stuck', 'done', 'busy', 'ended', 'archived'];
 
 export const SECTION_LABEL: Record<SectionId, string> = {
   ...STATUS_LABEL,
@@ -246,19 +287,23 @@ export function hookBanner(h: HookHealth | undefined, estimatedLive: number): Ho
 }
 
 /**
- * Label for the pace chip, or '' to show nothing.
+ * Text for the ETA column of a busy row.
  *
- * Silent below the median, which is the important part: a turn three seconds
- * old is unremarkable, and putting "~28m" on it would read as a prediction of
- * 28 minutes when most turns are done inside three. Once a turn has outlived
- * half its peers, "most of the rest finish by p90" becomes a real statement
- * about the distribution and is worth showing. Past p90 the distribution has
- * nothing left to say, so it stops predicting rather than counting down to a
- * deadline it cannot know.
+ * The estimate is a percentile of past turns, never a prediction of this one,
+ * and the number shown tracks which percentile still has something to say:
+ *
+ * - below the median: time until half of your turns are done (`~2m`). A young
+ *   turn most likely finishes soon, and p50 is the honest way to say so.
+ * - median to p90: time until 9 in 10 are done (`~27m`). Once a turn has
+ *   outlived half its peers the median is spent; p90 is the next real bound.
+ * - past p90: `>30m` — the distribution has nothing left to say, so the cell
+ *   stops counting down rather than inventing a deadline it cannot know.
+ *
+ * The jump at the median is deliberate: it is the moment the turn stopped being
+ * typical, and a smooth countdown through it would hide exactly that.
  */
-export function paceText(elapsedMs: number, p50Ms: number, p75Ms: number, p90Ms: number): string {
-  if (elapsedMs >= p90Ms) return 'very long';
-  if (elapsedMs < p50Ms) return '';
-  const left = `~${formatDuration(p90Ms - elapsedMs)}`;
-  return elapsedMs >= p75Ms ? `long · ${left}` : left;
+export function etaText(elapsedMs: number, p50Ms: number, p90Ms: number): string {
+  if (elapsedMs >= p90Ms) return `>${formatDuration(p90Ms)}`;
+  const bound = elapsedMs < p50Ms ? p50Ms : p90Ms;
+  return `~${formatDuration(bound - elapsedMs)}`;
 }

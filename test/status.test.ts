@@ -21,19 +21,32 @@ describe('deriveStatus', () => {
     ).toBe('ended');
   });
 
-  it('alive with no transcript → waiting (brand-new session)', () => {
+  it('alive with no transcript → waiting (brand-new session; the provider hides it)', () => {
     expect(status({})).toBe('waiting');
   });
 
-  it('assistant end_turn → waiting, staleness ignored', () => {
+  it('assistant end_turn with no reply text → waiting, staleness ignored', () => {
     expect(
       status({ lastMeaningful: { kind: 'assistant', stopReason: 'end_turn' }, transcriptMtimeMs: NOW - 10 * THRESHOLD }),
     ).toBe('waiting');
   });
 
-  it('other final stop reasons → waiting', () => {
+  it('assistant end_turn → done when the reply just reports, waiting when it asks', () => {
+    const finished = { kind: 'assistant' as const, stopReason: 'end_turn' };
+    expect(
+      status({ lastMeaningful: finished, transcriptMtimeMs: NOW, lastAssistantText: 'Built and pushed. Nothing else changed.' }),
+    ).toBe('done');
+    expect(
+      status({ lastMeaningful: finished, transcriptMtimeMs: NOW, lastAssistantText: 'Built. Should I push it?' }),
+    ).toBe('waiting');
+  });
+
+  it('other final stop reasons → waiting/done by the same rule', () => {
     for (const sr of ['stop_sequence', 'max_tokens', 'refusal']) {
       expect(status({ lastMeaningful: { kind: 'assistant', stopReason: sr }, transcriptMtimeMs: NOW })).toBe('waiting');
+      expect(
+        status({ lastMeaningful: { kind: 'assistant', stopReason: sr }, transcriptMtimeMs: NOW, lastAssistantText: 'Done.' }),
+      ).toBe('done');
     }
   });
 

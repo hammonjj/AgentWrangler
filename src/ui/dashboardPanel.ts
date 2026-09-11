@@ -3,6 +3,7 @@ import type { ArchiveService } from '../core/archive';
 import type { SessionStore } from '../core/sessionStore';
 import type { SessionActions } from './actions';
 import { DashboardHost, type HookHealthSource } from './dashboardHost';
+import type { SessionLocator } from './sessionLocator';
 
 /**
  * Panel view type. Deliberately distinct from the bottom-panel view id
@@ -25,6 +26,7 @@ export class DashboardPanelManager implements vscode.Disposable {
     private archive: ArchiveService,
     private actions: SessionActions,
     private health: HookHealthSource,
+    private locator: SessionLocator,
   ) {}
 
   /** True once a tab exists — created here, or restored by VSCode on reload. */
@@ -62,7 +64,7 @@ export class DashboardPanelManager implements vscode.Disposable {
     }
     this.panel = panel;
     panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'media', 'icon.svg');
-    this.host = new DashboardHost(panel.webview, this.extensionUri, this.store, this.archive, this.actions, this.health);
+    this.host = new DashboardHost(panel.webview, this.extensionUri, this.store, this.archive, this.actions, this.health, this.locator);
     panel.onDidDispose(() => {
       this.host?.dispose();
       this.host = undefined;

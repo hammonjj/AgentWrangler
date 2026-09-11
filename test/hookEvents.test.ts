@@ -81,8 +81,16 @@ describe('parseHookLine', () => {
 });
 
 describe('reduceHookEvent', () => {
-  it('marks a fresh session as waiting at its prompt', () => {
-    expect(feed([{ hook_event_name: 'SessionStart', source: 'startup' }]).status).toBe('waiting');
+  it('marks a fresh session as waiting at its prompt, and flags it as untouched', () => {
+    const st = feed([{ hook_event_name: 'SessionStart', source: 'startup' }]);
+    expect(st.status).toBe('waiting');
+    // Nothing has happened here yet; with no transcript either, the provider hides it.
+    expect(st.fresh).toBe(true);
+    expect(feed([{ hook_event_name: 'SessionStart' }, { hook_event_name: 'UserPromptSubmit' }]).fresh).toBe(false);
+  });
+
+  it('is not fresh when first seen mid-stream (hooks installed after it started)', () => {
+    expect(feed([{ hook_event_name: 'PreToolUse', tool_name: 'Bash' }]).fresh).toBe(false);
   });
 
   it('goes busy on prompt submit and waiting again on Stop', () => {
@@ -90,10 +98,22 @@ describe('reduceHookEvent', () => {
     expect(feed([{ hook_event_name: 'UserPromptSubmit' }, { hook_event_name: 'Stop' }]).status).toBe('waiting');
   });
 
-  it('treats StopFailure as end-of-turn too', () => {
-    expect(feed([{ hook_event_name: 'UserPromptSubmit' }, { hook_event_name: 'StopFailure' }]).status).toBe(
-      'waiting',
-    );
+  it('keeps the reply that ended the turn, for the waiting/done split', () => {
+    const st = feed([
+      { hook_event_name: 'UserPromptSubmit' },
+      { hook_event_name: 'Stop', last_assistant_message: 'All done, nothing committed.' },
+    ]);
+    expect(st.lastReply).toBe('All done, nothing committed.');
+    expect(st.turnFailed).toBe(false);
+    // The next prompt spends it.
+    const next = reduceHookEvent(st, ev('UserPromptSubmit', T0 + 5000));
+    expect(next.lastReply).toBeUndefined();
+  });
+
+  it('treats StopFailure as end-of-turn too, and marks the turn failed', () => {
+    const st = feed([{ hook_event_name: 'UserPromptSubmit' }, { hook_event_name: 'StopFailure' }]);
+    expect(st.status).toBe('waiting');
+    expect(st.turnFailed).toBe(true);
   });
 
   it('blocks on PermissionRequest and names the tool', () => {
@@ -103,6 +123,65 @@ describe('reduceHookEvent', () => {
     ]);
     expect(st.status).toBe('blocked');
     expect(st.blockedReason).toBe('Bash');
+  });
+
+  it('carries what the permission is for', () => {
+    const st = feed([
+      {
+        hook_event_name: 'PermissionRequest',
+        tool_name: 'Bash',
+        tool_input: { command: 'npm test', description: 'Run the tests' },
+      },
+    ]);
+    expect(st.blockedDetail).toBe('Run the tests — npm test');
+    // Cleared with the block.
+    expect(reduceHookEvent(st, ev('PreToolUse', T0 + 1000, { tool_name: 'Bash' })).blockedDetail).toBeUndefined();
+  });
+
+  it('treats a question to the user as blocked, with the question as the detail', () => {
+    // AskUserQuestion runs until the human answers: PreToolUse fires, then nothing.
+    const st = feed([
+      { hook_event_name: 'UserPromptSubmit' },
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Ship it?', header: 'Ship', options: [] }] },
+      },
+    ]);
+    expect(st.status).toBe('blocked');
+    expect(st.blockedReason).toBe('answer');
+    expect(st.blockedDetail).toBe('Ship it?');
+    expect(st.activeTool).toBeUndefined();
+    // Answered: the tool completes and the turn goes on.
+    expect(reduceHookEvent(st, ev('PostToolUse', T0 + 9000, { tool_name: 'AskUserQuestion' })).status).toBe('busy');
+  });
+
+  it('attaches our pending marker to the open prompt, and drops it when the prompt is answered', () => {
+    const open = feed([
+      { hook_event_name: 'PermissionRequest', tool_name: 'Bash' },
+      { hook_event_name: 'AgentWranglerPermissionPending', request_id: '4242-777' },
+    ]);
+    expect(open.permissionRequestId).toBe('4242-777');
+
+    for (const answer of [
+      ev('PreToolUse', T0 + 5000, { tool_name: 'Bash' }),
+      ev('PermissionDenied', T0 + 5000, { tool_name: 'Bash' }),
+      ev('Stop', T0 + 5000),
+      ev('UserPromptSubmit', T0 + 5000),
+    ]) {
+      expect(reduceHookEvent(open, answer).permissionRequestId, answer.hookEventName).toBeUndefined();
+    }
+    // A second prompt supersedes the first marker rather than inheriting it.
+    expect(reduceHookEvent(open, ev('PermissionRequest', T0 + 5000, { tool_name: 'Edit' })).permissionRequestId).toBeUndefined();
+  });
+
+  it('ignores a pending marker that arrives when nothing is blocked', () => {
+    const st = feed([
+      { hook_event_name: 'UserPromptSubmit' },
+      { hook_event_name: 'AgentWranglerPermissionPending', request_id: '1-2' },
+    ]);
+    expect(st.status).toBe('busy');
+    expect(st.permissionRequestId).toBeUndefined();
   });
 
   it('unblocks once the user answers', () => {
@@ -334,5 +413,10 @@ describe('statusFromHookState', () => {
     expect(statusFromHookState(blocked, long, threshold)).toBe('blocked');
     expect(statusFromHookState(waiting, long, threshold)).toBe('waiting');
     expect(statusFromHookState(ended, long, threshold)).toBe('ended');
+  });
+
+  it('never turns a blocked question into stuck, however long it goes unanswered', () => {
+    const asked = feed([{ hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion' }]);
+    expect(statusFromHookState(asked, T0 + 86_400_000, threshold)).toBe('blocked');
   });
 });

@@ -174,6 +174,73 @@ describe('HookLog', () => {
     expect(log.get(SID_A)?.turnStartUncertain).toBe(false);
   });
 
+  describe('permission decisions', () => {
+    const REQ = '1234-999';
+    const marker = () => path.join(dir, 'requests', REQ);
+    const decisionFile = () => path.join(dir, 'decisions', `${REQ}.json`);
+
+    const openPrompt = async () => {
+      await fsp.mkdir(path.join(dir, 'requests'), { recursive: true });
+      await fsp.writeFile(marker(), '', 'utf8');
+      await write(
+        1234,
+        ev(SID_A, 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'ls' } }) +
+          ev(SID_A, 'AgentWranglerPermissionPending', { request_id: REQ }),
+      );
+      await log.scanAll();
+    };
+
+    it('knows whether the hook script is still waiting', async () => {
+      await openPrompt();
+      expect(log.get(SID_A)?.permissionRequestId).toBe(REQ);
+      expect(log.pendingRequestExists(REQ)).toBe(true);
+      expect(log.pendingRequestExists('nope')).toBe(false);
+      expect(log.pendingRequestExists('../../etc/passwd')).toBe(false); // ids are `<pid>-<pid>` only
+    });
+
+    it('writes the decision the script is polling for, then hides the buttons', async () => {
+      await openPrompt();
+      let fired = 0;
+      log.onDidChange(() => fired++);
+
+      expect(await log.decide(SID_A, 'allow')).toBe(true);
+      const written = JSON.parse(await fsp.readFile(decisionFile(), 'utf8'));
+      expect(written).toEqual({
+        hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } },
+      });
+      expect(log.get(SID_A)?.permissionRequestId).toBeUndefined();
+      // Status is left to the events that follow: the dialog may have won the race.
+      expect(log.get(SID_A)?.status).toBe('blocked');
+      expect(fired).toBe(1);
+    });
+
+    it('denies with a message, as Claude Code requires', async () => {
+      await openPrompt();
+      expect(await log.decide(SID_A, 'deny')).toBe(true);
+      const written = JSON.parse(await fsp.readFile(decisionFile(), 'utf8'));
+      expect(written.hookSpecificOutput.decision.behavior).toBe('deny');
+      expect(typeof written.hookSpecificOutput.decision.message).toBe('string');
+    });
+
+    it('refuses when there is nothing left to answer', async () => {
+      await openPrompt();
+      await fsp.unlink(marker()); // the script already exited
+      expect(await log.decide(SID_A, 'allow')).toBe(false);
+      expect(await log.decide(SID_B, 'allow')).toBe(false); // unknown session
+      await expect(fsp.stat(decisionFile())).rejects.toThrow();
+    });
+
+    it('releases the script once the log shows the prompt was answered in Claude Code', async () => {
+      await openPrompt();
+      await append(1234, ev(SID_A, 'PreToolUse', { tool_name: 'Bash' }));
+      await log.scanAll();
+      expect(log.get(SID_A)?.status).toBe('busy');
+      // unlink is fire-and-forget; give it a tick.
+      await new Promise((r) => setTimeout(r, 20));
+      await expect(fsp.stat(marker())).rejects.toThrow();
+    });
+  });
+
   it('reports completed turns, but never ones replayed from the backlog', async () => {
     const durations: number[] = [];
     log.onTurnCompleted((ms) => durations.push(ms));

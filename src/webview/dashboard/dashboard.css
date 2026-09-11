@@ -3,6 +3,7 @@
   --aw-waiting: var(--vscode-charts-yellow, #d7ba7d);
   --aw-busy: var(--vscode-charts-blue, #569cd6);
   --aw-stuck: var(--vscode-charts-red, #f14c4c);
+  --aw-done: var(--vscode-charts-green, #89d185);
   --aw-ended: var(--vscode-disabledForeground, #888);
 }
 
@@ -52,6 +53,9 @@ th.h-branch {
 th.h-pr {
   width: 56px;
 }
+th.h-eta {
+  width: 52px;
+}
 th.h-age {
   width: 48px;
 }
@@ -73,6 +77,7 @@ thead th {
   background: var(--vscode-panel-background, var(--vscode-editor-background));
   border-bottom: 1px solid var(--vscode-panel-border, transparent);
 }
+thead th.h-eta,
 thead th.h-age {
   text-align: right;
 }
@@ -109,6 +114,9 @@ tr.sec.st-waiting td {
 }
 tr.sec.st-stuck td {
   color: var(--aw-stuck);
+}
+tr.sec.st-done td {
+  color: var(--aw-done);
 }
 tr.sec .twist {
   display: inline-block;
@@ -161,6 +169,10 @@ tr.row.archived:hover td {
 .st-stuck .dot {
   background: var(--aw-stuck);
 }
+/* Finished and not asking for anything: steady green, no pulse — nothing to act on. */
+.st-done .dot {
+  background: var(--aw-done);
+}
 .st-ended .dot {
   background: transparent;
   border: 1.5px solid var(--aw-ended);
@@ -187,6 +199,9 @@ tr.row.est.st-busy .dot {
 }
 tr.row.est.st-stuck .dot {
   color: var(--aw-stuck);
+}
+tr.row.est.st-done .dot {
+  color: var(--aw-done);
 }
 
 @keyframes aw-pulse {
@@ -242,6 +257,64 @@ tr.st-ended .title {
   color: var(--vscode-descriptionForeground);
 }
 
+/* ---- blocked: what for, and the answer ----
+   A third line under the title. The row gets taller for it on purpose: a
+   permission prompt is the one state where the dashboard should let you decide
+   without opening the session, and that takes the command, not just "Bash". */
+.c-agent .perm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  min-width: 0;
+}
+.c-agent .pdetail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88em;
+  font-family: var(--vscode-editor-font-family, monospace);
+  color: var(--aw-blocked);
+}
+.c-agent .pdetail.dim {
+  font-family: inherit;
+  color: var(--vscode-descriptionForeground);
+}
+.c-agent .pbtns {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 4px;
+}
+button.pbtn {
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.85em;
+  line-height: 1.2;
+  padding: 2px 9px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+}
+button.pbtn.allow {
+  color: var(--vscode-button-foreground, #fff);
+  background: var(--vscode-button-background, #0e639c);
+}
+button.pbtn.allow:hover {
+  background: var(--vscode-button-hoverBackground, #1177bb);
+}
+button.pbtn.deny {
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.25));
+}
+button.pbtn.deny:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.4));
+}
+button.pbtn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .chip {
   margin-left: 6px;
   padding: 0 6px;
@@ -279,28 +352,32 @@ tr.st-ended .title {
   position: relative;
 }
 
-/* Pace is a comparison against past turns, never a prediction of this one, so
-   it stays quiet until a turn is genuinely running long. */
-.chip.pace {
+/* ETA is a comparison against past turns, never a prediction of this one. The
+   colour says how far past typical the turn has run. */
+.c-eta {
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  text-align: right;
   font-variant-numeric: tabular-nums;
 }
+.c-eta.typical {
+  color: var(--vscode-foreground);
+}
 /* Yellow, not red: a turn past p75 is slow, not broken. `stuck` owns red. */
-.chip.pace.long {
-  border-color: var(--aw-waiting);
+.c-eta.long {
   color: var(--aw-waiting);
 }
-.chip.pace.very-long {
-  border-color: var(--aw-blocked);
+.c-eta.very-long {
   color: var(--aw-blocked);
 }
 /* Still on the seeded baseline: shown, but visibly less sure of itself. */
-.chip.pace.prov {
+.c-eta.prov {
   opacity: 0.7;
-  border-style: dashed;
+  font-style: italic;
 }
-/* Turn hasn't outrun the median yet — nothing worth saying, so take no space. */
-.chip.pace.quiet {
-  display: none;
+/* Busy with no watched turn: a dash, with the reason in the cell tooltip. */
+.c-eta.none {
+  opacity: 0.6;
 }
 
 .c-proj,
@@ -359,7 +436,7 @@ button.act svg {
    project name and nothing else. Below this width the location moves into the
    row's second line and the title, chips and age keep their space. */
 @media (max-width: 719px) {
-  /* Zero-width, not display:none. The section rows span all seven columns, so
+  /* Zero-width, not display:none. The section rows span all eight columns, so
      a column whose cells are gone still exists as an auto-width column and
      takes an equal share of the leftover — at 300px that left the Agent column
      39px. A zero width keeps the column in the grid and gives it nothing. */
@@ -385,6 +462,9 @@ button.act svg {
   th.h-dot {
     width: 22px;
   }
+  th.h-eta {
+    width: 44px;
+  }
   th.h-age {
     width: 40px;
   }
@@ -399,8 +479,12 @@ button.act svg {
     grid-template-columns: auto minmax(0, 1fr);
     grid-template-areas:
       'ttl ttl'
-      'chips sub';
+      'chips sub'
+      'perm perm';
     align-items: baseline;
+  }
+  .c-agent .perm {
+    grid-area: perm;
   }
   .c-agent .title {
     display: contents;

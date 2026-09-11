@@ -10,6 +10,12 @@ export interface RegistryEntry {
   version?: string;
   kind?: SessionKind;
   entrypoint?: string;
+  /**
+   * A name the user gave the session (`/rename`). Claude Code also writes a
+   * derived `<project>-<hash>` name (`nameSource: "derived"`) for every session;
+   * those say nothing the Project column doesn't and are dropped here, so a
+   * `name` on an entry is always one worth showing ahead of the title.
+   */
   name?: string;
 }
 
@@ -54,7 +60,7 @@ export async function readRegistry(dir: string, alive: (pid: number) => boolean 
     } catch {
       continue;
     }
-    const e = obj as Partial<RegistryEntry>;
+    const e = obj as Partial<RegistryEntry> & { nameSource?: unknown };
     if (!e || typeof e !== 'object') continue;
     if (!Number.isInteger(e.pid) || (e.pid as number) <= 0) continue;
     if (typeof e.sessionId !== 'string' || e.sessionId.length < 8) continue;
@@ -67,7 +73,7 @@ export async function readRegistry(dir: string, alive: (pid: number) => boolean 
       version: typeof e.version === 'string' ? e.version : undefined,
       kind: typeof e.kind === 'string' ? (e.kind as SessionKind) : undefined,
       entrypoint: typeof e.entrypoint === 'string' ? e.entrypoint : undefined,
-      name: typeof e.name === 'string' ? e.name : undefined,
+      name: typeof e.name === 'string' && e.nameSource !== 'derived' ? e.name : undefined,
     });
   }
 

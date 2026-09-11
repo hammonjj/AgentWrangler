@@ -1,6 +1,6 @@
 /** Session actions shared by the dashboard webview, viewer panels, and palette commands. */
 export interface SessionActions {
-  /** Row click: live → viewer, ended → resume in terminal. */
+  /** Row click: go to wherever the session lives (see `OpenTarget`). */
   smartOpen(key: string): void;
   openViewer(key: string): void;
   resume(key: string): void;
@@ -10,4 +10,6 @@ export interface SessionActions {
   openExternal(url: string): void;
   /** Dashboard banner → the `agentWrangler.installHooks` command (modal confirm included). */
   installHooks(): void;
+  /** Answer the permission prompt a blocked session is sitting on, from the dashboard. */
+  decidePermission(key: string, behavior: 'allow' | 'deny'): void;
 }
