@@ -7,4 +7,5 @@ vitest.config.ts
 tsconfig.json
 .gitignore
 .dev-auto-open
+.dev-reload
 **/*.map
