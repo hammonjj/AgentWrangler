@@ -4,6 +4,7 @@ import type { Disposable } from '../core/events';
 import type { SessionStore } from '../core/sessionStore';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { HookHealth } from '../shared/model';
+import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
 import { buildWebviewHtml } from './html';
 import { openTargetFor } from './openTarget';
@@ -17,6 +18,14 @@ import { isInThisWorkspace } from './workspace';
 export interface HookHealthSource {
   readonly hookHealth: HookHealth | undefined;
   onDidChangeHookHealth(listener: () => void): Disposable;
+}
+
+/** Where the usage cards' numbers come from — `UsageService`, behind an interface for the same reason. */
+export interface UsageSource {
+  readonly usage: UsageState;
+  readonly enabled: boolean;
+  onDidChange(listener: () => void): Disposable;
+  refresh(): Promise<void>;
 }
 
 /**
@@ -36,6 +45,7 @@ export class DashboardHost {
     private actions: SessionActions,
     private health: HookHealthSource,
     private locator: SessionLocator,
+    private usage: UsageSource,
   ) {
     webview.options = {
       enableScripts: true,
@@ -58,6 +68,7 @@ export class DashboardHost {
       // The store only fires on material session changes, so an install that
       // changes nothing about any session still has to reach the banner.
       this.health.onDidChangeHookHealth(() => this.pushSnapshot()),
+      this.usage.onDidChange(() => this.pushSnapshot()),
     );
   }
 
@@ -91,7 +102,13 @@ export class DashboardHost {
         isInThisWorkspace(s.cwd),
       ),
     }));
-    const msg: HostToDashboard = { type: 'snapshot', sessions, nowMs: Date.now(), hooks: this.health.hookHealth };
+    const msg: HostToDashboard = {
+      type: 'snapshot',
+      sessions,
+      nowMs: Date.now(),
+      hooks: this.health.hookHealth,
+      usage: this.usage.enabled ? this.usage.usage : undefined,
+    };
     void this.webview.postMessage(msg);
   }
 
@@ -99,6 +116,8 @@ export class DashboardHost {
     switch (m.type) {
       case 'ready':
         this.pushSnapshot();
+        // A dashboard just opened wants today's numbers, not last minute's.
+        void this.usage.refresh();
         break;
       case 'rowClick':
         this.actions.smartOpen(m.key);
@@ -114,9 +133,13 @@ export class DashboardHost {
         break;
       case 'refresh':
         this.actions.refreshAll();
+        void this.usage.refresh();
         break;
       case 'installHooks':
         this.actions.installHooks();
+        break;
+      case 'refreshUsage':
+        void this.usage.refresh();
         break;
     }
   }

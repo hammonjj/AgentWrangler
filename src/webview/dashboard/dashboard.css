@@ -513,6 +513,169 @@ button.act svg {
   }
 }
 
+/* ---- plan usage cards ----
+   One card per rate-limit window, above everything else: the question "how
+   much week do I have left" is asked as often as "who is waiting on me", and
+   the answer should not need a trip to another panel. Colours follow the
+   dashboard's own scale — the bar is busy-blue until 70%, then the waiting
+   yellow, then the blocked orange at 90%. */
+
+.usage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+.ucard {
+  flex: 1 1 150px;
+  min-width: 150px;
+  max-width: 260px;
+  padding: 6px 10px 7px;
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
+  cursor: default;
+}
+.usage.stale .ucard {
+  opacity: 0.7;
+}
+.uhead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.ulabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--vscode-descriptionForeground);
+}
+.upct {
+  flex: 0 0 auto;
+  font-size: 1.05em;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-foreground);
+}
+.ucard.warning .upct {
+  color: var(--aw-waiting);
+}
+.ucard.critical .upct {
+  color: var(--aw-blocked);
+}
+.ubar {
+  position: relative;
+  height: 5px;
+  margin: 5px 0 4px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--vscode-progressBar-background, rgba(128, 128, 128, 0.25));
+  /* The track shows through at the fill's colour, dimmed, so an empty bar
+     still reads as a bar and a full one as the same colour twice over. */
+  background: color-mix(in srgb, var(--aw-busy) 22%, transparent);
+}
+.ucard.warning .ubar {
+  background: color-mix(in srgb, var(--aw-waiting) 22%, transparent);
+}
+.ucard.critical .ubar {
+  background: color-mix(in srgb, var(--aw-blocked) 22%, transparent);
+}
+.ufill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: var(--aw-busy);
+  transition: width 0.4s ease-out;
+}
+.ucard.warning .ufill {
+  background: var(--aw-waiting);
+}
+.ucard.critical .ufill {
+  background: var(--aw-blocked);
+}
+.ureset {
+  display: block;
+  min-height: 1.2em;
+  font-size: 0.82em;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Trailing cell: the stale note and the refresh button, bottom-aligned so the
+   button sits level with the cards' last line rather than floating mid-air. */
+.utail {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+.ustale {
+  font-size: 0.82em;
+  color: var(--aw-waiting);
+  white-space: nowrap;
+}
+.unote {
+  flex: 1 1 auto;
+  align-self: center;
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+}
+.usage.err .unote {
+  color: var(--aw-blocked);
+}
+button.uref {
+  flex: 0 0 auto;
+  align-self: center;
+  background: transparent;
+  border: none;
+  padding: 3px 4px;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  opacity: 0.6;
+}
+.usage:hover button.uref {
+  opacity: 1;
+}
+button.uref:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-foreground);
+}
+button.uref:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+button.uref svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+@media (max-width: 719px) {
+  .usage {
+    padding: 6px 5px 5px;
+    gap: 5px;
+  }
+  .ucard {
+    flex-basis: 120px;
+    min-width: 120px;
+    padding: 4px 8px 5px;
+  }
+  .ustale {
+    display: none;
+  }
+}
+
 /* ---- hook status banner ---- */
 
 .banner {

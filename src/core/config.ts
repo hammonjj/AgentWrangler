@@ -10,6 +10,9 @@ export interface WranglerConfig {
   maxEndedSessions: number;
   notifyOnWaiting: boolean;
   pollIntervalSeconds: number;
+  /** Plan-usage cards above the table (session / weekly limits, as in Claude Code's /usage). */
+  showUsage: boolean;
+  usagePollIntervalSeconds: number;
 }
 
 export const DEFAULT_CONFIG: WranglerConfig = {
@@ -24,6 +27,10 @@ export const DEFAULT_CONFIG: WranglerConfig = {
   maxEndedSessions: 50,
   notifyOnWaiting: false,
   pollIntervalSeconds: 5,
+  showUsage: true,
+  // A minute. The windows move by whole percents over minutes, and the reset
+  // countdown ticks locally, so nothing is gained by asking more often.
+  usagePollIntervalSeconds: 60,
 };
 
 export type ConfigGetter = () => WranglerConfig;

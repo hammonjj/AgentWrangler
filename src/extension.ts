@@ -8,10 +8,12 @@ import {
   uninstallHooks,
 } from './claude/hookInstall';
 import { hookLogDir } from './claude/hookLog';
+import { fetchUsage } from './claude/usageFetch';
 import { ArchiveService } from './core/archive';
 import { DEFAULT_CONFIG, type ConfigGetter, type WranglerConfig } from './core/config';
 import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
+import { UsageService } from './core/usageService';
 import { STATUS_LABEL, type AgentSession, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
 import { DASHBOARD_PANEL_TYPE, DashboardPanelManager, DashboardPanelSerializer } from './ui/dashboardPanel';
@@ -58,6 +60,8 @@ export function activate(context: vscode.ExtensionContext): void {
       maxEndedSessions: c.get('maxEndedSessions', DEFAULT_CONFIG.maxEndedSessions),
       notifyOnWaiting: c.get('notifyOnWaiting', DEFAULT_CONFIG.notifyOnWaiting),
       pollIntervalSeconds: c.get('pollIntervalSeconds', DEFAULT_CONFIG.pollIntervalSeconds),
+      showUsage: c.get('showUsage', DEFAULT_CONFIG.showUsage),
+      usagePollIntervalSeconds: c.get('usagePollIntervalSeconds', DEFAULT_CONFIG.usagePollIntervalSeconds),
     };
     return cfg;
   };
@@ -69,6 +73,19 @@ export function activate(context: vscode.ExtensionContext): void {
   const provider = new ClaudeProvider(getConfig, log, turnStats);
   const archive = new ArchiveService(context.globalState);
   context.subscriptions.push({ dispose: () => store.dispose() }); // store disposes providers
+
+  // Plan usage for the cards above the table — the same numbers as Claude
+  // Code's /usage, read with the login token Claude Code stored.
+  const usage = new UsageService(fetchUsage, getConfig, log);
+  context.subscriptions.push(usage);
+  usage.start();
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('agentWrangler.showUsage') || e.affectsConfiguration('agentWrangler.usagePollIntervalSeconds')) {
+        void usage.refresh();
+      }
+    }),
+  );
 
   const openViewerFor = (session: AgentSession) => viewers.open(session);
 
@@ -206,13 +223,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The dashboard has two homes: an editor tab (default) and the bottom panel.
   // Both are always registered; the setting only decides where opening it goes.
-  const dashboardPanel = new DashboardPanelManager(context.extensionUri, store, archive, actions, provider, locator);
+  const dashboardPanel = new DashboardPanelManager(context.extensionUri, store, archive, actions, provider, locator, usage);
   context.subscriptions.push(
     dashboardPanel,
     vscode.window.registerWebviewPanelSerializer(DASHBOARD_PANEL_TYPE, new DashboardPanelSerializer(dashboardPanel)),
     vscode.window.registerWebviewViewProvider(
       DashboardViewProvider.viewId,
-      new DashboardViewProvider(context.extensionUri, store, archive, actions, provider, locator),
+      new DashboardViewProvider(context.extensionUri, store, archive, actions, provider, locator, usage),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );
@@ -285,7 +302,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('agentWrangler.openDashboard', () => openDashboard()),
-    vscode.commands.registerCommand('agentWrangler.refresh', () => actions.refreshAll()),
+    vscode.commands.registerCommand('agentWrangler.refresh', () => {
+      actions.refreshAll();
+      void usage.refresh();
+    }),
     vscode.commands.registerCommand(
       'agentWrangler.openViewer',
       withSession((k) => actions.openViewer(k), (s) => s.transcriptPath !== undefined),

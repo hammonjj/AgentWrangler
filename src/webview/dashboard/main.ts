@@ -14,6 +14,15 @@ import {
   type SectionId,
   type SessionDTO,
 } from '../../shared/model';
+import {
+  resetsInText,
+  spendText,
+  usageErrorText,
+  usageSeverity,
+  type UsageSnapshot,
+  type UsageState,
+  type UsageWindow,
+} from '../../shared/usage';
 
 interface WebviewState {
   collapsed?: string[];
@@ -32,6 +41,7 @@ const post = (msg: DashboardToHost) => vscodeApi.postMessage(msg);
 const app = document.getElementById('app')!;
 let sessions: SessionDTO[] = [];
 let hooks: HookHealth | undefined;
+let usage: UsageState | undefined;
 // Collapse state survives reloads via webview state; Archived starts collapsed.
 const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
@@ -271,9 +281,89 @@ function bannerHtml(): string {
   return `<div class="banner ${b.tone}" role="status"><span class="txt">${esc(b.text)}</span>${action}${close}</div>`;
 }
 
+// ---- plan usage cards ----
+
+const ICON_REFRESH =
+  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.6 1.9v3.2h-3.2"/></svg>';
+
+/** "Thu 8:20 AM" — the absolute reset time, for the tooltip; the card itself shows the countdown. */
+function resetsAtClock(ms: number): string {
+  try {
+    return new Date(ms).toLocaleString(undefined, {
+      weekday: 'short',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  } catch {
+    return new Date(ms).toISOString();
+  }
+}
+
+function usageCardTitle(w: UsageWindow, snap: UsageSnapshot): string {
+  const lines = [`${w.label}: ${Math.round(w.percent)}% of the limit used.`];
+  if (w.resetsAtMs !== undefined) {
+    lines.push(`Resets ${resetsAtClock(w.resetsAtMs)} (${resetsInText(Date.now(), w.resetsAtMs).toLowerCase()}).`);
+  }
+  if (w.active) lines.push('This is the window currently constraining requests.');
+  lines.push(`Read ${formatAge(Date.now(), snap.fetchedAtMs)} ago from Claude, the same source as /usage.`);
+  return lines.join('\n');
+}
+
+function usageCardHtml(w: UsageWindow, snap: UsageSnapshot): string {
+  const pct = Math.round(w.percent);
+  const sev = usageSeverity(w.percent);
+  const resets =
+    w.resetsAtMs !== undefined
+      ? `<span class="ureset" data-resets-at="${w.resetsAtMs}">${esc(resetsInText(Date.now(), w.resetsAtMs))}</span>`
+      : '<span class="ureset"></span>';
+  return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap))}">
+  <div class="uhead"><span class="ulabel">${esc(w.label)}</span><span class="upct">${pct}%</span></div>
+  <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(w.label)}"><span class="ufill" style="width:${pct}%"></span></div>
+  ${resets}
+</div>`;
+}
+
+/** The extra-usage card: only once credits have actually been spent, so an idle $0 does not take a slot. */
+function spendCardHtml(snap: UsageSnapshot): string {
+  const s = snap.spend;
+  if (!s || s.usedMinor <= 0) return '';
+  const pct = Math.round(s.percent);
+  const sev = usageSeverity(s.percent);
+  const title = `Extra usage: ${spendText(s)} of credits spent this month (${pct}%). These cover you past the plan limits.`;
+  return `<div class="ucard ${sev}" title="${esc(title)}">
+  <div class="uhead"><span class="ulabel">Extra usage</span><span class="upct">${pct}%</span></div>
+  <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Extra usage"><span class="ufill" style="width:${pct}%"></span></div>
+  <span class="ureset">${esc(spendText(s))}</span>
+</div>`;
+}
+
+/**
+ * The strip above the table: one card per rate-limit window, so "where am I
+ * this week" is answered at the same glance as "who is waiting on me". The
+ * host omits `usage` entirely when the cards are turned off. The last good
+ * read stays up through a failed refresh, marked stale, because an old number
+ * beats a blank when the question is whether the weekly limit is close.
+ */
+function usageHtml(): string {
+  if (!usage) return '';
+  const { last, error } = usage;
+  const refreshBtn = `<button class="uref" data-usage="refresh" title="Read usage again now">${ICON_REFRESH}</button>`;
+
+  if (!last) {
+    const text = error ? usageErrorText(error) : 'Reading plan usage…';
+    return `<div class="usage${error ? ' err' : ''}" role="status"><span class="unote">${esc(text)}</span>${error ? refreshBtn : ''}</div>`;
+  }
+
+  const stale = error
+    ? `<span class="ustale" title="${esc(usageErrorText(error))}">stale · read <span data-age-ts="${last.fetchedAtMs}">${formatAge(Date.now(), last.fetchedAtMs)}</span> ago</span>`
+    : '';
+  const cards = last.windows.map((w) => usageCardHtml(w, last)).join('') + spendCardHtml(last);
+  return `<div class="usage${error ? ' stale' : ''}" role="region" aria-label="Plan usage">${cards}<div class="utail">${stale}${refreshBtn}</div></div>`;
+}
+
 function render(): void {
   if (sessions.length === 0) {
-    app.innerHTML = `${bannerHtml()}<div class="empty">No agent sessions found.
+    app.innerHTML = `${usageHtml()}${bannerHtml()}<div class="empty">No agent sessions found.
 <div class="hint">Sessions are discovered from <code>~/.claude</code>. Start a Claude Code session anywhere and it will appear here.</div></div>`;
     return;
   }
@@ -288,7 +378,7 @@ function render(): void {
 
   // No <colgroup>: widths sit on the header cells so a column hidden by the
   // narrow-layout media query disappears entirely instead of leaving a gap.
-  let html = `${bannerHtml()}<table>
+  let html = `${usageHtml()}${bannerHtml()}<table>
 <thead><tr>
   <th class="h-dot"></th><th class="h-agent">Agent</th><th class="h-proj">Project</th><th class="h-branch">Branch</th><th class="h-pr">PR</th><th class="h-eta" title="Estimated completion: when most of your past turns of this length were done. Not a prediction of this one.">ETA</th><th class="h-age">Age</th><th class="h-act"></th>
 </tr></thead>`;
@@ -312,12 +402,19 @@ window.addEventListener('message', (e: MessageEvent) => {
   if (m.type === 'snapshot') {
     sessions = m.sessions;
     hooks = m.hooks;
+    usage = m.usage;
     render();
   }
 });
 
 app.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
+  const usageBtn = target.closest('button[data-usage]') as HTMLButtonElement | null;
+  if (usageBtn) {
+    usageBtn.disabled = true; // re-enabled by the re-render the next snapshot causes
+    post({ type: 'refreshUsage' });
+    return;
+  }
   const bannerBtn = target.closest('button[data-banner]') as HTMLElement | null;
   const pbtn = target.closest('button.pbtn') as HTMLButtonElement | null;
   const btn = target.closest('button.act') as HTMLElement | null;
@@ -377,6 +474,9 @@ setInterval(() => {
   for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-eta]'))) {
     const [startedAtMs, blockedMs, p50Ms, p90Ms] = el.dataset.eta!.split(',').map(Number);
     el.textContent = etaText(workingElapsedMs({ startedAtMs, blockedMs, toolCalls: 0 }, now), p50Ms, p90Ms);
+  }
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-resets-at]'))) {
+    el.textContent = resetsInText(now, Number(el.dataset.resetsAt));
   }
 }, 10_000);
 

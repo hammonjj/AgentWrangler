@@ -140,6 +140,17 @@
           "default": 5,
           "minimum": 2,
           "description": "Reconciliation poll interval (pid liveness, staleness, missed file events)."
+        },
+        "agentWrangler.showUsage": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show plan-usage cards above the agent table: the 5-hour session and weekly limits, as in Claude Code's /usage. Read with the login token Claude Code stored on this machine."
+        },
+        "agentWrangler.usagePollIntervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 15,
+          "description": "How often to re-read plan usage. The reset countdown ticks locally between reads."
         }
       }
     }

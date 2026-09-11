@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
 import type { SessionStore } from '../core/sessionStore';
 import type { SessionActions } from './actions';
-import { DashboardHost, type HookHealthSource } from './dashboardHost';
+import { DashboardHost, type HookHealthSource, type UsageSource } from './dashboardHost';
 import type { SessionLocator } from './sessionLocator';
 
 /** Dashboard docked in the bottom panel, next to Terminal. */
@@ -16,10 +16,20 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     private actions: SessionActions,
     private health: HookHealthSource,
     private locator: SessionLocator,
+    private usage: UsageSource,
   ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
-    const host = new DashboardHost(view.webview, this.extensionUri, this.store, this.archive, this.actions, this.health, this.locator);
+    const host = new DashboardHost(
+      view.webview,
+      this.extensionUri,
+      this.store,
+      this.archive,
+      this.actions,
+      this.health,
+      this.locator,
+      this.usage,
+    );
     view.onDidDispose(() => host.dispose());
   }
 }
