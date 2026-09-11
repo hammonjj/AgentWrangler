@@ -8,7 +8,7 @@ import type { HookHealth } from '../shared/model';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
 import { buildWebviewHtml } from './html';
-import { openTargetFor } from './openTarget';
+import { openTargetFor, type RowClickBehavior } from './openTarget';
 import type { SessionLocator } from './sessionLocator';
 import { isInThisWorkspace } from './workspace';
 
@@ -99,6 +99,9 @@ export class DashboardHost {
     const locations = await this.locator.locateMany(livePids);
     if (seq !== this.snapshotSeq) return; // superseded while we waited
 
+    const behavior = vscode.workspace
+      .getConfiguration('agentWrangler')
+      .get<RowClickBehavior>('rowClickOpens', 'conversation');
     const sessions = raw.map((s) => ({
       ...s,
       archived: this.archive.isArchived(s.key),
@@ -106,6 +109,7 @@ export class DashboardHost {
         s,
         s.pid === undefined ? 'unavailable' : (locations.get(s.pid) ?? 'unavailable'),
         isInThisWorkspace(s.cwd),
+        behavior,
       ),
     }));
     const msg: HostToDashboard = {
@@ -130,7 +134,7 @@ export class DashboardHost {
         this.actions.smartOpen(m.key);
         break;
       case 'action':
-        if (m.action === 'viewer') this.actions.openViewer(m.key);
+        if (m.action === 'pin') this.actions.pin(m.key);
         else if (m.action === 'resume') this.actions.resume(m.key);
         else if (m.action === 'archive') this.archive.toggle(m.key);
         else if (m.action === 'allow' || m.action === 'deny' || m.action === 'always') {

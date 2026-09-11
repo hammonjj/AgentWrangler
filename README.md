@@ -42,16 +42,15 @@ The VSCode CLI is assumed to live in `/Applications/Visual Studio Code.app`; ove
 - **Narrow docking works.** Below ~720px (a sidebar or a split bottom panel) the Project, Worktree, Branch, Model and PR columns are not rendered at all and fold into the row's second line, so the session title, status chips, ETA and age stay visible instead of being pushed off-screen. The picker shows those columns as *too narrow* rather than pretending they are on screen; widening the dock brings them back exactly as you left them.
 - **An ETA column** on every busy row (hooks required). It counts down against your own turn history: until the median while the turn is still typical, then until the 90th percentile once it has outlived half its peers (yellow past p75, orange past p90, where it shows `>Xm` instead of a countdown). Italic means the baseline is still the seeded one, before 20 of your turns have been recorded. A dash means the turn's start was not observed; the cell's tooltip says why.
 - **A banner at the top says when status is only estimated** — hooks not installed, disabled, or stale — with an *Install hooks* button. Once installed, it lists the live sessions that predate the install and still need a restart.
-- **Clicking a row goes to wherever the session actually lives.** Ownership is decided from the process tree, not the folder: every live session's pid is in Claude's registry, and walking its parents says whether it sits under this window's extension host (a Claude Code panel), under one of this window's terminal shells, under another window of this VSCode, or outside VSCode altogether. The row tooltip says what a click will do.
-  - **Panel session in this window** → reveals it in the official Claude Code panel (`claude-vscode.editor.open <sessionId>`) — fully interactive immediately.
-  - **Terminal session in this window** → shows the integrated terminal running it. A terminal session cannot be moved into the panel: it is one process, and resuming its id in a panel would start a second copy and fork the conversation, so the extension never does that.
-  - **Live session in another window of this VSCode** → cross-window relay: a note (session id, cwd, pid) is written to a shared mailbox (extension globalStorage) watched by every Agent Wrangler instance, and the owning window is focused via VSCode's own CLI; the instance that owns the process claims the note and reveals the panel or terminal there. (Requires the extension to be running in the target window — during F5-only iteration that means only dev-host windows participate; other windows still get focused.)
-  - **Live session nothing here can reveal** (an iTerm session, a pid that has just died) → read-only viewer.
-  - **Ended session** → in this window's workspace: resumed into the Claude Code panel; elsewhere: a terminal at the project folder running `claude --resume <id>`.
-  - Without a readable process table (no `ps`) the old folder-based rule applies: in this workspace → panel, other window's panel session → relay, else viewer.
-- The eye button opens the read-only viewer for any session with a transcript.
-- Row buttons: view transcript (ended sessions) and **archive** — archived sessions move to the always-last Archived section (collapsed by default), stop counting toward the status-bar bell, and never toast. The same button unarchives.
-- Command palette: `Agent Wrangler: …` commands (dashboard, refresh, viewer, resume, copy id, reveal transcript, install/remove status hooks).
+- **Clicking a row opens the conversation here.** Every session — in this window, in another VSCode window, in a terminal, on this machine at all — opens in the **conversation pane** beside the dashboard, and the click never moves focus or jumps you between windows. The pane reads the session's transcript live, so it works for conversations this extension has nothing to do with.
+  - **What it renders**: prompts and replies as markdown, thinking collapsed, one card per tool call that expands to its input and output, edits as a diff. Code blocks have a copy button; links open in the browser.
+  - **Permission prompts can be answered from it.** A *Blocked on you* session grows a card naming the tool and what it wants, with **Allow** and **Deny**. This is the same hook race the dashboard buttons use, so answering in Claude Code instead simply flips the card to *answered there*. (`AskUserQuestion` and plan approval are shown but cannot be answered from outside, by Claude Code's design.)
+  - **Typing is not wired up yet.** The composer bar says which window or terminal owns the session, and the button beside it goes there: the Claude Code panel, the integrated terminal, or the VSCode window that owns the process (via the cross-window relay). Ownership is decided from the process tree, not the folder — every live session's pid is in Claude's registry, and walking its parents says where it sits.
+  - **Pin** (the eye button on a row, or the pane's own Pin) gives a session a tab of its own that row clicks never swap away. One reusable pane plus pins means browsing five agents costs one tab.
+  - **Ended sessions** open in the pane too, with *Resume in terminal* as the way to continue them.
+  - Set `agentWrangler.rowClickOpens` to `wherever-it-runs` to get the old behaviour back, where a click went straight to the panel, terminal or window that runs the session.
+- Row buttons: **pin** and **archive** — archived sessions move to the always-last Archived section (collapsed by default), stop counting toward the status-bar bell, and never toast. The same button unarchives.
+- Command palette: `Agent Wrangler: …` commands (dashboard, refresh, open conversation, pin conversation, go to where a session runs, resume, copy id, reveal transcript, install/remove status hooks).
 
 ## How status is detected
 
@@ -104,7 +103,7 @@ Transcripts and hook logs are both read incrementally (bounded tail reads with a
 
 ## Settings
 
-`agentWrangler.dashboardLocation` (`editor` — or `panel` for the bottom panel) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting, blocked or done) · `pollIntervalSeconds` (5)
+`agentWrangler.rowClickOpens` (`conversation` — or `wherever-it-runs` for the pre-pane behaviour) · `conversation.openBeside` (true) · `agentWrangler.dashboardLocation` (`editor` — or `panel` for the bottom panel) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting, blocked or done) · `pollIntervalSeconds` (5)
 
 ## Development
 
@@ -114,4 +113,4 @@ npm run typecheck  # tsc --noEmit
 npm test           # vitest: tail parser, status table, live ~/.claude smoke test
 ```
 
-Source layout: `src/claude/*` (registry reader, incremental tail parser, status derivation, hook event reducer + log tailer + settings installer, provider), `src/core/*` (provider-agnostic store), `src/ui/*` (dashboard host + its two shells — editor tab and panel view, viewer panels, status bar, terminal resume), `src/webview/*` (browser bundles). Webview code may only import from `src/shared/*`.
+Source layout: `src/claude/*` (registry reader, incremental tail parser, transcript→block reducer, status derivation, hook event reducer + log tailer + settings installer, provider), `src/core/*` (provider-agnostic store), `src/ui/*` (dashboard host + its two shells — editor tab and panel view — conversation pane host, sources and shells, click routing, cross-window relay, status bar, terminal resume), `src/webview/*` (browser bundles: dashboard, conversation). Webview code may only import from `src/shared/*`.

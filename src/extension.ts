@@ -16,17 +16,22 @@ import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
 import { UsageService } from './core/usageService';
-import { STATUS_LABEL, type AgentSession, type SessionStatus } from './shared/model';
+import { STATUS_LABEL, type AgentSession, type OpenTarget, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
+import {
+  CONVERSATION_PANEL_TYPE,
+  CONVERSATION_PINNED_TYPE,
+  ConversationPanelManager,
+  ConversationPanelSerializer,
+} from './ui/conversation/conversationPanel';
 import { DASHBOARD_PANEL_TYPE, DashboardPanelManager, DashboardPanelSerializer } from './ui/dashboardPanel';
 import { DashboardViewProvider } from './ui/dashboardView';
 import { watchForDevReload } from './ui/devReload';
-import { openTargetFor } from './ui/openTarget';
+import { openTargetFor, type RowClickBehavior } from './ui/openTarget';
 import { CrossWindowRelay } from './ui/relay';
-import { SessionLocator } from './ui/sessionLocator';
+import { SessionLocator, type SessionLocation } from './ui/sessionLocator';
 import { createStatusBar } from './ui/statusBar';
 import { resumeInTerminal } from './ui/terminal';
-import { ViewerPanelManager } from './ui/viewerPanel';
 import { isInThisWorkspace } from './ui/workspace';
 
 /** How long to let a session emit its first hook event before calling hooks broken. */
@@ -99,11 +104,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  const openViewerFor = (session: AgentSession) => viewers.open(session);
+  const showInPane = (s: AgentSession) => conversations.show(s.key);
 
   const fallbackOpen = (s: AgentSession) => {
     if (s.status === 'ended') resumeInTerminal(s, getConfig);
-    else openViewerFor(s);
+    else showInPane(s);
   };
 
   /**
@@ -150,39 +155,70 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(relay);
   void relay.start();
 
+  /**
+   * Go to wherever the session actually runs. This was what a row click did
+   * until the conversation pane existed; it is now a deliberate action, because
+   * being thrown into another VSCode window is only ever welcome on purpose.
+   */
+  const goToSession = (s: AgentSession, target: Exclude<OpenTarget, 'conversation'>, loc: SessionLocation) => {
+    switch (target) {
+      case 'panel':
+        openInPanel(s);
+        return;
+      case 'terminal':
+        if (loc.kind === 'terminal') loc.terminal.show();
+        else openInPanel(s);
+        return;
+      case 'window':
+        // Owned by another window of this VSCode: focus it and have its
+        // Agent Wrangler instance reveal the panel or terminal there.
+        void relay.request(s.sessionId, s.cwd ?? '', s.pid);
+        vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${s.name ?? s.title} in its window…`, 4000);
+        return;
+      case 'resume':
+        resumeInTerminal(s, getConfig);
+        return;
+    }
+  };
+
   const actions: SessionActions = {
     smartOpen(key) {
       const s = store.get(key);
       if (!s) return;
+      const behavior = vscode.workspace
+        .getConfiguration('agentWrangler')
+        .get<RowClickBehavior>('rowClickOpens', 'conversation');
+      if (behavior === 'conversation') {
+        showInPane(s);
+        return;
+      }
       void (async () => {
         const loc = await locator.locate(s.pid, { fresh: true });
-        const target = openTargetFor(s, loc.kind, isInThisWorkspace(s.cwd));
+        const target = openTargetFor(s, loc.kind, isInThisWorkspace(s.cwd), behavior);
         log(`open ${s.name ?? s.sessionId}: process ${loc.kind} → ${target}`);
-        switch (target) {
-          case 'panel':
-            openInPanel(s);
-            return;
-          case 'terminal':
-            if (loc.kind === 'terminal') loc.terminal.show();
-            return;
-          case 'window':
-            // Owned by another window of this VSCode: focus it and have its
-            // Agent Wrangler instance reveal the panel or terminal there.
-            void relay.request(s.sessionId, s.cwd ?? '', s.pid);
-            vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${s.name ?? s.title} in its window…`, 4000);
-            return;
-          case 'resume':
-            resumeInTerminal(s, getConfig);
-            return;
-          case 'viewer':
-            openViewerFor(s);
-            return;
-        }
+        if (target === 'conversation') showInPane(s);
+        else goToSession(s, target, loc);
       })();
     },
-    openViewer(key) {
+    goTo(key) {
       const s = store.get(key);
-      if (s) openViewerFor(s);
+      if (!s) return;
+      void (async () => {
+        const loc = await locator.locate(s.pid, { fresh: true });
+        const target = openTargetFor(s, loc.kind, isInThisWorkspace(s.cwd), 'wherever-it-runs');
+        log(`goTo ${s.name ?? s.sessionId}: process ${loc.kind} → ${target}`);
+        if (target === 'conversation') {
+          vscode.window.setStatusBarMessage(
+            `Agent Wrangler: ${s.name ?? s.title} runs outside this VSCode; nothing here can reveal it.`,
+            4000,
+          );
+          return;
+        }
+        goToSession(s, target, loc);
+      })();
+    },
+    pin(key) {
+      conversations.pin(key);
     },
     resume(key) {
       const s = store.get(key);
@@ -208,6 +244,12 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     openExternal(url) {
       if (/^https?:\/\//i.test(url)) void vscode.env.openExternal(vscode.Uri.parse(url));
+    },
+    openFile(filePath) {
+      void vscode.workspace.openTextDocument(vscode.Uri.file(filePath)).then(
+        (doc) => vscode.window.showTextDocument(doc, { preview: true }),
+        () => vscode.window.setStatusBarMessage(`Agent Wrangler: cannot open ${filePath}`, 4000),
+      );
     },
     installHooks() {
       void vscode.commands.executeCommand('agentWrangler.installHooks');
@@ -236,8 +278,20 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   };
 
-  const viewers = new ViewerPanelManager(context.extensionUri, store, provider, actions);
-  context.subscriptions.push(viewers);
+  // The conversation pane: one reusable panel that row clicks swap, plus a
+  // pinned panel per session the user wants to keep on screen.
+  const conversations = new ConversationPanelManager(context.extensionUri, store, provider, actions, locator);
+  context.subscriptions.push(
+    conversations,
+    vscode.window.registerWebviewPanelSerializer(
+      CONVERSATION_PANEL_TYPE,
+      new ConversationPanelSerializer(conversations, false),
+    ),
+    vscode.window.registerWebviewPanelSerializer(
+      CONVERSATION_PINNED_TYPE,
+      new ConversationPanelSerializer(conversations, true),
+    ),
+  );
 
   // The dashboard has two homes: an editor tab (default) and the bottom panel.
   // Both are always registered; the setting only decides where opening it goes.
@@ -288,9 +342,9 @@ export function activate(context: vscode.ExtensionContext): void {
               ? `${s.title} is done`
               : `${s.title} is waiting on you`;
         void vscode.window
-          .showInformationMessage(msg, 'Open Viewer', 'Dashboard')
+          .showInformationMessage(msg, 'Open', 'Dashboard')
           .then((choice) => {
-            if (choice === 'Open Viewer') actions.openViewer(s.key);
+            if (choice === 'Open') actions.smartOpen(s.key);
             else if (choice === 'Dashboard') void vscode.commands.executeCommand('agentWrangler.openDashboard');
           });
       }
@@ -334,9 +388,14 @@ export function activate(context: vscode.ExtensionContext): void {
       void usage.refresh({ force: true });
     }),
     vscode.commands.registerCommand(
-      'agentWrangler.openViewer',
-      withSession((k) => actions.openViewer(k), (s) => s.transcriptPath !== undefined),
+      'agentWrangler.openConversation',
+      withSession((k) => actions.smartOpen(k)),
     ),
+    vscode.commands.registerCommand(
+      'agentWrangler.pinConversation',
+      withSession((k) => actions.pin(k)),
+    ),
+    vscode.commands.registerCommand('agentWrangler.goToSession', withSession((k) => actions.goTo(k))),
     vscode.commands.registerCommand(
       'agentWrangler.resumeInTerminal',
       withSession((k) => actions.resume(k), (s) => s.status === 'ended'),

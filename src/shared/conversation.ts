@@ -1,0 +1,148 @@
+/**
+ * The conversation pane's block model.
+ *
+ * Two very different things produce these blocks — a transcript file being
+ * tailed from disk, and (later) a Claude Code process this extension drives —
+ * and the webview must not be able to tell which. So this file is the contract
+ * between them: anything a renderer needs is here, and anything source-specific
+ * stays in the source.
+ *
+ * Imported by BOTH the extension host and the webview bundle, so it must stay
+ * free of `vscode`, Node and DOM imports.
+ */
+
+/**
+ * Mirrors the Agent SDK's `PermissionMode`. Duplicated rather than imported
+ * because shared code is bundled into the webview, where the SDK cannot go.
+ * Keep in step with `@anthropic-ai/claude-agent-sdk`.
+ */
+export type PermissionModeName = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
+
+/**
+ * Where an ask (a permission prompt, a question, a plan) stands.
+ *
+ * `expired` is the one that matters: Claude Code races our answer against its
+ * own dialog, so a prompt can be settled somewhere else while the card is still
+ * on screen. The card then says so rather than offering a button that would do
+ * nothing.
+ */
+export type AskState = 'pending' | 'allowed' | 'denied' | 'expired';
+
+/** A tool's output, already capped for the wire. */
+export interface ToolResultView {
+  text: string;
+  isError: boolean;
+  /** True when `text` is a prefix of a longer output; the card offers to fetch the rest. */
+  truncated: boolean;
+  /** Edits and writes carry a unified patch, which reads far better than the raw result text. */
+  diff?: { file: string; patch: string };
+}
+
+export interface QuestionOptionView {
+  label: string;
+  description: string;
+}
+
+export interface QuestionView {
+  question: string;
+  header: string;
+  multiSelect?: boolean;
+  options: QuestionOptionView[];
+}
+
+/**
+ * One rendered unit of a conversation.
+ *
+ * `id` is stable for the life of the pane so the host can patch a block in
+ * place — a tool block gains its result minutes after it appears, and a
+ * streaming reply grows word by word.
+ */
+export type ConvBlock =
+  | { kind: 'user'; id: string; ts?: string; text: string; imageCount?: number }
+  | { kind: 'assistant'; id: string; ts?: string; msgId?: string; text: string; streaming?: boolean; model?: string }
+  | { kind: 'thinking'; id: string; ts?: string; text: string; streaming?: boolean }
+  | {
+      kind: 'tool';
+      id: string;
+      ts?: string;
+      toolUseId: string;
+      name: string;
+      /** One line: the command, the file, the query — what `permissionDetail` does for prompts. */
+      inputPreview: string;
+      input?: unknown;
+      result?: ToolResultView;
+      state: 'running' | 'done' | 'error';
+      /** Set on a subagent's tool calls, so the renderer can nest them under the Agent block. */
+      parentToolUseId?: string;
+    }
+  | {
+      kind: 'permission';
+      id: string;
+      /** Opaque handle the source needs to answer this ask. */
+      requestId: string;
+      toolName: string;
+      title?: string;
+      description?: string;
+      /** One line saying what the permission is actually for. */
+      detail?: string;
+      input?: unknown;
+      /** Whether an "always allow" rule can be written for this ask. */
+      canAlwaysAllow: boolean;
+      state: AskState;
+    }
+  | { kind: 'question'; id: string; requestId: string; questions: QuestionView[]; state: AskState; answers?: Record<string, string> }
+  | { kind: 'plan'; id: string; requestId: string; plan: string; planFilePath?: string; state: AskState }
+  /** Out-of-band facts: compaction, errors, "this session ended", "adopted here". */
+  | { kind: 'note'; id: string; ts?: string; tone: 'info' | 'warn' | 'error'; text: string };
+
+export type ConvBlockKind = ConvBlock['kind'];
+
+/**
+ * An in-place update of a block already on screen. Both sources need it: a
+ * tool result lands long after its call, and an ask is settled long after it
+ * is asked.
+ */
+export interface BlockPatch {
+  id: string;
+  block: Partial<ConvBlock>;
+}
+
+/** Longest text carried in one block. Matches the old viewer's cap. */
+export const MAX_BLOCK_CHARS = 6000;
+/** Longest tool output sent unasked; the rest is fetched on demand. */
+export const MAX_TOOL_RESULT_CHARS = 4000;
+
+/** Cap a string for the wire, marking the cut so the renderer never implies completeness. */
+export function capText(text: string, max: number = MAX_BLOCK_CHARS): string {
+  return text.length > max ? `${text.slice(0, max)}\n… [truncated]` : text;
+}
+
+/**
+ * What the pane can currently do with this session. Computed by the host from
+ * where the session's process lives, so the webview renders buttons without
+ * knowing any of those rules.
+ */
+export interface ConversationCapabilities {
+  /** The session is driven by this extension, so the composer can send. */
+  canSend: boolean;
+  canInterrupt: boolean;
+  /** Idle and owned elsewhere: it could be pulled into this window. */
+  canAdopt: boolean;
+  /** Driven here: it could be handed back to a terminal or the Claude Code panel. */
+  canRelease: boolean;
+  /** The demoted "go to where it actually runs" action, when there is somewhere to go. */
+  goTo?: { label: string; target: 'panel' | 'terminal' | 'window' | 'resume' };
+  /** Status is inferred from the transcript rather than pushed by hooks. */
+  estimated: boolean;
+  /** Why the composer is disabled, in one sentence, when `canSend` is false. */
+  readOnlyReason?: string;
+}
+
+/** Live state of a session this extension drives. Absent for transcript-backed panes. */
+export interface ComposerState {
+  permissionMode: PermissionModeName;
+  model?: string;
+  slashCommands: string[];
+  busy: boolean;
+  queued: number;
+}

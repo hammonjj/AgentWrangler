@@ -126,14 +126,16 @@ function clickHint(s: SessionDTO): string {
     case 'resume':
       return 'Click to resume in a terminal';
     default:
-      return 'Click to open the live transcript viewer';
+      return 'Click to open the conversation here';
   }
 }
 
 function actionButtons(s: SessionDTO): string {
   const btns: string[] = [];
   if (s.transcriptPath) {
-    btns.push(`<button class="act" data-action="viewer" title="View transcript (read-only)">${ICON_EYE}</button>`);
+    btns.push(
+      `<button class="act" data-action="pin" title="Pin this conversation in its own tab">${ICON_EYE}</button>`,
+    );
   }
   btns.push(
     s.archived

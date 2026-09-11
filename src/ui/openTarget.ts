@@ -1,6 +1,7 @@
 /**
- * What a click on a session row should do. Pure, so the rules are testable:
- * the locator says where the process lives, this says what that means.
+ * What a click on a session row should do, and what the conversation pane
+ * should offer as its way out to the real thing. Pure, so the rules are
+ * testable: the locator says where the process lives, this says what that means.
  */
 import type { AgentSession, OpenTarget } from '../shared/model';
 
@@ -18,14 +19,31 @@ import type { AgentSession, OpenTarget } from '../shared/model';
  */
 export type LocationKind = 'panel' | 'terminal' | 'other-window' | 'external' | 'dead' | 'unavailable';
 
+/** `agentWrangler.rowClickOpens`. */
+export type RowClickBehavior = 'conversation' | 'wherever-it-runs';
+
 /**
- * Decide the click target. `inWorkspace` is the old cwd-based ownership guess;
- * it survives only as the fallback when the process tree cannot be read, and
- * for ended sessions, which have no process to locate and are resumed into the
- * panel of the window whose project they belong to.
+ * Decide the click target.
+ *
+ * The default is unconditional: every row opens the conversation pane, in this
+ * window, without stealing focus from anything. That is the whole point of the
+ * pane — a click used to fling the user into another VSCode window, and the
+ * attention cost of that outweighed the fidelity it bought.
+ *
+ * `wherever-it-runs` keeps the old routing for one release, as a way back if
+ * the pane turns out to be worse for some session type. `inWorkspace` is the
+ * old cwd-based ownership guess, used there only when the process tree cannot
+ * be read.
  */
-export function openTargetFor(s: AgentSession, location: LocationKind, inWorkspace: boolean): OpenTarget {
-  if (s.provider !== 'claude') return s.status === 'ended' ? 'resume' : 'viewer';
+export function openTargetFor(
+  s: AgentSession,
+  location: LocationKind,
+  inWorkspace: boolean,
+  behavior: RowClickBehavior = 'conversation',
+): OpenTarget {
+  if (behavior === 'conversation') return 'conversation';
+
+  if (s.provider !== 'claude') return s.status === 'ended' ? 'resume' : 'conversation';
   if (s.status === 'ended') return inWorkspace ? 'panel' : 'resume';
 
   switch (location) {
@@ -34,16 +52,66 @@ export function openTargetFor(s: AgentSession, location: LocationKind, inWorkspa
     case 'terminal':
       return 'terminal';
     case 'other-window':
-      return s.cwd ? 'window' : 'viewer';
+      return s.cwd ? 'window' : 'conversation';
     case 'external':
     case 'dead':
       // Opening the panel would resume a session that is still running
-      // somewhere else, forking the conversation. Read-only is the honest option.
-      return 'viewer';
+      // somewhere else, forking the conversation. The pane is the honest option.
+      return 'conversation';
     case 'unavailable':
       // No process tree: the pre-pid heuristics.
       if (inWorkspace) return 'panel';
       if (s.entrypoint === 'claude-vscode' && s.cwd) return 'window';
-      return 'viewer';
+      return 'conversation';
   }
 }
+
+/**
+ * The pane's secondary action: how to reach the session where it actually
+ * lives, for the times when the pane is not enough — typing into it, today.
+ *
+ * `undefined` means there is nowhere to go: the session runs outside this
+ * VSCode, or its process is already gone.
+ *
+ * Phase 3 adds `adopt` and `release` here, once there is a runner to adopt
+ * into; they are deliberately absent while the pane cannot type.
+ */
+export type SecondaryAction = 'reveal-panel' | 'show-terminal' | 'focus-window' | 'resume-terminal';
+
+export function secondaryActionFor(
+  s: AgentSession,
+  location: LocationKind,
+  inWorkspace: boolean,
+): SecondaryAction | undefined {
+  if (s.status === 'ended') {
+    // Resuming into this window's Claude Code panel only works for a session
+    // whose project this window actually has open.
+    return inWorkspace && s.provider === 'claude' ? 'reveal-panel' : 'resume-terminal';
+  }
+  if (s.provider !== 'claude') return undefined;
+
+  switch (location) {
+    case 'panel':
+      return 'reveal-panel';
+    case 'terminal':
+      return 'show-terminal';
+    case 'other-window':
+      return s.cwd ? 'focus-window' : undefined;
+    case 'unavailable':
+      // No process tree to consult; fall back to the folder guess, which is
+      // right often enough to be worth offering.
+      if (inWorkspace) return 'reveal-panel';
+      return s.entrypoint === 'claude-vscode' && s.cwd ? 'focus-window' : undefined;
+    case 'external':
+    case 'dead':
+      return undefined;
+  }
+}
+
+/** Button text for the pane's secondary action. */
+export const SECONDARY_LABEL: Record<SecondaryAction, string> = {
+  'reveal-panel': 'Open in Claude Code',
+  'show-terminal': 'Show terminal',
+  'focus-window': 'Go to its window',
+  'resume-terminal': 'Resume in terminal',
+};

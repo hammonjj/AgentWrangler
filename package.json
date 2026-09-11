@@ -46,8 +46,16 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "agentWrangler.openViewer",
-        "title": "Agent Wrangler: Open Transcript Viewer…"
+        "command": "agentWrangler.openConversation",
+        "title": "Agent Wrangler: Open Conversation…"
+      },
+      {
+        "command": "agentWrangler.pinConversation",
+        "title": "Agent Wrangler: Pin Conversation in Its Own Tab…"
+      },
+      {
+        "command": "agentWrangler.goToSession",
+        "title": "Agent Wrangler: Go to Where a Session Runs…"
       },
       {
         "command": "agentWrangler.resumeInTerminal",
@@ -89,6 +97,24 @@
     "configuration": {
       "title": "Agent Wrangler",
       "properties": {
+        "agentWrangler.rowClickOpens": {
+          "type": "string",
+          "enum": [
+            "conversation",
+            "wherever-it-runs"
+          ],
+          "enumDescriptions": [
+            "Open the session in the Agent Wrangler conversation pane, in this window.",
+            "Go to the Claude Code panel, terminal or VSCode window that runs the session (the behaviour before the conversation pane)."
+          ],
+          "default": "conversation",
+          "description": "What clicking a session row does. The conversation pane keeps you in one window; 'Go to where it runs' is still available from the pane and the command palette."
+        },
+        "agentWrangler.conversation.openBeside": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the conversation pane in an editor group beside the current one, so the dashboard stays visible. Turn off to open it in the active group."
+        },
         "agentWrangler.dashboardLocation": {
           "type": "string",
           "enum": [
@@ -165,9 +191,11 @@
     "install-local:reload": "npm run install-local && date > .dev-reload"
   },
   "devDependencies": {
+    "@types/markdown-it": "14.2.0",
     "@types/node": "^24.0.0",
     "@types/vscode": "1.90.0",
     "esbuild": "^0.25.0",
+    "markdown-it": "15.0.2",
     "typescript": "^5.9.0",
     "vitest": "^3.0.0"
   }

@@ -12,7 +12,7 @@ export function getNonce(): string {
 export function buildWebviewHtml(opts: {
   webview: vscode.Webview;
   extensionUri: vscode.Uri;
-  bundleName: 'dashboard' | 'viewer';
+  bundleName: 'dashboard' | 'conversation';
   title: string;
 }): string {
   const { webview, extensionUri, bundleName, title } = opts;
