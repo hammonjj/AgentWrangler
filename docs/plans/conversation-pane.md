@@ -549,7 +549,34 @@ the card flips to *allowed*; answer in Claude Code instead → card flips to *ex
 session → pane shows it with a "Resume in terminal" secondary action; pane at 400 px is
 usable; dashboard at 300 px unchanged.
 
-### Phase 2 — The runner: start a session here and talk to it
+### Phase 2 — The runner: start a session here and talk to it — **SHIPPED 2026-09-11**
+
+**What shipped, and where it differs from the plan below.**
+
+- The runner lives in `src/claude/runner/`, not `src/core/runner/`: it is as
+  Claude-specific as the hook reducer, and `CLAUDE.md` reserves `src/core` for the
+  provider-agnostic layer. Only `inputQueue.ts` (a generic push-based async iterable) stayed in
+  `src/core/runner/`.
+- **No slash-command autocomplete.** Whether `/compact` and friends execute when sent as user
+  text in stream-json mode is still unverified, and an autocomplete for commands that might do
+  nothing is worse than none. Text starting with `/` is sent as typed. Settle the open question
+  first (see §6), then add the menu.
+- **No persisted runner list.** The plan had `stateStore.ts` in phase 2 for phase 3 to use;
+  writing state nothing reads yet is speculative, so it moves to phase 3 with the re-adopt flow.
+- **`bypassPermissions` is not in the mode dropdown.** It needs a second opt-in flag and turns
+  every guard off at once, which is not something a dropdown should do by accident.
+- **`permissionPrompts`/`onUserDialog`**: not declared. `supportedDialogKinds` stays unset, so
+  the CLI emits no dialogs and degrades to its no-dialog behaviour, as planned.
+- The **+** button is a `view/title` and `editor/title` menu contribution rather than a button
+  inside the dashboard webview, which keeps it out of a file another agent is actively editing.
+- Tests: 314 pass. New are `runnerBlocks.test.ts` (16, synthetic SDK stream),
+  `runnerSession.test.ts` (19, `query` injected — no process is spawned), `inputQueue.test.ts`
+  (5) and `binary.test.ts` (6).
+- Verified after building: the bundled SDK initialises (`require('./dist/extension.js')` fails
+  only on the `vscode` host module), which is the check that catches the `import.meta.url`
+  problem — it is silent until activation otherwise.
+
+#### The original phase 2 plan
 
 Outcome: "New conversation" starts a Claude Code session inside the extension for a chosen
 project folder; the pane streams its output, shows permission/question/plan cards from
