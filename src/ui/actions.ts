@@ -10,6 +10,12 @@ export interface SessionActions {
   goTo(key: string): void;
   /** Open a conversation panel of this session's own, which is never swapped away. */
   pin(key: string): void;
+  /**
+   * Hand a session this window is running back to a terminal: end our process,
+   * then resume the same id there. The conversation lives in the transcript, so
+   * nothing is lost in the handover.
+   */
+  release(key: string): void;
   resume(key: string): void;
   copyId(key: string): void;
   reveal(key: string): void;

@@ -6,17 +6,21 @@
  * The shell (a reusable panel, or a pinned one) owns only a lifetime — the same
  * split the dashboard uses between `DashboardHost` and its two shells.
  */
+import * as path from 'node:path';
 import * as vscode from 'vscode';
+import type { RunnerService } from '../../claude/runner/runnerService';
+import type { RunnerSession } from '../../claude/runner/runnerSession';
 import type { AgentProvider } from '../../core/provider';
 import type { SessionStore } from '../../core/sessionStore';
 import type { ConversationCapabilities } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
-import type { AgentSession } from '../../shared/model';
+import type { AgentSession, SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
 import { buildWebviewHtml } from '../html';
 import { SECONDARY_LABEL, secondaryActionFor, type SecondaryAction } from '../openTarget';
 import type { SessionLocator } from '../sessionLocator';
 import { isInThisWorkspace } from '../workspace';
+import { RunnerSource } from './runnerSource';
 import type { ConversationSource } from './source';
 import { TranscriptSource } from './transcriptSource';
 
@@ -33,10 +37,17 @@ export interface ConversationProvider extends AgentProvider {
   decidePermission(sessionId: string, behavior: 'allow' | 'deny' | 'always'): Promise<boolean>;
 }
 
+/**
+ * What the pane is showing: a session the store knows about, or a runner we
+ * just started, whose id and store entry do not exist yet.
+ */
+type Binding = { kind: 'store'; key: string } | { kind: 'runner'; runner: RunnerSession };
+
 export class ConversationHost {
   private subs: { dispose(): void }[] = [];
   private source?: ConversationSource;
   private sourceSubs: { dispose(): void }[] = [];
+  private binding?: Binding;
   private session?: AgentSession;
   private ready = false;
   /** Only the newest capability computation may land; the locator read is async. */
@@ -47,6 +58,7 @@ export class ConversationHost {
     extensionUri: vscode.Uri,
     private store: SessionStore,
     private provider: ConversationProvider,
+    private runners: RunnerService,
     private actions: SessionActions,
     private locator: SessionLocator,
     private onTitle: (title: string) => void,
@@ -65,6 +77,9 @@ export class ConversationHost {
     this.subs.push(
       webview.onDidReceiveMessage((m: ConversationToHost) => void this.onMessage(m)),
       this.store.onDidUpdate(() => this.onStoreUpdate()),
+      // A runner's id arriving, or its lifecycle changing, changes what the
+      // pane can offer even when the store has not moved.
+      this.runners.onDidChange(() => this.onStoreUpdate()),
     );
   }
 
@@ -72,15 +87,18 @@ export class ConversationHost {
     return this.session?.key;
   }
 
-  /** Point the pane at a session. Safe to call repeatedly with the same key. */
+  /** Point the pane at a session the store knows. Safe to call repeatedly. */
   show(key: string): void {
-    if (this.session?.key === key) return;
+    if (this.binding?.kind === 'store' && this.binding.key === key) return;
     const session = this.store.get(key);
     if (!session) return;
-    this.session = session;
-    this.onTitle(session.title);
-    this.swapSource(session);
-    if (this.ready) void this.sendInit();
+    this.bind({ kind: 'store', key }, session);
+  }
+
+  /** Point the pane at a session we have just started, before it has an id. */
+  showRunner(runner: RunnerSession): void {
+    if (this.binding?.kind === 'runner' && this.binding.runner === runner) return;
+    this.bind({ kind: 'runner', runner }, syntheticSession(runner));
   }
 
   dispose(): void {
@@ -91,6 +109,14 @@ export class ConversationHost {
 
   // ---- internals ----
 
+  private bind(binding: Binding, session: AgentSession): void {
+    this.binding = binding;
+    this.session = session;
+    this.onTitle(session.title);
+    this.swapSource(session);
+    if (this.ready) void this.sendInit();
+  }
+
   private post(msg: HostToConversation): void {
     void this.webview.postMessage(msg);
   }
@@ -98,21 +124,28 @@ export class ConversationHost {
   private disposeSource(): void {
     for (const s of this.sourceSubs) s.dispose();
     this.sourceSubs = [];
+    // Disposing a runner source unsubscribes; the session keeps running.
     this.source?.dispose();
     this.source = undefined;
   }
 
   private swapSource(session: AgentSession): void {
     this.disposeSource();
-    // Phase 2 picks a runner source here when this extension owns the process.
-    const source = new TranscriptSource(session, this.provider, (id, behavior) =>
-      this.provider.decidePermission(id, behavior),
-    );
+    const runner =
+      this.binding?.kind === 'runner' ? this.binding.runner : this.runners.get(session.sessionId);
+    const source: ConversationSource = runner
+      ? new RunnerSource(runner)
+      : new TranscriptSource(session, this.provider, (id, behavior) =>
+          this.provider.decidePermission(id, behavior),
+        );
     this.source = source;
     this.sourceSubs.push(
       source.onAppend((blocks) => this.post({ type: 'append', blocks })),
       source.onPatch((patch) => this.post({ type: 'patch', id: patch.id, block: patch.block })),
     );
+    if (source.onComposer) {
+      this.sourceSubs.push(source.onComposer((composer) => this.post({ type: 'composer', composer })));
+    }
   }
 
   private async sendInit(): Promise<void> {
@@ -132,14 +165,21 @@ export class ConversationHost {
   }
 
   private onStoreUpdate(): void {
-    const key = this.session?.key;
-    if (!key) return;
-    const next = this.store.get(key);
-    if (!next) {
-      // Aged out of the store (ended and outside the window). Keep showing what
-      // we have; the last status we sent stands.
-      return;
+    const binding = this.binding;
+    if (!binding) return;
+
+    let next: AgentSession | undefined;
+    if (binding.kind === 'store') {
+      next = this.store.get(binding.key);
+    } else {
+      // A runner's real store entry appears once it has an id and a transcript;
+      // until then the synthetic one carries the pane.
+      next =
+        this.store.get(`claude:${(binding.runner.sessionId ?? '').toLowerCase()}`) ??
+        syntheticSession(binding.runner);
     }
+    if (!next) return; // aged out of the store; keep showing what we have
+
     const titleChanged = next.title !== this.session?.title;
     this.session = next;
     this.source?.setSession(next);
@@ -150,42 +190,72 @@ export class ConversationHost {
   private async pushSession(session: AgentSession): Promise<void> {
     const seq = ++this.capsSeq;
     const caps = await this.caps(session);
-    if (seq !== this.capsSeq || this.session?.key !== session.key) return;
+    if (seq !== this.capsSeq) return;
     this.post({ type: 'session', session, caps });
   }
 
   private async caps(session: AgentSession): Promise<ConversationCapabilities> {
-    const loc = await this.locator.locate(session.pid);
-    const action = secondaryActionFor(session, loc.kind, isInThisWorkspace(session.cwd));
+    const source = this.source;
+    const runner = source instanceof RunnerSource ? source.runner : undefined;
+    const canSend = runner !== undefined && runner.canSend;
+
+    // A runner session's process is a child of this extension host, so the
+    // locator would call it "a Claude Code panel in this window". It is not:
+    // this pane is the only place it exists.
+    const action = runner
+      ? undefined
+      : secondaryActionFor(session, (await this.locator.locate(session.pid)).kind, isInThisWorkspace(session.cwd));
+
     return {
-      // Phase 2: true for sessions this extension drives.
-      canSend: false,
-      canInterrupt: false,
+      canSend,
+      canInterrupt: canSend && (runner?.composer.busy ?? false),
+      // Phase 3.
       canAdopt: false,
-      canRelease: false,
+      canRelease: runner !== undefined,
       goTo: action ? { label: SECONDARY_LABEL[action], target: SECONDARY_TARGET[action] } : undefined,
-      estimated: session.statusIsEstimated === true,
-      readOnlyReason: readOnlyReason(session, action),
+      estimated: runner === undefined && session.statusIsEstimated === true,
+      readOnlyReason: canSend ? undefined : readOnlyReason(session, runner, action),
     };
   }
 
   private async onMessage(m: ConversationToHost): Promise<void> {
     const key = this.session?.key;
+    const source = this.source;
     switch (m.type) {
       case 'ready':
         this.ready = true;
         await this.sendInit();
         return;
+      case 'send':
+        await source?.send?.(m.text);
+        return;
+      case 'interrupt':
+        await source?.interrupt?.();
+        return;
       case 'decide': {
-        const sent = await this.source?.decide?.(m.requestId, m.decision, m.message);
-        if (sent === false) {
-          vscode.window.setStatusBarMessage(
-            'Agent Wrangler: that prompt was already answered in Claude Code.',
-            4000,
-          );
-        }
+        const sent = await source?.decide?.(m.requestId, m.decision, m.message);
+        if (sent === false) this.tooLate();
         return;
       }
+      case 'answer': {
+        const sent = await source?.answer?.(m.requestId, m.answers);
+        if (sent === false) this.tooLate();
+        return;
+      }
+      case 'plan': {
+        const sent = await source?.decidePlan?.(m.requestId, m.decision === 'approve', m.feedback);
+        if (sent === false) this.tooLate();
+        return;
+      }
+      case 'setPermissionMode':
+        await source?.setPermissionMode?.(m.mode);
+        return;
+      case 'setModel':
+        await source?.setModel?.(m.model);
+        return;
+      case 'release':
+        if (key) this.actions.release(key);
+        return;
       case 'goTo':
         if (key) this.actions.goTo(key);
         return;
@@ -198,7 +268,7 @@ export class ConversationHost {
         if (key) this.actions.resume(key);
         return;
       case 'requestToolResult': {
-        const text = this.source?.fullToolResult?.(m.id);
+        const text = source?.fullToolResult?.(m.id);
         if (text !== undefined) this.post({ type: 'toolResult', id: m.id, text });
         return;
       }
@@ -208,23 +278,52 @@ export class ConversationHost {
       case 'openFile':
         this.actions.openFile(m.path);
         return;
-      case 'send':
-      case 'interrupt':
-      case 'answer':
-      case 'plan':
-      case 'setPermissionMode':
-      case 'setModel':
       case 'adopt':
-      case 'release':
-        // Phase 2 and 3. The webview does not offer these yet; ignore rather
-        // than throw if an older bundle is still loaded in a restored panel.
+        // Phase 3.
         return;
     }
   }
+
+  private tooLate(): void {
+    vscode.window.setStatusBarMessage('Agent Wrangler: that prompt has already been answered.', 4000);
+  }
+}
+
+/** A session that exists only as a runner so far: started here, no id yet. */
+function syntheticSession(runner: RunnerSession): AgentSession {
+  const id = runner.sessionId ?? 'pending';
+  const status: SessionStatus =
+    runner.lifecycle === 'running'
+      ? 'busy'
+      : runner.lifecycle === 'ended' || runner.lifecycle === 'ending'
+        ? 'ended'
+        : runner.lifecycle === 'error'
+          ? 'stuck'
+          : 'waiting';
+  return {
+    provider: 'claude',
+    sessionId: id,
+    key: `claude:${id.toLowerCase()}`,
+    title: path.basename(runner.cwd) || 'New conversation',
+    cwd: runner.cwd,
+    projectName: path.basename(runner.cwd),
+    status,
+    lastActivityAt: Date.now(),
+    startedAt: runner.startedAt,
+  };
 }
 
 /** One sentence saying why the composer is disabled. */
-function readOnlyReason(session: AgentSession, action: SecondaryAction | undefined): string {
+function readOnlyReason(
+  session: AgentSession,
+  runner: RunnerSession | undefined,
+  action: SecondaryAction | undefined,
+): string {
+  if (runner) {
+    return runner.lifecycle === 'error'
+      ? 'This session stopped with an error.'
+      : 'This session has ended.';
+  }
   if (session.status === 'ended') return 'This session has ended.';
   switch (action) {
     case 'reveal-panel':

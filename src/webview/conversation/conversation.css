@@ -381,17 +381,109 @@ body,
 
 #composer {
   flex: 0 0 auto;
+  padding: 7px 12px;
+  border-top: 1px solid var(--aw-rule);
+}
+#composerRead {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 12px;
-  border-top: 1px solid var(--aw-rule);
   color: var(--vscode-descriptionForeground);
   font-size: 0.88em;
 }
 #composerNote {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+#composerBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#composerBar .grow {
+  flex: 1 1 auto;
+}
+#mode {
+  font-family: inherit;
+  font-size: inherit;
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid var(--vscode-dropdown-border, var(--aw-rule));
+  background: var(--vscode-dropdown-background, transparent);
+  color: var(--vscode-dropdown-foreground, inherit);
+}
+#queued {
+  padding: 0 7px;
+  border-radius: 8px;
+  border: 1px solid currentColor;
+  color: var(--aw-busy);
+}
+
+#composerInput {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+#msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: none;
+  overflow-y: auto;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.4;
+  padding: 5px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-input-border, var(--aw-rule));
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+}
+#msg:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  border-color: var(--vscode-focusBorder);
+}
+
+/* A reply still arriving gets a caret, so a pause reads as thinking. */
+.blk.assistant.streaming .body > :last-child::after {
+  content: '▍';
+  opacity: 0.5;
+}
+
+.qtext {
+  margin: 6px 0 3px;
+}
+.qopts {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 4px;
+}
+.qopt {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+}
+.qother,
+.qfeedback {
+  font-family: inherit;
+  font-size: inherit;
+  margin-top: 4px;
+  padding: 3px 7px;
+  border-radius: 3px;
+  border: 1px solid var(--vscode-input-border, var(--aw-rule));
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+}
+.qfeedback {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
 }
 
 #jump {

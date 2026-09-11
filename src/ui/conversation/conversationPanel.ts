@@ -8,6 +8,8 @@
  * while you browse others gets one of its own, and it is never swapped.
  */
 import * as vscode from 'vscode';
+import type { RunnerService } from '../../claude/runner/runnerService';
+import type { RunnerSession } from '../../claude/runner/runnerSession';
 import type { SessionStore } from '../../core/sessionStore';
 import type { SessionActions } from '../actions';
 import type { SessionLocator } from '../sessionLocator';
@@ -34,6 +36,7 @@ export class ConversationPanelManager implements vscode.Disposable {
     private extensionUri: vscode.Uri,
     private store: SessionStore,
     private provider: ConversationProvider,
+    private runners: RunnerService,
     private actions: SessionActions,
     private locator: SessionLocator,
   ) {}
@@ -51,23 +54,36 @@ export class ConversationPanelManager implements vscode.Disposable {
       pinnedShell.panel.reveal(undefined, preserveFocus);
       return;
     }
-    if (!this.shared) {
-      const beside = vscode.workspace
-        .getConfiguration('agentWrangler')
-        .get<boolean>('conversation.openBeside', true);
-      this.shared = this.adoptShell(
-        vscode.window.createWebviewPanel(
-          CONVERSATION_PANEL_TYPE,
-          'Conversation',
-          { viewColumn: beside ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active, preserveFocus },
-          { retainContextWhenHidden: true },
-        ),
-        undefined,
-      );
-    } else {
+    this.ensureShared(preserveFocus).host.show(key);
+  }
+
+  /**
+   * Show a session this window has just started, which has no id and no store
+   * entry yet. Takes focus, unlike a row click: the user asked for this one and
+   * will want to type into it.
+   */
+  showRunner(runner: RunnerSession): void {
+    this.ensureShared(false).host.showRunner(runner);
+  }
+
+  private ensureShared(preserveFocus: boolean): Shell {
+    if (this.shared) {
       this.shared.panel.reveal(undefined, preserveFocus);
+      return this.shared;
     }
-    this.shared.host.show(key);
+    const beside = vscode.workspace
+      .getConfiguration('agentWrangler')
+      .get<boolean>('conversation.openBeside', true);
+    this.shared = this.adoptShell(
+      vscode.window.createWebviewPanel(
+        CONVERSATION_PANEL_TYPE,
+        'Conversation',
+        { viewColumn: beside ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active, preserveFocus },
+        { retainContextWhenHidden: true },
+      ),
+      undefined,
+    );
+    return this.shared;
   }
 
   /** Give this session a panel of its own, which `show` will never swap. */
@@ -137,6 +153,7 @@ export class ConversationPanelManager implements vscode.Disposable {
       this.extensionUri,
       this.store,
       this.provider,
+      this.runners,
       this.actions,
       this.locator,
       (title) => {

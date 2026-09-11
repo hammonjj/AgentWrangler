@@ -4,6 +4,8 @@ import type {
   ComposerState,
   ConvBlock,
   ConversationCapabilities,
+  PermissionModeName,
+  QuestionView,
 } from '../../shared/conversation';
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
@@ -21,6 +23,19 @@ const post = (msg: ConversationToHost) => vscodeApi.postMessage(msg);
 const MAX_BLOCK_NODES = 400;
 /** Treat the view as "at the bottom" within this many pixels. */
 const STICK_PX = 56;
+/** Composer grows with the message up to this, then scrolls. */
+const MAX_COMPOSER_PX = 180;
+
+/**
+ * The modes worth offering. `bypassPermissions` is deliberately absent: it
+ * needs an extra opt-in flag and turns every guard off at once, which is not
+ * something a dropdown should do by accident.
+ */
+const MODES: { value: PermissionModeName; label: string }[] = [
+  { value: 'default', label: 'Ask permission' },
+  { value: 'acceptEdits', label: 'Auto-accept edits' },
+  { value: 'plan', label: 'Plan mode' },
+];
 
 const app = document.getElementById('app')!;
 app.innerHTML = `
@@ -29,14 +44,29 @@ app.innerHTML = `
   <span id="ttl"></span>
   <span id="meta"></span>
   <span id="spacer"></span>
+  <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
   <button id="pin" class="hdrbtn" title="Open this conversation in its own tab">Pin</button>
 </div>
 <div id="banner" hidden></div>
 <div id="scroll"><div id="notch" hidden>earlier messages not shown</div><div id="blocks"></div></div>
 <button id="jump" hidden></button>
 <div id="composer">
-  <span id="composerNote"></span>
-  <button id="goTo" class="hdrbtn" hidden></button>
+  <div id="composerRead">
+    <span id="composerNote"></span>
+    <button id="goTo" class="hdrbtn" hidden></button>
+  </div>
+  <div id="composerWrite" hidden>
+    <div id="composerBar">
+      <select id="mode" title="Permission mode"></select>
+      <span id="queued" hidden></span>
+      <span class="grow"></span>
+      <button id="stop" class="hdrbtn" hidden>Stop</button>
+    </div>
+    <div id="composerInput">
+      <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button id="send" class="askbtn primary">Send</button>
+    </div>
+  </div>
 </div>
 `;
 
@@ -48,9 +78,17 @@ const scroller = document.getElementById('scroll')!;
 const notch = document.getElementById('notch')!;
 const blocksEl = document.getElementById('blocks')!;
 const jump = document.getElementById('jump')!;
+const composerRead = document.getElementById('composerRead')!;
+const composerWrite = document.getElementById('composerWrite')!;
 const composerNote = document.getElementById('composerNote')!;
 const goToBtn = document.getElementById('goTo') as HTMLButtonElement;
 const pinBtn = document.getElementById('pin') as HTMLButtonElement;
+const releaseBtn = document.getElementById('release') as HTMLButtonElement;
+const modeSel = document.getElementById('mode') as HTMLSelectElement;
+const queuedEl = document.getElementById('queued')!;
+const stopBtn = document.getElementById('stop') as HTMLButtonElement;
+const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
+const sendBtn = document.getElementById('send') as HTMLButtonElement;
 
 /** Block id → its node, so a patch updates in place instead of re-rendering. */
 const nodes = new Map<string, HTMLElement>();
@@ -59,6 +97,14 @@ const blockState = new Map<string, ConvBlock>();
 
 let stick = true;
 let newCount = 0;
+let caps: ConversationCapabilities | undefined;
+
+for (const m of MODES) {
+  const opt = document.createElement('option');
+  opt.value = m.value;
+  opt.textContent = m.label;
+  modeSel.appendChild(opt);
+}
 
 // ---- rendering helpers ----
 
@@ -102,9 +148,17 @@ function timeLabel(ts: string | undefined): string {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function toolStateLabel(b: Extract<ConvBlock, { kind: 'tool' }>): string {
-  if (b.state === 'running') return 'running';
-  return b.state === 'error' ? 'failed' : '';
+function answeredLabel(state: AskState): string {
+  switch (state) {
+    case 'allowed':
+      return 'Allowed.';
+    case 'denied':
+      return 'Denied.';
+    case 'expired':
+      return 'Answered elsewhere.';
+    default:
+      return '';
+  }
 }
 
 // ---- block nodes ----
@@ -134,7 +188,7 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       break;
     }
     case 'assistant': {
-      el.className = 'blk assistant';
+      el.className = b.streaming ? 'blk assistant streaming' : 'blk assistant';
       el.innerHTML = '';
       const body = document.createElement('div');
       body.className = 'body';
@@ -147,7 +201,7 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       el.innerHTML = '';
       const d = document.createElement('details');
       const s = document.createElement('summary');
-      setText(s, 'Thinking');
+      setText(s, b.streaming ? 'Thinking…' : 'Thinking');
       const body = document.createElement('div');
       body.className = 'body';
       renderMarkdown(body, b.text);
@@ -167,11 +221,10 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       preview.className = 'tin';
       setText(preview, b.inputPreview);
       s.append(name, preview);
-      const state = toolStateLabel(b);
-      if (state) {
+      if (b.state !== 'done') {
         const st = document.createElement('span');
         st.className = 'tstate';
-        setText(st, state);
+        setText(st, b.state === 'running' ? 'running' : 'failed');
         s.appendChild(st);
       }
       d.appendChild(s);
@@ -229,7 +282,7 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
         setText(pre, b.body);
         el.appendChild(pre);
       }
-      el.appendChild(askActions(b.requestId, b.state, b.alwaysAllowRule));
+      el.appendChild(permissionActions(b.requestId, b.state, b.alwaysAllowRule));
       break;
     }
     case 'question': {
@@ -237,27 +290,9 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       el.innerHTML = '';
       const head = document.createElement('div');
       head.className = 'askhead';
-      setText(head, 'Claude asked a question');
+      setText(head, 'Claude has a question');
       el.appendChild(head);
-      for (const q of b.questions) {
-        const qd = document.createElement('div');
-        qd.className = 'body';
-        setText(qd, q.question);
-        el.appendChild(qd);
-        const opts = document.createElement('div');
-        opts.className = 'sub';
-        setText(opts, q.options.map((o) => o.label).join(' · '));
-        el.appendChild(opts);
-      }
-      const note = document.createElement('div');
-      note.className = 'asknote';
-      setText(
-        note,
-        b.state === 'pending'
-          ? 'Answer this one in Claude Code: a question cannot be settled from outside.'
-          : answeredLabel(b.state),
-      );
-      el.appendChild(note);
+      el.appendChild(questionForm(b.requestId, b.questions, b.state, b.answers));
       break;
     }
     case 'plan': {
@@ -265,21 +300,13 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       el.innerHTML = '';
       const head = document.createElement('div');
       head.className = 'askhead';
-      setText(head, 'Plan awaiting approval');
+      setText(head, 'Plan ready for approval');
       el.appendChild(head);
       const body = document.createElement('div');
       body.className = 'body';
       renderMarkdown(body, b.plan);
       el.appendChild(body);
-      const note = document.createElement('div');
-      note.className = 'asknote';
-      setText(
-        note,
-        b.state === 'pending'
-          ? 'Approve this one in Claude Code: plan approval cannot be settled from outside.'
-          : answeredLabel(b.state),
-      );
-      el.appendChild(note);
+      el.appendChild(planActions(b.requestId, b.state));
       break;
     }
     case 'note': {
@@ -296,41 +323,42 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
   if (ts) el.title = ts;
 }
 
-function answeredLabel(state: AskState): string {
-  switch (state) {
-    case 'allowed':
-      return 'Allowed.';
-    case 'denied':
-      return 'Denied.';
-    case 'expired':
-      return 'Answered in Claude Code.';
-    default:
-      return '';
-  }
+/** An ask this pane cannot answer: say so instead of showing dead buttons. */
+function cannotAnswer(row: HTMLElement, what: string): void {
+  const note = document.createElement('span');
+  note.className = 'asknote';
+  setText(note, `Answer this in ${what}: this session is not running in this window.`);
+  row.appendChild(note);
 }
 
-function askActions(requestId: string, state: AskState, alwaysAllowRule: string | undefined): HTMLElement {
+function settledRow(state: AskState): HTMLElement {
   const row = document.createElement('div');
   row.className = 'askrow';
-  if (state !== 'pending') {
-    const done = document.createElement('span');
-    done.className = 'asknote';
-    setText(done, answeredLabel(state));
-    row.appendChild(done);
-    return row;
-  }
+  const done = document.createElement('span');
+  done.className = 'asknote';
+  setText(done, answeredLabel(state));
+  row.appendChild(done);
+  return row;
+}
+
+function permissionActions(requestId: string, state: AskState, alwaysAllowRule: string | undefined): HTMLElement {
+  if (state !== 'pending') return settledRow(state);
+  const row = document.createElement('div');
+  row.className = 'askrow';
+
   const mk = (label: string, decision: 'allow' | 'always' | 'deny', cls: string) => {
     const b = document.createElement('button');
     b.className = `askbtn ${cls}`;
     setText(b, label);
     b.addEventListener('click', () => {
-      // Optimistic only in the sense of disabling: the host's patch decides
-      // what the card ends up saying, including "too late".
+      // Disabling is optimistic; the host's patch decides what the card ends
+      // up saying, including "too late".
       for (const other of Array.from(row.querySelectorAll('button'))) other.disabled = true;
       post({ type: 'decide', requestId, decision });
     });
     return b;
   };
+
   row.appendChild(mk('Allow', 'allow', 'primary'));
   if (alwaysAllowRule) {
     const always = mk('Always allow', 'always', '');
@@ -340,6 +368,143 @@ function askActions(requestId: string, state: AskState, alwaysAllowRule: string 
   }
   row.appendChild(mk('Deny', 'deny', ''));
   return row;
+}
+
+/**
+ * `AskUserQuestion` as a form. Only a session running here can be answered —
+ * the hook that carries Allow/Deny to another window explicitly cannot settle
+ * a question.
+ */
+function questionForm(
+  requestId: string,
+  questions: QuestionView[],
+  state: AskState,
+  answers: Record<string, string> | undefined,
+): HTMLElement {
+  const wrap = document.createElement('div');
+
+  for (const q of questions) {
+    const qd = document.createElement('div');
+    qd.className = 'qtext';
+    setText(qd, q.question);
+    wrap.appendChild(qd);
+
+    if (state !== 'pending') {
+      const chosen = document.createElement('div');
+      chosen.className = 'sub';
+      setText(chosen, answers?.[q.question] ?? q.options.map((o) => o.label).join(' · '));
+      wrap.appendChild(chosen);
+      continue;
+    }
+
+    const opts = document.createElement('div');
+    opts.className = 'qopts';
+    for (const o of q.options) {
+      const label = document.createElement('label');
+      label.className = 'qopt';
+      const input = document.createElement('input');
+      input.type = q.multiSelect ? 'checkbox' : 'radio';
+      input.name = `q:${requestId}:${q.question}`;
+      input.value = o.label;
+      const text = document.createElement('span');
+      setText(text, o.label);
+      label.append(input, text);
+      if (o.description) label.title = o.description;
+      opts.appendChild(label);
+    }
+    // Claude's own question tool always offers "Other"; so does this.
+    const other = document.createElement('input');
+    other.type = 'text';
+    other.className = 'qother';
+    other.placeholder = 'Other…';
+    other.dataset.question = q.question;
+    opts.appendChild(other);
+    wrap.appendChild(opts);
+  }
+
+  if (state !== 'pending') {
+    wrap.appendChild(settledRow(state));
+    return wrap;
+  }
+
+  const row = document.createElement('div');
+  row.className = 'askrow';
+  if (!caps?.canSend) {
+    cannotAnswer(row, 'Claude Code');
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  const submit = document.createElement('button');
+  submit.className = 'askbtn primary';
+  setText(submit, 'Answer');
+  submit.addEventListener('click', () => {
+    const collected: Record<string, string> = {};
+    for (const q of questions) {
+      const picked = Array.from(
+        wrap.querySelectorAll<HTMLInputElement>(`input[name="q:${CSS.escape(requestId)}:${CSS.escape(q.question)}"]`),
+      )
+        .filter((i) => i.checked)
+        .map((i) => i.value);
+      const free = wrap.querySelector<HTMLInputElement>(`input.qother[data-question="${CSS.escape(q.question)}"]`);
+      const freeText = free?.value.trim();
+      if (freeText) picked.push(freeText);
+      if (picked.length > 0) collected[q.question] = picked.join(', ');
+    }
+    if (Object.keys(collected).length === 0) return;
+    submit.disabled = true;
+    post({ type: 'answer', requestId, answers: collected });
+  });
+  row.appendChild(submit);
+  wrap.appendChild(row);
+  return wrap;
+}
+
+function planActions(requestId: string, state: AskState): HTMLElement {
+  if (state !== 'pending') return settledRow(state);
+  const wrap = document.createElement('div');
+  const row = document.createElement('div');
+  row.className = 'askrow';
+
+  if (!caps?.canSend) {
+    cannotAnswer(row, 'Claude Code');
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  const approve = document.createElement('button');
+  approve.className = 'askbtn primary';
+  setText(approve, 'Approve');
+  approve.addEventListener('click', () => {
+    approve.disabled = true;
+    changes.disabled = true;
+    post({ type: 'plan', requestId, decision: 'approve' });
+  });
+
+  const feedback = document.createElement('textarea');
+  feedback.className = 'qfeedback';
+  feedback.rows = 2;
+  feedback.placeholder = 'What should change?';
+  feedback.hidden = true;
+
+  const changes = document.createElement('button');
+  changes.className = 'askbtn';
+  setText(changes, 'Request changes');
+  changes.addEventListener('click', () => {
+    if (feedback.hidden) {
+      feedback.hidden = false;
+      feedback.focus();
+      setText(changes, 'Send feedback');
+      return;
+    }
+    approve.disabled = true;
+    changes.disabled = true;
+    post({ type: 'plan', requestId, decision: 'deny', feedback: feedback.value.trim() || undefined });
+  });
+
+  row.append(approve, changes);
+  wrap.append(row, feedback);
+  return wrap;
 }
 
 /** Colour a unified patch without a syntax highlighter. */
@@ -413,9 +578,7 @@ function scrollToBottom(): void {
 function setStatus(status: SessionStatus, estimated: boolean): void {
   pill.className = `pill st-${status}`;
   pill.textContent = estimated ? `~ ${STATUS_LABEL[status]}` : STATUS_LABEL[status];
-  pill.title = estimated
-    ? 'Estimated from the transcript: install the status hooks for exact status.'
-    : '';
+  pill.title = estimated ? 'Estimated from the transcript: install the status hooks for exact status.' : '';
 }
 
 function setMeta(session: SessionDTO): void {
@@ -425,22 +588,28 @@ function setMeta(session: SessionDTO): void {
     .join(' · ');
 }
 
-function setCaps(caps: ConversationCapabilities, composer: ComposerState | undefined): void {
-  if (caps.goTo) {
-    goToBtn.hidden = false;
-    goToBtn.textContent = caps.goTo.label;
-  } else {
-    goToBtn.hidden = true;
-  }
-  if (caps.canSend && composer) {
-    composerNote.textContent = '';
-  } else {
-    composerNote.textContent = caps.readOnlyReason ?? 'Read-only.';
-  }
+function setCaps(next: ConversationCapabilities, composer: ComposerState | undefined): void {
+  caps = next;
+  goToBtn.hidden = !next.goTo;
+  if (next.goTo) goToBtn.textContent = next.goTo.label;
+  releaseBtn.hidden = !next.canRelease;
+
+  composerWrite.hidden = !next.canSend;
+  composerRead.hidden = next.canSend;
+  if (!next.canSend) composerNote.textContent = next.readOnlyReason ?? 'Read-only.';
+  if (composer) setComposer(composer);
 }
 
-function setBanner(caps: ConversationCapabilities): void {
-  if (!caps.estimated) {
+function setComposer(c: ComposerState): void {
+  if (c.permissionMode) modeSel.value = c.permissionMode;
+  stopBtn.hidden = !c.busy;
+  sendBtn.disabled = false; // sends queue behind a running turn, so never blocked
+  queuedEl.hidden = c.queued === 0;
+  queuedEl.textContent = c.queued === 1 ? '1 queued' : `${c.queued} queued`;
+}
+
+function setBanner(next: ConversationCapabilities): void {
+  if (!next.estimated) {
     banner.hidden = true;
     return;
   }
@@ -448,6 +617,21 @@ function setBanner(caps: ConversationCapabilities): void {
   banner.textContent =
     'Status here is estimated from the transcript, and a permission prompt cannot be answered. ' +
     'Install the Agent Wrangler status hooks, then restart this session.';
+}
+
+function autoGrow(): void {
+  msgEl.style.height = 'auto';
+  msgEl.style.height = `${Math.min(msgEl.scrollHeight, MAX_COMPOSER_PX)}px`;
+}
+
+function sendMessage(): void {
+  const text = msgEl.value.trim();
+  if (!text) return;
+  post({ type: 'send', text });
+  msgEl.value = '';
+  autoGrow();
+  stick = true;
+  scrollToBottom();
 }
 
 // ---- events ----
@@ -470,6 +654,17 @@ jump.addEventListener('click', () => {
 
 goToBtn.addEventListener('click', () => post({ type: 'goTo' }));
 pinBtn.addEventListener('click', () => post({ type: 'pin' }));
+releaseBtn.addEventListener('click', () => post({ type: 'release' }));
+sendBtn.addEventListener('click', sendMessage);
+stopBtn.addEventListener('click', () => post({ type: 'interrupt' }));
+modeSel.addEventListener('change', () => post({ type: 'setPermissionMode', mode: modeSel.value as PermissionModeName }));
+
+msgEl.addEventListener('input', autoGrow);
+msgEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+  e.preventDefault();
+  sendMessage();
+});
 
 // Links inside rendered markdown open in the browser, never inside the pane.
 blocksEl.addEventListener('click', (e) => {
@@ -512,13 +707,17 @@ window.addEventListener('message', (e: MessageEvent) => {
       setBanner(m.caps);
       break;
     case 'composer':
-      break; // phase 2
-    case 'toolResult':
-      break; // phase 2
-    case 'error': {
-      appendBlocks([{ kind: 'note', id: `e${Date.now()}`, tone: 'error', text: m.text }]);
+      setComposer(m.composer);
+      break;
+    case 'toolResult': {
+      const node = nodes.get(m.id);
+      const pre = node?.querySelector('.tresult');
+      if (pre) setText(pre as HTMLElement, m.text);
       break;
     }
+    case 'error':
+      appendBlocks([{ kind: 'note', id: `e${Date.now()}`, tone: 'error', text: m.text }]);
+      break;
   }
 });
 

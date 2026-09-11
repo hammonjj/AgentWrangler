@@ -1,5 +1,11 @@
+import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { resolveClaudeBinary } from './claude/binary';
 import { ClaudeProvider } from './claude/claudeProvider';
+import { RunnerService } from './claude/runner/runnerService';
+import type { RunnerSession } from './claude/runner/runnerSession';
 import {
   currentState,
   installHooks,
@@ -16,6 +22,7 @@ import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
 import { UsageService } from './core/usageService';
+import type { PermissionModeName } from './shared/conversation';
 import { STATUS_LABEL, type AgentSession, type OpenTarget, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
 import {
@@ -103,6 +110,15 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
   );
+
+  // Sessions this window runs itself, through the Agent SDK. The binary is
+  // resolved per start so changing the setting does not need a reload.
+  const runners = new RunnerService({
+    query: sdkQuery,
+    binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath),
+    log,
+  });
+  context.subscriptions.push(runners);
 
   const showInPane = (s: AgentSession) => conversations.show(s.key);
 
@@ -220,6 +236,27 @@ export function activate(context: vscode.ExtensionContext): void {
     pin(key) {
       conversations.pin(key);
     },
+    release(key) {
+      const s = store.get(key);
+      const runner = runners.get(s?.sessionId);
+      if (!s || !runner) return;
+      void (async () => {
+        const choice = await vscode.window.showWarningMessage(
+          `Hand ${s.name ?? s.title} back to a terminal?`,
+          {
+            modal: true,
+            detail:
+              'This window stops running the session and a terminal resumes it with the same id. ' +
+              'The conversation is the transcript, so nothing is lost — but a turn in flight is cut off.',
+          },
+          'Release',
+        );
+        if (choice !== 'Release') return;
+        await runners.end(runner);
+        resumeInTerminal(s, getConfig);
+        log(`released ${s.sessionId} to a terminal`);
+      })();
+    },
     resume(key) {
       const s = store.get(key);
       if (s) resumeInTerminal(s, getConfig);
@@ -280,7 +317,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The conversation pane: one reusable panel that row clicks swap, plus a
   // pinned panel per session the user wants to keep on screen.
-  const conversations = new ConversationPanelManager(context.extensionUri, store, provider, actions, locator);
+  const conversations = new ConversationPanelManager(
+    context.extensionUri,
+    store,
+    provider,
+    runners,
+    actions,
+    locator,
+  );
   context.subscriptions.push(
     conversations,
     vscode.window.registerWebviewPanelSerializer(
@@ -381,7 +425,62 @@ export function activate(context: vscode.ExtensionContext): void {
       if (s) fn(s.key);
     };
 
+  /**
+   * Start a session this window runs itself. The folder matters more than
+   * usual here: it is the session's working directory, and unlike the Claude
+   * Code panel — which is bound to its window's workspace — the pane can run a
+   * session in any project on the machine.
+   */
+  const newConversation = async (): Promise<RunnerSession | undefined> => {
+    const seen = new Set<string>();
+    const folders: { label: string; description?: string; dir?: string; browse?: boolean }[] = [];
+    for (const f of vscode.workspace.workspaceFolders ?? []) {
+      if (seen.has(f.uri.fsPath)) continue;
+      seen.add(f.uri.fsPath);
+      folders.push({ label: path.basename(f.uri.fsPath), description: f.uri.fsPath, dir: f.uri.fsPath });
+    }
+    for (const s of store.sessions) {
+      if (!s.cwd || seen.has(s.cwd)) continue;
+      seen.add(s.cwd);
+      folders.push({ label: path.basename(s.cwd), description: s.cwd, dir: s.cwd });
+    }
+    folders.push({ label: '$(folder-opened) Browse…', description: 'Pick another folder', browse: true });
+
+    const picked = await vscode.window.showQuickPick(folders, {
+      placeHolder: 'Start a conversation in which project?',
+      matchOnDescription: true,
+    });
+    if (!picked) return undefined;
+
+    let cwd = picked.dir;
+    if (picked.browse) {
+      const chosen = await vscode.window.showOpenDialog({
+        canSelectFolders: true,
+        canSelectFiles: false,
+        canSelectMany: false,
+        openLabel: 'Start here',
+      });
+      cwd = chosen?.[0]?.fsPath;
+    }
+    if (!cwd) return undefined;
+    if (!fs.existsSync(cwd)) {
+      void vscode.window.showErrorMessage(`Agent Wrangler: ${cwd} no longer exists.`);
+      return undefined;
+    }
+
+    const cfg = vscode.workspace.getConfiguration('agentWrangler');
+    const model = cfg.get<string>('runner.model', '').trim();
+    const runner = runners.start({
+      cwd,
+      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'default'),
+      model: model || undefined,
+    });
+    conversations.showRunner(runner);
+    return runner;
+  };
+
   context.subscriptions.push(
+    vscode.commands.registerCommand('agentWrangler.newConversation', () => void newConversation()),
     vscode.commands.registerCommand('agentWrangler.openDashboard', () => openDashboard()),
     vscode.commands.registerCommand('agentWrangler.refresh', () => {
       actions.refreshAll();

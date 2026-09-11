@@ -46,6 +46,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "agentWrangler.newConversation",
+        "title": "Agent Wrangler: New Conversation…",
+        "icon": "$(add)"
+      },
+      {
         "command": "agentWrangler.openConversation",
         "title": "Agent Wrangler: Open Conversation…"
       },
@@ -81,16 +86,26 @@
     "menus": {
       "view/title": [
         {
+          "command": "agentWrangler.newConversation",
+          "when": "view == agentWrangler.dashboard",
+          "group": "navigation@1"
+        },
+        {
           "command": "agentWrangler.refresh",
           "when": "view == agentWrangler.dashboard",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ],
       "editor/title": [
         {
+          "command": "agentWrangler.newConversation",
+          "when": "activeWebviewPanelViewType == agentWrangler.dashboardPanel",
+          "group": "navigation@1"
+        },
+        {
           "command": "agentWrangler.refresh",
           "when": "activeWebviewPanelViewType == agentWrangler.dashboardPanel",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ]
     },
@@ -114,6 +129,26 @@
           "type": "boolean",
           "default": true,
           "description": "Open the conversation pane in an editor group beside the current one, so the dashboard stays visible. Turn off to open it in the active group."
+        },
+        "agentWrangler.runner.defaultPermissionMode": {
+          "type": "string",
+          "enum": [
+            "default",
+            "acceptEdits",
+            "plan"
+          ],
+          "enumDescriptions": [
+            "Ask before every tool that needs permission.",
+            "Accept file edits without asking; still ask for everything else.",
+            "Plan first: no tools run until you approve a plan."
+          ],
+          "default": "default",
+          "description": "Permission mode for conversations started from Agent Wrangler. Changeable per session from the pane."
+        },
+        "agentWrangler.runner.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model for conversations started from Agent Wrangler (e.g. claude-opus-5). Empty means Claude Code's own default."
         },
         "agentWrangler.dashboardLocation": {
           "type": "string",
@@ -191,6 +226,7 @@
     "install-local:reload": "npm run install-local && date > .dev-reload"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.268",
     "@types/markdown-it": "14.2.0",
     "@types/node": "^24.0.0",
     "@types/vscode": "1.90.0",

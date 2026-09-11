@@ -28,6 +28,11 @@ const host = {
   outfile: 'dist/extension.js',
   sourcemap: true,
   minify: false,
+  // The Claude Agent SDK ships as ESM and calls `createRequire(import.meta.url)`
+  // at load. Bundled to CJS that expression is empty and the module throws
+  // before it exports anything, so point it at this file's own URL.
+  define: { 'import.meta.url': '__aw_import_meta_url' },
+  banner: { js: "var __aw_import_meta_url = require('url').pathToFileURL(__filename).href;" },
   plugins: [watchLogger],
 };
 
