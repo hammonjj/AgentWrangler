@@ -1,6 +1,8 @@
 # Conversation pane: work every Claude Code session from one window
 
-Status: **approved plan, not yet implemented.** Branch: `feat/conversation-pane`.
+Status: **approved plan, not yet implemented.** Branch: `feat/conversation-pane`, which has
+its own worktree at `../AgentWrangler-conversation-pane` — work there, never in the primary
+checkout, which stays on `main`.
 Written 2026-09-11 after a design discussion and a live spike; the implementing agent
 should treat every "Verified" item below as fact and every "Unverified" item as something
 to confirm in the first task that touches it.
@@ -63,9 +65,13 @@ window again. "Go to its window" survives only as a secondary button.
   must stay free of `vscode`, Node and DOM imports (it is bundled into both worlds).
 - The dashboard is used **narrow** (300–370 CSS px). The conversation pane will usually be
   wider, but must degrade to ~400 px.
-- Before the first commit on this branch, `git status` must be clean apart from your
-  work. When the plan was written, `main` carried ~30 uncommitted files of usage-card work
-  that belong to a separate commit; James decides what to do with them.
+- Several agents work this repo at once. `CLAUDE.md` has the rules; the ones that bite here:
+  commit **by path**, never `git commit -a` or a blind `git add -A`; never `git checkout` in a
+  tree you did not create; say which tree you installed from, because `install-local` installs
+  whichever tree it ran in and the last one wins.
+- This worktree's `node_modules` is a **symlink to the primary tree's**. Phase 2 adds
+  dependencies, so that `npm i` writes into the shared directory and the primary tree sees
+  them before the merge. Harmless, but say so rather than letting it surprise anyone.
 - Commit messages: imperative summary line, body explains *why*. Keep the co-author trailer
   the harness gives you.
 
