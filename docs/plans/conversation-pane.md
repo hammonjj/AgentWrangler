@@ -623,7 +623,31 @@ it continues; `/plan`-style flow: switch mode to plan, ask for a plan → plan c
 quickly → second shows as queued and runs after; usage cards move after a few turns
 (subscription is being used).
 
-### Phase 3 — Adopt, release, survive reloads
+### Phase 3 — Adopt, release, survive reloads — **SHIPPED 2026-09-11**
+
+**What shipped, and where it differs from the plan below.**
+
+- Adoptability is its own pure function, `adoptActionFor(session, ownedByRunner)`, rather than
+  extra results on `secondaryActionFor`. The two answer different questions — "where else does
+  this run?" and "can it be pulled here?" — and the pane shows both at once.
+- **Re-adopt is automatic and narrow**, not an offer in the pane. `RunnerRegistry` is
+  **workspace** state, not global as the plan implied: global is shared by every window, so two
+  windows starting up would both resume the same id, which is the corruption the whole adopt
+  path exists to avoid. Only the most recently shown session, only within `RESUME_WINDOW_MS`
+  (8h), only when nothing else is running it.
+- `stateStore.ts` from the phase 2 plan landed here as `runnerRegistry.ts`, as noted then.
+- **Release was already shipped in phase 2.**
+- Found and fixed while testing: `ConversationPanelManager.restore` disposed the restored pane
+  because VSCode restores panels during activation, before the provider's first scan, so
+  `store.get(key)` was always undefined. The host now holds a `pendingKey` and binds when the
+  session appears. Any future code reading the store during activation has the same trap.
+- Tests: 332 pass. New are `adopt.test.ts` (6, a virtual clock so the 5s/2s budgets cost
+  nothing), `runnerRegistry.test.ts` (6), and `adoptActionFor` cases in `openTarget.test.ts`.
+- Not done, and not needed: `LocationKind 'runner'` exists and is used, but the phase 4
+  detached broker is still the only way to keep runner sessions alive across a reload rather
+  than resuming them.
+
+#### The original phase 3 plan
 
 Outcome: any idle session anywhere can be pulled into this window; a runner session can be
 handed back to a terminal or the Claude Code panel; a window reload does not lose runner
