@@ -484,11 +484,35 @@ in `src/core/config.ts`, and `getConfig` in `src/extension.ts`.
 Each phase ends with: `npm run typecheck && npm test` green, `npm run install-local` run,
 README updated for the behaviour that changed, and a note to James that a reload is needed.
 
-### Phase 1 — The pane replaces window-jumping (read + permissions, no typing)
+### Phase 1 — The pane replaces window-jumping (read + permissions, no typing) — **SHIPPED 2026-09-11**
 
 Outcome: clicking any row opens the Conversation pane beside the dashboard with a proper
 rendering of the session, permission prompts can be answered from it, and nothing ever
 focuses another window.
+
+**What shipped, and where it differs from the plan below.** Read these before phase 2; the
+task list that follows is the original plan, kept for context.
+
+- Files landed as planned, plus `src/shared/markdown.ts` — the `markdown-it` instance moved
+  into `shared` so the `html: false` escaping could be tested without a DOM
+  (`test/markdown.test.ts`). `markdown-it` is therefore a phase 1 dependency, not phase 2.
+- `secondaryActionFor` does **not** take `ownedByRunner` and does not return `adopt` /
+  `release` yet. There is no runner to adopt into, and a button that cannot work is worse
+  than no button. Phase 3 adds the parameter and those two results.
+- **Subagent lines are skipped, not nested.** The plan said to collapse `isSidechain` lines
+  under their parent tool. The transcript does not stamp them with the `tool_use_id` of the
+  Agent call that spawned them, so there is nothing reliable to nest them under; the parent
+  Agent block still shows the call and its report. Revisit only if a linking field appears.
+- **`fullToolResult` is not implemented for the transcript source.** Results are capped at
+  `MAX_TOOL_RESULT_CHARS` in the reducer and the card says the output was truncated. The
+  `requestToolResult` message exists in the protocol for the runner, which holds the full
+  text in memory; the transcript source would have to re-read and re-parse the file for it.
+- `docs/**` was added to `.vscodeignore`: this plan was shipping inside the `.vsix`.
+- The old viewer is gone (`viewerPanel.ts`, `transcriptRender.ts`, `src/webview/viewer/*`,
+  `ViewerBlock`, `HostToViewer`/`ViewerToHost`). `agentWrangler.openViewer` became
+  `agentWrangler.openConversation`, plus `pinConversation` and `goToSession`.
+- Tests: 255 pass. New files are `test/transcriptBlocks.test.ts` (18 cases),
+  `test/markdown.test.ts` (6), and a rewritten `test/openTarget.test.ts` (13).
 
 Tasks:
 
