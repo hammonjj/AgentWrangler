@@ -10,9 +10,11 @@ import {
 import { hookLogDir } from './claude/hookLog';
 import { fetchUsage } from './claude/usageFetch';
 import { ArchiveService } from './core/archive';
+import { ColumnPrefsService } from './core/columnPrefs';
 import { DEFAULT_CONFIG, type ConfigGetter, type WranglerConfig } from './core/config';
 import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
+import { FileUsageCache } from './core/usageCache';
 import { UsageService } from './core/usageService';
 import { STATUS_LABEL, type AgentSession, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
@@ -72,11 +74,21 @@ export function activate(context: vscode.ExtensionContext): void {
   const turnStats = new TurnStats(context.globalState);
   const provider = new ClaudeProvider(getConfig, log, turnStats);
   const archive = new ArchiveService(context.globalState);
+  // Column widths and the hidden set: a preference, so global state rather than
+  // per-webview state — the same layout in the editor tab, the dock, and after
+  // a restart.
+  const columns = new ColumnPrefsService(context.globalState);
   context.subscriptions.push({ dispose: () => store.dispose() }); // store disposes providers
 
   // Plan usage for the cards above the table — the same numbers as Claude
-  // Code's /usage, read with the login token Claude Code stored.
-  const usage = new UsageService(fetchUsage, getConfig, log);
+  // Code's /usage, read with the login token Claude Code stored. The cache is
+  // in globalStorage so every window shares one read per interval.
+  const usage = new UsageService(
+    fetchUsage,
+    new FileUsageCache(vscode.Uri.joinPath(context.globalStorageUri, 'usage.json').fsPath),
+    getConfig,
+    log,
+  );
   context.subscriptions.push(usage);
   usage.start();
   context.subscriptions.push(
@@ -223,13 +235,22 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The dashboard has two homes: an editor tab (default) and the bottom panel.
   // Both are always registered; the setting only decides where opening it goes.
-  const dashboardPanel = new DashboardPanelManager(context.extensionUri, store, archive, actions, provider, locator, usage);
+  const dashboardPanel = new DashboardPanelManager(
+    context.extensionUri,
+    store,
+    archive,
+    actions,
+    provider,
+    locator,
+    usage,
+    columns,
+  );
   context.subscriptions.push(
     dashboardPanel,
     vscode.window.registerWebviewPanelSerializer(DASHBOARD_PANEL_TYPE, new DashboardPanelSerializer(dashboardPanel)),
     vscode.window.registerWebviewViewProvider(
       DashboardViewProvider.viewId,
-      new DashboardViewProvider(context.extensionUri, store, archive, actions, provider, locator, usage),
+      new DashboardViewProvider(context.extensionUri, store, archive, actions, provider, locator, usage, columns),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );
@@ -304,7 +325,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('agentWrangler.openDashboard', () => openDashboard()),
     vscode.commands.registerCommand('agentWrangler.refresh', () => {
       actions.refreshAll();
-      void usage.refresh();
+      void usage.refresh({ force: true });
     }),
     vscode.commands.registerCommand(
       'agentWrangler.openViewer',

@@ -92,6 +92,12 @@ export async function fetchUsage(nowMs = Date.now(), fetchImpl: typeof fetch = f
   if (res.status === 401 || res.status === 403) {
     return { ok: false, error: { kind: 'unauthorized', detail: `HTTP ${res.status}`, atMs: nowMs } };
   }
+  if (res.status === 429) {
+    return {
+      ok: false,
+      error: { kind: 'rate-limited', detail: 'HTTP 429', atMs: nowMs, retryAfterMs: retryAfterMs(res.headers.get('retry-after'), nowMs) },
+    };
+  }
   if (!res.ok) {
     return { ok: false, error: { kind: 'bad-response', detail: `HTTP ${res.status}`, atMs: nowMs } };
   }
@@ -105,6 +111,15 @@ export async function fetchUsage(nowMs = Date.now(), fetchImpl: typeof fetch = f
   const snapshot = parseUsage(body, nowMs);
   if (!snapshot) return { ok: false, error: { kind: 'bad-response', detail: 'no limits in body', atMs: nowMs } };
   return { ok: true, snapshot };
+}
+
+/** `Retry-After` is either seconds or an HTTP date; undefined when absent or unparseable. */
+export function retryAfterMs(header: string | null, nowMs: number): number | undefined {
+  if (!header) return undefined;
+  const secs = Number(header);
+  if (Number.isFinite(secs) && secs >= 0) return Math.round(secs * 1000);
+  const at = Date.parse(header);
+  return Number.isFinite(at) && at > nowMs ? at - nowMs : undefined;
 }
 
 function shortError(err: unknown): string {

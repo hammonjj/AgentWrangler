@@ -91,6 +91,8 @@ export interface AgentSession {
   cwd?: string;
   projectName?: string;
   gitBranch?: string;
+  /** Wire id of the model behind the latest reply, e.g. `claude-opus-5`; the Model column shortens it. */
+  model?: string;
   status: SessionStatus;
   /** ms epoch of last observed activity (transcript mtime, else registry startedAt). */
   lastActivityAt: number;
@@ -149,7 +151,7 @@ export const STATUS_RANK: Record<SessionStatus, number> = {
 
 export const STATUS_LABEL: Record<SessionStatus, string> = {
   blocked: 'Blocked on you',
-  waiting: 'Waiting on you',
+  waiting: 'Waiting',
   stuck: 'Possibly stuck',
   done: 'Done',
   busy: 'Busy',
@@ -284,69 +286,6 @@ export function hookBanner(h: HookHealth | undefined, estimatedLive: number): Ho
     default:
       return undefined;
   }
-}
-
-// ---- plan usage (the cards above the table) ----
-
-/**
- * One rate-limit window from Claude's usage endpoint: the 5-hour session, the
- * 7-day all-models window, and any model- or surface-scoped weekly window
- * (e.g. "Weekly Fable"). The same three rows Claude Code's own /usage shows.
- */
-export interface UsageLimit {
-  /** Stable id for the card: `session`, `weekly_all`, `weekly_scoped:<name>`. */
-  id: string;
-  /** Row label as Claude Code names it: "Session (5hr)", "Weekly (7 day)", "Weekly Fable". */
-  label: string;
-  /** Percent of the window used, 0–100 (the API can report over 100 briefly). */
-  percent: number;
-  /** Server-side severity word (`normal`, or a warning level). Kept for the tooltip. */
-  severity: string;
-  /** ms epoch when this window resets, if the server said. */
-  resetsAtMs?: number;
-  /** True for the window the server says is currently the binding one. */
-  isActive: boolean;
-}
-
-export interface UsageSnapshot {
-  /** ms epoch of the fetch these limits came from. */
-  fetchedAtMs: number;
-  limits: UsageLimit[];
-  /**
-   * Why the most recent fetch failed, when it did. `limits` are then the last
-   * good read (possibly empty), and `fetchedAtMs` says how old they are.
-   */
-  error?: string;
-}
-
-/** Colour band for a usage card. Yellow from 70%, orange from 90%: those are the
- * points where the rest of the day, or the week, starts needing a plan. */
-export type UsageBand = 'ok' | 'warn' | 'high';
-
-export function usageBand(l: Pick<UsageLimit, 'percent' | 'severity'>): UsageBand {
-  if (l.percent >= 90) return 'high';
-  if (l.percent >= 70) return 'warn';
-  // Trust a non-normal server severity even below our thresholds.
-  return l.severity && l.severity !== 'normal' ? 'warn' : 'ok';
-}
-
-/**
- * "Resets in 4h 12m" — two units, because "4h" alone hides whether the session
- * window frees up before or after lunch. Past the reset time the card says so
- * rather than counting negative; the next fetch replaces it.
- */
-export function usageResetText(resetsAtMs: number | undefined, nowMs: number): string {
-  if (resetsAtMs === undefined) return '';
-  const ms = resetsAtMs - nowMs;
-  if (ms <= 0) return 'Resetting…';
-  const totalMin = Math.ceil(ms / 60_000);
-  if (totalMin < 60) return `Resets in ${totalMin}m`;
-  const h = Math.floor(totalMin / 60);
-  const m = totalMin % 60;
-  if (h < 24) return m > 0 ? `Resets in ${h}h ${m}m` : `Resets in ${h}h`;
-  const d = Math.floor(h / 24);
-  const rh = h % 24;
-  return rh > 0 ? `Resets in ${d}d ${rh}h` : `Resets in ${d}d`;
 }
 
 /**

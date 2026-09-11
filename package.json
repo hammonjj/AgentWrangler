@@ -148,9 +148,9 @@
         },
         "agentWrangler.usagePollIntervalSeconds": {
           "type": "number",
-          "default": 60,
+          "default": 300,
           "minimum": 15,
-          "description": "How often to re-read plan usage. The reset countdown ticks locally between reads."
+          "description": "How often to re-read plan usage, in seconds. The reset countdown ticks locally between reads, and a failed read leaves the last numbers up until the next one."
         }
       }
     }
@@ -161,7 +161,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "package": "npm run build && npx --yes @vscode/vsce package --allow-missing-repository --skip-license",
-    "install-local": "npm run package && \"${VSCODE_CLI:-/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code}\" --install-extension agent-wrangler-$npm_package_version.vsix --force && date > .dev-reload"
+    "install-local": "npm run package && \"${VSCODE_CLI:-/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code}\" --install-extension agent-wrangler-$npm_package_version.vsix --force",
+    "install-local:reload": "npm run install-local && date > .dev-reload"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

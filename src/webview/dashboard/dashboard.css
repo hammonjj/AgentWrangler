@@ -37,30 +37,45 @@ table {
   table-layout: fixed;
 }
 
-/* Widths live on the header cells, not <col>s. With `table-layout: fixed` the
-   first row defines the columns, so a header the narrow-layout media query
-   hides takes its whole column with it; a <col> would have kept the width
-   reserved. The Agent column is the one without a width and takes the rest. */
+/* Widths live on the header cells, not <col>s: with `table-layout: fixed` the
+   first row defines the columns. The configurable columns get theirs inline
+   from the saved layout (see shared/columns.ts) — these two are chrome, and the
+   Agent column deliberately has none, so it absorbs every drag. Border-box so a
+   width read back off the element is the width that was written. */
+th,
+td {
+  box-sizing: border-box;
+}
 th.h-dot {
   width: 26px;
 }
-th.h-proj {
-  width: 150px;
-}
-th.h-branch {
-  width: 120px;
-}
-th.h-pr {
-  width: 56px;
-}
-th.h-eta {
-  width: 52px;
-}
-th.h-age {
-  width: 48px;
-}
 th.h-act {
   width: 60px;
+}
+
+/* The grab strip on a column's left edge — the divider it shares with the
+   column before it. Wider than it looks: 7px is about the smallest target a
+   pointer finds first time. */
+.rz {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.rz:hover,
+body.resizing .rz {
+  background: var(--vscode-sash-hoverBorder, var(--aw-busy));
+  opacity: 0.55;
+}
+/* The pointer is captured by the handle, so without this the cursor flickers
+   back to the default over every cell the drag crosses. */
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 thead th {
@@ -234,10 +249,12 @@ tr.row.est.st-done .dot {
   flex: 0 0 auto;
   white-space: nowrap;
 }
-/* Project · branch · PR inline — shown only when the columns are hidden. */
-.c-agent .meta,
-.c-agent .msep {
-  display: none;
+/* Project · branch · model · PR inline. Only ever emitted for columns that are
+   not on screen (hidden, or folded away by a narrow dock), so it needs no
+   display rule of its own — if it is in the DOM it is wanted. */
+.c-agent .meta {
+  color: var(--vscode-foreground);
+  opacity: 0.85;
 }
 .c-agent .nm {
   font-weight: 600;
@@ -381,9 +398,97 @@ button.pbtn:disabled {
 }
 
 .c-proj,
-.c-branch {
+.c-branch,
+.c-model {
   color: var(--vscode-descriptionForeground);
   font-size: 0.92em;
+}
+
+/* ---- column picker ---- */
+
+button.colcfg {
+  background: transparent;
+  border: none;
+  padding: 2px 3px;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  opacity: 0.55;
+  vertical-align: middle;
+}
+button.colcfg:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-foreground);
+}
+button.colcfg svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* Fixed, not absolute: the header it hangs from is sticky, and the table
+   scrolls underneath. Pinned to the y of the click that opened it. */
+.colmenu {
+  position: fixed;
+  right: 10px;
+  z-index: 10;
+  min-width: 150px;
+  padding: 4px;
+  border-radius: 5px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+.colmenu .cmhead {
+  padding: 3px 8px 5px;
+  font-size: 0.78em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--vscode-descriptionForeground);
+}
+.colmenu .cmrow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  user-select: none;
+}
+.colmenu .cmrow:hover {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-menu-selectionForeground, var(--vscode-foreground));
+}
+.colmenu input {
+  margin: 0;
+  accent-color: var(--aw-busy);
+}
+/* A column that is on, but folded away because the dock is too narrow to hold
+   it. Saying so beats a checkbox that looks broken. */
+.colmenu .cmnote {
+  margin-left: auto;
+  font-size: 0.8em;
+  opacity: 0.65;
+}
+.colmenu .cmreset {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+  padding: 4px 8px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+.colmenu .cmreset:hover {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
 }
 
 .c-pr .pr {
@@ -436,24 +541,10 @@ button.act svg {
    project name and nothing else. Below this width the location moves into the
    row's second line and the title, chips and age keep their space. */
 @media (max-width: 719px) {
-  /* Zero-width, not display:none. The section rows span all eight columns, so
-     a column whose cells are gone still exists as an auto-width column and
-     takes an equal share of the leftover — at 300px that left the Agent column
-     39px. A zero width keeps the column in the grid and gives it nothing. */
-  th.h-proj,
-  th.h-branch,
-  th.h-pr,
-  td.c-proj,
-  td.c-branch,
-  td.c-pr {
-    width: 0;
-    min-width: 0;
-    padding: 0;
-    border: 0;
-    overflow: hidden;
-    visibility: hidden;
-  }
-  /* Tighter gutters and fixed columns: every pixel saved here is title. */
+  /* The Project/Branch/Model/PR columns are not rendered at all below this
+     width (shared/columns.ts folds them, main.ts moves their contents to the
+     row's second line), so there is nothing to hide here — only the chrome to
+     tighten. Every pixel saved is title. */
   td,
   thead th {
     padding-left: 5px;
@@ -461,12 +552,6 @@ button.act svg {
   }
   th.h-dot {
     width: 22px;
-  }
-  th.h-eta {
-    width: 44px;
-  }
-  th.h-age {
-    width: 40px;
   }
   th.h-act {
     width: 52px;
@@ -503,14 +588,6 @@ button.act svg {
     grid-area: sub;
     min-width: 0;
   }
-  .c-agent .meta,
-  .c-agent .msep {
-    display: inline;
-  }
-  .c-agent .meta {
-    color: var(--vscode-foreground);
-    opacity: 0.85;
-  }
 }
 
 /* ---- plan usage cards ----
@@ -524,8 +601,11 @@ button.act svg {
   display: flex;
   flex-wrap: wrap;
   align-items: stretch;
+  /* Cards grow equally to their cap and the group sits centred rather than
+     hugging the left edge in a wide tab. */
+  justify-content: center;
   gap: 8px;
-  padding: 8px 10px 6px;
+  padding: 8px 10px 9px;
   border-bottom: 1px solid var(--vscode-panel-border, transparent);
 }
 .ucard {
@@ -537,9 +617,6 @@ button.act svg {
   background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
   border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, transparent));
   cursor: default;
-}
-.usage.stale .ucard {
-  opacity: 0.7;
 }
 .uhead {
   display: flex;
@@ -609,21 +686,6 @@ button.act svg {
   font-variant-numeric: tabular-nums;
 }
 
-/* Trailing cell: the stale note and the refresh button, bottom-aligned so the
-   button sits level with the cards' last line rather than floating mid-air. */
-.utail {
-  flex: 1 1 auto;
-  display: flex;
-  align-items: flex-end;
-  justify-content: flex-end;
-  gap: 8px;
-  min-width: 0;
-}
-.ustale {
-  font-size: 0.82em;
-  color: var(--aw-waiting);
-  white-space: nowrap;
-}
 .unote {
   flex: 1 1 auto;
   align-self: center;
@@ -633,46 +695,15 @@ button.act svg {
 .usage.err .unote {
   color: var(--aw-blocked);
 }
-button.uref {
-  flex: 0 0 auto;
-  align-self: center;
-  background: transparent;
-  border: none;
-  padding: 3px 4px;
-  border-radius: 3px;
-  color: var(--vscode-descriptionForeground);
-  cursor: pointer;
-  opacity: 0.6;
-}
-.usage:hover button.uref {
-  opacity: 1;
-}
-button.uref:hover {
-  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.3));
-  color: var(--vscode-foreground);
-}
-button.uref:disabled {
-  cursor: default;
-  opacity: 0.4;
-}
-button.uref svg {
-  width: 14px;
-  height: 14px;
-  display: block;
-}
-
 @media (max-width: 719px) {
   .usage {
-    padding: 6px 5px 5px;
+    padding: 6px 5px 7px;
     gap: 5px;
   }
   .ucard {
     flex-basis: 120px;
     min-width: 120px;
     padding: 4px 8px 5px;
-  }
-  .ustale {
-    display: none;
   }
 }
 

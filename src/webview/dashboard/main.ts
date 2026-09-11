@@ -1,5 +1,21 @@
 import './dashboard.css';
+import {
+  clampResizeDelta,
+  COLUMNS,
+  columnWidth,
+  isHidden,
+  MIN_AGENT_WIDTH,
+  NARROW_PX,
+  visibleColumns,
+  withDefaultWidths,
+  withHidden,
+  withWidths,
+  type ColumnDef,
+  type ColumnId,
+  type ColumnPrefs,
+} from '../../shared/columns';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
+import { modelLabel } from '../../shared/modelName';
 import {
   capitalize,
   etaText,
@@ -42,6 +58,28 @@ const app = document.getElementById('app')!;
 let sessions: SessionDTO[] = [];
 let hooks: HookHealth | undefined;
 let usage: UsageState | undefined;
+
+// ---- columns ----
+// The layout is the host's (globalState, shared by every dashboard), but a drag
+// has to feel immediate, so the webview keeps its own copy and posts changes.
+// The snapshot that comes back matches what we already drew.
+let columns: ColumnPrefs = {};
+let narrow = document.documentElement.clientWidth < NARROW_PX;
+/** Open column picker, or undefined. The number is where to pin it vertically. */
+let menuTop: number | undefined;
+/** A drag owns the table until it ends: snapshots arriving mid-drag are deferred. */
+let dragging = false;
+let renderDeferred = false;
+
+function cols(): ColumnDef[] {
+  return visibleColumns(columns, narrow);
+}
+
+/** Send the layout up so it outlives this webview, and draw it now. */
+function saveColumns(next: ColumnPrefs): void {
+  columns = next;
+  post({ type: 'setColumns', prefs: next });
+}
 // Collapse state survives reloads via webview state; Archived starts collapsed.
 const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
@@ -61,6 +99,9 @@ const ICON_ARCHIVE =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.7" y="2.5" width="12.6" height="3.2" rx="0.6"/><path d="M3.1 5.9v6.4a1.2 1.2 0 0 0 1.2 1.2h7.4a1.2 1.2 0 0 0 1.2-1.2V5.9"/><path d="M6.2 8.7h3.6"/></svg>';
 const ICON_UNARCHIVE =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.7" y="2.5" width="12.6" height="3.2" rx="0.6"/><path d="M3.1 5.9v6.4a1.2 1.2 0 0 0 1.2 1.2h7.4a1.2 1.2 0 0 0 1.2-1.2V5.9"/><path d="M8 12.2V8.2M6.2 9.8 8 8l1.8 1.8"/></svg>';
+
+const ICON_COLUMNS =
+  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1"/><path d="M6.4 2.8v10.4M10.4 2.8v10.4"/></svg>';
 
 function clickHint(s: SessionDTO): string {
   switch (s.openTarget) {
@@ -220,10 +261,46 @@ function rowTitle(s: SessionDTO): string {
   // Done vs Waiting is read off the reply text; say so, since it is a judgment.
   const done =
     s.status === 'done'
-      ? '\n\nFinished its turn without asking you anything — the last message reads as a report. Waiting on you would mean it ended on a question or a choice.'
+      ? '\n\nFinished its turn without asking you anything — the last message reads as a report. Waiting would mean it ended on a question or a choice.'
       : '';
   return `${hint}${est}${stuck}${done}${progressTooltip(s)}`;
 }
+
+/** Branch, minus the detached-HEAD placeholder, which names nothing. */
+function branchText(s: SessionDTO): string {
+  return s.gitBranch && s.gitBranch !== 'HEAD' ? esc(s.gitBranch) : '';
+}
+
+function prHtml(s: SessionDTO): string {
+  return s.prLink
+    ? `<span class="pr" role="link" data-url="${esc(s.prLink.prUrl)}" title="${esc(s.prLink.prUrl)}">#${s.prLink.prNumber}</span>`
+    : '';
+}
+
+/**
+ * One renderer per configurable column, each returning a whole `<td>` so a
+ * column that is switched off costs nothing at all — no zero-width cell, no
+ * hidden text. The dot, Agent and action columns are not in here: they are the
+ * table itself rather than columns the user chooses.
+ */
+const CELL: Record<ColumnId, (s: SessionDTO) => string> = {
+  proj: (s) => `<td class="c-proj"${s.cwd ? ` title="${esc(s.cwd)}"` : ''}>${esc(s.projectName ?? '')}</td>`,
+  branch: (s) => {
+    const b = branchText(s);
+    return `<td class="c-branch"${b ? ` title="${b}"` : ''}>${b}</td>`;
+  },
+  // The wire id is the tooltip: the cell shortens "claude-opus-5" to "Opus 5",
+  // and the shortening is a guess worth being able to check.
+  model: (s) => {
+    const label = modelLabel(s.model);
+    return label === undefined
+      ? '<td class="c-model"></td>'
+      : `<td class="c-model" title="${esc(s.model ?? label)}">${esc(label)}</td>`;
+  },
+  pr: (s) => `<td class="c-pr">${prHtml(s)}</td>`,
+  eta: etaCell,
+  age: (s) => `<td class="c-age" data-age-ts="${s.lastActivityAt}">${formatAge(Date.now(), s.lastActivityAt)}</td>`,
+};
 
 function rowHtml(s: SessionDTO): string {
   const titleLine =
@@ -232,14 +309,17 @@ function rowHtml(s: SessionDTO): string {
       : esc(s.title);
   const kindChip =
     s.kind && s.kind !== 'interactive' ? `<span class="chip kind">${esc(capitalize(s.kind))}</span>` : '';
-  const branch = s.gitBranch && s.gitBranch !== 'HEAD' ? esc(s.gitBranch) : '';
-  const pr = s.prLink
-    ? `<span class="pr" role="link" data-url="${esc(s.prLink.prUrl)}" title="${esc(s.prLink.prUrl)}">#${s.prLink.prNumber}</span>`
-    : '';
 
-  // Narrow layouts hide the Project/Branch/PR columns and show this instead
-  // (CSS decides which), so the row still says where the agent is working.
-  const meta = [s.projectName ? esc(s.projectName) : '', branch, pr]
+  // Anything without a column of its own right now — switched off, or folded
+  // away by a narrow dock — rides on the row's second line instead, so hiding a
+  // column costs the space it took and not the fact it carried.
+  const shown = new Set(cols().map((c) => c.id));
+  const meta = [
+    shown.has('proj') ? '' : s.projectName ? esc(s.projectName) : '',
+    shown.has('branch') ? '' : branchText(s),
+    shown.has('model') ? '' : esc(modelLabel(s.model) ?? ''),
+    shown.has('pr') ? '' : prHtml(s),
+  ]
     .filter(Boolean)
     .join('<span class="sep">·</span>');
   const sub = s.subtitle ? esc(s.subtitle) : '';
@@ -256,11 +336,9 @@ function rowHtml(s: SessionDTO): string {
     ${secondLine}
     ${permissionLine(s)}
   </div></td>
-  <td class="c-proj"${s.cwd ? ` title="${esc(s.cwd)}"` : ''}>${esc(s.projectName ?? '')}</td>
-  <td class="c-branch"${branch ? ` title="${branch}"` : ''}>${branch}</td>
-  <td class="c-pr">${pr}</td>
-  ${etaCell(s)}
-  <td class="c-age" data-age-ts="${s.lastActivityAt}">${formatAge(Date.now(), s.lastActivityAt)}</td>
+  ${cols()
+    .map((c) => CELL[c.id](s))
+    .join('')}
   <td class="c-act">${actionButtons(s)}</td>
 </tr>`;
 }
@@ -282,9 +360,6 @@ function bannerHtml(): string {
 }
 
 // ---- plan usage cards ----
-
-const ICON_REFRESH =
-  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.6 1.9v3.2h-3.2"/></svg>';
 
 /** "Thu 8:20 AM" — the absolute reset time, for the tooltip; the card itself shows the countdown. */
 function resetsAtClock(ms: number): string {
@@ -341,28 +416,77 @@ function spendCardHtml(snap: UsageSnapshot): string {
  * The strip above the table: one card per rate-limit window, so "where am I
  * this week" is answered at the same glance as "who is waiting on me". The
  * host omits `usage` entirely when the cards are turned off. The last good
- * read stays up through a failed refresh, marked stale, because an old number
- * beats a blank when the question is whether the weekly limit is close.
+ * read stays up, unmarked, through a failed refresh: the service repolls on
+ * its own, and an old number beats a blank or a warning when the question is
+ * whether the weekly limit is close. There is no refresh button: the palette
+ * command "Refresh" forces a read for anyone who wants one now.
  */
 function usageHtml(): string {
   if (!usage) return '';
   const { last, error } = usage;
-  const refreshBtn = `<button class="uref" data-usage="refresh" title="Read usage again now">${ICON_REFRESH}</button>`;
 
   if (!last) {
     const text = error ? usageErrorText(error) : 'Reading plan usage…';
-    return `<div class="usage${error ? ' err' : ''}" role="status"><span class="unote">${esc(text)}</span>${error ? refreshBtn : ''}</div>`;
+    return `<div class="usage${error ? ' err' : ''}" role="status"><span class="unote">${esc(text)}</span></div>`;
   }
 
-  const stale = error
-    ? `<span class="ustale" title="${esc(usageErrorText(error))}">stale · read <span data-age-ts="${last.fetchedAtMs}">${formatAge(Date.now(), last.fetchedAtMs)}</span> ago</span>`
-    : '';
   const cards = last.windows.map((w) => usageCardHtml(w, last)).join('') + spendCardHtml(last);
-  return `<div class="usage${error ? ' stale' : ''}" role="region" aria-label="Plan usage">${cards}<div class="utail">${stale}${refreshBtn}</div></div>`;
+  return `<div class="usage" role="region" aria-label="Plan usage">${cards}</div>`;
+}
+
+// ---- column header, resize handles, picker ----
+
+/**
+ * The header row. Widths are inline because they are data, not style: a width
+ * the user dragged has to survive every re-render and reach the other dashboard
+ * unchanged. Each header carries a grab handle on its LEFT edge — the divider
+ * it shares with the column before it, which is the thing the eye is actually
+ * aiming at.
+ */
+function headHtml(): string {
+  const ths = cols()
+    .map((c) => {
+      const w = columnWidth(columns, c);
+      const title = c.title ? ` title="${esc(c.title)}"` : '';
+      return `<th class="h-${c.id}" data-col="${c.id}" style="width:${w}px"${title}><span class="rz" data-rz="${c.id}"></span>${esc(c.label)}</th>`;
+    })
+    .join('');
+  return `<thead><tr>
+  <th class="h-dot"></th><th class="h-agent">Agent</th>${ths}<th class="h-act"><button class="colcfg" data-cols="menu" title="Choose columns">${ICON_COLUMNS}</button></th>
+</tr></thead>`;
+}
+
+/**
+ * The column picker. Rendered as part of the table's own HTML rather than as a
+ * detached popup, so a snapshot arriving while it is open cannot yank it out
+ * from under the pointer. Pinned to the click's y so it opens where it was
+ * asked for, whatever the dashboard is scrolled to.
+ */
+function menuHtml(): string {
+  if (menuTop === undefined) return '';
+  const rows = COLUMNS.map((c) => {
+    const hidden = isHidden(columns, c.id);
+    const folded = !hidden && narrow && c.foldsWhenNarrow;
+    const note = folded ? '<span class="cmnote">too narrow</span>' : '';
+    return `<label class="cmrow"><input type="checkbox" data-col="${c.id}"${hidden ? '' : ' checked'}>${esc(c.label)}${note}</label>`;
+  }).join('');
+  return `<div class="colmenu" style="top:${menuTop}px" role="menu">
+  <div class="cmhead">Columns</div>
+  ${rows}
+  <button class="cmreset" data-cols="reset">Reset widths</button>
+</div>`;
 }
 
 function render(): void {
+  // A drag owns the widths until the pointer is released; re-rendering under it
+  // would replace the <th> being dragged.
+  if (dragging) {
+    renderDeferred = true;
+    return;
+  }
+
   if (sessions.length === 0) {
+    menuTop = undefined; // no table, so no button to close the picker with
     app.innerHTML = `${usageHtml()}${bannerHtml()}<div class="empty">No agent sessions found.
 <div class="hint">Sessions are discovered from <code>~/.claude</code>. Start a Claude Code session anywhere and it will appear here.</div></div>`;
     return;
@@ -376,12 +500,11 @@ function render(): void {
     else groups.set(sec, [s]);
   }
 
-  // No <colgroup>: widths sit on the header cells so a column hidden by the
-  // narrow-layout media query disappears entirely instead of leaving a gap.
-  let html = `${usageHtml()}${bannerHtml()}<table>
-<thead><tr>
-  <th class="h-dot"></th><th class="h-agent">Agent</th><th class="h-proj">Project</th><th class="h-branch">Branch</th><th class="h-pr">PR</th><th class="h-eta" title="Estimated completion: when most of your past turns of this length were done. Not a prediction of this one.">ETA</th><th class="h-age">Age</th><th class="h-act"></th>
-</tr></thead>`;
+  // No <colgroup>: `table-layout: fixed` takes its columns from the first row,
+  // so widths live on the header cells and a column that is switched off simply
+  // is not rendered.
+  const span = cols().length + 3; // dot + agent + data columns + actions
+  let html = `${usageHtml()}${bannerHtml()}${menuHtml()}<table>${headHtml()}`;
 
   for (const sec of SECTION_ORDER) {
     const rows = groups.get(sec);
@@ -389,7 +512,7 @@ function render(): void {
     rows.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
     const isCollapsed = collapsed.has(sec);
     html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${sec}">
-<tr class="sec st-${sec}"><td colspan="8"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(SECTION_LABEL[sec])}<span class="count">${rows.length}</span></td></tr>`;
+<tr class="sec st-${sec}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(SECTION_LABEL[sec])}<span class="count">${rows.length}</span></td></tr>`;
     for (const s of rows) html += rowHtml(s);
     html += '</tbody>';
   }
@@ -403,18 +526,160 @@ window.addEventListener('message', (e: MessageEvent) => {
     sessions = m.sessions;
     hooks = m.hooks;
     usage = m.usage;
+    // Our own drag already drew this; anything else is another dashboard's.
+    if (m.columns) columns = m.columns;
+    render();
+  }
+});
+
+// ---- resizing ----
+
+/**
+ * Drag a divider. The column to its right takes the change; the column to its
+ * left takes the opposite, so every other divider stays exactly where it is and
+ * the one under the pointer tracks it. When the left-hand neighbour is the
+ * Agent column there is nothing to write: Agent has no width of its own and
+ * absorbs whatever the fixed columns leave, which is the whole reason it is the
+ * elastic one. It still gets a floor, or a drag could squeeze it to nothing.
+ */
+function beginResize(e: PointerEvent, handle: HTMLElement): void {
+  const id = handle.dataset.rz as ColumnId;
+  const th = handle.parentElement as HTMLTableCellElement | null;
+  const prevTh = th?.previousElementSibling as HTMLTableCellElement | null;
+  const visible = cols();
+  const def = visible.find((c) => c.id === id);
+  if (!th || !prevTh || !def) return;
+
+  const prevId = prevTh.dataset.col as ColumnId | undefined;
+  const prevDef = prevId ? visible.find((c) => c.id === prevId) : undefined;
+  const minPrev = prevDef ? prevDef.minWidth : MIN_AGENT_WIDTH;
+
+  const startX = e.clientX;
+  const startW = th.getBoundingClientRect().width;
+  const startPrevW = prevTh.getBoundingClientRect().width;
+
+  dragging = true;
+  document.body.classList.add('resizing');
+  handle.setPointerCapture(e.pointerId);
+  e.preventDefault();
+
+  let width = startW;
+  let prevWidth = startPrevW;
+
+  const move = (ev: PointerEvent) => {
+    const d = clampResizeDelta(ev.clientX - startX, {
+      startWidth: startW,
+      startPrevWidth: startPrevW,
+      minWidth: def.minWidth,
+      minPrevWidth: minPrev,
+      prevIsElastic: prevDef === undefined,
+    });
+
+    width = Math.round(startW - d);
+    th.style.width = `${width}px`;
+    if (prevDef) {
+      prevWidth = Math.round(startPrevW + d);
+      prevTh.style.width = `${prevWidth}px`;
+    }
+  };
+
+  let ended = false;
+  const end = () => {
+    if (ended) return; // pointerup and lostpointercapture both fire
+    ended = true;
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', end);
+    handle.removeEventListener('pointercancel', end);
+    handle.removeEventListener('lostpointercapture', end);
+    dragging = false;
+    document.body.classList.remove('resizing');
+
+    const patch: Partial<Record<ColumnId, number>> = { [id]: width };
+    if (prevDef) patch[prevDef.id] = prevWidth;
+    saveColumns(withWidths(columns, patch));
+
+    if (renderDeferred) {
+      renderDeferred = false;
+      render();
+    }
+  };
+
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+  // Belt and braces: a capture lost to a window switch must not leave the table
+  // frozen mid-drag, refusing every snapshot from then on.
+  handle.addEventListener('lostpointercapture', end);
+}
+
+app.addEventListener('pointerdown', (e) => {
+  const handle = (e.target as HTMLElement).closest('.rz') as HTMLElement | null;
+  if (handle) beginResize(e, handle);
+});
+
+// ---- column picker ----
+
+function openMenu(atY: number): void {
+  menuTop = Math.max(4, Math.round(atY));
+  render();
+}
+
+function closeMenu(): void {
+  if (menuTop === undefined) return;
+  menuTop = undefined;
+  render();
+}
+
+/** A checkbox in the picker: show or hide that column, everywhere, for good. */
+app.addEventListener('change', (e) => {
+  const box = (e.target as HTMLElement).closest('input[data-col]') as HTMLInputElement | null;
+  if (!box) return;
+  saveColumns(withHidden(columns, box.dataset.col as ColumnId, !box.checked));
+  render(); // menu stays open: hiding two columns should take two clicks, not four
+});
+
+// Right-click the header for the same menu, where a table's column menu lives.
+app.addEventListener('contextmenu', (e) => {
+  if (!(e.target as HTMLElement).closest('thead')) return;
+  e.preventDefault();
+  openMenu((e as MouseEvent).clientY);
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeMenu();
+});
+
+// Only the fold threshold matters here: widths are absolute and do not care how
+// wide the dock is.
+let lastNarrow = narrow;
+window.addEventListener('resize', () => {
+  narrow = document.documentElement.clientWidth < NARROW_PX;
+  if (narrow !== lastNarrow) {
+    lastNarrow = narrow;
     render();
   }
 });
 
 app.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
-  const usageBtn = target.closest('button[data-usage]') as HTMLButtonElement | null;
-  if (usageBtn) {
-    usageBtn.disabled = true; // re-enabled by the re-render the next snapshot causes
-    post({ type: 'refreshUsage' });
+
+  const colBtn = target.closest('[data-cols]') as HTMLElement | null;
+  if (colBtn?.dataset.cols === 'menu') {
+    if (menuTop === undefined) openMenu(colBtn.getBoundingClientRect().bottom + 4);
+    else closeMenu();
     return;
   }
+  if (colBtn?.dataset.cols === 'reset') {
+    saveColumns(withDefaultWidths(columns));
+    render();
+    return;
+  }
+  // Any click outside the open menu dismisses it, and does nothing else.
+  if (menuTop !== undefined && !target.closest('.colmenu')) {
+    closeMenu();
+    return;
+  }
+
   const bannerBtn = target.closest('button[data-banner]') as HTMLElement | null;
   const pbtn = target.closest('button.pbtn') as HTMLButtonElement | null;
   const btn = target.closest('button.act') as HTMLElement | null;

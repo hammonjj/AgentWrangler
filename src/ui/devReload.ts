@@ -2,17 +2,21 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 
-/** Touched by `npm run install-local` once the new build is installed. */
+/** Touched by `npm run install-local:reload` (opt-in) once the new build is installed. */
 const RELOAD_MARKER = '.dev-reload';
 
 /**
  * Development convenience: when this window has the Agent Wrangler repo itself
- * open, reload it as soon as `npm run install-local` finishes, so the change
- * just made is on screen without a trip through the command palette.
+ * open, reload it when the marker is touched, so the change just made is on
+ * screen without a trip through the command palette.
+ *
+ * Opt-in: the plain `install-local` never touches the marker. A reload ends
+ * every Claude Code session running in the window, and the dev window usually
+ * has several going, so an automatic reload cost more than it saved.
  *
  * Scoped to that one window on purpose. Every window runs this extension, and
  * reloading all of them on each build would tear down whatever else is going
- * on in them; the dev window is the one where the interruption is the point.
+ * on in them.
  *
  * Detection is by the folder's package.json name — nothing to configure, and
  * a clone at any path qualifies.

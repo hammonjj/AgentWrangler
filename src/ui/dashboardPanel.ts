@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
+import type { ColumnPrefsService } from '../core/columnPrefs';
 import type { SessionStore } from '../core/sessionStore';
 import type { SessionActions } from './actions';
 import { DashboardHost, type HookHealthSource, type UsageSource } from './dashboardHost';
@@ -28,6 +29,7 @@ export class DashboardPanelManager implements vscode.Disposable {
     private health: HookHealthSource,
     private locator: SessionLocator,
     private usage: UsageSource,
+    private columns: ColumnPrefsService,
   ) {}
 
   /** True once a tab exists — created here, or restored by VSCode on reload. */
@@ -74,6 +76,7 @@ export class DashboardPanelManager implements vscode.Disposable {
       this.health,
       this.locator,
       this.usage,
+      this.columns,
     );
     panel.onDidDispose(() => {
       this.host?.dispose();

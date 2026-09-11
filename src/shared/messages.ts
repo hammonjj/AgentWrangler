@@ -2,6 +2,7 @@
  * Typed message protocol between the extension host and the webviews.
  * Imported by both bundles — keep free of `vscode`/Node/DOM imports.
  */
+import type { ColumnPrefs } from './columns';
 import type { HookHealth, SessionDTO, SessionStatus, ViewerBlock } from './model';
 import type { UsageState } from './usage';
 
@@ -18,6 +19,8 @@ export type HostToDashboard = {
   nowMs: number;
   hooks?: HookHealth;
   usage?: UsageState;
+  /** Saved column layout. Absent only before the host has read storage once. */
+  columns?: ColumnPrefs;
 };
 
 /** `allow` / `deny` answer the permission prompt a blocked row is sitting on. */
@@ -31,8 +34,8 @@ export type DashboardToHost =
   | { type: 'refresh' }
   /** Banner button: runs the same confirm-then-install flow as the palette command. */
   | { type: 'installHooks' }
-  /** Usage cards: read plan usage again now. */
-  | { type: 'refreshUsage' };
+  /** A column was dragged, hidden or shown — persist this layout for every dashboard. */
+  | { type: 'setColumns'; prefs: ColumnPrefs };
 
 // ---- Transcript viewer ----
 

@@ -1,7 +1,7 @@
 /**
  * Does an agent's final message need an answer from the human?
  *
- * This is what separates "Waiting on you" from "Done". Nothing in Claude Code
+ * This is what separates "Waiting" from "Done". Nothing in Claude Code
  * marks the difference — a turn that ends with "which option?" and one that
  * ends with "all tests pass, nothing committed" both arrive as a plain `Stop`.
  * The only evidence is the text, so this is a heuristic and errs towards

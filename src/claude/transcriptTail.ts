@@ -31,6 +31,12 @@ export interface TranscriptSummary {
    * anything (waiting) or just reported (done).
    */
   lastAssistantText?: string;
+  /**
+   * Wire id of the model behind the most recent reply (`claude-opus-5`, …).
+   * Last-wins like everything else here, so a session the user switched models
+   * in reports the one currently answering.
+   */
+  model?: string;
   /** Last {"type":"ai-title"} seen — the freshest model-generated title. */
   aiTitle?: string;
   /** Last {"type":"last-prompt"} seen (~200 char preview of the user's last prompt). */
@@ -77,7 +83,15 @@ export function splitCompleteLines(buf: Buffer, startsMidLine: boolean): { lines
 /** Fields extractable from a parsed chunk (forward pass, last-wins ≡ backwards scan). */
 export type SummaryPartial = Pick<
   TranscriptSummary,
-  'lastMeaningful' | 'lastAssistantText' | 'aiTitle' | 'lastPrompt' | 'slug' | 'cwd' | 'gitBranch' | 'prLink'
+  | 'lastMeaningful'
+  | 'lastAssistantText'
+  | 'model'
+  | 'aiTitle'
+  | 'lastPrompt'
+  | 'slug'
+  | 'cwd'
+  | 'gitBranch'
+  | 'prLink'
 >;
 
 /** Cap on the reply text kept per transcript; `needsReply` only reads the tail anyway. */
@@ -121,6 +135,10 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
         };
         const text = assistantText(obj.message?.content);
         if (text !== undefined) out.lastAssistantText = text;
+        // `<synthetic>` marks a message Claude Code wrote itself (an interrupt,
+        // a local error); it names no model and must not overwrite the real one.
+        const model = obj.message?.model;
+        if (typeof model === 'string' && model.length > 0 && !model.startsWith('<')) out.model = model;
         break;
       }
       case 'user':
@@ -221,6 +239,7 @@ export function mergeSummaries(
   return {
     lastMeaningful: next.lastMeaningful ?? prev?.lastMeaningful,
     lastAssistantText: sawTurnBoundary ? next.lastAssistantText : prev?.lastAssistantText,
+    model: next.model ?? prev?.model,
     aiTitle: next.aiTitle ?? prev?.aiTitle,
     lastPrompt: next.lastPrompt ?? prev?.lastPrompt,
     slug: next.slug ?? prev?.slug,

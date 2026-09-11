@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
+import type { ColumnPrefsService } from '../core/columnPrefs';
 import type { Disposable } from '../core/events';
 import type { SessionStore } from '../core/sessionStore';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
@@ -25,7 +26,8 @@ export interface UsageSource {
   readonly usage: UsageState;
   readonly enabled: boolean;
   onDidChange(listener: () => void): Disposable;
-  refresh(): Promise<void>;
+  /** Plain: a cached read within the interval will do. `force`: the user asked, go to Claude. */
+  refresh(opts?: { force?: boolean }): Promise<void>;
 }
 
 /**
@@ -46,6 +48,7 @@ export class DashboardHost {
     private health: HookHealthSource,
     private locator: SessionLocator,
     private usage: UsageSource,
+    private columns: ColumnPrefsService,
   ) {
     webview.options = {
       enableScripts: true,
@@ -69,6 +72,9 @@ export class DashboardHost {
       // changes nothing about any session still has to reach the banner.
       this.health.onDidChangeHookHealth(() => this.pushSnapshot()),
       this.usage.onDidChange(() => this.pushSnapshot()),
+      // Columns are shared across dashboards: a drag in the editor tab reaches
+      // the docked one, and neither is the owner of the layout.
+      this.columns.onDidChange(() => this.pushSnapshot()),
     );
   }
 
@@ -108,6 +114,7 @@ export class DashboardHost {
       nowMs: Date.now(),
       hooks: this.health.hookHealth,
       usage: this.usage.enabled ? this.usage.usage : undefined,
+      columns: this.columns.value,
     };
     void this.webview.postMessage(msg);
   }
@@ -133,13 +140,13 @@ export class DashboardHost {
         break;
       case 'refresh':
         this.actions.refreshAll();
-        void this.usage.refresh();
+        void this.usage.refresh({ force: true });
         break;
       case 'installHooks':
         this.actions.installHooks();
         break;
-      case 'refreshUsage':
-        void this.usage.refresh();
+      case 'setColumns':
+        this.columns.set(m.prefs);
         break;
     }
   }

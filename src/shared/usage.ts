@@ -43,12 +43,14 @@ export interface UsageSnapshot {
  * stored token was rejected — Claude Code refreshes it the next time it runs,
  * so this is usually transient. `network`/`bad-response`: the request failed.
  */
-export type UsageErrorKind = 'no-credentials' | 'unauthorized' | 'network' | 'bad-response';
+export type UsageErrorKind = 'no-credentials' | 'unauthorized' | 'rate-limited' | 'network' | 'bad-response';
 
 export interface UsageError {
   kind: UsageErrorKind;
   detail?: string;
   atMs: number;
+  /** For `rate-limited`: how long the server asked us to wait, when it said. */
+  retryAfterMs?: number;
 }
 
 /** What the host pushes to the dashboard. `last` is the most recent good read, kept through errors. */
@@ -203,11 +205,13 @@ export function resetsInText(nowMs: number, resetsAtMs: number | undefined): str
 export function spendText(s: UsageSpend): string {
   const fmt = (minor: number) => {
     const major = minor / 10 ** s.exponent;
+    // Whole amounts drop the cents ("$1,000"); anything else shows them all ("$3.50", never "$3.5").
+    const whole = minor % 10 ** s.exponent === 0;
     try {
       return new Intl.NumberFormat('en-US', {
         style: 'currency',
         currency: s.currency,
-        minimumFractionDigits: 0,
+        minimumFractionDigits: whole ? 0 : s.exponent,
         maximumFractionDigits: s.exponent,
       }).format(major);
     } catch {
@@ -228,13 +232,15 @@ export function usageSummaryLine(snap: UsageSnapshot): string {
     .join(' · ');
 }
 
-/** What the cards say when there is nothing to show, or the last read is stale. */
+/** What the cards say when there is nothing to show; with numbers up it goes in the refresh button's tooltip. */
 export function usageErrorText(e: UsageError): string {
   switch (e.kind) {
     case 'no-credentials':
       return 'No Claude Code login found on this machine, so plan usage is unavailable.';
     case 'unauthorized':
       return 'Claude rejected the stored login token. It refreshes the next time Claude Code talks to the API.';
+    case 'rate-limited':
+      return 'Claude is rate-limiting usage reads right now. Showing the last numbers; the next read is backed off.';
     case 'network':
       return `Could not reach Claude to read usage${e.detail ? ` (${e.detail})` : ''}.`;
     case 'bad-response':

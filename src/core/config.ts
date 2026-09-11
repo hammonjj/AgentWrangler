@@ -28,9 +28,9 @@ export const DEFAULT_CONFIG: WranglerConfig = {
   notifyOnWaiting: false,
   pollIntervalSeconds: 5,
   showUsage: true,
-  // A minute. The windows move by whole percents over minutes, and the reset
-  // countdown ticks locally, so nothing is gained by asking more often.
-  usagePollIntervalSeconds: 60,
+  // Five minutes. The cards answer "am I near the weekly limit", which does not
+  // change by the minute; the reset countdown ticks locally between reads.
+  usagePollIntervalSeconds: 300,
 };
 
 export type ConfigGetter = () => WranglerConfig;

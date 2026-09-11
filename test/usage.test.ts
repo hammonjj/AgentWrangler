@@ -131,6 +131,7 @@ describe('usageErrorText', () => {
   it('explains each failure in terms of what to do about it', () => {
     expect(usageErrorText({ kind: 'no-credentials', atMs: NOW })).toMatch(/No Claude Code login/);
     expect(usageErrorText({ kind: 'unauthorized', atMs: NOW })).toMatch(/refreshes the next time/);
+    expect(usageErrorText({ kind: 'rate-limited', atMs: NOW })).toMatch(/rate-limiting/);
     expect(usageErrorText({ kind: 'network', detail: 'ENOTFOUND', atMs: NOW })).toContain('ENOTFOUND');
     expect(usageErrorText({ kind: 'bad-response', detail: 'HTTP 500', atMs: NOW })).toContain('HTTP 500');
   });

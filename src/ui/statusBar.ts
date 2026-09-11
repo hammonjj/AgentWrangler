@@ -60,7 +60,7 @@ export function createStatusBar(store: SessionStore, archive: ArchiveService, co
         if (waiting.length > 0) md.appendMarkdown('\n');
       }
       if (waiting.length > 0) {
-        md.appendMarkdown('**Waiting on you:**\n\n');
+        md.appendMarkdown('**Waiting:**\n\n');
         for (const s of waiting.slice(0, 10)) md.appendMarkdown(`${line(s)}\n`);
       }
       appendDone(md, done, line);
