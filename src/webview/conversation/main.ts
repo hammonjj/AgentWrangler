@@ -1,0 +1,744 @@
+import './conversation.css';
+import type {
+  AskState,
+  ComposerState,
+  ConvBlock,
+  ConversationCapabilities,
+  PermissionModeName,
+  QuestionView,
+} from '../../shared/conversation';
+import { renderMarkdown as mdToHtml } from '../../shared/markdown';
+import type { ConversationToHost, HostToConversation } from '../../shared/messages';
+import { STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
+
+declare function acquireVsCodeApi(): {
+  postMessage(msg: unknown): void;
+  setState(state: unknown): void;
+  getState(): unknown;
+};
+const vscodeApi = acquireVsCodeApi();
+const post = (msg: ConversationToHost) => vscodeApi.postMessage(msg);
+
+/** Rendered blocks kept in the DOM. Older ones are dropped with a notch. */
+const MAX_BLOCK_NODES = 400;
+/** Treat the view as "at the bottom" within this many pixels. */
+const STICK_PX = 56;
+/** Composer grows with the message up to this, then scrolls. */
+const MAX_COMPOSER_PX = 180;
+
+/**
+ * The modes worth offering. `bypassPermissions` is deliberately absent: it
+ * needs an extra opt-in flag and turns every guard off at once, which is not
+ * something a dropdown should do by accident.
+ */
+const MODES: { value: PermissionModeName; label: string }[] = [
+  { value: 'default', label: 'Ask permission' },
+  { value: 'acceptEdits', label: 'Auto-accept edits' },
+  { value: 'plan', label: 'Plan mode' },
+];
+
+const app = document.getElementById('app')!;
+app.innerHTML = `
+<div id="hdr">
+  <span id="pill" class="pill"></span>
+  <span id="ttl"></span>
+  <span id="meta"></span>
+  <span id="spacer"></span>
+  <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
+  <button id="pin" class="hdrbtn" title="Open this conversation in its own tab">Pin</button>
+</div>
+<div id="banner" hidden></div>
+<div id="scroll"><div id="notch" hidden>earlier messages not shown</div><div id="blocks"></div></div>
+<button id="jump" hidden></button>
+<div id="composer">
+  <div id="composerRead">
+    <span id="composerNote"></span>
+    <button id="adopt" class="askbtn primary" hidden></button>
+    <button id="goTo" class="hdrbtn" hidden></button>
+  </div>
+  <div id="composerWrite" hidden>
+    <div id="composerBar">
+      <select id="mode" title="Permission mode"></select>
+      <span id="queued" hidden></span>
+      <span class="grow"></span>
+      <button id="stop" class="hdrbtn" hidden>Stop</button>
+    </div>
+    <div id="composerInput">
+      <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button id="send" class="askbtn primary">Send</button>
+    </div>
+  </div>
+</div>
+`;
+
+const pill = document.getElementById('pill')!;
+const ttl = document.getElementById('ttl')!;
+const meta = document.getElementById('meta')!;
+const banner = document.getElementById('banner')!;
+const scroller = document.getElementById('scroll')!;
+const notch = document.getElementById('notch')!;
+const blocksEl = document.getElementById('blocks')!;
+const jump = document.getElementById('jump')!;
+const composerRead = document.getElementById('composerRead')!;
+const composerWrite = document.getElementById('composerWrite')!;
+const composerNote = document.getElementById('composerNote')!;
+const goToBtn = document.getElementById('goTo') as HTMLButtonElement;
+const adoptBtn = document.getElementById('adopt') as HTMLButtonElement;
+const pinBtn = document.getElementById('pin') as HTMLButtonElement;
+const releaseBtn = document.getElementById('release') as HTMLButtonElement;
+const modeSel = document.getElementById('mode') as HTMLSelectElement;
+const queuedEl = document.getElementById('queued')!;
+const stopBtn = document.getElementById('stop') as HTMLButtonElement;
+const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
+const sendBtn = document.getElementById('send') as HTMLButtonElement;
+
+/** Block id → its node, so a patch updates in place instead of re-rendering. */
+const nodes = new Map<string, HTMLElement>();
+/** Latest state of each block, since a patch is partial. */
+const blockState = new Map<string, ConvBlock>();
+
+let stick = true;
+let newCount = 0;
+let caps: ConversationCapabilities | undefined;
+
+for (const m of MODES) {
+  const opt = document.createElement('option');
+  opt.value = m.value;
+  opt.textContent = m.label;
+  modeSel.appendChild(opt);
+}
+
+// ---- rendering helpers ----
+
+function setText(el: HTMLElement, text: string): void {
+  el.textContent = text;
+}
+
+/** Markdown → HTML. The shared renderer escapes any markup in the source. */
+function renderMarkdown(el: HTMLElement, text: string): void {
+  el.innerHTML = mdToHtml(text);
+  decorateCodeBlocks(el);
+}
+
+function decorateCodeBlocks(root: HTMLElement): void {
+  for (const pre of Array.from(root.querySelectorAll('pre'))) {
+    if (pre.querySelector('.copy')) continue;
+    const btn = document.createElement('button');
+    btn.className = 'copy';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const code = pre.querySelector('code')?.textContent ?? pre.textContent ?? '';
+      navigator.clipboard.writeText(code).then(
+        () => {
+          btn.textContent = 'Copied';
+          setTimeout(() => (btn.textContent = 'Copy'), 1200);
+        },
+        () => {
+          btn.textContent = 'Copy failed';
+          setTimeout(() => (btn.textContent = 'Copy'), 1600);
+        },
+      );
+    });
+    pre.appendChild(btn);
+  }
+}
+
+function timeLabel(ts: string | undefined): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function answeredLabel(state: AskState): string {
+  switch (state) {
+    case 'allowed':
+      return 'Allowed.';
+    case 'denied':
+      return 'Denied.';
+    case 'expired':
+      return 'Answered elsewhere.';
+    default:
+      return '';
+  }
+}
+
+// ---- block nodes ----
+
+function buildNode(b: ConvBlock): HTMLElement {
+  const el = document.createElement('div');
+  el.dataset.id = b.id;
+  fillNode(el, b);
+  return el;
+}
+
+function fillNode(el: HTMLElement, b: ConvBlock): void {
+  switch (b.kind) {
+    case 'user': {
+      el.className = 'blk user';
+      el.innerHTML = '';
+      const body = document.createElement('div');
+      body.className = 'body';
+      renderMarkdown(body, b.text);
+      el.appendChild(body);
+      if (b.imageCount) {
+        const img = document.createElement('div');
+        img.className = 'sub';
+        setText(img, `${b.imageCount} image${b.imageCount === 1 ? '' : 's'} attached`);
+        el.appendChild(img);
+      }
+      break;
+    }
+    case 'assistant': {
+      el.className = b.streaming ? 'blk assistant streaming' : 'blk assistant';
+      el.innerHTML = '';
+      const body = document.createElement('div');
+      body.className = 'body';
+      renderMarkdown(body, b.text);
+      el.appendChild(body);
+      break;
+    }
+    case 'thinking': {
+      el.className = 'blk thinking';
+      el.innerHTML = '';
+      const d = document.createElement('details');
+      const s = document.createElement('summary');
+      setText(s, b.streaming ? 'Thinking…' : 'Thinking');
+      const body = document.createElement('div');
+      body.className = 'body';
+      renderMarkdown(body, b.text);
+      d.append(s, body);
+      el.appendChild(d);
+      break;
+    }
+    case 'tool': {
+      el.className = `blk tool st-${b.state}`;
+      el.innerHTML = '';
+      const d = document.createElement('details');
+      const s = document.createElement('summary');
+      const name = document.createElement('span');
+      name.className = 'tname';
+      setText(name, b.name);
+      const preview = document.createElement('span');
+      preview.className = 'tin';
+      setText(preview, b.inputPreview);
+      s.append(name, preview);
+      if (b.state !== 'done') {
+        const st = document.createElement('span');
+        st.className = 'tstate';
+        setText(st, b.state === 'running' ? 'running' : 'failed');
+        s.appendChild(st);
+      }
+      d.appendChild(s);
+
+      if (b.input !== undefined) {
+        const pre = document.createElement('pre');
+        pre.className = 'tinput';
+        let text: string;
+        try {
+          text = JSON.stringify(b.input, null, 2);
+        } catch {
+          text = String(b.input);
+        }
+        setText(pre, text);
+        d.appendChild(pre);
+      }
+      if (b.result) {
+        if (b.result.diff) {
+          const file = document.createElement('div');
+          file.className = 'sub';
+          setText(file, b.result.diff.file);
+          const pre = document.createElement('pre');
+          pre.className = 'tdiff';
+          renderDiff(pre, b.result.diff.patch);
+          d.append(file, pre);
+        }
+        if (b.result.text) {
+          const pre = document.createElement('pre');
+          pre.className = b.result.isError ? 'tresult err' : 'tresult';
+          setText(pre, b.result.text + (b.result.truncated ? '\n… output truncated' : ''));
+          d.appendChild(pre);
+        }
+      }
+      el.appendChild(d);
+      break;
+    }
+    case 'permission': {
+      el.className = `blk ask permission st-${b.state}`;
+      el.innerHTML = '';
+      const head = document.createElement('div');
+      head.className = 'askhead';
+      // Claude's own description if it gave one, since it says why; the tool
+      // name alone only says what.
+      setText(head, b.summary ?? `${b.toolName} needs permission`);
+      el.appendChild(head);
+      if (b.summary) {
+        const tool = document.createElement('div');
+        tool.className = 'sub';
+        setText(tool, b.toolName);
+        el.appendChild(tool);
+      }
+      if (b.body) {
+        const pre = document.createElement('pre');
+        pre.className = b.isCommand ? 'askdetail cmd' : 'askdetail';
+        setText(pre, b.body);
+        el.appendChild(pre);
+      }
+      el.appendChild(permissionActions(b.requestId, b.state, b.alwaysAllowRule));
+      break;
+    }
+    case 'question': {
+      el.className = `blk ask question st-${b.state}`;
+      el.innerHTML = '';
+      const head = document.createElement('div');
+      head.className = 'askhead';
+      setText(head, 'Claude has a question');
+      el.appendChild(head);
+      el.appendChild(questionForm(b.requestId, b.questions, b.state, b.answers));
+      break;
+    }
+    case 'plan': {
+      el.className = `blk ask plan st-${b.state}`;
+      el.innerHTML = '';
+      const head = document.createElement('div');
+      head.className = 'askhead';
+      setText(head, 'Plan ready for approval');
+      el.appendChild(head);
+      const body = document.createElement('div');
+      body.className = 'body';
+      renderMarkdown(body, b.plan);
+      el.appendChild(body);
+      el.appendChild(planActions(b.requestId, b.state));
+      break;
+    }
+    case 'note': {
+      el.className = `blk note tone-${b.tone}`;
+      el.innerHTML = '';
+      const body = document.createElement('span');
+      setText(body, b.text);
+      el.appendChild(body);
+      break;
+    }
+  }
+
+  const ts = 'ts' in b ? timeLabel(b.ts) : '';
+  if (ts) el.title = ts;
+}
+
+/** An ask this pane cannot answer: say so instead of showing dead buttons. */
+function cannotAnswer(row: HTMLElement, what: string): void {
+  const note = document.createElement('span');
+  note.className = 'asknote';
+  setText(note, `Answer this in ${what}: this session is not running in this window.`);
+  row.appendChild(note);
+}
+
+function settledRow(state: AskState): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'askrow';
+  const done = document.createElement('span');
+  done.className = 'asknote';
+  setText(done, answeredLabel(state));
+  row.appendChild(done);
+  return row;
+}
+
+function permissionActions(requestId: string, state: AskState, alwaysAllowRule: string | undefined): HTMLElement {
+  if (state !== 'pending') return settledRow(state);
+  const row = document.createElement('div');
+  row.className = 'askrow';
+
+  const mk = (label: string, decision: 'allow' | 'always' | 'deny', cls: string) => {
+    const b = document.createElement('button');
+    b.className = `askbtn ${cls}`;
+    setText(b, label);
+    b.addEventListener('click', () => {
+      // Disabling is optimistic; the host's patch decides what the card ends
+      // up saying, including "too late".
+      for (const other of Array.from(row.querySelectorAll('button'))) other.disabled = true;
+      post({ type: 'decide', requestId, decision });
+    });
+    return b;
+  };
+
+  row.appendChild(mk('Allow', 'allow', 'primary'));
+  if (alwaysAllowRule) {
+    const always = mk('Always allow', 'always', '');
+    // Say exactly which rule gets written, so "always" is never a blank cheque.
+    always.title = `Adds the rule ${alwaysAllowRule}`;
+    row.appendChild(always);
+  }
+  row.appendChild(mk('Deny', 'deny', ''));
+  return row;
+}
+
+/**
+ * `AskUserQuestion` as a form. Only a session running here can be answered —
+ * the hook that carries Allow/Deny to another window explicitly cannot settle
+ * a question.
+ */
+function questionForm(
+  requestId: string,
+  questions: QuestionView[],
+  state: AskState,
+  answers: Record<string, string> | undefined,
+): HTMLElement {
+  const wrap = document.createElement('div');
+
+  for (const q of questions) {
+    const qd = document.createElement('div');
+    qd.className = 'qtext';
+    setText(qd, q.question);
+    wrap.appendChild(qd);
+
+    if (state !== 'pending') {
+      const chosen = document.createElement('div');
+      chosen.className = 'sub';
+      setText(chosen, answers?.[q.question] ?? q.options.map((o) => o.label).join(' · '));
+      wrap.appendChild(chosen);
+      continue;
+    }
+
+    const opts = document.createElement('div');
+    opts.className = 'qopts';
+    for (const o of q.options) {
+      const label = document.createElement('label');
+      label.className = 'qopt';
+      const input = document.createElement('input');
+      input.type = q.multiSelect ? 'checkbox' : 'radio';
+      input.name = `q:${requestId}:${q.question}`;
+      input.value = o.label;
+      const text = document.createElement('span');
+      setText(text, o.label);
+      label.append(input, text);
+      if (o.description) label.title = o.description;
+      opts.appendChild(label);
+    }
+    // Claude's own question tool always offers "Other"; so does this.
+    const other = document.createElement('input');
+    other.type = 'text';
+    other.className = 'qother';
+    other.placeholder = 'Other…';
+    other.dataset.question = q.question;
+    opts.appendChild(other);
+    wrap.appendChild(opts);
+  }
+
+  if (state !== 'pending') {
+    wrap.appendChild(settledRow(state));
+    return wrap;
+  }
+
+  const row = document.createElement('div');
+  row.className = 'askrow';
+  if (!caps?.canSend) {
+    cannotAnswer(row, 'Claude Code');
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  const submit = document.createElement('button');
+  submit.className = 'askbtn primary';
+  setText(submit, 'Answer');
+  submit.addEventListener('click', () => {
+    const collected: Record<string, string> = {};
+    for (const q of questions) {
+      const picked = Array.from(
+        wrap.querySelectorAll<HTMLInputElement>(`input[name="q:${CSS.escape(requestId)}:${CSS.escape(q.question)}"]`),
+      )
+        .filter((i) => i.checked)
+        .map((i) => i.value);
+      const free = wrap.querySelector<HTMLInputElement>(`input.qother[data-question="${CSS.escape(q.question)}"]`);
+      const freeText = free?.value.trim();
+      if (freeText) picked.push(freeText);
+      if (picked.length > 0) collected[q.question] = picked.join(', ');
+    }
+    if (Object.keys(collected).length === 0) return;
+    submit.disabled = true;
+    post({ type: 'answer', requestId, answers: collected });
+  });
+  row.appendChild(submit);
+  wrap.appendChild(row);
+  return wrap;
+}
+
+function planActions(requestId: string, state: AskState): HTMLElement {
+  if (state !== 'pending') return settledRow(state);
+  const wrap = document.createElement('div');
+  const row = document.createElement('div');
+  row.className = 'askrow';
+
+  if (!caps?.canSend) {
+    cannotAnswer(row, 'Claude Code');
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  const approve = document.createElement('button');
+  approve.className = 'askbtn primary';
+  setText(approve, 'Approve');
+  approve.addEventListener('click', () => {
+    approve.disabled = true;
+    changes.disabled = true;
+    post({ type: 'plan', requestId, decision: 'approve' });
+  });
+
+  const feedback = document.createElement('textarea');
+  feedback.className = 'qfeedback';
+  feedback.rows = 2;
+  feedback.placeholder = 'What should change?';
+  feedback.hidden = true;
+
+  const changes = document.createElement('button');
+  changes.className = 'askbtn';
+  setText(changes, 'Request changes');
+  changes.addEventListener('click', () => {
+    if (feedback.hidden) {
+      feedback.hidden = false;
+      feedback.focus();
+      setText(changes, 'Send feedback');
+      return;
+    }
+    approve.disabled = true;
+    changes.disabled = true;
+    post({ type: 'plan', requestId, decision: 'deny', feedback: feedback.value.trim() || undefined });
+  });
+
+  row.append(approve, changes);
+  wrap.append(row, feedback);
+  return wrap;
+}
+
+/** Colour a unified patch without a syntax highlighter. */
+function renderDiff(pre: HTMLElement, patch: string): void {
+  pre.innerHTML = '';
+  for (const line of patch.split('\n')) {
+    const span = document.createElement('span');
+    span.className = line.startsWith('+')
+      ? 'dadd'
+      : line.startsWith('-')
+        ? 'ddel'
+        : line.startsWith('@@')
+          ? 'dhunk'
+          : 'dctx';
+    setText(span, `${line}\n`);
+    pre.appendChild(span);
+  }
+}
+
+// ---- list maintenance ----
+
+function appendBlocks(blocks: ConvBlock[]): void {
+  for (const b of blocks) {
+    const existing = nodes.get(b.id);
+    if (existing) {
+      blockState.set(b.id, b);
+      fillNode(existing, b);
+      continue;
+    }
+    const node = buildNode(b);
+    nodes.set(b.id, node);
+    blockState.set(b.id, b);
+    blocksEl.appendChild(node);
+  }
+  while (blocksEl.children.length > MAX_BLOCK_NODES) {
+    const first = blocksEl.firstElementChild as HTMLElement | null;
+    if (!first) break;
+    blocksEl.removeChild(first);
+    if (first.dataset.id) {
+      nodes.delete(first.dataset.id);
+      blockState.delete(first.dataset.id);
+    }
+    notch.hidden = false;
+  }
+  if (stick) scrollToBottom();
+  else {
+    newCount += blocks.length;
+    jump.textContent = `↓ ${newCount} new`;
+    jump.hidden = false;
+  }
+}
+
+function patchBlock(id: string, partial: Partial<ConvBlock>): void {
+  const node = nodes.get(id);
+  const prev = blockState.get(id);
+  if (!node || !prev) return;
+  const next = { ...prev, ...partial } as ConvBlock;
+  blockState.set(id, next);
+  fillNode(node, next);
+  if (stick) scrollToBottom();
+}
+
+function scrollToBottom(): void {
+  scroller.scrollTop = scroller.scrollHeight;
+  newCount = 0;
+  jump.hidden = true;
+}
+
+// ---- header / composer ----
+
+function setStatus(status: SessionStatus, estimated: boolean): void {
+  pill.className = `pill st-${status}`;
+  pill.textContent = estimated ? `~ ${STATUS_LABEL[status]}` : STATUS_LABEL[status];
+  pill.title = estimated ? 'Estimated from the transcript: install the status hooks for exact status.' : '';
+}
+
+function setMeta(session: SessionDTO): void {
+  ttl.textContent = session.title;
+  meta.textContent = [session.projectName, session.gitBranch !== 'HEAD' ? session.gitBranch : undefined, session.name]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function setCaps(next: ConversationCapabilities, composer: ComposerState | undefined): void {
+  caps = next;
+  goToBtn.hidden = !next.goTo;
+  if (next.goTo) goToBtn.textContent = next.goTo.label;
+  releaseBtn.hidden = !next.canRelease;
+
+  // Taking over is the way a read-only conversation becomes a typeable one, so
+  // it sits in the composer bar where the question "why can't I type?" is asked.
+  adoptBtn.hidden = !(next.canAdopt || next.canResumeHere);
+  adoptBtn.disabled = false;
+  if (next.canAdopt) {
+    adoptBtn.textContent = 'Take over here';
+    adoptBtn.title = 'End the process running this session and continue it in this window';
+  } else if (next.canResumeHere) {
+    adoptBtn.textContent = 'Resume here';
+    adoptBtn.title = 'Continue this ended session in this window';
+  }
+
+  composerWrite.hidden = !next.canSend;
+  composerRead.hidden = next.canSend;
+  if (!next.canSend) composerNote.textContent = next.readOnlyReason ?? 'Read-only.';
+  if (composer) setComposer(composer);
+}
+
+function setComposer(c: ComposerState): void {
+  if (c.permissionMode) modeSel.value = c.permissionMode;
+  stopBtn.hidden = !c.busy;
+  sendBtn.disabled = false; // sends queue behind a running turn, so never blocked
+  queuedEl.hidden = c.queued === 0;
+  queuedEl.textContent = c.queued === 1 ? '1 queued' : `${c.queued} queued`;
+}
+
+function setBanner(next: ConversationCapabilities): void {
+  if (!next.estimated) {
+    banner.hidden = true;
+    return;
+  }
+  banner.hidden = false;
+  banner.textContent =
+    'Status here is estimated from the transcript, and a permission prompt cannot be answered. ' +
+    'Install the Agent Wrangler status hooks, then restart this session.';
+}
+
+function autoGrow(): void {
+  msgEl.style.height = 'auto';
+  msgEl.style.height = `${Math.min(msgEl.scrollHeight, MAX_COMPOSER_PX)}px`;
+}
+
+function sendMessage(): void {
+  const text = msgEl.value.trim();
+  if (!text) return;
+  post({ type: 'send', text });
+  msgEl.value = '';
+  autoGrow();
+  stick = true;
+  scrollToBottom();
+}
+
+// ---- events ----
+
+scroller.addEventListener('scroll', () => {
+  const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_PX;
+  if (nearBottom) {
+    stick = true;
+    newCount = 0;
+    jump.hidden = true;
+  } else {
+    stick = false;
+  }
+});
+
+jump.addEventListener('click', () => {
+  stick = true;
+  scrollToBottom();
+});
+
+goToBtn.addEventListener('click', () => post({ type: 'goTo' }));
+pinBtn.addEventListener('click', () => post({ type: 'pin' }));
+releaseBtn.addEventListener('click', () => post({ type: 'release' }));
+adoptBtn.addEventListener('click', () => {
+  // The host confirms before doing anything; disabling here only stops a
+  // second click landing while that modal is up.
+  adoptBtn.disabled = true;
+  post({ type: caps?.canAdopt ? 'adopt' : 'resumeHere' });
+});
+sendBtn.addEventListener('click', sendMessage);
+stopBtn.addEventListener('click', () => post({ type: 'interrupt' }));
+modeSel.addEventListener('change', () => post({ type: 'setPermissionMode', mode: modeSel.value as PermissionModeName }));
+
+msgEl.addEventListener('input', autoGrow);
+msgEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+  e.preventDefault();
+  sendMessage();
+});
+
+// Links inside rendered markdown open in the browser, never inside the pane.
+blocksEl.addEventListener('click', (e) => {
+  const a = (e.target as HTMLElement).closest('a[href]') as HTMLAnchorElement | null;
+  if (!a) return;
+  e.preventDefault();
+  const href = a.getAttribute('href') ?? '';
+  if (/^https?:\/\//i.test(href)) post({ type: 'openExternal', url: href });
+  else if (href.startsWith('/')) post({ type: 'openFile', path: href });
+});
+
+window.addEventListener('message', (e: MessageEvent) => {
+  const m = e.data as HostToConversation;
+  switch (m.type) {
+    case 'init':
+      nodes.clear();
+      blockState.clear();
+      blocksEl.innerHTML = '';
+      notch.hidden = !m.truncated;
+      setMeta(m.session);
+      setStatus(m.session.status, m.caps.estimated);
+      setCaps(m.caps, m.composer);
+      setBanner(m.caps);
+      stick = true;
+      appendBlocks(m.blocks);
+      scrollToBottom();
+      // So a window reload brings this pane back on the same conversation.
+      vscodeApi.setState({ key: m.session.key });
+      break;
+    case 'append':
+      appendBlocks(m.blocks);
+      break;
+    case 'patch':
+      patchBlock(m.id, m.block);
+      break;
+    case 'session':
+      setMeta(m.session);
+      setStatus(m.session.status, m.caps.estimated);
+      setCaps(m.caps, undefined);
+      setBanner(m.caps);
+      break;
+    case 'composer':
+      setComposer(m.composer);
+      break;
+    case 'toolResult': {
+      const node = nodes.get(m.id);
+      const pre = node?.querySelector('.tresult');
+      if (pre) setText(pre as HTMLElement, m.text);
+      break;
+    }
+    case 'error':
+      appendBlocks([{ kind: 'note', id: `e${Date.now()}`, tone: 'error', text: m.text }]);
+      break;
+  }
+});
+
+post({ type: 'ready' });

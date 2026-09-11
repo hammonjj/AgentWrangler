@@ -46,8 +46,21 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "agentWrangler.openViewer",
-        "title": "Agent Wrangler: Open Transcript Viewer…"
+        "command": "agentWrangler.newConversation",
+        "title": "Agent Wrangler: New Conversation…",
+        "icon": "$(add)"
+      },
+      {
+        "command": "agentWrangler.openConversation",
+        "title": "Agent Wrangler: Open Conversation…"
+      },
+      {
+        "command": "agentWrangler.pinConversation",
+        "title": "Agent Wrangler: Pin Conversation in Its Own Tab…"
+      },
+      {
+        "command": "agentWrangler.goToSession",
+        "title": "Agent Wrangler: Go to Where a Session Runs…"
       },
       {
         "command": "agentWrangler.resumeInTerminal",
@@ -73,22 +86,75 @@
     "menus": {
       "view/title": [
         {
+          "command": "agentWrangler.newConversation",
+          "when": "view == agentWrangler.dashboard",
+          "group": "navigation@1"
+        },
+        {
           "command": "agentWrangler.refresh",
           "when": "view == agentWrangler.dashboard",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ],
       "editor/title": [
         {
+          "command": "agentWrangler.newConversation",
+          "when": "activeWebviewPanelViewType == agentWrangler.dashboardPanel",
+          "group": "navigation@1"
+        },
+        {
           "command": "agentWrangler.refresh",
           "when": "activeWebviewPanelViewType == agentWrangler.dashboardPanel",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ]
     },
     "configuration": {
       "title": "Agent Wrangler",
       "properties": {
+        "agentWrangler.rowClickOpens": {
+          "type": "string",
+          "enum": [
+            "conversation",
+            "wherever-it-runs"
+          ],
+          "enumDescriptions": [
+            "Open the session in the Agent Wrangler conversation pane, in this window.",
+            "Go to the Claude Code panel, terminal or VSCode window that runs the session (the behaviour before the conversation pane)."
+          ],
+          "default": "conversation",
+          "description": "What clicking a session row does. The conversation pane keeps you in one window; 'Go to where it runs' is still available from the pane and the command palette."
+        },
+        "agentWrangler.conversation.openBeside": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open the conversation pane in an editor group beside the current one, so the dashboard stays visible. Turn off to open it in the active group."
+        },
+        "agentWrangler.runner.defaultPermissionMode": {
+          "type": "string",
+          "enum": [
+            "default",
+            "acceptEdits",
+            "plan"
+          ],
+          "enumDescriptions": [
+            "Ask before every tool that needs permission.",
+            "Accept file edits without asking; still ask for everything else.",
+            "Plan first: no tools run until you approve a plan."
+          ],
+          "default": "default",
+          "description": "Permission mode for conversations started from Agent Wrangler. Changeable per session from the pane."
+        },
+        "agentWrangler.runner.autoResumeLastOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "After a window reload, resume the conversation this window was running. Only the most recent one, only if it was running in the last few hours, and never one something else has picked up in the meantime."
+        },
+        "agentWrangler.runner.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model for conversations started from Agent Wrangler (e.g. claude-opus-5). Empty means Claude Code's own default."
+        },
         "agentWrangler.dashboardLocation": {
           "type": "string",
           "enum": [
@@ -165,9 +231,12 @@
     "install-local:reload": "npm run install-local && date > .dev-reload"
   },
   "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.268",
+    "@types/markdown-it": "14.2.0",
     "@types/node": "^24.0.0",
     "@types/vscode": "1.90.0",
     "esbuild": "^0.25.0",
+    "markdown-it": "15.0.2",
     "typescript": "^5.9.0",
     "vitest": "^3.0.0"
   }

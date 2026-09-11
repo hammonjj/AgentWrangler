@@ -68,13 +68,19 @@ export interface TurnProgress {
 }
 
 /**
- * What a row click does. `panel`: the Claude Code panel in this window (reveal,
- * or resume an ended session into one). `terminal`: show the integrated terminal
- * running the session. `window`: hand off to the VSCode window that owns it.
- * `resume`: a new terminal running `claude --resume`. `viewer`: the read-only
- * transcript, for a live session nothing in this app can reveal.
+ * What a row click does.
+ *
+ * `conversation` — the Agent Wrangler conversation pane in this window. The
+ * default for every session, because jumping the user between VSCode windows
+ * to reach a conversation costs more attention than it is worth.
+ *
+ * The rest are the old "go to wherever it runs" behaviour, still reachable via
+ * `agentWrangler.rowClickOpens` and always available as the pane's own
+ * secondary action. `panel`: the Claude Code panel in this window. `terminal`:
+ * show the integrated terminal running it. `window`: hand off to the VSCode
+ * window that owns it. `resume`: a new terminal running `claude --resume`.
  */
-export type OpenTarget = 'panel' | 'terminal' | 'window' | 'resume' | 'viewer';
+export type OpenTarget = 'conversation' | 'panel' | 'terminal' | 'window' | 'resume';
 
 export interface AgentSession {
   /** Provider id, e.g. 'claude'. */
@@ -115,6 +121,11 @@ export interface AgentSession {
   archived?: boolean;
   /** What clicking the row does, decided by the host from where the process lives (host decorates). */
   openTarget?: OpenTarget;
+  /**
+   * This window is running the session itself, so the conversation pane can be
+   * typed into rather than only read (host decorates).
+   */
+  runnerOwned?: boolean;
   /**
    * True when `status` was inferred from the transcript rather than pushed by a
    * hook — i.e. a session started before hooks were installed. Rendered dimmed
@@ -229,12 +240,6 @@ export const SECTION_LABEL: Record<SectionId, string> = {
 export function sectionOf(s: AgentSession): SectionId {
   return s.archived ? 'archived' : s.status;
 }
-
-/** One rendered block of a transcript in the viewer. */
-export type ViewerBlock =
-  | { kind: 'user'; text: string; ts?: string }
-  | { kind: 'assistant'; text: string; ts?: string; msgId?: string }
-  | { kind: 'tool'; name: string; inputPreview: string; ts?: string };
 
 export function formatDuration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));

@@ -1,5 +1,14 @@
+import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { resolveClaudeBinary } from './claude/binary';
 import { ClaudeProvider } from './claude/claudeProvider';
+import { isPidAlive } from './claude/registry';
+import { endProcess } from './claude/runner/adopt';
+import { RunnerRegistry } from './claude/runner/runnerRegistry';
+import { RunnerService } from './claude/runner/runnerService';
+import type { RunnerSession } from './claude/runner/runnerSession';
 import {
   currentState,
   installHooks,
@@ -16,17 +25,23 @@ import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
 import { UsageService } from './core/usageService';
-import { STATUS_LABEL, type AgentSession, type SessionStatus } from './shared/model';
+import type { PermissionModeName } from './shared/conversation';
+import { STATUS_LABEL, type AgentSession, type OpenTarget, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
+import {
+  CONVERSATION_PANEL_TYPE,
+  CONVERSATION_PINNED_TYPE,
+  ConversationPanelManager,
+  ConversationPanelSerializer,
+} from './ui/conversation/conversationPanel';
 import { DASHBOARD_PANEL_TYPE, DashboardPanelManager, DashboardPanelSerializer } from './ui/dashboardPanel';
 import { DashboardViewProvider } from './ui/dashboardView';
 import { watchForDevReload } from './ui/devReload';
-import { openTargetFor } from './ui/openTarget';
+import { adoptActionFor, openTargetFor, type RowClickBehavior } from './ui/openTarget';
 import { CrossWindowRelay } from './ui/relay';
-import { SessionLocator } from './ui/sessionLocator';
+import { SessionLocator, type SessionLocation } from './ui/sessionLocator';
 import { createStatusBar } from './ui/statusBar';
 import { resumeInTerminal } from './ui/terminal';
-import { ViewerPanelManager } from './ui/viewerPanel';
 import { isInThisWorkspace } from './ui/workspace';
 
 /** How long to let a session emit its first hook event before calling hooks broken. */
@@ -99,11 +114,24 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  const openViewerFor = (session: AgentSession) => viewers.open(session);
+  // Sessions this window runs itself, through the Agent SDK. The binary is
+  // resolved per start so changing the setting does not need a reload.
+  // Workspace state, not global: two windows sharing one record would both
+  // resume the same session, and two processes on one id corrupt its transcript.
+  const runnerRegistry = new RunnerRegistry(context.workspaceState);
+  const runners = new RunnerService({
+    query: sdkQuery,
+    binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath),
+    log,
+    registry: runnerRegistry,
+  });
+  context.subscriptions.push(runners);
+
+  const showInPane = (s: AgentSession) => conversations.show(s.key);
 
   const fallbackOpen = (s: AgentSession) => {
     if (s.status === 'ended') resumeInTerminal(s, getConfig);
-    else openViewerFor(s);
+    else showInPane(s);
   };
 
   /**
@@ -150,39 +178,165 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(relay);
   void relay.start();
 
+  /**
+   * Go to wherever the session actually runs. This was what a row click did
+   * until the conversation pane existed; it is now a deliberate action, because
+   * being thrown into another VSCode window is only ever welcome on purpose.
+   */
+  const goToSession = (s: AgentSession, target: Exclude<OpenTarget, 'conversation'>, loc: SessionLocation) => {
+    switch (target) {
+      case 'panel':
+        openInPanel(s);
+        return;
+      case 'terminal':
+        if (loc.kind === 'terminal') loc.terminal.show();
+        else openInPanel(s);
+        return;
+      case 'window':
+        // Owned by another window of this VSCode: focus it and have its
+        // Agent Wrangler instance reveal the panel or terminal there.
+        void relay.request(s.sessionId, s.cwd ?? '', s.pid);
+        vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${s.name ?? s.title} in its window…`, 4000);
+        return;
+      case 'resume':
+        resumeInTerminal(s, getConfig);
+        return;
+    }
+  };
+
+  /**
+   * Take a session over: end whatever runs it, then resume the same id here.
+   *
+   * The whole move rests on one fact — a Claude Code conversation *is* its
+   * transcript, and resuming an id appends to the same file — so an idle
+   * session survives the handover intact. What it cannot survive is a turn in
+   * flight, which is why the offer is withdrawn while one is running and
+   * re-checked here in case it started between the click and the confirm.
+   */
+  const adoptSession = async (s: AgentSession): Promise<void> => {
+    const kind = adoptActionFor(s, runners.owns(s.sessionId));
+    if (!kind || !s.cwd) return;
+    if (!fs.existsSync(s.cwd)) {
+      void vscode.window.showErrorMessage(`Agent Wrangler: ${s.cwd} no longer exists.`);
+      return;
+    }
+
+    if (kind === 'adopt') {
+      const choice = await vscode.window.showWarningMessage(
+        `Take over ${s.name ?? s.title} in this window?`,
+        {
+          modal: true,
+          detail:
+            'The process running it now ends, and this window resumes the same session. Its terminal ' +
+            'or Claude Code panel will show it as ended.\n\n' +
+            'The conversation is kept — it lives in the transcript — and you can hand it back at any time.',
+        },
+        'Take over',
+      );
+      if (choice !== 'Take over') return;
+
+      // It may have started a turn while the dialog was up.
+      const now = store.get(s.key) ?? s;
+      if (adoptActionFor(now, runners.owns(now.sessionId)) !== 'adopt') {
+        void vscode.window.showInformationMessage(
+          `Agent Wrangler: ${now.name ?? now.title} started working again; take it over once it is idle.`,
+        );
+        return;
+      }
+
+      if (now.pid !== undefined) {
+        const outcome = await endProcess(now.pid, {
+          kill: (pid, signal) => process.kill(pid, signal),
+          isAlive: isPidAlive,
+          delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+        });
+        log(`adopt ${now.sessionId}: ending pid ${now.pid} → ${outcome}`);
+        if (outcome === 'refused') {
+          void vscode.window.showErrorMessage(
+            `Agent Wrangler: could not stop the process running ${now.name ?? now.title}, so it was not taken over. ` +
+              'Two processes on one session would corrupt its transcript.',
+          );
+          return;
+        }
+      }
+    }
+
+    const cfg = vscode.workspace.getConfiguration('agentWrangler');
+    const model = cfg.get<string>('runner.model', '').trim();
+    const runner = runners.start({
+      cwd: s.cwd,
+      resume: s.sessionId,
+      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'default'),
+      model: model || undefined,
+    });
+    conversations.showRunner(runner);
+    log(`adopted ${s.sessionId} into this window`);
+  };
+
   const actions: SessionActions = {
     smartOpen(key) {
       const s = store.get(key);
       if (!s) return;
+      const behavior = vscode.workspace
+        .getConfiguration('agentWrangler')
+        .get<RowClickBehavior>('rowClickOpens', 'conversation');
+      if (behavior === 'conversation') {
+        showInPane(s);
+        return;
+      }
       void (async () => {
         const loc = await locator.locate(s.pid, { fresh: true });
-        const target = openTargetFor(s, loc.kind, isInThisWorkspace(s.cwd));
+        const target = openTargetFor(s, loc.kind, isInThisWorkspace(s.cwd), behavior);
         log(`open ${s.name ?? s.sessionId}: process ${loc.kind} → ${target}`);
-        switch (target) {
-          case 'panel':
-            openInPanel(s);
-            return;
-          case 'terminal':
-            if (loc.kind === 'terminal') loc.terminal.show();
-            return;
-          case 'window':
-            // Owned by another window of this VSCode: focus it and have its
-            // Agent Wrangler instance reveal the panel or terminal there.
-            void relay.request(s.sessionId, s.cwd ?? '', s.pid);
-            vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${s.name ?? s.title} in its window…`, 4000);
-            return;
-          case 'resume':
-            resumeInTerminal(s, getConfig);
-            return;
-          case 'viewer':
-            openViewerFor(s);
-            return;
-        }
+        if (target === 'conversation') showInPane(s);
+        else goToSession(s, target, loc);
       })();
     },
-    openViewer(key) {
+    goTo(key) {
       const s = store.get(key);
-      if (s) openViewerFor(s);
+      if (!s) return;
+      void (async () => {
+        const loc = await locator.locate(s.pid, { fresh: true });
+        const target = openTargetFor(s, loc.kind, isInThisWorkspace(s.cwd), 'wherever-it-runs');
+        log(`goTo ${s.name ?? s.sessionId}: process ${loc.kind} → ${target}`);
+        if (target === 'conversation') {
+          vscode.window.setStatusBarMessage(
+            `Agent Wrangler: ${s.name ?? s.title} runs outside this VSCode; nothing here can reveal it.`,
+            4000,
+          );
+          return;
+        }
+        goToSession(s, target, loc);
+      })();
+    },
+    pin(key) {
+      conversations.pin(key);
+    },
+    adopt(key) {
+      const s = store.get(key);
+      if (!s) return;
+      void adoptSession(s);
+    },
+    release(key) {
+      const s = store.get(key);
+      const runner = runners.get(s?.sessionId);
+      if (!s || !runner) return;
+      void (async () => {
+        const choice = await vscode.window.showWarningMessage(
+          `Hand ${s.name ?? s.title} back to a terminal?`,
+          {
+            modal: true,
+            detail:
+              'This window stops running the session and a terminal resumes it with the same id. ' +
+              'The conversation is the transcript, so nothing is lost — but a turn in flight is cut off.',
+          },
+          'Release',
+        );
+        if (choice !== 'Release') return;
+        await runners.end(runner);
+        resumeInTerminal(s, getConfig);
+        log(`released ${s.sessionId} to a terminal`);
+      })();
     },
     resume(key) {
       const s = store.get(key);
@@ -208,6 +362,12 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     openExternal(url) {
       if (/^https?:\/\//i.test(url)) void vscode.env.openExternal(vscode.Uri.parse(url));
+    },
+    openFile(filePath) {
+      void vscode.workspace.openTextDocument(vscode.Uri.file(filePath)).then(
+        (doc) => vscode.window.showTextDocument(doc, { preview: true }),
+        () => vscode.window.setStatusBarMessage(`Agent Wrangler: cannot open ${filePath}`, 4000),
+      );
     },
     installHooks() {
       void vscode.commands.executeCommand('agentWrangler.installHooks');
@@ -236,8 +396,27 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   };
 
-  const viewers = new ViewerPanelManager(context.extensionUri, store, provider, actions);
-  context.subscriptions.push(viewers);
+  // The conversation pane: one reusable panel that row clicks swap, plus a
+  // pinned panel per session the user wants to keep on screen.
+  const conversations = new ConversationPanelManager(
+    context.extensionUri,
+    store,
+    provider,
+    runners,
+    actions,
+    locator,
+  );
+  context.subscriptions.push(
+    conversations,
+    vscode.window.registerWebviewPanelSerializer(
+      CONVERSATION_PANEL_TYPE,
+      new ConversationPanelSerializer(conversations, false),
+    ),
+    vscode.window.registerWebviewPanelSerializer(
+      CONVERSATION_PINNED_TYPE,
+      new ConversationPanelSerializer(conversations, true),
+    ),
+  );
 
   // The dashboard has two homes: an editor tab (default) and the bottom panel.
   // Both are always registered; the setting only decides where opening it goes.
@@ -250,13 +429,24 @@ export function activate(context: vscode.ExtensionContext): void {
     locator,
     usage,
     columns,
+    runners,
   );
   context.subscriptions.push(
     dashboardPanel,
     vscode.window.registerWebviewPanelSerializer(DASHBOARD_PANEL_TYPE, new DashboardPanelSerializer(dashboardPanel)),
     vscode.window.registerWebviewViewProvider(
       DashboardViewProvider.viewId,
-      new DashboardViewProvider(context.extensionUri, store, archive, actions, provider, locator, usage, columns),
+      new DashboardViewProvider(
+        context.extensionUri,
+        store,
+        archive,
+        actions,
+        provider,
+        locator,
+        usage,
+        columns,
+        runners,
+      ),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );
@@ -288,9 +478,9 @@ export function activate(context: vscode.ExtensionContext): void {
               ? `${s.title} is done`
               : `${s.title} is waiting on you`;
         void vscode.window
-          .showInformationMessage(msg, 'Open Viewer', 'Dashboard')
+          .showInformationMessage(msg, 'Open', 'Dashboard')
           .then((choice) => {
-            if (choice === 'Open Viewer') actions.openViewer(s.key);
+            if (choice === 'Open') actions.smartOpen(s.key);
             else if (choice === 'Dashboard') void vscode.commands.executeCommand('agentWrangler.openDashboard');
           });
       }
@@ -327,16 +517,76 @@ export function activate(context: vscode.ExtensionContext): void {
       if (s) fn(s.key);
     };
 
+  /**
+   * Start a session this window runs itself. The folder matters more than
+   * usual here: it is the session's working directory, and unlike the Claude
+   * Code panel — which is bound to its window's workspace — the pane can run a
+   * session in any project on the machine.
+   */
+  const newConversation = async (): Promise<RunnerSession | undefined> => {
+    const seen = new Set<string>();
+    const folders: { label: string; description?: string; dir?: string; browse?: boolean }[] = [];
+    for (const f of vscode.workspace.workspaceFolders ?? []) {
+      if (seen.has(f.uri.fsPath)) continue;
+      seen.add(f.uri.fsPath);
+      folders.push({ label: path.basename(f.uri.fsPath), description: f.uri.fsPath, dir: f.uri.fsPath });
+    }
+    for (const s of store.sessions) {
+      if (!s.cwd || seen.has(s.cwd)) continue;
+      seen.add(s.cwd);
+      folders.push({ label: path.basename(s.cwd), description: s.cwd, dir: s.cwd });
+    }
+    folders.push({ label: '$(folder-opened) Browse…', description: 'Pick another folder', browse: true });
+
+    const picked = await vscode.window.showQuickPick(folders, {
+      placeHolder: 'Start a conversation in which project?',
+      matchOnDescription: true,
+    });
+    if (!picked) return undefined;
+
+    let cwd = picked.dir;
+    if (picked.browse) {
+      const chosen = await vscode.window.showOpenDialog({
+        canSelectFolders: true,
+        canSelectFiles: false,
+        canSelectMany: false,
+        openLabel: 'Start here',
+      });
+      cwd = chosen?.[0]?.fsPath;
+    }
+    if (!cwd) return undefined;
+    if (!fs.existsSync(cwd)) {
+      void vscode.window.showErrorMessage(`Agent Wrangler: ${cwd} no longer exists.`);
+      return undefined;
+    }
+
+    const cfg = vscode.workspace.getConfiguration('agentWrangler');
+    const model = cfg.get<string>('runner.model', '').trim();
+    const runner = runners.start({
+      cwd,
+      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'default'),
+      model: model || undefined,
+    });
+    conversations.showRunner(runner);
+    return runner;
+  };
+
   context.subscriptions.push(
+    vscode.commands.registerCommand('agentWrangler.newConversation', () => void newConversation()),
     vscode.commands.registerCommand('agentWrangler.openDashboard', () => openDashboard()),
     vscode.commands.registerCommand('agentWrangler.refresh', () => {
       actions.refreshAll();
       void usage.refresh({ force: true });
     }),
     vscode.commands.registerCommand(
-      'agentWrangler.openViewer',
-      withSession((k) => actions.openViewer(k), (s) => s.transcriptPath !== undefined),
+      'agentWrangler.openConversation',
+      withSession((k) => actions.smartOpen(k)),
     ),
+    vscode.commands.registerCommand(
+      'agentWrangler.pinConversation',
+      withSession((k) => actions.pin(k)),
+    ),
+    vscode.commands.registerCommand('agentWrangler.goToSession', withSession((k) => actions.goTo(k))),
     vscode.commands.registerCommand(
       'agentWrangler.resumeInTerminal',
       withSession((k) => actions.resume(k), (s) => s.status === 'ended'),
@@ -379,6 +629,51 @@ export function activate(context: vscode.ExtensionContext): void {
   void store.register(provider).catch((err) => log(`provider start failed: ${String(err)}`));
   log('Agent Wrangler activated');
   watchForDevReload(context, log);
+
+  /**
+   * Bring back the conversation this window was running before it reloaded.
+   *
+   * Runner sessions are children of the extension host, so a reload ends every
+   * one of them — but only the process. Resuming the id reads the same
+   * transcript back, so the only thing actually lost is a turn that was in
+   * flight. Bounded deliberately: the most recent session only, recorded in
+   * *this* window's state, within a few hours, and never one something else is
+   * already running.
+   */
+  const resumeLastRunner = async (): Promise<void> => {
+    if (!vscode.workspace.getConfiguration('agentWrangler').get<boolean>('runner.autoResumeLastOnStartup', true)) {
+      return;
+    }
+    const record = runnerRegistry.resumable();
+    if (!record) return;
+    if (!fs.existsSync(record.cwd)) {
+      runnerRegistry.forget(record.sessionId);
+      return;
+    }
+    const live = store.sessions.find(
+      (s) => s.sessionId.toLowerCase() === record.sessionId.toLowerCase() && s.status !== 'ended',
+    );
+    if (live) {
+      // Someone else picked it up — another window, or a terminal. Leave it.
+      log(`not resuming ${record.sessionId}: it is running elsewhere`);
+      return;
+    }
+    const cfg = vscode.workspace.getConfiguration('agentWrangler');
+    const model = cfg.get<string>('runner.model', '').trim();
+    const runner = runners.start({
+      cwd: record.cwd,
+      resume: record.sessionId,
+      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'default'),
+      model: model || undefined,
+    });
+    log(`resumed ${record.sessionId} after a reload`);
+    // Beside the dashboard, without taking the cursor: a window that has just
+    // come back should not start by moving your focus.
+    conversations.showRunner(runner, { preserveFocus: true });
+  };
+
+  // After the store's first scan, so "is it running elsewhere?" has an answer.
+  setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), STARTUP_OPEN_DELAY_MS + 500);
 
   // Hooks can be suppressed with no error we'd ever see: `disableAllHooks`,
   // safe mode, an org policy allowing only managed hooks, or unaccepted

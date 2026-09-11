@@ -56,16 +56,18 @@ export function mkAssistant(
 }
 
 export const mkText = (text: string) => ({ type: 'text', text });
-export const mkToolUse = (name: string, input: Record<string, unknown>) => ({
+export const mkThinking = (thinking: string) => ({ type: 'thinking', thinking });
+export const mkToolUse = (name: string, input: Record<string, unknown>, id = 'toolu_x') => ({
   type: 'tool_use',
-  id: 'toolu_x',
+  id,
   name,
   input,
 });
-export const mkToolResult = (content: string) => ({
-  tool_use_id: 'toolu_x',
+export const mkToolResult = (content: string, id = 'toolu_x', isError = false) => ({
+  tool_use_id: id,
   type: 'tool_result',
   content,
+  ...(isError ? { is_error: true } : {}),
 });
 
 export function mkAiTitle(title: string): string {

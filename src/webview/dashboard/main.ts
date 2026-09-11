@@ -116,6 +116,7 @@ const ICON_COLUMNS =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1"/><path d="M6.4 2.8v10.4M10.4 2.8v10.4"/></svg>';
 
 function clickHint(s: SessionDTO): string {
+  if (s.runnerOwned) return 'Click to open the conversation — this window runs it, so you can type into it';
   switch (s.openTarget) {
     case 'panel':
       return 'Click to open in the Claude Code panel';
@@ -126,14 +127,16 @@ function clickHint(s: SessionDTO): string {
     case 'resume':
       return 'Click to resume in a terminal';
     default:
-      return 'Click to open the live transcript viewer';
+      return 'Click to open the conversation here';
   }
 }
 
 function actionButtons(s: SessionDTO): string {
   const btns: string[] = [];
   if (s.transcriptPath) {
-    btns.push(`<button class="act" data-action="viewer" title="View transcript (read-only)">${ICON_EYE}</button>`);
+    btns.push(
+      `<button class="act" data-action="pin" title="Pin this conversation in its own tab">${ICON_EYE}</button>`,
+    );
   }
   btns.push(
     s.archived
@@ -152,6 +155,14 @@ function actionButtons(s: SessionDTO): string {
  * honest percentage in the whole pipeline. The time estimate lives in its own
  * column (`etaCell`), not here.
  */
+/**
+ * Sessions this window runs itself are the ones that can be typed into, which
+ * is the single most useful thing to know at a glance about a row.
+ */
+function hereChip(s: SessionDTO): string {
+  return s.runnerOwned ? '<span class="chip here" title="Running in this window — you can type into it">here</span>' : '';
+}
+
 function statusChip(s: SessionDTO): string {
   if (s.status === 'blocked' && s.blockedReason) {
     return `<span class="chip blk">${esc(capitalize(`needs ${s.blockedReason}`))}</span>`;
@@ -390,7 +401,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${kindChip}${statusChip(s)}</span></div>
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()

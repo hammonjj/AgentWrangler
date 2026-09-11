@@ -466,6 +466,11 @@ button.pbtn:disabled {
   border-color: var(--aw-blocked);
   color: var(--aw-blocked);
 }
+/* Runs in this window, so the pane can type into it. */
+.chip.here {
+  border-color: var(--vscode-textLink-foreground, #569cd6);
+  color: var(--vscode-textLink-foreground, #569cd6);
+}
 .chip.tool {
   border-color: var(--aw-busy);
   color: var(--aw-busy);
