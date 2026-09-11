@@ -4,6 +4,9 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { resolveClaudeBinary } from './claude/binary';
 import { ClaudeProvider } from './claude/claudeProvider';
+import { isPidAlive } from './claude/registry';
+import { endProcess } from './claude/runner/adopt';
+import { RunnerRegistry } from './claude/runner/runnerRegistry';
 import { RunnerService } from './claude/runner/runnerService';
 import type { RunnerSession } from './claude/runner/runnerSession';
 import {
@@ -34,7 +37,7 @@ import {
 import { DASHBOARD_PANEL_TYPE, DashboardPanelManager, DashboardPanelSerializer } from './ui/dashboardPanel';
 import { DashboardViewProvider } from './ui/dashboardView';
 import { watchForDevReload } from './ui/devReload';
-import { openTargetFor, type RowClickBehavior } from './ui/openTarget';
+import { adoptActionFor, openTargetFor, type RowClickBehavior } from './ui/openTarget';
 import { CrossWindowRelay } from './ui/relay';
 import { SessionLocator, type SessionLocation } from './ui/sessionLocator';
 import { createStatusBar } from './ui/statusBar';
@@ -113,10 +116,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Sessions this window runs itself, through the Agent SDK. The binary is
   // resolved per start so changing the setting does not need a reload.
+  // Workspace state, not global: two windows sharing one record would both
+  // resume the same session, and two processes on one id corrupt its transcript.
+  const runnerRegistry = new RunnerRegistry(context.workspaceState);
   const runners = new RunnerService({
     query: sdkQuery,
     binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath),
     log,
+    registry: runnerRegistry,
   });
   context.subscriptions.push(runners);
 
@@ -197,6 +204,75 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  /**
+   * Take a session over: end whatever runs it, then resume the same id here.
+   *
+   * The whole move rests on one fact — a Claude Code conversation *is* its
+   * transcript, and resuming an id appends to the same file — so an idle
+   * session survives the handover intact. What it cannot survive is a turn in
+   * flight, which is why the offer is withdrawn while one is running and
+   * re-checked here in case it started between the click and the confirm.
+   */
+  const adoptSession = async (s: AgentSession): Promise<void> => {
+    const kind = adoptActionFor(s, runners.owns(s.sessionId));
+    if (!kind || !s.cwd) return;
+    if (!fs.existsSync(s.cwd)) {
+      void vscode.window.showErrorMessage(`Agent Wrangler: ${s.cwd} no longer exists.`);
+      return;
+    }
+
+    if (kind === 'adopt') {
+      const choice = await vscode.window.showWarningMessage(
+        `Take over ${s.name ?? s.title} in this window?`,
+        {
+          modal: true,
+          detail:
+            'The process running it now ends, and this window resumes the same session. Its terminal ' +
+            'or Claude Code panel will show it as ended.\n\n' +
+            'The conversation is kept — it lives in the transcript — and you can hand it back at any time.',
+        },
+        'Take over',
+      );
+      if (choice !== 'Take over') return;
+
+      // It may have started a turn while the dialog was up.
+      const now = store.get(s.key) ?? s;
+      if (adoptActionFor(now, runners.owns(now.sessionId)) !== 'adopt') {
+        void vscode.window.showInformationMessage(
+          `Agent Wrangler: ${now.name ?? now.title} started working again; take it over once it is idle.`,
+        );
+        return;
+      }
+
+      if (now.pid !== undefined) {
+        const outcome = await endProcess(now.pid, {
+          kill: (pid, signal) => process.kill(pid, signal),
+          isAlive: isPidAlive,
+          delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+        });
+        log(`adopt ${now.sessionId}: ending pid ${now.pid} → ${outcome}`);
+        if (outcome === 'refused') {
+          void vscode.window.showErrorMessage(
+            `Agent Wrangler: could not stop the process running ${now.name ?? now.title}, so it was not taken over. ` +
+              'Two processes on one session would corrupt its transcript.',
+          );
+          return;
+        }
+      }
+    }
+
+    const cfg = vscode.workspace.getConfiguration('agentWrangler');
+    const model = cfg.get<string>('runner.model', '').trim();
+    const runner = runners.start({
+      cwd: s.cwd,
+      resume: s.sessionId,
+      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'default'),
+      model: model || undefined,
+    });
+    conversations.showRunner(runner);
+    log(`adopted ${s.sessionId} into this window`);
+  };
+
   const actions: SessionActions = {
     smartOpen(key) {
       const s = store.get(key);
@@ -235,6 +311,11 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     pin(key) {
       conversations.pin(key);
+    },
+    adopt(key) {
+      const s = store.get(key);
+      if (!s) return;
+      void adoptSession(s);
     },
     release(key) {
       const s = store.get(key);
@@ -348,13 +429,24 @@ export function activate(context: vscode.ExtensionContext): void {
     locator,
     usage,
     columns,
+    runners,
   );
   context.subscriptions.push(
     dashboardPanel,
     vscode.window.registerWebviewPanelSerializer(DASHBOARD_PANEL_TYPE, new DashboardPanelSerializer(dashboardPanel)),
     vscode.window.registerWebviewViewProvider(
       DashboardViewProvider.viewId,
-      new DashboardViewProvider(context.extensionUri, store, archive, actions, provider, locator, usage, columns),
+      new DashboardViewProvider(
+        context.extensionUri,
+        store,
+        archive,
+        actions,
+        provider,
+        locator,
+        usage,
+        columns,
+        runners,
+      ),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
   );
@@ -537,6 +629,51 @@ export function activate(context: vscode.ExtensionContext): void {
   void store.register(provider).catch((err) => log(`provider start failed: ${String(err)}`));
   log('Agent Wrangler activated');
   watchForDevReload(context, log);
+
+  /**
+   * Bring back the conversation this window was running before it reloaded.
+   *
+   * Runner sessions are children of the extension host, so a reload ends every
+   * one of them — but only the process. Resuming the id reads the same
+   * transcript back, so the only thing actually lost is a turn that was in
+   * flight. Bounded deliberately: the most recent session only, recorded in
+   * *this* window's state, within a few hours, and never one something else is
+   * already running.
+   */
+  const resumeLastRunner = async (): Promise<void> => {
+    if (!vscode.workspace.getConfiguration('agentWrangler').get<boolean>('runner.autoResumeLastOnStartup', true)) {
+      return;
+    }
+    const record = runnerRegistry.resumable();
+    if (!record) return;
+    if (!fs.existsSync(record.cwd)) {
+      runnerRegistry.forget(record.sessionId);
+      return;
+    }
+    const live = store.sessions.find(
+      (s) => s.sessionId.toLowerCase() === record.sessionId.toLowerCase() && s.status !== 'ended',
+    );
+    if (live) {
+      // Someone else picked it up — another window, or a terminal. Leave it.
+      log(`not resuming ${record.sessionId}: it is running elsewhere`);
+      return;
+    }
+    const cfg = vscode.workspace.getConfiguration('agentWrangler');
+    const model = cfg.get<string>('runner.model', '').trim();
+    const runner = runners.start({
+      cwd: record.cwd,
+      resume: record.sessionId,
+      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'default'),
+      model: model || undefined,
+    });
+    log(`resumed ${record.sessionId} after a reload`);
+    // Beside the dashboard, without taking the cursor: a window that has just
+    // come back should not start by moving your focus.
+    conversations.showRunner(runner, { preserveFocus: true });
+  };
+
+  // After the store's first scan, so "is it running elsewhere?" has an answer.
+  setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), STARTUP_OPEN_DELAY_MS + 500);
 
   // Hooks can be suppressed with no error we'd ever see: `disableAllHooks`,
   // safe mode, an org policy allowing only managed hooks, or unaccepted

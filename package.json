@@ -145,6 +145,11 @@
           "default": "default",
           "description": "Permission mode for conversations started from Agent Wrangler. Changeable per session from the pane."
         },
+        "agentWrangler.runner.autoResumeLastOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "After a window reload, resume the conversation this window was running. Only the most recent one, only if it was running in the last few hours, and never one something else has picked up in the meantime."
+        },
         "agentWrangler.runner.model": {
           "type": "string",
           "default": "",

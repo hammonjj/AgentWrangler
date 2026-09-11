@@ -122,6 +122,11 @@ export interface AgentSession {
   /** What clicking the row does, decided by the host from where the process lives (host decorates). */
   openTarget?: OpenTarget;
   /**
+   * This window is running the session itself, so the conversation pane can be
+   * typed into rather than only read (host decorates).
+   */
+  runnerOwned?: boolean;
+  /**
    * True when `status` was inferred from the transcript rather than pushed by a
    * hook — i.e. a session started before hooks were installed. Rendered dimmed
    * with a `~` so a guess is never mistaken for ground truth.

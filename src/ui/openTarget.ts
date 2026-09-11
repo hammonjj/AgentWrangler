@@ -16,8 +16,18 @@ import type { AgentSession, OpenTarget } from '../shared/model';
  *   a different VSCode build). Nothing here can reveal it.
  * - `dead`: the pid is gone; the registry has not caught up yet.
  * - `unavailable`: no process table on this platform, or the session has no pid.
+ * - `runner`: this extension is running it. Checked before the process table,
+ *   which would otherwise say `panel` — the process really is a child of this
+ *   extension host, but there is no Claude Code panel behind it.
  */
-export type LocationKind = 'panel' | 'terminal' | 'other-window' | 'external' | 'dead' | 'unavailable';
+export type LocationKind =
+  | 'runner'
+  | 'panel'
+  | 'terminal'
+  | 'other-window'
+  | 'external'
+  | 'dead'
+  | 'unavailable';
 
 /** `agentWrangler.rowClickOpens`. */
 export type RowClickBehavior = 'conversation' | 'wherever-it-runs';
@@ -44,6 +54,8 @@ export function openTargetFor(
   if (behavior === 'conversation') return 'conversation';
 
   if (s.provider !== 'claude') return s.status === 'ended' ? 'resume' : 'conversation';
+  // A session we run ourselves has nowhere else to be.
+  if (location === 'runner') return 'conversation';
   if (s.status === 'ended') return inWorkspace ? 'panel' : 'resume';
 
   switch (location) {
@@ -83,6 +95,8 @@ export function secondaryActionFor(
   location: LocationKind,
   inWorkspace: boolean,
 ): SecondaryAction | undefined {
+  // We are where it runs; there is nowhere to go.
+  if (location === 'runner') return undefined;
   if (s.status === 'ended') {
     // Resuming into this window's Claude Code panel only works for a session
     // whose project this window actually has open.
@@ -115,3 +129,24 @@ export const SECONDARY_LABEL: Record<SecondaryAction, string> = {
   'focus-window': 'Go to its window',
   'resume-terminal': 'Resume in terminal',
 };
+
+/**
+ * Whether this session can be pulled into this window, and how.
+ *
+ * Adopting means ending the process that currently runs the session and
+ * resuming the same id here. That is safe precisely because a Claude Code
+ * conversation *is* its transcript: resume reads the same file and keeps the
+ * same id, so an idle session loses nothing in the handover.
+ *
+ * The status is the whole guard. A `busy`, `stuck` or `blocked` session has a
+ * turn in flight, and ending its process would throw that turn away — so the
+ * offer simply is not made until it finishes. `ended` needs no kill at all,
+ * which is a different enough act to have its own name.
+ */
+export function adoptActionFor(s: AgentSession, ownedByRunner: boolean): 'adopt' | 'resume-here' | undefined {
+  if (ownedByRunner) return undefined; // already here — release is the opposite move
+  if (s.provider !== 'claude') return undefined;
+  if (!s.cwd) return undefined; // nothing to set as the working directory
+  if (s.status === 'ended') return 'resume-here';
+  return s.status === 'waiting' || s.status === 'done' ? 'adopt' : undefined;
+}

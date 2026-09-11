@@ -17,7 +17,7 @@ import type { ConversationToHost, HostToConversation } from '../../shared/messag
 import type { AgentSession, SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
 import { buildWebviewHtml } from '../html';
-import { SECONDARY_LABEL, secondaryActionFor, type SecondaryAction } from '../openTarget';
+import { adoptActionFor, SECONDARY_LABEL, secondaryActionFor, type SecondaryAction } from '../openTarget';
 import type { SessionLocator } from '../sessionLocator';
 import { isInThisWorkspace } from '../workspace';
 import { RunnerSource } from './runnerSource';
@@ -48,6 +48,8 @@ export class ConversationHost {
   private source?: ConversationSource;
   private sourceSubs: { dispose(): void }[] = [];
   private binding?: Binding;
+  /** A key asked for before the store knew it; bound on the next update. */
+  private pendingKey?: string;
   private session?: AgentSession;
   private ready = false;
   /** Only the newest capability computation may land; the locator read is async. */
@@ -87,11 +89,22 @@ export class ConversationHost {
     return this.session?.key;
   }
 
-  /** Point the pane at a session the store knows. Safe to call repeatedly. */
+  /**
+   * Point the pane at a session.
+   *
+   * The session may not be in the store yet: VSCode restores panels during
+   * activation, before the provider's first scan has run. So an unknown key is
+   * remembered and bound as soon as it appears, rather than dropped — which is
+   * what made a restored pane come back blank.
+   */
   show(key: string): void {
     if (this.binding?.kind === 'store' && this.binding.key === key) return;
     const session = this.store.get(key);
-    if (!session) return;
+    if (!session) {
+      this.pendingKey = key;
+      return;
+    }
+    this.pendingKey = undefined;
     this.bind({ kind: 'store', key }, session);
   }
 
@@ -114,6 +127,8 @@ export class ConversationHost {
     this.session = session;
     this.onTitle(session.title);
     this.swapSource(session);
+    const runner = this.source instanceof RunnerSource ? this.source.runner : undefined;
+    if (runner) this.runners.touch(runner);
     if (this.ready) void this.sendInit();
   }
 
@@ -165,6 +180,14 @@ export class ConversationHost {
   }
 
   private onStoreUpdate(): void {
+    if (this.pendingKey !== undefined) {
+      const waiting = this.store.get(this.pendingKey);
+      if (!waiting) return; // still not scanned, or gone for good
+      const key = this.pendingKey;
+      this.pendingKey = undefined;
+      this.bind({ kind: 'store', key }, waiting);
+      return;
+    }
     const binding = this.binding;
     if (!binding) return;
 
@@ -182,6 +205,20 @@ export class ConversationHost {
 
     const titleChanged = next.title !== this.session?.title;
     this.session = next;
+
+    // Adopting a session the pane is already showing swaps what feeds it: the
+    // transcript it was reading becomes a live process we drive. Re-init so the
+    // composer appears without the user having to reopen anything. (And the
+    // reverse, when a session is released back to a terminal.)
+    const shouldBeRunner = this.runners.owns(next.sessionId);
+    const isRunner = this.source instanceof RunnerSource;
+    if (shouldBeRunner !== isRunner) {
+      this.swapSource(next);
+      if (titleChanged) this.onTitle(next.title);
+      if (this.ready) void this.sendInit();
+      return;
+    }
+
     this.source?.setSession(next);
     if (titleChanged) this.onTitle(next.title);
     void this.pushSession(next);
@@ -206,11 +243,12 @@ export class ConversationHost {
       ? undefined
       : secondaryActionFor(session, (await this.locator.locate(session.pid)).kind, isInThisWorkspace(session.cwd));
 
+    const adopt = adoptActionFor(session, runner !== undefined);
     return {
       canSend,
       canInterrupt: canSend && (runner?.composer.busy ?? false),
-      // Phase 3.
-      canAdopt: false,
+      canAdopt: adopt === 'adopt',
+      canResumeHere: adopt === 'resume-here',
       canRelease: runner !== undefined,
       goTo: action ? { label: SECONDARY_LABEL[action], target: SECONDARY_TARGET[action] } : undefined,
       estimated: runner === undefined && session.statusIsEstimated === true,
@@ -262,10 +300,11 @@ export class ConversationHost {
       case 'pin':
         if (key) this.actions.pin(key);
         return;
+      case 'adopt':
       case 'resumeHere':
-        // Phase 3 resumes into a runner here; until then, a terminal is the
-        // honest way to continue an ended session.
-        if (key) this.actions.resume(key);
+        // One action: adopting an idle session ends its process first, and an
+        // ended one has nothing to end. `adopt` decides which it is.
+        if (key) this.actions.adopt(key);
         return;
       case 'requestToolResult': {
         const text = source?.fullToolResult?.(m.id);
@@ -277,9 +316,6 @@ export class ConversationHost {
         return;
       case 'openFile':
         this.actions.openFile(m.path);
-        return;
-      case 'adopt':
-        // Phase 3.
         return;
     }
   }
@@ -325,14 +361,18 @@ function readOnlyReason(
       : 'This session has ended.';
   }
   if (session.status === 'ended') return 'This session has ended.';
-  switch (action) {
-    case 'reveal-panel':
-      return 'This session runs in a Claude Code panel in this window.';
-    case 'show-terminal':
-      return 'This session runs in a terminal in this window.';
-    case 'focus-window':
-      return 'This session runs in another VSCode window.';
-    default:
-      return 'This session runs outside this VSCode window.';
-  }
+  const where =
+    action === 'reveal-panel'
+      ? 'a Claude Code panel in this window'
+      : action === 'show-terminal'
+        ? 'a terminal in this window'
+        : action === 'focus-window'
+          ? 'another VSCode window'
+          : 'outside this VSCode window';
+  // Say why Take over is missing rather than leaving its absence a mystery.
+  const busy =
+    session.status === 'waiting' || session.status === 'done'
+      ? ''
+      : ' Taking it over here has to wait for the turn in flight to finish.';
+  return `This session runs in ${where}.${busy}`;
 }

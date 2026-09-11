@@ -8,7 +8,7 @@ import type { HookHealth } from '../shared/model';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
 import { buildWebviewHtml } from './html';
-import { openTargetFor, type RowClickBehavior } from './openTarget';
+import { openTargetFor, type LocationKind, type RowClickBehavior } from './openTarget';
 import type { SessionLocator } from './sessionLocator';
 import { isInThisWorkspace } from './workspace';
 
@@ -36,6 +36,12 @@ export interface UsageSource {
  * WebviewPanel (editor tab) — so the HTML, snapshot pushes and message
  * handling live here and each shell only owns a lifetime.
  */
+/** Just enough of `RunnerService` for the dashboard: "are we running this one?" */
+export interface RunnerOwnership {
+  owns(sessionId: string | undefined): boolean;
+  onDidChange(listener: () => void): Disposable;
+}
+
 export class DashboardHost {
   private subs: { dispose(): void }[] = [];
 
@@ -49,6 +55,7 @@ export class DashboardHost {
     private locator: SessionLocator,
     private usage: UsageSource,
     private columns: ColumnPrefsService,
+    private runners: RunnerOwnership,
   ) {
     webview.options = {
       enableScripts: true,
@@ -75,6 +82,9 @@ export class DashboardHost {
       // Columns are shared across dashboards: a drag in the editor tab reaches
       // the docked one, and neither is the owner of the layout.
       this.columns.onDidChange(() => this.pushSnapshot()),
+      // Taking a session over (or handing it back) changes what its row says
+      // without changing anything the store tracks.
+      this.runners.onDidChange(() => this.pushSnapshot()),
     );
   }
 
@@ -102,16 +112,22 @@ export class DashboardHost {
     const behavior = vscode.workspace
       .getConfiguration('agentWrangler')
       .get<RowClickBehavior>('rowClickOpens', 'conversation');
-    const sessions = raw.map((s) => ({
-      ...s,
-      archived: this.archive.isArchived(s.key),
-      openTarget: openTargetFor(
-        s,
-        s.pid === undefined ? 'unavailable' : (locations.get(s.pid) ?? 'unavailable'),
-        isInThisWorkspace(s.cwd),
-        behavior,
-      ),
-    }));
+    const sessions = raw.map((s) => {
+      // Ask the runner first: its child processes are descendants of this
+      // extension host, so the process table would call them panel sessions.
+      const runnerOwned = this.runners.owns(s.sessionId);
+      const location: LocationKind = runnerOwned
+        ? 'runner'
+        : s.pid === undefined
+          ? 'unavailable'
+          : (locations.get(s.pid) ?? 'unavailable');
+      return {
+        ...s,
+        archived: this.archive.isArchived(s.key),
+        runnerOwned: runnerOwned || undefined,
+        openTarget: openTargetFor(s, location, isInThisWorkspace(s.cwd), behavior),
+      };
+    });
     const msg: HostToDashboard = {
       type: 'snapshot',
       sessions,

@@ -132,8 +132,10 @@ export interface ConversationCapabilities {
   /** The session is driven by this extension, so the composer can send. */
   canSend: boolean;
   canInterrupt: boolean;
-  /** Idle and owned elsewhere: it could be pulled into this window. */
+  /** Idle and owned elsewhere: its process could be ended and resumed here. */
   canAdopt: boolean;
+  /** Ended: nothing to end first, so it can simply be resumed here. */
+  canResumeHere: boolean;
   /** Driven here: it could be handed back to a terminal or the Claude Code panel. */
   canRelease: boolean;
   /** The demoted "go to where it actually runs" action, when there is somewhere to go. */

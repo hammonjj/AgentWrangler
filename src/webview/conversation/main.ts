@@ -53,6 +53,7 @@ app.innerHTML = `
 <div id="composer">
   <div id="composerRead">
     <span id="composerNote"></span>
+    <button id="adopt" class="askbtn primary" hidden></button>
     <button id="goTo" class="hdrbtn" hidden></button>
   </div>
   <div id="composerWrite" hidden>
@@ -82,6 +83,7 @@ const composerRead = document.getElementById('composerRead')!;
 const composerWrite = document.getElementById('composerWrite')!;
 const composerNote = document.getElementById('composerNote')!;
 const goToBtn = document.getElementById('goTo') as HTMLButtonElement;
+const adoptBtn = document.getElementById('adopt') as HTMLButtonElement;
 const pinBtn = document.getElementById('pin') as HTMLButtonElement;
 const releaseBtn = document.getElementById('release') as HTMLButtonElement;
 const modeSel = document.getElementById('mode') as HTMLSelectElement;
@@ -594,6 +596,18 @@ function setCaps(next: ConversationCapabilities, composer: ComposerState | undef
   if (next.goTo) goToBtn.textContent = next.goTo.label;
   releaseBtn.hidden = !next.canRelease;
 
+  // Taking over is the way a read-only conversation becomes a typeable one, so
+  // it sits in the composer bar where the question "why can't I type?" is asked.
+  adoptBtn.hidden = !(next.canAdopt || next.canResumeHere);
+  adoptBtn.disabled = false;
+  if (next.canAdopt) {
+    adoptBtn.textContent = 'Take over here';
+    adoptBtn.title = 'End the process running this session and continue it in this window';
+  } else if (next.canResumeHere) {
+    adoptBtn.textContent = 'Resume here';
+    adoptBtn.title = 'Continue this ended session in this window';
+  }
+
   composerWrite.hidden = !next.canSend;
   composerRead.hidden = next.canSend;
   if (!next.canSend) composerNote.textContent = next.readOnlyReason ?? 'Read-only.';
@@ -655,6 +669,12 @@ jump.addEventListener('click', () => {
 goToBtn.addEventListener('click', () => post({ type: 'goTo' }));
 pinBtn.addEventListener('click', () => post({ type: 'pin' }));
 releaseBtn.addEventListener('click', () => post({ type: 'release' }));
+adoptBtn.addEventListener('click', () => {
+  // The host confirms before doing anything; disabling here only stops a
+  // second click landing while that modal is up.
+  adoptBtn.disabled = true;
+  post({ type: caps?.canAdopt ? 'adopt' : 'resumeHere' });
+});
 sendBtn.addEventListener('click', sendMessage);
 stopBtn.addEventListener('click', () => post({ type: 'interrupt' }));
 modeSel.addEventListener('change', () => post({ type: 'setPermissionMode', mode: modeSel.value as PermissionModeName }));

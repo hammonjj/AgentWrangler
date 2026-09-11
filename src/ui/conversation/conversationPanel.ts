@@ -62,8 +62,8 @@ export class ConversationPanelManager implements vscode.Disposable {
    * entry yet. Takes focus, unlike a row click: the user asked for this one and
    * will want to type into it.
    */
-  showRunner(runner: RunnerSession): void {
-    this.ensureShared(false).host.showRunner(runner);
+  showRunner(runner: RunnerSession, opts?: { preserveFocus?: boolean }): void {
+    this.ensureShared(opts?.preserveFocus ?? false).host.showRunner(runner);
   }
 
   private ensureShared(preserveFocus: boolean): Shell {
@@ -115,12 +115,14 @@ export class ConversationPanelManager implements vscode.Disposable {
    */
   restore(panel: vscode.WebviewPanel, state: unknown, pinnedPanel: boolean): void {
     const key = (state as PanelState | undefined)?.key;
-    if (!key || !this.store.get(key)) {
-      // The session is gone (ended and aged out, or another machine's). An
-      // empty restored pane would be a puzzle, so close it.
+    if (!key) {
+      // Nothing to show and no way to find out what it was.
       panel.dispose();
       return;
     }
+    // The store is very likely empty at this point — VSCode restores panels
+    // during activation, before the first scan — so the key is handed over and
+    // the host binds it when the session turns up.
     if (pinnedPanel) {
       if (this.pinned.has(key)) {
         panel.dispose();

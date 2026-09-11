@@ -11,9 +11,14 @@ export interface SessionActions {
   /** Open a conversation panel of this session's own, which is never swapped away. */
   pin(key: string): void;
   /**
-   * Hand a session this window is running back to a terminal: end our process,
-   * then resume the same id there. The conversation lives in the transcript, so
-   * nothing is lost in the handover.
+   * Pull a session into this window: end whatever process runs it, then resume
+   * the same id here. Only offered for an idle or ended session — a turn in
+   * flight would be thrown away. An ended one has nothing to end first.
+   */
+  adopt(key: string): void;
+  /**
+   * The opposite: hand a session this window is running back to a terminal.
+   * The conversation lives in the transcript, so nothing is lost either way.
    */
   release(key: string): void;
   resume(key: string): void;
