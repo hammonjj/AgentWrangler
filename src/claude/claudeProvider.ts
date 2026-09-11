@@ -4,10 +4,12 @@ import type { ConfigGetter } from '../core/config';
 import { Emitter, type Disposable } from '../core/events';
 import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import type { TurnStats } from '../core/turnStats';
+import { clearWorktreeCache, worktreeFor } from '../core/worktree';
 import type { AgentSession, HookHealth, TurnProgress } from '../shared/model';
 import { statusFromHookState, turnBlockedMsAt, type HookSessionState } from './hookEvents';
 import { currentState, type InstallState } from './hookInstall';
-import { HookLog, hookLogDir } from './hookLog';
+import { HookLog, hookLogDir, type PermissionBehavior } from './hookLog';
+import { suggestionDestination, suggestionLabels } from './permissionDetail';
 import { isSessionJsonlName, projectsDir, sessionsDir } from './paths';
 import { readRegistry, type RegistryEntry } from './registry';
 import { deriveStatus, turnOver } from './status';
@@ -94,6 +96,9 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   async refresh(): Promise<void> {
+    // The one place worktrees are re-checked: a `git worktree add` between polls
+    // would otherwise keep reporting the answer from before it existed.
+    clearWorktreeCache();
     await this.refreshRegistry();
     await this.fullScan();
     await this.refreshHookHealth();
@@ -167,14 +172,18 @@ export class ClaudeProvider implements AgentProvider {
     const s = idx?.summary;
     const cwd = r.cwd ?? s?.cwd;
     const blocked = status === 'blocked';
+    // Buttons only while the hook script is provably still waiting.
+    const pending = blocked && this.hooks.pendingRequestExists(hook?.permissionRequestId);
+    const suggestions = pending ? (hook?.permissionSuggestions ?? []) : [];
+    const wt = worktreeFor(cwd);
     return {
       statusIsEstimated: hook === undefined,
       blockedReason: blocked ? hook?.blockedReason : undefined,
-      blockedDetail: blocked ? hook?.blockedDetail : undefined,
-      // Buttons only while the hook script is provably still waiting.
-      permissionRequestId:
-        blocked && this.hooks.pendingRequestExists(hook?.permissionRequestId)
-          ? hook?.permissionRequestId
+      blockedAsk: blocked ? hook?.blockedDetail : undefined,
+      permissionRequestId: pending ? hook?.permissionRequestId : undefined,
+      alwaysAllow:
+        suggestions.length > 0
+          ? { rules: suggestionLabels(suggestions), destination: suggestionDestination(suggestions) }
           : undefined,
       activeTool: status === 'busy' ? hook?.activeTool : undefined,
       progress: status === 'busy' && hook ? this.buildProgress(hook, now) : undefined,
@@ -186,6 +195,8 @@ export class ClaudeProvider implements AgentProvider {
       subtitle: s?.lastPrompt,
       cwd,
       projectName: cwd ? path.basename(cwd) : undefined,
+      worktree: wt?.name,
+      worktreePath: wt?.root,
       gitBranch: s?.gitBranch,
       model: s?.model,
       status,
@@ -218,7 +229,7 @@ export class ClaudeProvider implements AgentProvider {
    * Answer the permission prompt a session is blocked on. Resolves false when
    * there is no prompt left to answer (see `HookLog.decide`).
    */
-  async decidePermission(sessionId: string, behavior: 'allow' | 'deny'): Promise<boolean> {
+  async decidePermission(sessionId: string, behavior: PermissionBehavior): Promise<boolean> {
     const sent = await this.hooks.decide(sessionId, behavior);
     if (sent) this.changeEmitter.fire();
     return sent;
@@ -244,6 +255,7 @@ export class ClaudeProvider implements AgentProvider {
 
   private buildEnded(t: IndexedTranscript): AgentSession {
     const s = t.summary;
+    const wt = worktreeFor(s.cwd);
     return {
       provider: this.id,
       sessionId: t.sessionId,
@@ -252,6 +264,8 @@ export class ClaudeProvider implements AgentProvider {
       subtitle: s.lastPrompt,
       cwd: s.cwd,
       projectName: s.cwd ? path.basename(s.cwd) : undefined,
+      worktree: wt?.name,
+      worktreePath: wt?.root,
       gitBranch: s.gitBranch,
       model: s.model,
       status: 'ended',

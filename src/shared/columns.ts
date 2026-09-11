@@ -11,7 +11,7 @@
  * dragging and the picker menu.
  */
 
-export type ColumnId = 'proj' | 'branch' | 'model' | 'pr' | 'eta' | 'age';
+export type ColumnId = 'proj' | 'worktree' | 'branch' | 'model' | 'pr' | 'eta' | 'age';
 
 export interface ColumnDef {
   id: ColumnId;
@@ -33,6 +33,14 @@ export interface ColumnDef {
 
 export const COLUMNS: readonly ColumnDef[] = [
   { id: 'proj', label: 'Project', defaultWidth: 150, minWidth: 56, foldsWhenNarrow: true },
+  {
+    id: 'worktree',
+    label: 'Worktree',
+    title: 'The linked git worktree the session is working in. Blank in a main checkout.',
+    defaultWidth: 130,
+    minWidth: 56,
+    foldsWhenNarrow: true,
+  },
   { id: 'branch', label: 'Branch', defaultWidth: 120, minWidth: 56, foldsWhenNarrow: true },
   {
     id: 'model',
@@ -112,36 +120,37 @@ export function withDefaultWidths(prefs: ColumnPrefs): ColumnPrefs {
 }
 
 export interface ResizeBounds {
-  /** Width of the column right of the divider, when the drag started. */
+  /** Width of the column being dragged, when the drag started. */
   startWidth: number;
-  /** Width of the column left of it, when the drag started. */
-  startPrevWidth: number;
+  /** That column's floor. */
   minWidth: number;
-  minPrevWidth: number;
   /**
-   * The left-hand neighbour is the elastic Agent column. It has a floor, but no
-   * ceiling and no stored width: it simply takes whatever the others leave.
+   * Pixels the elastic Agent column can still give up — its current width minus
+   * `MIN_AGENT_WIDTH`, never below 0. It is the only column that moves in
+   * sympathy, so it is the only limit on growing this one.
    */
-  prevIsElastic: boolean;
+  slack: number;
 }
 
 /**
- * How far a divider may actually travel, given both columns' floors and the
- * ceiling. Positive is rightwards: the left column grows, the right one shrinks
- * by the same amount, which is what keeps every other divider still and the
- * dragged one under the pointer.
+ * The width a drag lands on. A drag resizes exactly ONE column: the handle sits
+ * on the column's left edge, so dragging left grows it and dragging right
+ * shrinks it, and the elastic Agent column takes the difference. Every other
+ * column keeps the width it had.
+ *
+ * `delta` is pointer travel in px, positive rightwards, so the new width is
+ * `startWidth - delta` — clamped by this column's floor, the global ceiling,
+ * and how much the Agent column has left to give.
  *
  * Pure, because the arithmetic is the only part of resizing worth testing — the
  * rest is pointer events.
  */
-export function clampResizeDelta(delta: number, b: ResizeBounds): number {
-  const lo = Math.max(b.minPrevWidth - b.startPrevWidth, b.startWidth - MAX_COLUMN_WIDTH);
-  let hi = b.startWidth - b.minWidth;
-  if (!b.prevIsElastic) hi = Math.min(hi, MAX_COLUMN_WIDTH - b.startPrevWidth);
-  // A window too narrow to satisfy both floors: refuse to move rather than
-  // honouring one of them by breaking the other.
-  if (hi < lo) return 0;
-  return Math.min(hi, Math.max(lo, delta));
+export function clampResizeWidth(delta: number, b: ResizeBounds): number {
+  // Never wider than the global cap or than Agent has left to give — with no
+  // slack the column can only shrink. The column's own floor wins if the two
+  // ever conflict, since a table too cramped to hold it is already broken.
+  const widest = Math.max(b.minWidth, Math.min(MAX_COLUMN_WIDTH, b.startWidth + Math.max(0, b.slack)));
+  return Math.round(Math.min(widest, Math.max(b.minWidth, b.startWidth - delta)));
 }
 
 /**

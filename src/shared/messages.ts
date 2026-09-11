@@ -23,8 +23,11 @@ export type HostToDashboard = {
   columns?: ColumnPrefs;
 };
 
-/** `allow` / `deny` answer the permission prompt a blocked row is sitting on. */
-export type DashboardAction = 'viewer' | 'resume' | 'archive' | 'allow' | 'deny';
+/**
+ * `allow` / `deny` / `always` answer the permission prompt a blocked row is
+ * sitting on; `always` also adds the rule Claude Code's "don't ask again" would.
+ */
+export type DashboardAction = 'viewer' | 'resume' | 'archive' | 'allow' | 'deny' | 'always';
 
 export type DashboardToHost =
   | { type: 'ready' }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  clampResizeDelta,
+  clampResizeWidth,
   columnDef,
   columnWidth,
   COLUMNS,
@@ -25,7 +25,7 @@ describe('visibleColumns', () => {
 
   it('drops what the user hid', () => {
     const prefs: ColumnPrefs = { hidden: ['branch', 'pr'] };
-    expect(visibleColumns(prefs, false).map((c) => c.id)).toEqual(['proj', 'model', 'eta', 'age']);
+    expect(visibleColumns(prefs, false).map((c) => c.id)).toEqual(['proj', 'worktree', 'model', 'eta', 'age']);
   });
 
   it('folds the location columns away in a narrow dock', () => {
@@ -102,63 +102,45 @@ describe('prefs updates', () => {
   });
 });
 
-describe('clampResizeDelta', () => {
+describe('clampResizeWidth', () => {
   const bounds = (over: Partial<ResizeBounds> = {}): ResizeBounds => ({
     startWidth: 150,
-    startPrevWidth: 120,
     minWidth: 56,
-    minPrevWidth: 56,
-    prevIsElastic: false,
+    slack: 200,
     ...over,
   });
 
-  it('passes a delta that breaks nothing straight through', () => {
-    expect(clampResizeDelta(30, bounds())).toBe(30);
-    expect(clampResizeDelta(-30, bounds())).toBe(-30);
+  it('tracks the pointer: the handle is on the left edge, so dragging left grows', () => {
+    expect(clampResizeWidth(-30, bounds())).toBe(180);
+    expect(clampResizeWidth(30, bounds())).toBe(120);
   });
 
-  it('stops at the dragged column`s floor', () => {
-    // 150 wide, floor 56: it can give up 94px and not a pixel more.
-    expect(clampResizeDelta(500, bounds())).toBe(94);
+  it('stops at the column`s own floor', () => {
+    expect(clampResizeWidth(500, bounds())).toBe(56);
   });
 
-  it('stops at the neighbour`s floor', () => {
-    // 120 wide, floor 56: dragging left can take 64px off it.
-    expect(clampResizeDelta(-500, bounds())).toBe(-64);
+  it('grows no further than the Agent column has left to give', () => {
+    // Agent is 40px above its floor: this column may take those 40 and no more.
+    expect(clampResizeWidth(-500, bounds({ slack: 40 }))).toBe(190);
+    // Agent already at its floor: the column can only shrink from here.
+    expect(clampResizeWidth(-500, bounds({ slack: 0 }))).toBe(150);
+    expect(clampResizeWidth(20, bounds({ slack: 0 }))).toBe(130);
   });
 
-  it('gives the elastic Agent column a floor but no ceiling', () => {
-    const elastic = bounds({ prevIsElastic: true, startPrevWidth: 300, minPrevWidth: 110 });
-    expect(clampResizeDelta(-500, elastic)).toBe(-190); // Agent may not go below 110
-    expect(clampResizeDelta(94, elastic)).toBe(94); // but may grow as far as this column shrinks
+  it('treats a table already overflowing as no slack at all', () => {
+    expect(clampResizeWidth(-50, bounds({ slack: -80 }))).toBe(150);
   });
 
-  it('refuses to let either column exceed the ceiling', () => {
-    // Both already at the cap: growing either one is out, so the divider is stuck.
-    const wide = bounds({ startWidth: MAX_COLUMN_WIDTH, startPrevWidth: MAX_COLUMN_WIDTH });
-    expect(clampResizeDelta(-50, wide)).toBe(0);
-    expect(clampResizeDelta(50, wide)).toBe(0);
-
-    // A neighbour at the cap can still be dragged narrower.
-    const other = bounds({ startWidth: 100, startPrevWidth: MAX_COLUMN_WIDTH });
-    expect(clampResizeDelta(-10, other)).toBe(-10);
-    expect(clampResizeDelta(10, other)).toBe(0); // but not wider
-  });
-
-  it('does not move at all when the floors cannot both be met', () => {
-    const cramped = bounds({ startWidth: 40, minWidth: 56, startPrevWidth: 40, minPrevWidth: 56 });
-    expect(clampResizeDelta(20, cramped)).toBe(0);
-  });
-
-  it('is symmetric: what one column gives, the other takes', () => {
-    const b = bounds();
-    const d = clampResizeDelta(25, b);
-    expect(b.startWidth - d + (b.startPrevWidth + d)).toBe(b.startWidth + b.startPrevWidth);
+  it('never exceeds the ceiling, however much slack there is', () => {
+    expect(clampResizeWidth(-5000, bounds({ slack: 5000 }))).toBe(MAX_COLUMN_WIDTH);
   });
 
   it('keeps a narrow column draggable down to its own floor', () => {
-    expect(clampResizeDelta(500, bounds({ startWidth: age.defaultWidth, minWidth: age.minWidth }))).toBe(
-      age.defaultWidth - age.minWidth,
-    );
+    const b = bounds({ startWidth: age.defaultWidth, minWidth: age.minWidth });
+    expect(clampResizeWidth(500, b)).toBe(age.minWidth);
+  });
+
+  it('returns whole pixels', () => {
+    expect(clampResizeWidth(-10.4, bounds({ startWidth: 150.6 }))).toBe(161);
   });
 });

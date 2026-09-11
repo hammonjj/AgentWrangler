@@ -91,6 +91,15 @@ export interface AgentSession {
   cwd?: string;
   projectName?: string;
   gitBranch?: string;
+  /**
+   * Name of the linked git worktree this session is working in, when it is in
+   * one — the directory `git worktree add` created. Absent in a main checkout,
+   * which is the point: the column is only ever filled in for the trees that
+   * are easy to lose track of.
+   */
+  worktree?: string;
+  /** Absolute path of that worktree's root, for the cell's tooltip. */
+  worktreePath?: string;
   /** Wire id of the model behind the latest reply, e.g. `claude-opus-5`; the Model column shortens it. */
   model?: string;
   status: SessionStatus;
@@ -115,21 +124,51 @@ export interface AgentSession {
   /** For `blocked`: what Claude is asking for (tool name, or an elicitation label). */
   blockedReason?: string;
   /**
-   * For `blocked`: what the permission is actually for, one line — the Bash
-   * command's description, the file an Edit touches, the question being asked.
-   * Read off the hook payload's `tool_input`, so absent without hooks.
+   * For `blocked`: what the permission is actually for — the command, the file
+   * an Edit touches, the question being asked. Read off the hook payload's
+   * `tool_input`, so absent without hooks.
    */
-  blockedDetail?: string;
+  blockedAsk?: PermissionAsk;
   /**
    * For `blocked`: set while our PermissionRequest hook is still waiting for a
    * decision file, i.e. while Allow/Deny from the dashboard can still land.
    * Absent once the user has answered in Claude Code itself.
    */
   permissionRequestId?: string;
+  /**
+   * For `blocked`: the rule an *Always allow* would add, as Claude Code itself
+   * would phrase it (`Bash(npm test:*)`), and where it would be saved. Present
+   * only when the payload offered a suggestion — the same one Claude Code's own
+   * "don't ask again" would apply.
+   */
+  alwaysAllow?: { rules: string[]; destination: string };
   /** For `busy`: the tool currently in flight, so a long build reads as work, not a stall. */
   activeTool?: { name: string; sinceMs: number };
   /** For `busy`: how far into the current turn we are. Requires hooks. */
   progress?: TurnProgress;
+}
+
+/**
+ * A permission prompt, broken into the two things a decision actually needs:
+ * what Claude says it is doing, and the literal thing that will happen. Kept
+ * apart rather than pre-joined into one line because the dashboard shows the
+ * command on its own, monospaced and over as many lines as it takes.
+ */
+export interface PermissionAsk {
+  /** Claude's own one-line description, when it gave one ("Run the unit tests"). */
+  summary?: string;
+  /** The subject itself: the command, the file, the URL, the question. May be multi-line. */
+  body?: string;
+  /** `body` is a shell command — rendered monospace and labelled as one. */
+  isCommand?: boolean;
+}
+
+/** The ask flattened to one line, for tooltips and the narrow layout. */
+export function askLine(ask: PermissionAsk | undefined): string | undefined {
+  if (!ask) return undefined;
+  const body = ask.body?.replace(/\s+/g, ' ').trim();
+  if (ask.summary && body) return `${ask.summary} — ${body}`;
+  return ask.summary ?? (body || undefined);
 }
 
 /** Working time spent on this turn — wall clock minus time parked on a human. */

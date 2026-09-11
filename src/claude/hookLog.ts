@@ -25,6 +25,7 @@ import * as path from 'node:path';
 import { Emitter, type Disposable } from '../core/events';
 import { parseHookLine, reduceHookEvent, type HookSessionState } from './hookEvents';
 import { claudeHome } from './paths';
+import type { PermissionSuggestion } from './permissionDetail';
 import { isPidAlive } from './registry';
 import { MAX_CHUNK_BYTES, readRange, splitCompleteLines, TAIL_CHUNK_BYTES } from './transcriptTail';
 
@@ -39,15 +40,28 @@ export function hookLogDir(): string {
 }
 
 /**
+ * What answering a prompt from the dashboard does. `always` is `allow` plus the
+ * permission rules Claude Code's own "don't ask again" would have added.
+ */
+export type PermissionBehavior = 'allow' | 'deny' | 'always';
+
+/**
  * What the PermissionRequest hook script prints for Claude Code to read as its
  * decision. The shape is Claude Code's: `decision` must be `{behavior: "allow"}`
- * or `{behavior: "deny", message}`.
+ * or `{behavior: "deny", message}`, and an allow may carry `updatedPermissions`
+ * — the `permission_suggestions` from the payload, handed straight back. Claude
+ * Code applies those to the session and persists them where each says.
  */
-export function permissionDecisionJson(behavior: 'allow' | 'deny'): string {
+export function permissionDecisionJson(
+  behavior: PermissionBehavior,
+  suggestions: PermissionSuggestion[] = [],
+): string {
   const decision =
-    behavior === 'allow'
-      ? { behavior: 'allow' }
-      : { behavior: 'deny', message: 'Denied from the Agent Wrangler dashboard.' };
+    behavior === 'deny'
+      ? { behavior: 'deny', message: 'Denied from the Agent Wrangler dashboard.' }
+      : behavior === 'always' && suggestions.length > 0
+        ? { behavior: 'allow', updatedPermissions: suggestions }
+        : { behavior: 'allow' };
   return `${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } })}\n`;
 }
 
@@ -118,7 +132,7 @@ export class HookLog implements Disposable {
    * events that follow (PreToolUse / PermissionDenied) say what actually
    * happened. Only the marker id is cleared, so the buttons go away at once.
    */
-  async decide(sessionId: string, behavior: 'allow' | 'deny'): Promise<boolean> {
+  async decide(sessionId: string, behavior: PermissionBehavior): Promise<boolean> {
     const st = this.states.get(sessionId.toLowerCase());
     const id = st?.permissionRequestId;
     if (!st || !id || !this.pendingRequestExists(id)) return false;
@@ -126,7 +140,7 @@ export class HookLog implements Disposable {
     const target = path.join(this.dir, 'decisions', `${id}.json`);
     try {
       await fsp.mkdir(path.dirname(target), { recursive: true });
-      await fsp.writeFile(`${target}.tmp`, permissionDecisionJson(behavior), 'utf8');
+      await fsp.writeFile(`${target}.tmp`, permissionDecisionJson(behavior, st.permissionSuggestions), 'utf8');
       await fsp.rename(`${target}.tmp`, target);
     } catch (err) {
       this.log(`permission decision write failed: ${String(err)}`);

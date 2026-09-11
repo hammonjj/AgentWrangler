@@ -218,6 +218,12 @@ export function activate(context: vscode.ExtensionContext): void {
       void provider.decidePermission(s.sessionId, behavior).then((sent) => {
         if (sent) {
           log(`permission ${behavior} sent to ${s.name ?? s.sessionId}`);
+          if (behavior === 'always' && s.alwaysAllow) {
+            vscode.window.setStatusBarMessage(
+              `Agent Wrangler: allowed ${s.alwaysAllow.rules.join(', ')} in ${s.alwaysAllow.destination}.`,
+              5000,
+            );
+          }
           return;
         }
         // The prompt was answered in Claude Code first, or the hook gave up

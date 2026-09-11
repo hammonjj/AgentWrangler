@@ -125,17 +125,27 @@ describe('reduceHookEvent', () => {
     expect(st.blockedReason).toBe('Bash');
   });
 
-  it('carries what the permission is for', () => {
+  it('carries what the permission is for, and what an Always would allow', () => {
+    const suggestion = {
+      type: 'addRules',
+      destination: 'localSettings',
+      behavior: 'allow',
+      rules: [{ toolName: 'Bash', ruleContent: 'npm test:*' }],
+    };
     const st = feed([
       {
         hook_event_name: 'PermissionRequest',
         tool_name: 'Bash',
         tool_input: { command: 'npm test', description: 'Run the tests' },
+        permission_suggestions: [suggestion],
       },
     ]);
-    expect(st.blockedDetail).toBe('Run the tests — npm test');
+    expect(st.blockedDetail).toEqual({ summary: 'Run the tests', body: 'npm test', isCommand: true });
+    expect(st.permissionSuggestions).toEqual([suggestion]);
     // Cleared with the block.
-    expect(reduceHookEvent(st, ev('PreToolUse', T0 + 1000, { tool_name: 'Bash' })).blockedDetail).toBeUndefined();
+    const after = reduceHookEvent(st, ev('PreToolUse', T0 + 1000, { tool_name: 'Bash' }));
+    expect(after.blockedDetail).toBeUndefined();
+    expect(after.permissionSuggestions).toBeUndefined();
   });
 
   it('treats a question to the user as blocked, with the question as the detail', () => {
@@ -150,7 +160,7 @@ describe('reduceHookEvent', () => {
     ]);
     expect(st.status).toBe('blocked');
     expect(st.blockedReason).toBe('answer');
-    expect(st.blockedDetail).toBe('Ship it?');
+    expect(st.blockedDetail?.body).toBe('Ship it?');
     expect(st.activeTool).toBeUndefined();
     // Answered: the tool completes and the turn goes on.
     expect(reduceHookEvent(st, ev('PostToolUse', T0 + 9000, { tool_name: 'AskUserQuestion' })).status).toBe('busy');

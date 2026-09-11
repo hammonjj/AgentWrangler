@@ -1,6 +1,6 @@
 import './dashboard.css';
 import {
-  clampResizeDelta,
+  clampResizeWidth,
   COLUMNS,
   columnWidth,
   isHidden,
@@ -17,6 +17,7 @@ import {
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
 import {
+  askLine,
   capitalize,
   etaText,
   formatAge,
@@ -70,6 +71,17 @@ let menuTop: number | undefined;
 /** A drag owns the table until it ends: snapshots arriving mid-drag are deferred. */
 let dragging = false;
 let renderDeferred = false;
+
+/**
+ * Permission cards the user opened or closed by hand, by session key. Not
+ * persisted: a prompt lives for minutes, and the default (open while it can
+ * still be answered) is the right one every time a new one arrives.
+ */
+const permOverride = new Map<string, boolean>();
+
+function permExpanded(key: string, pending: boolean): boolean {
+  return permOverride.get(key) ?? pending;
+}
 
 function cols(): ColumnDef[] {
   return visibleColumns(columns, narrow);
@@ -167,21 +179,58 @@ function statusChip(s: SessionDTO): string {
 }
 
 /**
- * Third line of a blocked row: what the permission is for, and — while our hook
- * script is still waiting on a decision — Allow / Deny. The row grows to fit,
- * because this is the one place a glance has to be enough to act on. Claude
- * Code's own dialog stays open the whole time and works as before; whichever
- * is answered first wins.
+ * The permission card: extra rows under a blocked session saying what it wants
+ * to run, and the buttons that answer it.
+ *
+ * It is its own `<tr>` spanning the whole table rather than a third line inside
+ * the Agent cell, because the command needs the full width and as many lines as
+ * it takes — a one-line ellipsis is not something you can safely click Allow on.
+ * Expanded by default while a decision can still land, collapsed once it cannot;
+ * the header line stays either way, so the row never loses what it is waiting
+ * for. Claude Code's own dialog stays open the whole time and works as before;
+ * whichever is answered first wins.
  */
-function permissionLine(s: SessionDTO): string {
-  if (s.status !== 'blocked' || (!s.blockedDetail && !s.permissionRequestId)) return '';
-  const detail = s.blockedDetail
-    ? `<span class="pdetail" title="${esc(s.blockedDetail)}">${esc(s.blockedDetail)}</span>`
-    : `<span class="pdetail dim">${esc(capitalize(s.blockedReason ?? 'permission'))} — see the session for details</span>`;
-  const buttons = s.permissionRequestId
-    ? `<span class="pbtns"><button class="pbtn allow" data-action="allow" title="Allow this once, as if you had clicked Allow in Claude Code">Allow</button><button class="pbtn deny" data-action="deny" title="Deny, as if you had clicked Deny in Claude Code">Deny</button></span>`
+function permissionRow(s: SessionDTO, span: number): string {
+  if (s.status !== 'blocked' || (!s.blockedAsk && !s.permissionRequestId)) return '';
+
+  const ask = s.blockedAsk;
+  const pending = s.permissionRequestId !== undefined;
+  const open = permExpanded(s.key, pending);
+
+  // The header is the summary when Claude gave one, else the ask itself on one
+  // line; the body below repeats it in full, unflattened.
+  const headline = ask?.summary ?? askLine(ask);
+  const header = headline
+    ? `<span class="phead">${esc(headline)}</span>`
+    : `<span class="phead dim">${esc(capitalize(s.blockedReason ?? 'permission'))} — open the session for details</span>`;
+
+  const bodyLabel = ask?.isCommand ? 'Command' : 'Request';
+  const detail = ask?.body
+    ? `<div class="pdetail"><span class="plabel">${bodyLabel}</span><pre class="pcmd${ask.isCommand ? ' mono' : ''}">${esc(ask.body)}</pre></div>`
     : '';
-  return `<div class="perm">${detail}${buttons}</div>`;
+
+  const always =
+    pending && s.alwaysAllow
+      ? `<button class="pbtn always" data-action="always" title="${esc(
+          `Allow this and stop asking: adds ${s.alwaysAllow.rules.join(', ')} to ${s.alwaysAllow.destination}, exactly as Claude Code's own "don't ask again" would.`,
+        )}">Always allow</button>`
+      : '';
+  const buttons = pending
+    ? `<div class="pbtns">
+      <button class="pbtn allow" data-action="allow" title="Allow this once, as if you had clicked Allow in Claude Code">Allow</button>
+      ${always}
+      <button class="pbtn deny" data-action="deny" title="Deny, as if you had clicked Deny in Claude Code">Deny</button>
+    </div>`
+    : // No buttons: either this was answered in Claude Code already, or it is a
+      // tool that only the session itself can answer (a question, a plan).
+      '<div class="pnote">Answer this in the session.</div>';
+
+  return `<tr class="permrow${open ? ' open' : ''}${pending ? ' pending' : ''}" data-key="${esc(s.key)}">
+  <td class="c-perm" colspan="${span}">
+    <button class="ptoggle" data-perm="toggle" aria-expanded="${open}" title="${open ? 'Hide the details' : 'Show the command and the buttons'}"><span class="ptw" aria-hidden="true">${open ? '▾' : '▸'}</span>${header}</button>
+    <div class="pslide"><div class="pinner">${detail}${buttons}</div></div>
+  </td>
+</tr>`;
 }
 
 /**
@@ -271,6 +320,11 @@ function branchText(s: SessionDTO): string {
   return s.gitBranch && s.gitBranch !== 'HEAD' ? esc(s.gitBranch) : '';
 }
 
+/** Unescaped — the caller escapes it as a tooltip. */
+function worktreeTitle(s: SessionDTO): string {
+  return `Linked git worktree${s.worktreePath ? `\n${s.worktreePath}` : ''}`;
+}
+
 function prHtml(s: SessionDTO): string {
   return s.prLink
     ? `<span class="pr" role="link" data-url="${esc(s.prLink.prUrl)}" title="${esc(s.prLink.prUrl)}">#${s.prLink.prNumber}</span>`
@@ -285,6 +339,10 @@ function prHtml(s: SessionDTO): string {
  */
 const CELL: Record<ColumnId, (s: SessionDTO) => string> = {
   proj: (s) => `<td class="c-proj"${s.cwd ? ` title="${esc(s.cwd)}"` : ''}>${esc(s.projectName ?? '')}</td>`,
+  worktree: (s) =>
+    s.worktree === undefined
+      ? '<td class="c-worktree"></td>'
+      : `<td class="c-worktree" title="${esc(worktreeTitle(s))}">${esc(s.worktree)}</td>`,
   branch: (s) => {
     const b = branchText(s);
     return `<td class="c-branch"${b ? ` title="${b}"` : ''}>${b}</td>`;
@@ -302,7 +360,7 @@ const CELL: Record<ColumnId, (s: SessionDTO) => string> = {
   age: (s) => `<td class="c-age" data-age-ts="${s.lastActivityAt}">${formatAge(Date.now(), s.lastActivityAt)}</td>`,
 };
 
-function rowHtml(s: SessionDTO): string {
+function rowHtml(s: SessionDTO, span: number): string {
   const titleLine =
     s.name && s.title !== s.name
       ? `<span class="nm">${esc(s.name)}</span><span class="sep">·</span>${esc(s.title)}`
@@ -316,17 +374,17 @@ function rowHtml(s: SessionDTO): string {
   const shown = new Set(cols().map((c) => c.id));
   const meta = [
     shown.has('proj') ? '' : s.projectName ? esc(s.projectName) : '',
+    // Folded, the two are bare words with nothing to tell them apart, and a
+    // session sitting at the root of its worktree would print the same name
+    // twice. In the columns they keep their headers, so both stay.
+    shown.has('worktree') || s.worktree === s.projectName ? '' : esc(s.worktree ?? ''),
     shown.has('branch') ? '' : branchText(s),
     shown.has('model') ? '' : esc(modelLabel(s.model) ?? ''),
     shown.has('pr') ? '' : prHtml(s),
   ]
     .filter(Boolean)
     .join('<span class="sep">·</span>');
-  const sub = s.subtitle ? esc(s.subtitle) : '';
-  const secondLine =
-    meta || sub
-      ? `<div class="sub">${meta ? `<span class="meta">${meta}</span>` : ''}${meta && sub ? '<span class="msep"> — </span>' : ''}${sub}</div>`
-      : '';
+  const secondLine = meta ? `<div class="sub"><span class="meta">${meta}</span></div>` : '';
 
   const est = s.statusIsEstimated && s.status !== 'ended' ? ' est' : '';
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
@@ -334,13 +392,12 @@ function rowHtml(s: SessionDTO): string {
   <td class="c-agent"><div class="agent">
     <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
-    ${permissionLine(s)}
   </div></td>
   ${cols()
     .map((c) => CELL[c.id](s))
     .join('')}
   <td class="c-act">${actionButtons(s)}</td>
-</tr>`;
+</tr>${permissionRow(s, span)}`;
 }
 
 /**
@@ -440,8 +497,8 @@ function usageHtml(): string {
  * The header row. Widths are inline because they are data, not style: a width
  * the user dragged has to survive every re-render and reach the other dashboard
  * unchanged. Each header carries a grab handle on its LEFT edge — the divider
- * it shares with the column before it, which is the thing the eye is actually
- * aiming at.
+ * it shares with the column before it, which is both the thing the eye aims at
+ * and the edge that moves when that column is resized.
  */
 function headHtml(): string {
   const ths = cols()
@@ -452,7 +509,7 @@ function headHtml(): string {
     })
     .join('');
   return `<thead><tr>
-  <th class="h-dot"></th><th class="h-agent">Agent</th>${ths}<th class="h-act"><button class="colcfg" data-cols="menu" title="Choose columns">${ICON_COLUMNS}</button></th>
+  <th class="h-dot"></th><th class="h-agent" title="Takes whatever width the other columns leave. Drag a divider to resize the column to its right.">Agent</th>${ths}<th class="h-act"><button class="colcfg" data-cols="menu" title="Choose columns">${ICON_COLUMNS}</button></th>
 </tr></thead>`;
 }
 
@@ -513,7 +570,7 @@ function render(): void {
     const isCollapsed = collapsed.has(sec);
     html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${sec}">
 <tr class="sec st-${sec}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(SECTION_LABEL[sec])}<span class="count">${rows.length}</span></td></tr>`;
-    for (const s of rows) html += rowHtml(s);
+    for (const s of rows) html += rowHtml(s, span);
     html += '</tbody>';
   }
   html += '</table>';
@@ -524,6 +581,12 @@ window.addEventListener('message', (e: MessageEvent) => {
   const m = e.data as HostToDashboard;
   if (m.type === 'snapshot') {
     sessions = m.sessions;
+    // A card the user opened or closed is about one prompt. Once that session
+    // is no longer blocked the override has outlived its subject, and the next
+    // prompt should open by itself.
+    for (const key of Array.from(permOverride.keys())) {
+      if (!sessions.some((s) => s.key === key && s.status === 'blocked')) permOverride.delete(key);
+    }
     hooks = m.hooks;
     usage = m.usage;
     // Our own drag already drew this; anything else is another dashboard's.
@@ -535,52 +598,42 @@ window.addEventListener('message', (e: MessageEvent) => {
 // ---- resizing ----
 
 /**
- * Drag a divider. The column to its right takes the change; the column to its
- * left takes the opposite, so every other divider stays exactly where it is and
- * the one under the pointer tracks it. When the left-hand neighbour is the
- * Agent column there is nothing to write: Agent has no width of its own and
- * absorbs whatever the fixed columns leave, which is the whole reason it is the
- * elastic one. It still gets a floor, or a drag could squeeze it to nothing.
+ * Drag a divider. Exactly ONE column changes width: the one the handle belongs
+ * to. The handle sits on that column's LEFT edge, so dragging left grows it and
+ * dragging right shrinks it, and the elastic Agent column — which has no width
+ * of its own and simply takes whatever the fixed columns leave — absorbs the
+ * difference. Every other column keeps the width it had.
+ *
+ * Agent's floor is therefore the only ceiling on growing a column: `slack` is
+ * how much it has left to give, measured when the drag starts. Without it a
+ * drag would push the table wider than the dock and squeeze Agent to nothing.
  */
 function beginResize(e: PointerEvent, handle: HTMLElement): void {
   const id = handle.dataset.rz as ColumnId;
   const th = handle.parentElement as HTMLTableCellElement | null;
-  const prevTh = th?.previousElementSibling as HTMLTableCellElement | null;
-  const visible = cols();
-  const def = visible.find((c) => c.id === id);
-  if (!th || !prevTh || !def) return;
+  const def = cols().find((c) => c.id === id);
+  if (!th || !def) return;
 
-  const prevId = prevTh.dataset.col as ColumnId | undefined;
-  const prevDef = prevId ? visible.find((c) => c.id === prevId) : undefined;
-  const minPrev = prevDef ? prevDef.minWidth : MIN_AGENT_WIDTH;
-
+  const agentTh = app.querySelector('th.h-agent');
   const startX = e.clientX;
   const startW = th.getBoundingClientRect().width;
-  const startPrevW = prevTh.getBoundingClientRect().width;
+  const slack = agentTh ? agentTh.getBoundingClientRect().width - MIN_AGENT_WIDTH : 0;
 
   dragging = true;
   document.body.classList.add('resizing');
+  handle.classList.add('dragging'); // only THIS divider lights up, not all of them
   handle.setPointerCapture(e.pointerId);
   e.preventDefault();
 
   let width = startW;
-  let prevWidth = startPrevW;
 
   const move = (ev: PointerEvent) => {
-    const d = clampResizeDelta(ev.clientX - startX, {
+    width = clampResizeWidth(ev.clientX - startX, {
       startWidth: startW,
-      startPrevWidth: startPrevW,
       minWidth: def.minWidth,
-      minPrevWidth: minPrev,
-      prevIsElastic: prevDef === undefined,
+      slack,
     });
-
-    width = Math.round(startW - d);
     th.style.width = `${width}px`;
-    if (prevDef) {
-      prevWidth = Math.round(startPrevW + d);
-      prevTh.style.width = `${prevWidth}px`;
-    }
   };
 
   let ended = false;
@@ -593,10 +646,9 @@ function beginResize(e: PointerEvent, handle: HTMLElement): void {
     handle.removeEventListener('lostpointercapture', end);
     dragging = false;
     document.body.classList.remove('resizing');
+    handle.classList.remove('dragging');
 
-    const patch: Partial<Record<ColumnId, number>> = { [id]: width };
-    if (prevDef) patch[prevDef.id] = prevWidth;
-    saveColumns(withWidths(columns, patch));
+    saveColumns(withWidths(columns, { [id]: width }));
 
     if (renderDeferred) {
       renderDeferred = false;
@@ -681,7 +733,9 @@ app.addEventListener('click', (e) => {
   }
 
   const bannerBtn = target.closest('button[data-banner]') as HTMLElement | null;
+  const ptoggle = target.closest('button.ptoggle') as HTMLElement | null;
   const pbtn = target.closest('button.pbtn') as HTMLButtonElement | null;
+  const permRow = target.closest('tr.permrow') as HTMLElement | null;
   const btn = target.closest('button.act') as HTMLElement | null;
   const pr = target.closest('.pr') as HTMLElement | null;
   const row = target.closest('tr.row') as HTMLElement | null;
@@ -697,12 +751,31 @@ app.addEventListener('click', (e) => {
     }
     return;
   }
-  if (pbtn && row) {
-    // One click, one decision: disable both buttons until the next snapshot
-    // re-renders the row from what actually happened.
-    for (const b of Array.from(row.querySelectorAll<HTMLButtonElement>('button.pbtn'))) b.disabled = true;
-    pbtn.textContent = pbtn.dataset.action === 'allow' ? 'Allowing…' : 'Denying…';
-    post({ type: 'action', key: row.dataset.key!, action: pbtn.dataset.action as DashboardAction });
+  if (ptoggle && permRow) {
+    // Toggled on the live element rather than by re-rendering: a fresh <div> is
+    // born at its final height and the slide would never run.
+    const open = !permRow.classList.contains('open');
+    permOverride.set(permRow.dataset.key!, open);
+    permRow.classList.toggle('open', open);
+    ptoggle.setAttribute('aria-expanded', String(open));
+    ptoggle.title = open ? 'Hide the details' : 'Show the command and the buttons';
+    const twisty = ptoggle.querySelector('.ptw');
+    if (twisty) twisty.textContent = open ? '▾' : '▸';
+    e.stopPropagation();
+    return;
+  }
+  if (pbtn && permRow) {
+    // One click, one decision: disable every button until the next snapshot
+    // re-renders the card from what actually happened.
+    for (const b of Array.from(permRow.querySelectorAll<HTMLButtonElement>('button.pbtn'))) b.disabled = true;
+    pbtn.textContent = pbtn.dataset.action === 'deny' ? 'Denying…' : 'Allowing…';
+    post({ type: 'action', key: permRow.dataset.key!, action: pbtn.dataset.action as DashboardAction });
+    e.stopPropagation();
+    return;
+  }
+  // Anywhere else on the card: leave the row alone rather than opening the
+  // session out from under a decision.
+  if (permRow) {
     e.stopPropagation();
     return;
   }

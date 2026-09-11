@@ -214,6 +214,42 @@ describe('HookLog', () => {
       expect(fired).toBe(1);
     });
 
+    it('hands the suggested rules back for an Always allow', async () => {
+      // What Claude Code's own "don't ask again" would have applied, returned
+      // verbatim in the allow decision — it applies and persists them itself.
+      const suggestion = {
+        type: 'addRules',
+        destination: 'localSettings',
+        behavior: 'allow',
+        rules: [{ toolName: 'Bash', ruleContent: 'ls:*' }],
+      };
+      await fsp.mkdir(path.join(dir, 'requests'), { recursive: true });
+      await fsp.writeFile(marker(), '', 'utf8');
+      await write(
+        1234,
+        ev(SID_A, 'PermissionRequest', {
+          tool_name: 'Bash',
+          tool_input: { command: 'ls' },
+          permission_suggestions: [suggestion],
+        }) + ev(SID_A, 'AgentWranglerPermissionPending', { request_id: REQ }),
+      );
+      await log.scanAll();
+
+      expect(await log.decide(SID_A, 'always')).toBe(true);
+      const written = JSON.parse(await fsp.readFile(decisionFile(), 'utf8'));
+      expect(written.hookSpecificOutput.decision).toEqual({
+        behavior: 'allow',
+        updatedPermissions: [suggestion],
+      });
+    });
+
+    it('falls back to a plain allow when the payload suggested no rule', async () => {
+      await openPrompt(); // no permission_suggestions on it
+      expect(await log.decide(SID_A, 'always')).toBe(true);
+      const written = JSON.parse(await fsp.readFile(decisionFile(), 'utf8'));
+      expect(written.hookSpecificOutput.decision).toEqual({ behavior: 'allow' });
+    });
+
     it('denies with a message, as Claude Code requires', async () => {
       await openPrompt();
       expect(await log.decide(SID_A, 'deny')).toBe(true);

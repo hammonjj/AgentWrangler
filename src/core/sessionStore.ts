@@ -29,14 +29,17 @@ function materialFingerprint(s: AgentSession): string {
     s.lastActivityAt,
     s.name ?? '',
     s.gitBranch ?? '',
+    s.worktree ?? '',
     s.model ?? '',
     s.pid ?? '',
     s.transcriptPath ?? '',
     s.prLink?.prUrl ?? '',
     s.statusIsEstimated ? 'est' : '',
     s.blockedReason ?? '',
-    s.blockedDetail ?? '',
+    s.blockedAsk?.summary ?? '',
+    s.blockedAsk?.body ?? '',
     s.permissionRequestId ?? '',
+    s.alwaysAllow?.rules.join(',') ?? '',
     s.activeTool?.name ?? '',
     // Turn progress, minus elapsed time: the webview ticks that locally, so
     // including it here would make every poll a material change for every row.

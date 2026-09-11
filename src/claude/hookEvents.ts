@@ -11,8 +11,8 @@
  * No filesystem access here — `hookLog.ts` owns that — so the reduction is
  * unit-testable against synthetic lines.
  */
-import type { SessionStatus, TodoProgress } from '../shared/model';
-import { permissionDetail } from './permissionDetail';
+import type { PermissionAsk, SessionStatus, TodoProgress } from '../shared/model';
+import { parsePermissionSuggestions, permissionDetail, type PermissionSuggestion } from './permissionDetail';
 
 /**
  * Written by our own PermissionRequest hook script, right after the payload it
@@ -76,8 +76,13 @@ export interface HookEvent {
    * hands it to the hook. What decides Waiting-on-you vs Done.
    */
   lastAssistantMessage?: string;
-  /** `PermissionRequest` / interactive `PreToolUse`: one-line subject of the ask. */
-  detail?: string;
+  /** `PermissionRequest` / interactive `PreToolUse`: what the ask is for. */
+  detail?: PermissionAsk;
+  /**
+   * `PermissionRequest` only: the permission updates Claude Code's own "don't
+   * ask again" would apply. Handed straight back in an *Always allow* decision.
+   */
+  suggestions?: PermissionSuggestion[];
   /** Our own pending marker (see `PERMISSION_PENDING_EVENT`). */
   requestId?: string;
   /** Set on subagent events; those are folded into the parent, never shown as sessions. */
@@ -99,10 +104,12 @@ export interface HookSessionState {
   status: SessionStatus;
   /** Why we're blocked (tool name / elicitation label), for the row subtitle. */
   blockedReason?: string;
-  /** What the block is for, one line (the command, the file, the question). */
-  blockedDetail?: string;
+  /** What the block is for (the command, the file, the question). */
+  blockedDetail?: PermissionAsk;
   /** Marker our hook script is waiting on; cleared the moment anything unblocks. */
   permissionRequestId?: string;
+  /** What an *Always allow* would hand back to Claude Code for this prompt. */
+  permissionSuggestions?: PermissionSuggestion[];
   /**
    * True from `SessionStart` until the first prompt: the session exists but
    * nothing has happened in it yet. The dashboard hides such sessions when
@@ -216,6 +223,8 @@ export function parseHookLine(line: string, receivedAtMs: number): HookEvent | u
     source: str(obj.source),
     lastAssistantMessage: hookEventName === 'Stop' ? str(obj.last_assistant_message) : undefined,
     detail: wantsDetail ? permissionDetail(toolName, obj.tool_input, cwd) : undefined,
+    suggestions:
+      hookEventName === 'PermissionRequest' ? parsePermissionSuggestions(obj.permission_suggestions) : undefined,
     requestId: hookEventName === PERMISSION_PENDING_EVENT ? str(obj.request_id) : undefined,
     agentId: undefined,
     todo: toolName === TODO_TOOL ? parseTodos(obj.tool_input) : undefined,
@@ -338,6 +347,7 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
           blockedReason: interactive,
           blockedDetail: e.detail,
           permissionRequestId: undefined,
+          permissionSuggestions: undefined,
           activeTool: undefined,
           fresh: false,
           turnToolCalls: base.turnToolCalls + 1,
@@ -380,6 +390,7 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
         blockedDetail: e.detail,
         // A new prompt supersedes any marker from the previous one.
         permissionRequestId: undefined,
+        permissionSuggestions: e.suggestions,
         fresh: false,
       };
 
@@ -399,6 +410,7 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
         blockedReason: e.toolName ?? 'input',
         blockedDetail: e.detail,
         permissionRequestId: undefined,
+        permissionSuggestions: undefined,
         fresh: false,
       };
 
@@ -445,8 +457,16 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
 }
 
 /** Fields a block sets, reset together whenever the block ends. */
-function unblocked(): Pick<HookSessionState, 'blockedReason' | 'blockedDetail' | 'permissionRequestId'> {
-  return { blockedReason: undefined, blockedDetail: undefined, permissionRequestId: undefined };
+function unblocked(): Pick<
+  HookSessionState,
+  'blockedReason' | 'blockedDetail' | 'permissionRequestId' | 'permissionSuggestions'
+> {
+  return {
+    blockedReason: undefined,
+    blockedDetail: undefined,
+    permissionRequestId: undefined,
+    permissionSuggestions: undefined,
+  };
 }
 
 type TurnFields = Pick<

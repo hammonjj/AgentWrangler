@@ -49,27 +49,50 @@ td {
 th.h-dot {
   width: 26px;
 }
+/* Two 24px buttons plus the cell's own padding. At 60px the second one was
+   clipped and the cell rendered an ellipsis next to it. */
 th.h-act {
-  width: 60px;
+  width: 66px;
 }
 
 /* The grab strip on a column's left edge — the divider it shares with the
-   column before it. Wider than it looks: 7px is about the smallest target a
-   pointer finds first time. */
+   column before it, and the thing the eye aims at. Dragging it resizes THAT
+   column and nothing else; the elastic Agent column takes the difference.
+
+   The hit area is 11px wide (about the smallest a pointer finds first time),
+   but what is drawn is the 1px divider inside it: always visible, so the
+   handles read as a row of column separators rather than as invisible strips
+   you have to hunt for. Hover and drag thicken it to the sash colour. */
 .rz {
   position: absolute;
-  left: -3px;
+  left: -5px;
   top: 0;
   bottom: 0;
-  width: 7px;
+  width: 11px;
   cursor: col-resize;
   touch-action: none;
   user-select: none;
 }
-.rz:hover,
-body.resizing .rz {
+.rz::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 4px;
+  bottom: 4px;
+  width: 1px;
+  background: var(--vscode-panel-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.45)));
+}
+thead th:hover .rz::after {
+  background: var(--vscode-descriptionForeground);
+}
+.rz:hover::after,
+.rz.dragging::after {
+  left: 4px;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 2px;
   background: var(--vscode-sash-hoverBorder, var(--aw-busy));
-  opacity: 0.55;
 }
 /* The pointer is captured by the handle, so without this the cursor flickers
    back to the default over every cell the drag crosses. */
@@ -275,41 +298,130 @@ tr.st-ended .title {
 }
 
 /* ---- blocked: what for, and the answer ----
-   A third line under the title. The row gets taller for it on purpose: a
-   permission prompt is the one state where the dashboard should let you decide
-   without opening the session, and that takes the command, not just "Bash". */
-.c-agent .perm {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 3px;
-  min-width: 0;
+   Its own row under the session, spanning the table. A permission prompt is the
+   one state where the dashboard should let you decide without opening the
+   session, and that takes the whole command over as many lines as it has — not
+   an ellipsis you would be clicking Allow on blind. */
+
+tbody.collapsed tr.permrow {
+  display: none;
 }
-.c-agent .pdetail {
+tr.permrow > td {
+  padding: 0 8px 7px 34px; /* lines up under the title, clear of the status dot */
+  overflow: visible;
+  white-space: normal;
+  border-left: 2px solid var(--aw-blocked);
+  background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.06));
+}
+/* Answered elsewhere, or timed out: still says what it was, but stops shouting. */
+tr.permrow:not(.pending) > td {
+  border-left-color: var(--vscode-panel-border, transparent);
+}
+
+/* The header line is the whole disclosure target, so opening the card is an
+   easy click rather than a hunt for the twisty. */
+button.ptoggle {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.ptoggle .ptw {
+  flex: 0 0 auto;
+  width: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+.ptoggle .phead {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.88em;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
   color: var(--aw-blocked);
 }
-.c-agent .pdetail.dim {
-  font-family: inherit;
+.ptoggle .phead.dim {
   color: var(--vscode-descriptionForeground);
 }
-.c-agent .pbtns {
-  flex: 0 0 auto;
-  display: inline-flex;
-  gap: 4px;
+.ptoggle:hover .phead {
+  text-decoration: underline;
+}
+
+/* The slide. A 0fr → 1fr grid row animates to the content's real height without
+   anyone having to measure it, and collapses to nothing with no leftover gap. */
+.pslide {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.16s ease-out;
+}
+tr.permrow.open .pslide {
+  grid-template-rows: 1fr;
+}
+.pinner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.pdetail {
+  margin: 2px 0 6px;
+  min-width: 0;
+}
+.pdetail .plabel {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 0.74em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--vscode-descriptionForeground);
+}
+/* The command as it will run: wrapped, never ellipsised, and capped in height
+   so a 60-line heredoc cannot push the rest of the table off-screen. */
+pre.pcmd {
+  margin: 0;
+  padding: 5px 7px;
+  max-height: 9.5em;
+  overflow: auto;
+  border-radius: 3px;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.12));
+  border: 1px solid var(--vscode-panel-border, transparent);
+  color: var(--vscode-foreground);
+  font-family: inherit;
+  font-size: 0.9em;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+pre.pcmd.mono {
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.pbtns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding-bottom: 2px;
+}
+.pnote {
+  padding-bottom: 4px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
 }
 button.pbtn {
   cursor: pointer;
   font-family: inherit;
   font-size: 0.85em;
   line-height: 1.2;
-  padding: 2px 9px;
+  padding: 4px 11px;
   border-radius: 3px;
   border: 1px solid transparent;
 }
@@ -319,6 +431,16 @@ button.pbtn.allow {
 }
 button.pbtn.allow:hover {
   background: var(--vscode-button-hoverBackground, #1177bb);
+}
+/* Always allow changes settings, so it is deliberately the quieter button of
+   the two allows: outlined, not filled. */
+button.pbtn.always {
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  background: transparent;
+  border-color: var(--vscode-button-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.5)));
+}
+button.pbtn.always:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.4));
 }
 button.pbtn.deny {
   color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
@@ -398,6 +520,7 @@ button.pbtn:disabled {
 }
 
 .c-proj,
+.c-worktree,
 .c-branch,
 .c-model {
   color: var(--vscode-descriptionForeground);
@@ -510,6 +633,7 @@ button.colcfg svg {
 
 .c-act {
   text-align: right;
+  text-overflow: clip; /* buttons, not text: an ellipsis here is never wanted */
 }
 button.act {
   background: transparent;
@@ -541,10 +665,10 @@ button.act svg {
    project name and nothing else. Below this width the location moves into the
    row's second line and the title, chips and age keep their space. */
 @media (max-width: 719px) {
-  /* The Project/Branch/Model/PR columns are not rendered at all below this
-     width (shared/columns.ts folds them, main.ts moves their contents to the
-     row's second line), so there is nothing to hide here — only the chrome to
-     tighten. Every pixel saved is title. */
+  /* The Project/Worktree/Branch/Model/PR columns are not rendered at all below
+     this width (shared/columns.ts folds them, main.ts moves their contents to
+     the row's second line), so there is nothing to hide here — only the chrome
+     to tighten. Every pixel saved is title. */
   td,
   thead th {
     padding-left: 5px;
@@ -554,22 +678,21 @@ button.act svg {
     width: 22px;
   }
   th.h-act {
-    width: 52px;
+    width: 58px;
   }
-  /* Two lines: the title alone on the first, chips leading the location and
-     prompt on the second. At 300px a title and a "needs Bash" chip cannot share
-     a line without one of them disappearing. */
+  tr.permrow > td {
+    padding-left: 12px;
+  }
+  /* Two lines: the title alone on the first, chips leading the location on the
+     second. At 300px a title and a "needs Bash" chip cannot share a line
+     without one of them disappearing. */
   .c-agent .agent {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     grid-template-areas:
       'ttl ttl'
-      'chips sub'
-      'perm perm';
+      'chips sub';
     align-items: baseline;
-  }
-  .c-agent .perm {
-    grid-area: perm;
   }
   .c-agent .title {
     display: contents;

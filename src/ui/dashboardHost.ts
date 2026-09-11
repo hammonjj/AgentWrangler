@@ -133,7 +133,9 @@ export class DashboardHost {
         if (m.action === 'viewer') this.actions.openViewer(m.key);
         else if (m.action === 'resume') this.actions.resume(m.key);
         else if (m.action === 'archive') this.archive.toggle(m.key);
-        else if (m.action === 'allow' || m.action === 'deny') this.actions.decidePermission(m.key, m.action);
+        else if (m.action === 'allow' || m.action === 'deny' || m.action === 'always') {
+          this.actions.decidePermission(m.key, m.action);
+        }
         break;
       case 'openExternal':
         this.actions.openExternal(m.url);
