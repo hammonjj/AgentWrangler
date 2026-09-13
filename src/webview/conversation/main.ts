@@ -645,7 +645,7 @@ let modelsKey = '';
 
 function setModels(models: ModelChoice[] | undefined): void {
   const list = models ?? [];
-  const key = list.map((m) => `${m.value} ${m.label}`).join('');
+  const key = list.map((m) => `${m.value}\u0000${m.label}`).join('\u0001');
   if (key === modelsKey) return;
   modelsKey = key;
   modelSel.textContent = '';
