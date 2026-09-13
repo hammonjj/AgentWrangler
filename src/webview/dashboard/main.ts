@@ -28,6 +28,7 @@ import {
   sectionOf,
   workingElapsedMs,
   type HookHealth,
+  type ProjectDTO,
   type SectionId,
   type SessionDTO,
 } from '../../shared/model';
@@ -45,6 +46,12 @@ interface WebviewState {
   collapsed?: string[];
   /** Hook-health kind whose banner the user hid. A different kind brings the banner back. */
   bannerDismissed?: string;
+  /**
+   * Folder the launcher is pointed at. Per-webview on purpose: two windows are
+   * usually two different jobs, and a shared setting would have each one
+   * changing where the other starts its next conversation.
+   */
+  project?: string;
 }
 
 declare function acquireVsCodeApi(): {
@@ -96,9 +103,10 @@ function saveColumns(next: ColumnPrefs): void {
 const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 let bannerDismissed = saved?.bannerDismissed;
+let project = saved?.project;
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed });
+  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project });
 }
 
 function esc(s: string): string {
@@ -545,6 +553,126 @@ function menuHtml(): string {
 </div>`;
 }
 
+// ---- launcher ----
+
+/**
+ * The project dropdown and its New button live OUTSIDE `#app`, which `render()`
+ * replaces wholesale on every snapshot. Inside it, an open dropdown would be
+ * torn out from under the pointer every time any session changed status — which
+ * on a busy machine is every couple of seconds.
+ */
+const bar = document.createElement('div');
+bar.id = 'bar';
+// A <select> cannot carry a per-row button: an <option> renders as text and
+// nothing else. So the dropdown is a popup of real rows — the folder on the
+// left, the X that stops offering it on the right.
+bar.innerHTML = `<button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
+<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
+<div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
+app.insertAdjacentElement('beforebegin', bar);
+
+const projBtn = bar.querySelector<HTMLButtonElement>('#proj')!;
+const projName = bar.querySelector<HTMLElement>('#projname')!;
+const projMenu = bar.querySelector<HTMLElement>('#projmenu')!;
+const newBtn = bar.querySelector<HTMLButtonElement>('#new')!;
+
+let projects: ProjectDTO[] = [];
+let menuOpen = false;
+
+/** The folder New will use: the saved one while it still exists, else the most recent. */
+function currentProject(): string | undefined {
+  if (project && projects.some((p) => p.dir === project)) return project;
+  return projects[0]?.dir;
+}
+
+function renderLauncher(): void {
+  const cur = currentProject();
+  projName.textContent = cur ? (projects.find((p) => p.dir === cur)?.name ?? cur) : 'Choose a folder…';
+  projBtn.title = cur ?? 'Choose a folder to start a conversation in';
+  newBtn.disabled = cur === undefined;
+  // An open menu is showing the list that just changed, so redraw it in place
+  // rather than closing it out from under the pointer.
+  if (menuOpen) renderMenu();
+}
+
+function renderMenu(): void {
+  const cur = currentProject();
+  const rows = projects
+    .map(
+      (p) => `<div class="pmrow${p.dir === cur ? ' on' : ''}">
+<button class="pmname" data-dir="${esc(p.dir)}" role="option" aria-selected="${p.dir === cur}" title="${esc(p.dir)}">${esc(p.name)}</button>
+<button class="pmx" data-rm="${esc(p.dir)}" title="Remove ${esc(p.name)} from this list. Browsing to it again brings it back." aria-label="Remove ${esc(p.name)} from this list">✕</button>
+</div>`,
+    )
+    .join('');
+  const empty = projects.length === 0 ? '<div class="pmempty">No folders yet</div>' : '';
+  // Always present: with nothing in the list it is the only way in, and it is
+  // also the only way a removed folder comes back.
+  projMenu.innerHTML = `${empty}${rows}<button class="pmbrowse" data-browse="1">Browse…</button>`;
+}
+
+function openProjMenu(): void {
+  menuOpen = true;
+  projMenu.hidden = false;
+  projBtn.setAttribute('aria-expanded', 'true');
+  renderMenu();
+  // A folder may have been used in another window since the last scan. The
+  // answer arrives as a snapshot and redraws the menu under the pointer.
+  post({ type: 'refreshProjects' });
+}
+
+function closeProjMenu(): void {
+  if (!menuOpen) return;
+  menuOpen = false;
+  projMenu.hidden = true;
+  projBtn.setAttribute('aria-expanded', 'false');
+}
+
+projBtn.addEventListener('click', () => {
+  if (menuOpen) closeProjMenu();
+  else openProjMenu();
+});
+
+projMenu.addEventListener('click', (e) => {
+  const target = e.target as HTMLElement;
+
+  const rm = target.closest<HTMLElement>('[data-rm]');
+  if (rm) {
+    // The menu stays open: clearing three stale folders should be three clicks,
+    // not three round trips through opening it again.
+    post({ type: 'removeProject', dir: rm.dataset.rm! });
+    return;
+  }
+  if (target.closest('[data-browse]')) {
+    closeProjMenu();
+    post({ type: 'browseProject' });
+    return;
+  }
+  const pick = target.closest<HTMLElement>('[data-dir]');
+  if (pick) {
+    project = pick.dataset.dir!;
+    saveState();
+    closeProjMenu();
+    renderLauncher();
+    projBtn.focus();
+  }
+});
+
+// Anywhere outside dismisses, the way a dropdown does. Capture, because the
+// table's own click handler stops propagation on most of what it handles.
+document.addEventListener(
+  'click',
+  (e) => {
+    if (menuOpen && !bar.contains(e.target as Node)) closeProjMenu();
+  },
+  true,
+);
+
+newBtn.addEventListener('click', () => {
+  const cwd = currentProject();
+  if (cwd) post({ type: 'newConversation', cwd });
+});
+
 function render(): void {
   // A drag owns the widths until the pointer is released; re-rendering under it
   // would replace the <th> being dragged.
@@ -590,8 +718,23 @@ function render(): void {
 
 window.addEventListener('message', (e: MessageEvent) => {
   const m = e.data as HostToDashboard;
+  if (m.type === 'projectPicked') {
+    project = m.dir;
+    // The scan that will contain it is still running, and a selection with no
+    // option to match would show as blank; carry it until the snapshot lands.
+    if (!projects.some((p) => p.dir === m.dir)) {
+      projects = [{ dir: m.dir, name: m.dir.split(/[\\/]/).filter(Boolean).pop() ?? m.dir }, ...projects];
+    }
+    saveState();
+    renderLauncher();
+    return;
+  }
   if (m.type === 'snapshot') {
     sessions = m.sessions;
+    if (m.projects) {
+      projects = m.projects;
+      renderLauncher();
+    }
     // A card the user opened or closed is about one prompt. Once that session
     // is no longer blocked the override has outlived its subject, and the next
     // prompt should open by itself.
@@ -709,7 +852,12 @@ app.addEventListener('contextmenu', (e) => {
 });
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeMenu();
+  if (e.key !== 'Escape') return;
+  closeMenu();
+  if (menuOpen) {
+    closeProjMenu();
+    projBtn.focus(); // Escape should leave focus somewhere, not on a hidden row
+  }
 });
 
 // Only the fold threshold matters here: widths are absolute and do not care how

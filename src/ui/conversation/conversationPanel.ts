@@ -10,6 +10,7 @@
 import * as vscode from 'vscode';
 import type { RunnerService } from '../../claude/runner/runnerService';
 import type { RunnerSession } from '../../claude/runner/runnerSession';
+import type { DictationService } from '../../core/dictation';
 import type { SessionStore } from '../../core/sessionStore';
 import type { SessionActions } from '../actions';
 import type { SessionLocator } from '../sessionLocator';
@@ -39,6 +40,7 @@ export class ConversationPanelManager implements vscode.Disposable {
     private runners: RunnerService,
     private actions: SessionActions,
     private locator: SessionLocator,
+    private dictation: DictationService,
   ) {}
 
   /**
@@ -158,6 +160,7 @@ export class ConversationPanelManager implements vscode.Disposable {
       this.runners,
       this.actions,
       this.locator,
+      this.dictation,
       (title) => {
         panel.title = pinnedKey === undefined ? title : `📌 ${title}`;
       },

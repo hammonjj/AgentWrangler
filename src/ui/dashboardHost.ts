@@ -4,7 +4,7 @@ import type { ColumnPrefsService } from '../core/columnPrefs';
 import type { Disposable } from '../core/events';
 import type { SessionStore } from '../core/sessionStore';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
-import type { HookHealth } from '../shared/model';
+import type { HookHealth, ProjectDTO } from '../shared/model';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
 import { buildWebviewHtml } from './html';
@@ -42,6 +42,27 @@ export interface RunnerOwnership {
   onDidChange(listener: () => void): Disposable;
 }
 
+/**
+ * The launcher's folder list, behind an interface for the same reason as the
+ * others: the dashboard must not know that it comes from `~/.claude.json`.
+ */
+export interface ProjectSource {
+  readonly value: ProjectDTO[];
+  refresh(opts?: { force?: boolean }): Promise<ProjectDTO[]>;
+  /** Keep offering a folder the config has never heard of (one just browsed to). */
+  add(dir: string): void;
+  /** Stop offering a folder. Persisted, since the next scan would otherwise find it again. */
+  remove(dir: string): void;
+  onDidChange(listener: () => void): Disposable;
+}
+
+/** Starting a conversation is the extension's job, not the dashboard's; it only asks. */
+export interface ConversationLauncher {
+  newConversation(cwd: string): Promise<unknown>;
+  /** Run the folder dialog. `undefined` = cancelled, and the dropdown keeps what it had. */
+  browseForProject(): Promise<string | undefined>;
+}
+
 export class DashboardHost {
   private subs: { dispose(): void }[] = [];
 
@@ -56,6 +77,8 @@ export class DashboardHost {
     private usage: UsageSource,
     private columns: ColumnPrefsService,
     private runners: RunnerOwnership,
+    private projects: ProjectSource,
+    private launcher: ConversationLauncher,
   ) {
     webview.options = {
       enableScripts: true,
@@ -85,6 +108,8 @@ export class DashboardHost {
       // Taking a session over (or handing it back) changes what its row says
       // without changing anything the store tracks.
       this.runners.onDidChange(() => this.pushSnapshot()),
+      // A folder removed from one dashboard's dropdown is removed from both.
+      this.projects.onDidChange(() => this.pushSnapshot()),
     );
   }
 
@@ -135,6 +160,7 @@ export class DashboardHost {
       hooks: this.health.hookHealth,
       usage: this.usage.enabled ? this.usage.usage : undefined,
       columns: this.columns.value,
+      projects: this.projects.value.length > 0 ? this.projects.value : undefined,
     };
     void this.webview.postMessage(msg);
   }
@@ -145,6 +171,8 @@ export class DashboardHost {
         this.pushSnapshot();
         // A dashboard just opened wants today's numbers, not last minute's.
         void this.usage.refresh();
+        // And a launcher with no folders in it is not a launcher.
+        void this.refreshProjects();
         break;
       case 'rowClick':
         this.actions.smartOpen(m.key);
@@ -170,6 +198,40 @@ export class DashboardHost {
       case 'setColumns':
         this.columns.set(m.prefs);
         break;
+      case 'newConversation':
+        void this.launcher.newConversation(m.cwd);
+        break;
+      case 'browseProject':
+        void this.browseProject();
+        break;
+      case 'removeProject':
+        // Drops it from the cache synchronously and fires, which is what pushes
+        // the new list — here and to every other dashboard.
+        this.projects.remove(m.dir);
+        break;
+      case 'refreshProjects':
+        void this.refreshProjects();
+        break;
     }
+  }
+
+  /** Re-scan, then push only if the scan actually changed the list. */
+  private async refreshProjects(opts: { force?: boolean } = {}): Promise<void> {
+    const before = this.projects.value;
+    const after = await this.projects.refresh(opts);
+    if (after !== before) this.pushSnapshot();
+  }
+
+  /**
+   * A browsed folder may be one Claude Code has never been used in, so it is
+   * not in the config and a plain re-scan would not find it. Tell the dashboard
+   * to select it first, then force the scan that puts it in the list.
+   */
+  private async browseProject(): Promise<void> {
+    const dir = await this.launcher.browseForProject();
+    if (!dir) return;
+    this.projects.add(dir);
+    void this.webview.postMessage({ type: 'projectPicked', dir } satisfies HostToDashboard);
+    await this.refreshProjects({ force: true });
   }
 }

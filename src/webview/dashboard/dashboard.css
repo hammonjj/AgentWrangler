@@ -1,4 +1,7 @@
 :root {
+  /* Height of the launcher bar. Shared, because the sticky table header has to
+     come to rest directly beneath it. */
+  --aw-bar-h: 34px;
   --aw-blocked: var(--vscode-charts-orange, #d18616);
   --aw-waiting: var(--vscode-charts-yellow, #d7ba7d);
   --aw-busy: var(--vscode-charts-blue, #569cd6);
@@ -14,6 +17,174 @@ body {
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
   color: var(--vscode-foreground);
+}
+
+/* ---- launcher ---- */
+
+/* One row: the folder to start in, and the button that starts it. Sticky so the
+   only control that creates work stays reachable however long the list gets.
+   Lives outside #app, which the table re-render replaces wholesale. */
+#bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  box-sizing: border-box;
+  height: var(--aw-bar-h);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+
+/* The elastic half. `min-width: 0` is what lets it shrink below its content
+   instead of shoving the New button out of a 300px dock — a flex item's
+   default `min-width: auto` is its content width. The label is the folder's
+   basename for the same reason; the full path is on the title. */
+#bar .projbtn {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 4px 0 6px;
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 3px;
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  font-family: inherit;
+  font-size: 0.92em;
+  text-align: left;
+  cursor: pointer;
+}
+#bar .projbtn #projname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#bar .projbtn .chev {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+/* Anchored to #bar, which is already positioned (sticky), so no measured
+   offset has to be written into a style attribute — the CSP drops those. */
+.projmenu {
+  position: absolute;
+  top: 100%;
+  left: 6px;
+  right: 6px;
+  z-index: 1;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-top: 2px;
+  padding: 4px;
+  border-radius: 5px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+.projmenu .pmrow {
+  display: flex;
+  align-items: center;
+  border-radius: 3px;
+}
+.projmenu .pmrow:hover,
+.projmenu .pmrow:focus-within {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+}
+.projmenu .pmname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.projmenu .pmrow.on .pmname {
+  font-weight: 600;
+}
+/* Always laid out, so rows do not reflow on hover and move the X out from
+   under the pointer; only its ink comes and goes. */
+.projmenu .pmx {
+  flex: 0 0 auto;
+  width: 20px;
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.9em;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+}
+.projmenu .pmrow:hover .pmx,
+.projmenu .pmx:focus-visible {
+  opacity: 0.7;
+}
+.projmenu .pmx:hover {
+  opacity: 1;
+  color: var(--aw-stuck);
+}
+.projmenu .pmempty {
+  padding: 4px 6px;
+  color: var(--vscode-descriptionForeground);
+}
+.projmenu .pmbrowse {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+  padding: 4px 6px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+.projmenu .pmbrowse:hover {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+}
+
+#bar .newbtn {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 3px;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  font-family: inherit;
+  font-size: 0.92em;
+  cursor: pointer;
+}
+#bar .newbtn:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+#bar .newbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+#bar .projbtn:focus-visible,
+#bar .newbtn:focus-visible,
+.projmenu button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
 }
 
 .empty {
@@ -103,7 +274,9 @@ body.resizing {
 
 thead th {
   position: sticky;
-  top: 0;
+  /* Below the launcher bar, not under it: both stick to the same scrolling
+     document, so the header has to start where the bar ends. */
+  top: var(--aw-bar-h);
   z-index: 2;
   text-align: left;
   padding: 5px 8px 4px;

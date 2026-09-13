@@ -1,6 +1,6 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { resolveClaudeBinary } from './claude/binary';
 import { ClaudeProvider } from './claude/claudeProvider';
@@ -17,10 +17,13 @@ import {
   uninstallHooks,
 } from './claude/hookInstall';
 import { hookLogDir } from './claude/hookLog';
+import { ProjectsService } from './claude/projects';
 import { fetchUsage } from './claude/usageFetch';
 import { ArchiveService } from './core/archive';
 import { ColumnPrefsService } from './core/columnPrefs';
 import { DEFAULT_CONFIG, type ConfigGetter, type WranglerConfig } from './core/config';
+import { DictationService } from './core/dictation';
+import { HiddenProjectsService } from './core/hiddenProjects';
 import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
@@ -34,6 +37,7 @@ import {
   ConversationPanelManager,
   ConversationPanelSerializer,
 } from './ui/conversation/conversationPanel';
+import type { ConversationLauncher } from './ui/dashboardHost';
 import { DASHBOARD_PANEL_TYPE, DashboardPanelManager, DashboardPanelSerializer } from './ui/dashboardPanel';
 import { DashboardViewProvider } from './ui/dashboardView';
 import { watchForDevReload } from './ui/devReload';
@@ -396,6 +400,20 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   };
 
+  // One microphone, so one recorder for the whole window however many panes are open.
+  const dictation = new DictationService({
+    spawn,
+    settings: () => {
+      const cfg = vscode.workspace.getConfiguration('agentWrangler');
+      return {
+        ffmpegPath: cfg.get<string>('dictation.ffmpegPath', ''),
+        whisperPath: cfg.get<string>('dictation.whisperPath', ''),
+        modelPath: cfg.get<string>('dictation.modelPath', ''),
+        inputDevice: cfg.get<string>('dictation.inputDevice', ':default'),
+      };
+    },
+  });
+
   // The conversation pane: one reusable panel that row clicks swap, plus a
   // pinned panel per session the user wants to keep on screen.
   const conversations = new ConversationPanelManager(
@@ -405,6 +423,7 @@ export function activate(context: vscode.ExtensionContext): void {
     runners,
     actions,
     locator,
+    dictation,
   );
   context.subscriptions.push(
     conversations,
@@ -418,6 +437,27 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
 
+  // Folders the launcher offers. Claude Code's own history is the bulk of it;
+  // the workspace and anything currently running are added so a folder is
+  // never missing just because it has not been used through the CLI yet.
+  const hiddenProjects = new HiddenProjectsService(context.globalState);
+  const projects = new ProjectsService(
+    () => ({
+      workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
+      sessions: store.sessions
+        .filter((s): s is typeof s & { cwd: string } => typeof s.cwd === 'string')
+        .map((s) => ({ dir: s.cwd, lastUsedAt: s.lastActivityAt })),
+    }),
+    { hidden: hiddenProjects },
+  );
+
+  // Defined as closures rather than direct references: `newConversation` is
+  // declared further down, and only the calls happen after activation.
+  const launcher: ConversationLauncher = {
+    newConversation: (cwd) => newConversation(cwd),
+    browseForProject: () => browseForProject(),
+  };
+
   // The dashboard has two homes: an editor tab (default) and the bottom panel.
   // Both are always registered; the setting only decides where opening it goes.
   const dashboardPanel = new DashboardPanelManager(
@@ -430,6 +470,8 @@ export function activate(context: vscode.ExtensionContext): void {
     usage,
     columns,
     runners,
+    projects,
+    launcher,
   );
   context.subscriptions.push(
     dashboardPanel,
@@ -446,6 +488,8 @@ export function activate(context: vscode.ExtensionContext): void {
         usage,
         columns,
         runners,
+        projects,
+        launcher,
       ),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
@@ -523,43 +567,28 @@ export function activate(context: vscode.ExtensionContext): void {
    * Code panel — which is bound to its window's workspace — the pane can run a
    * session in any project on the machine.
    */
-  const newConversation = async (): Promise<RunnerSession | undefined> => {
-    const seen = new Set<string>();
-    const folders: { label: string; description?: string; dir?: string; browse?: boolean }[] = [];
-    for (const f of vscode.workspace.workspaceFolders ?? []) {
-      if (seen.has(f.uri.fsPath)) continue;
-      seen.add(f.uri.fsPath);
-      folders.push({ label: path.basename(f.uri.fsPath), description: f.uri.fsPath, dir: f.uri.fsPath });
-    }
-    for (const s of store.sessions) {
-      if (!s.cwd || seen.has(s.cwd)) continue;
-      seen.add(s.cwd);
-      folders.push({ label: path.basename(s.cwd), description: s.cwd, dir: s.cwd });
-    }
-    folders.push({ label: '$(folder-opened) Browse…', description: 'Pick another folder', browse: true });
-
-    const picked = await vscode.window.showQuickPick(folders, {
-      placeHolder: 'Start a conversation in which project?',
-      matchOnDescription: true,
+  /** The folder dialog, shared by the dashboard's Browse… row and the quick pick's. */
+  const browseForProject = async (): Promise<string | undefined> => {
+    const chosen = await vscode.window.showOpenDialog({
+      canSelectFolders: true,
+      canSelectFiles: false,
+      canSelectMany: false,
+      openLabel: 'Start here',
     });
-    if (!picked) return undefined;
+    const dir = chosen?.[0]?.fsPath;
+    if (dir) projects.add(dir);
+    return dir;
+  };
 
-    let cwd = picked.dir;
-    if (picked.browse) {
-      const chosen = await vscode.window.showOpenDialog({
-        canSelectFolders: true,
-        canSelectFiles: false,
-        canSelectMany: false,
-        openLabel: 'Start here',
-      });
-      cwd = chosen?.[0]?.fsPath;
-    }
-    if (!cwd) return undefined;
+  /** Spawn and show. The only path that starts a runner, so the cwd check lives here. */
+  const startConversation = (cwd: string): RunnerSession | undefined => {
     if (!fs.existsSync(cwd)) {
       void vscode.window.showErrorMessage(`Agent Wrangler: ${cwd} no longer exists.`);
       return undefined;
     }
-
+    // Working in a folder is the strongest possible statement that it belongs
+    // in the list, so it also undoes a removal — the same rule as browsing.
+    projects.add(cwd);
     const cfg = vscode.workspace.getConfiguration('agentWrangler');
     const model = cfg.get<string>('runner.model', '').trim();
     const runner = runners.start({
@@ -569,6 +598,36 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     conversations.showRunner(runner);
     return runner;
+  };
+
+  /**
+   * Start a session this window runs itself. The folder matters more than
+   * usual here: it is the session's working directory, and unlike the Claude
+   * Code panel — which is bound to its window's workspace — the pane can run a
+   * session in any project on the machine.
+   *
+   * With a `cwd` (the dashboard's launcher, which has its own dropdown) it goes
+   * straight to the session. Without one (the palette, the title-bar button)
+   * the same folders arrive as a quick pick instead.
+   */
+  const newConversation = async (cwd?: string): Promise<RunnerSession | undefined> => {
+    if (cwd) return startConversation(cwd);
+
+    // Newest first, the same order and the same list the dashboard dropdown shows.
+    await projects.refresh();
+    const folders: { label: string; description?: string; dir?: string; browse?: boolean }[] = projects.value.map(
+      (p) => ({ label: p.name, description: p.dir, dir: p.dir }),
+    );
+    folders.push({ label: '$(folder-opened) Browse…', description: 'Pick another folder', browse: true });
+
+    const picked = await vscode.window.showQuickPick(folders, {
+      placeHolder: 'Start a conversation in which project?',
+      matchOnDescription: true,
+    });
+    if (!picked) return undefined;
+
+    const dir = picked.browse ? await browseForProject() : picked.dir;
+    return dir ? startConversation(dir) : undefined;
   };
 
   context.subscriptions.push(

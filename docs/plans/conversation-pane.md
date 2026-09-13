@@ -683,6 +683,110 @@ conversation with context intact; Release to terminal → terminal opens with th
 resumed and the pane goes read-only; reload the window → the last shown session comes back
 by itself, others offer Resume here.
 
+### Phase 3.5 — The launcher: start a conversation from the dashboard — **SHIPPED 2026-09-12**
+
+Asked for ahead of phase 4: the dashboard should be the place agents are *deployed* from, not
+only watched in. Phase 2 had put `newConversation` behind a title-bar `+` and a modal quick
+pick, which is a command, not a hub.
+
+**What shipped.**
+
+- A sticky bar at the top of the dashboard: a project `<select>` taking the free width, a
+  **+ New** button pinned right. One row, because the dashboard is used at ~300px.
+- **The folder list comes from `~/.claude.json`'s `projects` map**, whose keys are real
+  absolute paths. `~/.claude/projects/` was rejected as the source: its names are slugs and
+  `slugForCwd` is lossy in the reverse direction. Recency uses the *forward* slug — path →
+  `~/.claude/projects/<slug>` → newest transcript mtime — which is exact. Workspace folders
+  and live session cwds are merged in, and a session's `lastActivityAt` beats a file mtime for
+  the same folder. Deleted folders are dropped; nothing can spawn in them.
+- **"New projects" need no detection.** Claude Code writes the key itself the first time a
+  folder is used, so re-reading the file is the whole mechanism. `ProjectsService` caches with
+  a 30s TTL because a dashboard snapshot fires on every store update and the scan is a readdir
+  plus a stat per transcript; the dropdown's `mousedown` triggers a re-read.
+- **Browsed folders are held in memory by `ProjectsService.add`.** A folder Claude Code has
+  never run in is in no config file, so a re-scan alone would drop it the moment it was
+  chosen. It stops needing that once a conversation has run there.
+- **The bar lives outside `#app`.** `render()` replaces `app.innerHTML` wholesale on every
+  snapshot; a `<select>` inside it would be torn out from under an open dropdown every couple
+  of seconds on a busy machine. Options are also rebuilt only when the list actually changes,
+  and never while the select has focus — a stale list waits for the blur.
+- `thead th` was sticky at `top: 0`, which the bar now occupies; both share `--aw-bar-h`.
+- The selected folder is **webview state**, not workspace or global: two windows are two jobs,
+  and a shared setting would have each moving where the other starts next. Same reasoning as
+  `RunnerRegistry` in phase 3, one level down.
+- `HostToDashboard` became a union (`snapshot` | `projectPicked`). The webview has to be told
+  which entry to select after a browse, and the list alone cannot say — a browsed folder is
+  not necessarily the newest.
+- The palette command and title-bar `+` still work, now sharing the same list and order.
+- Found while testing: `ProjectsService.refresh` called `extra()` before the `??=`, so
+  concurrent callers each gathered workspace and session folders even though only one scan
+  ran. Gathering moved inside a `scan()` method, which `??=` short-circuits past.
+- **Removing a folder from the dropdown** (asked for straight after the first cut). A native
+  `<select>` cannot do it — an `<option>` renders as text and holds no buttons — so the
+  dropdown became a popup of real rows, each a name button plus an X. It is anchored to the
+  already-sticky `#bar` with `top: 100%`, so unlike `.colmenu` it needs no measured offset and
+  therefore no inline `style` for the CSP to drop.
+- **A removal is recorded, not applied to the source.** `~/.claude.json` is Claude Code's
+  file; the list is rebuilt from it on every scan, so `HiddenProjectsService` (globalState,
+  like the column layout — curation is about the machine, not one window) holds the removals
+  and `ProjectsService.scan` filters them out. `ProjectsService.onDidChange` is what gets a
+  removal to the *other* dashboard, mirroring how columns propagate.
+- **Navigating to a folder un-removes it**: `add()` is called by both the browse dialog and
+  `startConversation`, and clears the hidden flag. Nothing else does — a session appearing in
+  a removed folder from a terminal elsewhere leaves the list alone, because hiding is explicit
+  curation and silent un-hiding would make the X feel broken. `add()` also zeroes `readAt`:
+  the user is about to look at the list and a cache that was fresh a second ago must not hide
+  their own choice.
+- Tests: 360 pass. New are `test/projects.test.ts` (24) — ranking, config parsing, the forward
+  slug lookup, deleted-folder filtering, TTL/sharing/browse, and the remove/re-add rules — and
+  `test/hiddenProjects.test.ts` (4), all against temp dirs so nothing reads the real
+  `~/.claude`.
+- Not done: the dropdown does not filter the session list. Decided against — picking where to
+  start work and choosing what to look at are different questions, and folding them together
+  would make every row click ambiguous.
+
+### Phase 3.6 — Dictation in the composer — **SHIPPED 2026-09-12**
+
+Asked for after the launcher: a microphone button like Claude Code's, filling the composer.
+
+**What was ruled out, and why — verified, not assumed.**
+
+- **`webkitSpeechRecognition` in the webview.** Electron ships without the Google speech key;
+  it fails with a `network` error. Not usable, in any webview, ever.
+- **VSCode's own speech API.** Proposed-only (`ms-vscode.vscode-speech`, reserved for Copilot
+  Chat). Would need VSCode relaunched with `--enable-proposed-api`, so not shippable.
+- **Claude Code's own transcription.** Its extension captures the mic in the *extension host*
+  via a bundled native module (`resources/audio-capture/<arch>/audio-capture.node`, 16 kHz mono
+  PCM, `sox`/`arecord` fallback) and streams to an Anthropic service gated on
+  `authMethod === "claudeai"`. The endpoint is not public, so only the architecture was copied.
+
+**What shipped.**
+
+- `ffmpeg -f avfoundation` records to a temp WAV; `whisper-cli` transcribes it locally. No key,
+  no network, ~460 ms for a six-second sentence on an M4. **The first run takes ~15 s** while
+  Metal compiles shaders into its cache; every run after is ~100 ms + audio length.
+- **Recording happens in the extension host, not the webview.** A webview is an iframe with its
+  own permission story and `getUserMedia` there is a fight with the CSP and the embedder; a
+  child process is just VSCode asking for the microphone, which macOS already understands.
+- **`q` on ffmpeg's stdin, never a signal.** Verified over a pipe: a killed ffmpeg leaves a RIFF
+  header claiming zero samples, which Whisper reads as an empty recording — a silent failure.
+- **Tools are searched on `PATH` and in the Homebrew prefixes.** A GUI VSCode is launched by
+  `launchd` with `/usr/bin:/bin:/usr/sbin:/sbin`, so *every* Homebrew binary is invisible to the
+  extension host. "It works in my terminal" is not evidence here.
+- **Whisper narrates silence** — `[BLANK_AUDIO]`, `(dramatic music)`, `[ Silence ]`. A line that
+  is nothing but a bracketed phrase is dropped; dictated speech never looks like that.
+- One `DictationService` per window: one microphone, so a second pane asking to record is told
+  no rather than quietly stealing the first one's audio.
+- Missing pieces are named and offered, not installed silently: a terminal with the `brew`
+  command, or a progress-barred model download to `~/.cache/agent-wrangler/whisper/`.
+- Text lands at the cursor with a space only where one is missing, so dictating to finish a
+  half-typed sentence works. Escape abandons a recording.
+- Tests: 384 pass. New is `test/dictation.test.ts` (24) — the `PATH` fallback, the setup-error
+  remedies, transcript cleaning, and the service lifecycle against an injected `spawn` so no
+  process is created and no microphone is opened.
+- Not done: no live partial text while speaking (whisper.cpp transcribes a finished file), and
+  no audio level meter. Both would need a streaming backend.
+
 ### Phase 4 — Later, only if wanted
 
 - A detached broker process owning runner children so a reload loses nothing at all.

@@ -9,7 +9,7 @@ import type {
   ConvBlock,
   PermissionModeName,
 } from './conversation';
-import type { HookHealth, SessionDTO } from './model';
+import type { HookHealth, ProjectDTO, SessionDTO } from './model';
 import type { UsageState } from './usage';
 
 // ---- Dashboard ----
@@ -19,15 +19,28 @@ import type { UsageState } from './usage';
  * absent when the usage cards are turned off; present-but-empty until the
  * first read lands.
  */
-export type HostToDashboard = {
-  type: 'snapshot';
-  sessions: SessionDTO[];
-  nowMs: number;
-  hooks?: HookHealth;
-  usage?: UsageState;
-  /** Saved column layout. Absent only before the host has read storage once. */
-  columns?: ColumnPrefs;
-};
+export type HostToDashboard =
+  | {
+      type: 'snapshot';
+      sessions: SessionDTO[];
+      nowMs: number;
+      hooks?: HookHealth;
+      usage?: UsageState;
+      /** Saved column layout. Absent only before the host has read storage once. */
+      columns?: ColumnPrefs;
+      /**
+       * Folders the launcher's dropdown offers, newest-used first. Absent until
+       * the first scan resolves; an empty array means the scan genuinely found
+       * nothing, which is a different thing and leaves only "Browse…".
+       */
+      projects?: ProjectDTO[];
+    }
+  /**
+   * The folder dialog closed on a choice. Sent before the snapshot that will
+   * contain it, because the webview has to know which entry to select and the
+   * list alone cannot say — a browsed folder is not necessarily the newest.
+   */
+  | { type: 'projectPicked'; dir: string };
 
 /**
  * `allow` / `deny` / `always` answer the permission prompt a blocked row is
@@ -46,7 +59,15 @@ export type DashboardToHost =
   /** Banner button: runs the same confirm-then-install flow as the palette command. */
   | { type: 'installHooks' }
   /** A column was dragged, hidden or shown — persist this layout for every dashboard. */
-  | { type: 'setColumns'; prefs: ColumnPrefs };
+  | { type: 'setColumns'; prefs: ColumnPrefs }
+  /** Start a Claude Code conversation in `cwd`, this window running it, and show the pane. */
+  | { type: 'newConversation'; cwd: string }
+  /** "Browse…" was chosen: open the folder dialog. A choice comes back as `projectPicked`. */
+  | { type: 'browseProject' }
+  /** The X on a dropdown row: stop offering this folder. Browsing back to it undoes this. */
+  | { type: 'removeProject'; dir: string }
+  /** The dropdown was opened — re-scan, since a folder may have been used elsewhere since the last snapshot. */
+  | { type: 'refreshProjects' };
 
 // ---- Conversation pane ----
 
@@ -71,6 +92,13 @@ export type HostToConversation =
   | { type: 'session'; session: SessionDTO; caps: ConversationCapabilities }
   | { type: 'composer'; composer: ComposerState }
   | { type: 'toolResult'; id: string; text: string }
+  /**
+   * Where dictation has got to. `text` arrives once, with `state: 'idle'`, and
+   * is what the composer inserts; an empty string means nothing was said.
+   * `message` is a problem worth showing on the button rather than as an error
+   * block — a missing tool, usually, which the host has already offered to fix.
+   */
+  | { type: 'dictation'; state: 'idle' | 'recording' | 'transcribing'; text?: string; message?: string }
   | { type: 'error'; text: string };
 
 export type ConversationToHost =
@@ -90,4 +118,9 @@ export type ConversationToHost =
   | { type: 'resumeHere' }
   | { type: 'requestToolResult'; id: string }
   | { type: 'openExternal'; url: string }
-  | { type: 'openFile'; path: string };
+  | { type: 'openFile'; path: string }
+  /**
+   * The microphone button. `stop` transcribes what was recorded and answers
+   * with a `dictation` message; `cancel` throws it away without transcribing.
+   */
+  | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' };

@@ -155,6 +155,26 @@
           "default": "",
           "description": "Model for conversations started from Agent Wrangler (e.g. claude-opus-5). Empty means Claude Code's own default."
         },
+        "agentWrangler.dictation.inputDevice": {
+          "type": "string",
+          "default": ":default",
+          "description": "Microphone for dictation, as an ffmpeg avfoundation input. ':default' is the system input device; ':1' picks audio device 1 (run 'ffmpeg -f avfoundation -list_devices true -i \"\"' to list them)."
+        },
+        "agentWrangler.dictation.modelPath": {
+          "type": "string",
+          "default": "",
+          "description": "Whisper model (.bin) for dictation. Empty uses ~/.cache/agent-wrangler/whisper/ggml-base.en.bin, which Agent Wrangler offers to download."
+        },
+        "agentWrangler.dictation.whisperPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to whisper-cli. Empty searches PATH and the Homebrew prefixes."
+        },
+        "agentWrangler.dictation.ffmpegPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to ffmpeg, used to record the microphone. Empty searches PATH and the Homebrew prefixes."
+        },
         "agentWrangler.dashboardLocation": {
           "type": "string",
           "enum": [
