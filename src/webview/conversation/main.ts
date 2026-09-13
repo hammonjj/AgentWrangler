@@ -65,14 +65,13 @@ app.innerHTML = `
       <select id="model" title="Model" hidden></select>
       <span id="queued" hidden></span>
       <span class="grow"></span>
-      <button id="stop" class="hdrbtn" hidden>Stop</button>
     </div>
     <div id="mentions" class="mentions" role="listbox" hidden></div>
     <div id="attachments" hidden></div>
     <div id="composerInput">
       <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
       <button id="mic" class="micbtn" title="Dictate a message" aria-label="Dictate a message"></button>
-      <button id="send" class="askbtn primary">Send</button>
+      <button id="send" class="askbtn primary" title="Send this message">Send</button>
     </div>
   </div>
 </div>
@@ -96,7 +95,6 @@ const releaseBtn = document.getElementById('release') as HTMLButtonElement;
 const modeSel = document.getElementById('mode') as HTMLSelectElement;
 const modelSel = document.getElementById('model') as HTMLSelectElement;
 const queuedEl = document.getElementById('queued')!;
-const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
@@ -637,6 +635,9 @@ function setCaps(next: ConversationCapabilities, composer: ComposerState | undef
   // Empty rather than hidden: the note keeps its flex space, so Resume here
   // stays where the Send button sits instead of jumping to the left edge.
   if (!next.canSend) composerNote.textContent = next.readOnlyReason ?? '';
+  // The pane is reused when it follows another session, so a turn that was
+  // running in the one before must not leave the button saying Stop.
+  if (!composer) setBusy(false);
   if (composer) setComposer(composer);
 }
 
@@ -682,11 +683,31 @@ function selectModel(model: string | undefined): void {
   modelSel.value = model;
 }
 
+/**
+ * Whether a turn is running, which is what the primary button does: Send while
+ * Claude is idle, Stop while it is working. One button rather than two because
+ * the pane is used at ~300px, and because "the button under the box" is where
+ * the hand already is when the thing to do is call the model off.
+ *
+ * Enter keeps sending even while it says Stop — typing the next instruction
+ * mid-turn queues it (the "N queued" chip), exactly as it does in a terminal —
+ * so the interrupt never eats a message the user meant to send.
+ */
+let busy = false;
+
+function setBusy(next: boolean): void {
+  if (busy === next) return;
+  busy = next;
+  sendBtn.textContent = next ? 'Stop' : 'Send';
+  sendBtn.title = next ? 'Interrupt what Claude is doing (Enter still queues a message)' : 'Send this message';
+  sendBtn.classList.toggle('stop', next);
+}
+
 function setComposer(c: ComposerState): void {
   if (c.permissionMode) modeSel.value = c.permissionMode;
   setModels(c.models);
   selectModel(c.model);
-  stopBtn.hidden = !c.busy;
+  setBusy(c.busy);
   sendBtn.disabled = false; // sends queue behind a running turn, so never blocked
   queuedEl.hidden = c.queued === 0;
   queuedEl.textContent = c.queued === 1 ? '1 queued' : `${c.queued} queued`;
@@ -989,8 +1010,10 @@ adoptBtn.addEventListener('click', () => {
   adoptBtn.disabled = true;
   post({ type: caps?.canAdopt ? 'adopt' : 'resumeHere' });
 });
-sendBtn.addEventListener('click', sendMessage);
-stopBtn.addEventListener('click', () => post({ type: 'interrupt' }));
+sendBtn.addEventListener('click', () => {
+  if (busy) post({ type: 'interrupt' });
+  else sendMessage();
+});
 modeSel.addEventListener('change', () => post({ type: 'setPermissionMode', mode: modeSel.value as PermissionModeName }));
 modelSel.addEventListener('change', () => post({ type: 'setModel', model: modelSel.value }));
 

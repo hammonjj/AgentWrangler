@@ -326,13 +326,14 @@ describe('RunnerSession', () => {
     expect(session.composer.permissionMode).toBe('plan');
   });
 
-  it('asks the CLI for the model list once init proves the control channel is up', async () => {
+  // `system/init` does not arrive until the first turn starts, so a list asked
+  // for on init would leave the dropdown hidden until then — and, since
+  // sending flips the lifecycle off `starting`, never arrive at all.
+  it('asks the CLI for the model list at start, without waiting for init', async () => {
     const { session, fake } = makeSession();
-    expect(fake.calls.supportedModels).toBe(0);
-
-    fake.emit({ type: 'system', subtype: 'init', session_id: 'abc-123', permissionMode: 'default' });
     await settle();
 
+    expect(fake.calls.supportedModels).toBe(1);
     // The valueless row is dropped, and a blank display name falls back to the id.
     expect(session.composer.models).toEqual([
       { value: 'default', label: 'Default (recommended)', resolved: 'claude-sonnet-4-5-20250929' },
@@ -340,7 +341,7 @@ describe('RunnerSession', () => {
       { value: 'haiku', label: 'haiku', resolved: undefined },
     ]);
 
-    // A re-emitted init must not ask again: the list cannot change mid-session.
+    // init is only a retry point: answered once, it must not ask again.
     fake.emit({ type: 'system', subtype: 'init', session_id: 'abc-123', permissionMode: 'default' });
     await settle();
     expect(fake.calls.supportedModels).toBe(1);
@@ -352,6 +353,15 @@ describe('RunnerSession', () => {
     await settle();
     expect(session.composer.models).toBeUndefined();
     expect(session.lifecycle).toBe('idle');
+  });
+
+  it('stops retrying the model list rather than asking a CLI that cannot answer on every turn', async () => {
+    const { fake } = makeSession('/Users/test/proj', new Error('too old'));
+    for (let turn = 0; turn < 6; turn++) {
+      fake.emit({ type: 'system', subtype: 'init', session_id: 'abc-123', permissionMode: 'default' });
+      await settle();
+    }
+    expect(fake.calls.supportedModels).toBe(3);
   });
 
   it('ends by closing stdin, and settles anything still parked on a human', async () => {

@@ -84,6 +84,8 @@ interface PendingAsk {
 const MAX_BLOCKS = 2000;
 /** How long a graceful `end()` waits for the CLI to exit before killing it. */
 const END_GRACE_MS = 5000;
+/** Attempts at the model list before giving up on a CLI that cannot answer. */
+const MAX_MODEL_ASKS = 3;
 
 export class RunnerSession {
   readonly cwd: string;
@@ -99,6 +101,9 @@ export class RunnerSession {
   private blockState: RunnerBlocksState = createRunnerState();
   private pending = new Map<string, PendingAsk>();
   private truncated = false;
+  /** The model list has been answered, so `init` does not ask for it again. */
+  private modelsLoaded = false;
+  private modelAttempts = 0;
 
   private appendEmitter = new Emitter<ConvBlock[]>();
   private patchEmitter = new Emitter<BlockPatch>();
@@ -147,6 +152,7 @@ export class RunnerSession {
       return;
     }
     void this.pump();
+    void this.loadModels();
   }
 
   send(text: string, images?: ImageAttachment[]): void {
@@ -213,12 +219,22 @@ export class RunnerSession {
   }
 
   /**
-   * Ask the CLI which models this account may use, once, after `init` proves
-   * the control channel is up. A hardcoded list would go stale and could offer
-   * a model the account cannot reach; when the call fails the list stays empty
+   * Ask the CLI which models this account may use, once, as soon as the
+   * process is spawned. A hardcoded list would go stale and could offer a
+   * model the account cannot reach; when the call fails the list stays empty
    * and the pane simply hides the dropdown.
+   *
+   * Asked at start rather than on `system/init`: that message does not arrive
+   * until a turn actually begins (verified against the 2.1.270 binary — a
+   * freshly spawned session sits on `hook_response` and emits nothing else
+   * until the first prompt), so waiting for it left the dropdown hidden for
+   * the whole of a session's first turn. The control channel answers straight
+   * away; `init` is only a retry point if this first attempt fails, and a
+   * binary too old to answer at all is not asked on every turn forever.
    */
   private async loadModels(): Promise<void> {
+    if (this.modelsLoaded || this.modelAttempts >= MAX_MODEL_ASKS) return;
+    this.modelAttempts++;
     try {
       const models = (await this.query?.supportedModels()) ?? [];
       const choices: ModelChoice[] = models
@@ -228,7 +244,10 @@ export class RunnerSession {
           label: m.displayName || m.value,
           resolved: typeof m.resolvedModel === 'string' ? m.resolvedModel : undefined,
         }));
-      if (choices.length > 0) this.setComposer({ models: choices });
+      if (choices.length > 0) {
+        this.modelsLoaded = true;
+        this.setComposer({ models: choices });
+      }
     } catch (err) {
       this.deps.log(`runner supportedModels failed: ${String(err)}`);
     }
@@ -413,8 +432,9 @@ export class RunnerSession {
       this.sessionId = m.session_id;
       this.deps.log(`runner session id ${m.session_id} (${this.cwd})`);
     }
-    if (m.type === 'system' && m.subtype === 'init' && this.lifecycle === 'starting') {
-      this.setLifecycle('idle');
+    if (m.type === 'system' && m.subtype === 'init') {
+      if (this.lifecycle === 'starting') this.setLifecycle('idle');
+      // Only if the ask at start failed: `loadModels` is a no-op once answered.
       void this.loadModels();
     }
 

@@ -48,8 +48,21 @@ export type HostToDashboard =
  * sitting on; `always` also adds the rule Claude Code's "don't ask again" would.
  * `pin` opens a conversation panel of this session's own, which the reusable
  * pane never swaps away from.
+ *
+ * `copyId`, `goTo` and `close` come from the row's right-click menu (see
+ * `shared/rowMenu.ts`). `close` ends the process running the session and is the
+ * only one of these the user can lose work to, so the host confirms it first.
  */
-export type DashboardAction = 'pin' | 'resume' | 'archive' | 'allow' | 'deny' | 'always';
+export type DashboardAction =
+  | 'pin'
+  | 'resume'
+  | 'archive'
+  | 'copyId'
+  | 'goTo'
+  | 'close'
+  | 'allow'
+  | 'deny'
+  | 'always';
 
 export type DashboardToHost =
   | { type: 'ready' }

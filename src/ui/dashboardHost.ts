@@ -181,6 +181,9 @@ export class DashboardHost {
         if (m.action === 'pin') this.actions.pin(m.key);
         else if (m.action === 'resume') this.actions.resume(m.key);
         else if (m.action === 'archive') this.archive.toggle(m.key);
+        else if (m.action === 'copyId') this.actions.copyId(m.key);
+        else if (m.action === 'goTo') this.actions.goTo(m.key);
+        else if (m.action === 'close') this.actions.closeSession(m.key);
         else if (m.action === 'allow' || m.action === 'deny' || m.action === 'always') {
           this.actions.decidePermission(m.key, m.action);
         }

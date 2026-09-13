@@ -297,6 +297,18 @@ body,
 .askbtn:hover:not(:disabled) {
   background: var(--vscode-button-hoverBackground);
 }
+/* Send turns into Stop for the length of a turn. Deliberately not the primary
+   fill: it is the same button in the same place, and the colour change is what
+   says the press does the opposite of what it did a second ago. */
+.askbtn.stop,
+.askbtn.primary.stop {
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, inherit);
+  border-color: var(--aw-busy);
+}
+.askbtn.stop:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
+}
 .askbtn:disabled {
   opacity: 0.5;
   cursor: default;

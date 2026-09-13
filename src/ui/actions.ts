@@ -21,6 +21,16 @@ export interface SessionActions {
    * The conversation lives in the transcript, so nothing is lost either way.
    */
   release(key: string): void;
+  /**
+   * End the process running a session, leaving the session itself intact: the
+   * row moves to Ended and `claude --resume` picks the conversation up where it
+   * stopped, because the conversation *is* the transcript.
+   *
+   * Unlike `adopt` this is offered while a turn is in flight — a wedged agent
+   * is the main reason to reach for it — so the implementation confirms first
+   * and says plainly when a turn is about to be thrown away.
+   */
+  closeSession(key: string): void;
   resume(key: string): void;
   copyId(key: string): void;
   reveal(key: string): void;

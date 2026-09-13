@@ -222,10 +222,12 @@ td {
 th.h-dot {
   width: 26px;
 }
-/* Two 24px buttons plus the cell's own padding. At 60px the second one was
-   clipped and the cell rendered an ellipsis next to it. */
+/* The column picker's button and nothing else: the row actions it used to sit
+   above are in the right-click menu now, so this is a 20px button plus the
+   cell's own padding rather than a 66px two-button tray. The ~32px that frees
+   goes to the Agent column, which is the one that is always short of room. */
 th.h-act {
-  width: 66px;
+  width: 36px;
 }
 
 /* The grab strip on a column's left edge — the divider it shares with the
@@ -809,33 +811,64 @@ button.colcfg svg {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- action buttons ---- */
+/* ---- row actions ---- */
 
+/* Empty in every body row: the column exists only so the header has somewhere
+   to hang the column picker. Row actions live in the right-click menu. */
 .c-act {
   text-align: right;
-  text-overflow: clip; /* buttons, not text: an ellipsis here is never wanted */
+  text-overflow: clip;
 }
-button.act {
+
+/* The row's right-click menu. Fixed, not absolute, for the same reason the
+   column picker is: the header is sticky and the table scrolls underneath. The
+   pointer's x/y are written in by `paint` through the CSSOM, since the CSP
+   drops inline styles. Above `.colmenu` in the stack — opening one closes the
+   other, but a repaint should never leave the loser on top. */
+.rowmenu {
+  position: fixed;
+  z-index: 20;
+  width: 190px; /* ROW_MENU_WIDTH in shared/rowMenu.ts, which clamps to the viewport */
+  padding: 4px;
+  border-radius: 5px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+.rowmenu .rmrow {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  text-align: left;
   background: transparent;
   border: none;
-  padding: 3px 4px;
   border-radius: 3px;
-  color: var(--vscode-descriptionForeground);
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
   cursor: pointer;
-  opacity: 0.6;
-  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-tr.row:hover button.act {
-  opacity: 1;
+.rowmenu .rmrow:hover {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-menu-selectionForeground, var(--vscode-foreground));
 }
-button.act:hover {
-  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.3));
-  color: var(--vscode-foreground);
+/* Closing a session ends a process. Separated, last, and in the error colour,
+   so the item you cannot undo is never the one the pointer lands on by
+   momentum. */
+.rowmenu .rmrow.danger {
+  margin-top: 3px;
+  padding-top: 5px;
+  border-top: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
+  border-radius: 0 0 3px 3px;
+  color: var(--vscode-errorForeground, #f14c4c);
 }
-button.act svg {
-  width: 16px;
-  height: 16px;
-  display: block;
+.rowmenu .rmrow.danger:hover {
+  background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.15));
+  color: var(--vscode-errorForeground, #f14c4c);
 }
 
 /* ---- narrow docking ----
@@ -858,7 +891,7 @@ button.act svg {
     width: 22px;
   }
   th.h-act {
-    width: 58px;
+    width: 30px;
   }
   tr.permrow > td {
     padding-left: 12px;

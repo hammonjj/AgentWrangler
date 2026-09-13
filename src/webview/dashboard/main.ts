@@ -16,6 +16,7 @@ import {
 } from '../../shared/columns';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
+import { clampMenuPosition, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
 import {
   askLine,
   capitalize,
@@ -75,6 +76,8 @@ let columns: ColumnPrefs = {};
 let narrow = document.documentElement.clientWidth < NARROW_PX;
 /** Open column picker, or undefined. The number is where to pin it vertically. */
 let menuTop: number | undefined;
+/** Open row context menu: which row it belongs to, and where it was asked for. */
+let rowMenu: { key: string; x: number; y: number } | undefined;
 /** A drag owns the table until it ends: snapshots arriving mid-drag are deferred. */
 let dragging = false;
 let renderDeferred = false;
@@ -128,8 +131,8 @@ const LENGTH = /^\d+(\.\d+)?(px|%)$/;
  * every column at once.
  *
  * The same property set through the CSSOM is not an inline style and is not
- * blocked. So widths ride in `data-w` (and the picker's offset in `data-top`)
- * and land here, after the HTML is in the document.
+ * blocked. So widths ride in `data-w` (and the menus' offsets in `data-top` /
+ * `data-left`) and land here, after the HTML is in the document.
  */
 function paint(html: string): void {
   app.innerHTML = html;
@@ -139,14 +142,10 @@ function paint(html: string): void {
   for (const el of app.querySelectorAll<HTMLElement>('[data-top]')) {
     if (LENGTH.test(el.dataset.top!)) el.style.top = el.dataset.top!;
   }
+  for (const el of app.querySelectorAll<HTMLElement>('[data-left]')) {
+    if (LENGTH.test(el.dataset.left!)) el.style.left = el.dataset.left!;
+  }
 }
-
-const ICON_EYE =
-  '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 3c-3.5 0-6.2 2.4-7.5 5 1.3 2.6 4 5 7.5 5s6.2-2.4 7.5-5c-1.3-2.6-4-5-7.5-5zm0 8.5A3.5 3.5 0 1 1 8 4.5a3.5 3.5 0 0 1 0 7zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>';
-const ICON_ARCHIVE =
-  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.7" y="2.5" width="12.6" height="3.2" rx="0.6"/><path d="M3.1 5.9v6.4a1.2 1.2 0 0 0 1.2 1.2h7.4a1.2 1.2 0 0 0 1.2-1.2V5.9"/><path d="M6.2 8.7h3.6"/></svg>';
-const ICON_UNARCHIVE =
-  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.7" y="2.5" width="12.6" height="3.2" rx="0.6"/><path d="M3.1 5.9v6.4a1.2 1.2 0 0 0 1.2 1.2h7.4a1.2 1.2 0 0 0 1.2-1.2V5.9"/><path d="M8 12.2V8.2M6.2 9.8 8 8l1.8 1.8"/></svg>';
 
 const ICON_COLUMNS =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1"/><path d="M6.4 2.8v10.4M10.4 2.8v10.4"/></svg>';
@@ -167,19 +166,36 @@ function clickHint(s: SessionDTO): string {
   }
 }
 
-function actionButtons(s: SessionDTO): string {
-  const btns: string[] = [];
-  if (s.transcriptPath) {
-    btns.push(
-      `<button class="act" data-action="pin" title="Pin this conversation in its own tab">${ICON_EYE}</button>`,
-    );
-  }
-  btns.push(
-    s.archived
-      ? `<button class="act" data-action="archive" title="Unarchive">${ICON_UNARCHIVE}</button>`
-      : `<button class="act" data-action="archive" title="Archive">${ICON_ARCHIVE}</button>`,
-  );
-  return btns.join('');
+/**
+ * The row's right-click menu. Rendered as part of the table's own HTML rather
+ * than as a detached popup, for the same reason the column picker is: a
+ * snapshot arrives every couple of seconds on a busy machine, and a menu living
+ * outside `#app` would be torn out from under the pointer by the next one.
+ *
+ * A row whose session vanished between the right-click and this render draws
+ * nothing — the snapshot handler clears `rowMenu` in that case, so the stale
+ * state cannot eat the next click either.
+ */
+function rowMenuHtml(): string {
+  if (!rowMenu) return '';
+  const s = sessions.find((x) => x.key === rowMenu!.key);
+  if (!s) return '';
+
+  const items = rowMenuItems(s);
+  if (items.length === 0) return '';
+  const { left, top } = clampMenuPosition(rowMenu, rowMenuSize(items), {
+    width: document.documentElement.clientWidth,
+    height: document.documentElement.clientHeight,
+  });
+  const rows = items
+    .map(
+      (i) =>
+        `<button class="rmrow${i.danger ? ' danger' : ''}" role="menuitem" data-row-action="${i.action}"${
+          i.title ? ` title="${esc(i.title)}"` : ''
+        }>${esc(i.label)}</button>`,
+    )
+    .join('');
+  return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(s.name ?? s.title)}">${rows}</div>`;
 }
 
 /**
@@ -344,6 +360,10 @@ function progressTooltip(s: SessionDTO): string {
 
 function rowTitle(s: SessionDTO): string {
   const hint = clickHint(s);
+  // Pin and archive used to be buttons on the row and are now in the menu, so
+  // the tooltip is what carries the discovery — nothing else on the row hints
+  // that a right-click does anything.
+  const more = '\nRight-click for pin, archive and more.';
   const est =
     s.statusIsEstimated && s.status !== 'ended'
       ? '\n\nStatus is estimated from the transcript — this session started before hooks were installed. Restart it for exact status.'
@@ -359,7 +379,7 @@ function rowTitle(s: SessionDTO): string {
     s.status === 'done'
       ? '\n\nFinished its turn without asking you anything — the last message reads as a report. Waiting would mean it ended on a question or a choice.'
       : '';
-  return `${hint}${est}${stuck}${done}${progressTooltip(s)}`;
+  return `${hint}${more}${est}${stuck}${done}${progressTooltip(s)}`;
 }
 
 /** Branch, minus the detached-HEAD placeholder, which names nothing. */
@@ -443,7 +463,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   ${cols()
     .map((c) => CELL[c.id](s))
     .join('')}
-  <td class="c-act">${actionButtons(s)}</td>
+  <td class="c-act"></td>
 </tr>${permissionRow(s, span)}`;
 }
 
@@ -712,6 +732,7 @@ function render(): void {
 
   if (sessions.length === 0) {
     menuTop = undefined; // no table, so no button to close the picker with
+    rowMenu = undefined; // and no row for a menu to belong to
     paint(`${usageHtml()}${bannerHtml()}<div class="empty">No agent sessions found.
 <div class="hint">Sessions are discovered from <code>~/.claude</code>. Start a Claude Code session anywhere and it will appear here.</div></div>`);
     return;
@@ -729,7 +750,7 @@ function render(): void {
   // so widths live on the header cells and a column that is switched off simply
   // is not rendered.
   const span = cols().length + 3; // dot + agent + data columns + actions
-  let html = `${usageHtml()}${bannerHtml()}${menuHtml()}<table>${headHtml()}`;
+  let html = `${usageHtml()}${bannerHtml()}${menuHtml()}${rowMenuHtml()}<table>${headHtml()}`;
 
   for (const sec of SECTION_ORDER) {
     const rows = groups.get(sec);
@@ -770,6 +791,9 @@ window.addEventListener('message', (e: MessageEvent) => {
     for (const key of Array.from(permOverride.keys())) {
       if (!sessions.some((s) => s.key === key && s.status === 'blocked')) permOverride.delete(key);
     }
+    // A menu whose row is gone draws nothing, so leaving it open would swallow
+    // the next click as a dismissal of something invisible.
+    if (rowMenu && !sessions.some((s) => s.key === rowMenu!.key)) rowMenu = undefined;
     hooks = m.hooks;
     usage = m.usage;
     // Our own drag already drew this; anything else is another dashboard's.
@@ -856,12 +880,29 @@ app.addEventListener('pointerdown', (e) => {
 
 function openMenu(atY: number): void {
   menuTop = Math.max(4, Math.round(atY));
+  rowMenu = undefined; // one menu at a time, in both directions
   render();
 }
 
 function closeMenu(): void {
   if (menuTop === undefined) return;
   menuTop = undefined;
+  render();
+}
+
+// ---- row context menu ----
+
+/** One menu at a time: opening this one closes the column picker and the launcher's. */
+function openRowMenu(key: string, x: number, y: number): void {
+  menuTop = undefined;
+  closeProjMenu();
+  rowMenu = { key, x, y };
+  render();
+}
+
+function closeRowMenu(): void {
+  if (!rowMenu) return;
+  rowMenu = undefined;
   render();
 }
 
@@ -873,16 +914,29 @@ app.addEventListener('change', (e) => {
   render(); // menu stays open: hiding two columns should take two clicks, not four
 });
 
-// Right-click the header for the same menu, where a table's column menu lives.
 app.addEventListener('contextmenu', (e) => {
-  if (!(e.target as HTMLElement).closest('thead')) return;
+  const target = e.target as HTMLElement;
+
+  // Right-click the header for the column menu, where a table's column menu lives.
+  if (target.closest('thead')) {
+    e.preventDefault();
+    openMenu((e as MouseEvent).clientY);
+    return;
+  }
+  // A permission card is a decision surface. Right-clicking it must not offer
+  // to close the very session that is waiting on the answer.
+  if (target.closest('tr.permrow')) return;
+
+  const row = target.closest('tr.row') as HTMLElement | null;
+  if (!row) return;
   e.preventDefault();
-  openMenu((e as MouseEvent).clientY);
+  openRowMenu(row.dataset.key!, (e as MouseEvent).clientX, (e as MouseEvent).clientY);
 });
 
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   closeMenu();
+  closeRowMenu();
   if (menuOpen) {
     closeProjMenu();
     projBtn.focus(); // Escape should leave focus somewhere, not on a hidden row
@@ -902,6 +956,18 @@ window.addEventListener('resize', () => {
 
 app.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
+
+  // The row menu is checked first: while it is open it owns the next click,
+  // whether that click picks an item or dismisses it. In particular a click on
+  // a row must dismiss and stop there, rather than also opening that session.
+  if (rowMenu) {
+    const item = target.closest('[data-row-action]') as HTMLElement | null;
+    const key = rowMenu.key;
+    closeRowMenu();
+    if (item) post({ type: 'action', key, action: item.dataset.rowAction as DashboardAction });
+    e.stopPropagation();
+    return;
+  }
 
   const colBtn = target.closest('[data-cols]') as HTMLElement | null;
   if (colBtn?.dataset.cols === 'menu') {
@@ -924,7 +990,6 @@ app.addEventListener('click', (e) => {
   const ptoggle = target.closest('button.ptoggle') as HTMLElement | null;
   const pbtn = target.closest('button.pbtn') as HTMLButtonElement | null;
   const permRow = target.closest('tr.permrow') as HTMLElement | null;
-  const btn = target.closest('button.act') as HTMLElement | null;
   const pr = target.closest('.pr') as HTMLElement | null;
   const row = target.closest('tr.row') as HTMLElement | null;
   const secRow = target.closest('tr.sec') as HTMLElement | null;
@@ -964,11 +1029,6 @@ app.addEventListener('click', (e) => {
   // Anywhere else on the card: leave the row alone rather than opening the
   // session out from under a decision.
   if (permRow) {
-    e.stopPropagation();
-    return;
-  }
-  if (btn && row) {
-    post({ type: 'action', key: row.dataset.key!, action: btn.dataset.action as DashboardAction });
     e.stopPropagation();
     return;
   }

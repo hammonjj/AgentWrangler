@@ -126,7 +126,7 @@ onUserDialog, supportedDialogKinds: [], permissionMode: 'default' } })`:
 | Observation | Detail |
 |---|---|
 | Auth | `system/init` had `apiKeySource: "none"` — the OAuth claude.ai login is used; no API key involved. Cost fields are estimates, not a bill. (Whether Anthropic's consumer terms are happy with a third-party frontend is a policy question, not a technical one; this *is* Claude Code's own binary and SDK.) |
-| Turn lifecycle | `system/init` is re-emitted at the start of **every** turn (carries `permissionMode`, `model`, `slash_commands`, `tools`, `capabilities`). `system/status` with `status: 'requesting' \| 'compacting' \| null` and sometimes `permissionMode`. Exactly one `result` per turn = turn complete (`is_error`, `result` text, cumulative `total_cost_usd`, `permission_denials`, `queued_turn_count`). |
+| Turn lifecycle | `system/init` arrives at the start of **every** turn, and **only** then: a freshly spawned session emits `system/hook_started` + `hook_response` and nothing else until the first prompt is sent (verified against the 2.1.270 binary, 2026-09-13 — a 45s wait produced no `init`). Anything that must happen before the first send (asking for the model list) cannot be hung off `init`. It carries `permissionMode`, `model`, `slash_commands`, `tools`, `capabilities`. `system/status` with `status: 'requesting' \| 'compacting' \| null` and sometimes `permissionMode`. Exactly one `result` per turn = turn complete (`is_error`, `result` text, cumulative `total_cost_usd`, `permission_denials`, `queued_turn_count`). |
 | Streaming | With `includePartialMessages`, `stream_event` messages carry raw Messages-API events (`content_block_start/delta/stop`, `message_start/delta/stop`); the complete `assistant` message follows anyway. 135 events over 3 short turns. |
 | Assistant messages | `assistant.message.content` blocks: `thinking`, `text`, `tool_use` (one block per SDK message while streaming; `stop_reason` null on those). |
 | Tool results | Arrive as `user` messages with `message.content = [{type:'tool_result', tool_use_id, content, is_error?}]` **and** a structured `tool_use_result` sibling (e.g. Bash: `{stdout, stderr, interrupted, isImage, noOutputExpected}`; Write: `{type, filePath, content, structuredPatch, originalFile, userModified}`). |
@@ -250,7 +250,7 @@ this window and only for single-line text (a newline submits). Do not build on e
  ConversationHost ◄── ConversationSource ◄── one of:          │ blocks: user / assistant(md) / thinking▸ / tool ▸ …   │
       │                 ├─ TranscriptSource (tail JSONL)      │         permission card [Allow][Always][Deny]         │
       │                 │    permissions via HookLog.decide   │         question card / plan card                     │
-      │                 └─ RunnerSource (RunnerSession)       │ composer: [mode ▾][model ▾] textarea [Send][Stop]     │
+      │                 └─ RunnerSource (RunnerSession)       │ composer: [mode ▾][model ▾] textarea [Send↔Stop]      │
       ▼                        ▲                              └───────────────────────────────────────────────────────┘
  HostToConversation msgs       │
                         RunnerService ── query() ── claude (child process, cwd = session.cwd)

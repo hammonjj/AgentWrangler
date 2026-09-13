@@ -279,6 +279,70 @@ export function activate(context: vscode.ExtensionContext): void {
     log(`adopted ${s.sessionId} into this window`);
   };
 
+  /**
+   * End the process running a session, and stop there.
+   *
+   * This is not `adopt` without the resume, and not `release` either: both of
+   * those hand the session on to something else, and this deliberately hands it
+   * to nobody. What makes that safe to offer is the same fact they rest on — a
+   * Claude Code conversation *is* its transcript — so closing a session is
+   * parking it, not destroying it. The row moves to Ended and `claude --resume`
+   * picks it up where it stopped.
+   *
+   * A turn in flight is the one thing that does not survive, and unlike `adopt`
+   * that does not withdraw the offer: the session most worth closing is the one
+   * that has wedged, which is `stuck` or `busy` by definition. The modal is
+   * where that cost gets stated instead.
+   */
+  const confirmAndCloseSession = async (s: AgentSession): Promise<void> => {
+    const label = s.name ?? s.title;
+    if (!runners.owns(s.sessionId) && s.pid === undefined) {
+      void vscode.window.showWarningMessage(
+        `Agent Wrangler: no process is known for ${label}, so there is nothing to close.`,
+      );
+      return;
+    }
+
+    const working = s.status === 'busy' || s.status === 'stuck' || s.status === 'blocked';
+    const detail = [
+      runners.owns(s.sessionId)
+        ? 'This window stops running the session.'
+        : 'The process running it ends. Its terminal or Claude Code panel will show it as ended.',
+      working ? 'It is working right now, and that turn is thrown away.' : '',
+      'The conversation is kept — it lives in the transcript — so you can resume it later.',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const choice = await vscode.window.showWarningMessage(`Close ${label}?`, { modal: true, detail }, 'Close session');
+    if (choice !== 'Close session') return;
+
+    // It may have finished, or ended on its own, while the dialog was up.
+    const now = store.get(s.key) ?? s;
+    const runner = runners.get(now.sessionId);
+    if (runner) {
+      await runners.end(runner);
+      log(`closed ${now.sessionId}: ended the runner in this window`);
+    } else if (now.pid !== undefined) {
+      const outcome = await endProcess(now.pid, {
+        kill: (pid, signal) => process.kill(pid, signal),
+        isAlive: isPidAlive,
+        delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+      });
+      log(`close ${now.sessionId}: ending pid ${now.pid} → ${outcome}`);
+      if (outcome === 'refused') {
+        void vscode.window.showErrorMessage(
+          `Agent Wrangler: could not stop the process running ${label} — it is ignoring both signals. ` +
+            'End it from its own terminal.',
+        );
+        return;
+      }
+    }
+    // The registry and the transcript will both say "ended" shortly; ask now so
+    // the row the user just acted on does not sit there looking alive.
+    void store.forceRefresh();
+  };
+
   const actions: SessionActions = {
     smartOpen(key) {
       const s = store.get(key);
@@ -343,6 +407,11 @@ export function activate(context: vscode.ExtensionContext): void {
         resumeInTerminal(s, getConfig);
         log(`released ${s.sessionId} to a terminal`);
       })();
+    },
+    closeSession(key) {
+      const s = store.get(key);
+      if (!s) return;
+      void confirmAndCloseSession(s);
     },
     resume(key) {
       const s = store.get(key);
