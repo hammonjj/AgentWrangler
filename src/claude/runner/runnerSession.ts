@@ -27,6 +27,7 @@ import type {
   BlockPatch,
   ComposerState,
   ConvBlock,
+  ModelChoice,
   PermissionModeName,
   QuestionView,
 } from '../../shared/conversation';
@@ -173,6 +174,28 @@ export class RunnerSession {
       this.setComposer({ model });
     } catch (err) {
       this.deps.log(`runner setModel failed: ${String(err)}`);
+    }
+  }
+
+  /**
+   * Ask the CLI which models this account may use, once, after `init` proves
+   * the control channel is up. A hardcoded list would go stale and could offer
+   * a model the account cannot reach; when the call fails the list stays empty
+   * and the pane simply hides the dropdown.
+   */
+  private async loadModels(): Promise<void> {
+    try {
+      const models = (await this.query?.supportedModels()) ?? [];
+      const choices: ModelChoice[] = models
+        .filter((m) => typeof m?.value === 'string' && m.value !== '')
+        .map((m) => ({
+          value: m.value,
+          label: m.displayName || m.value,
+          resolved: typeof m.resolvedModel === 'string' ? m.resolvedModel : undefined,
+        }));
+      if (choices.length > 0) this.setComposer({ models: choices });
+    } catch (err) {
+      this.deps.log(`runner supportedModels failed: ${String(err)}`);
     }
   }
 
@@ -357,6 +380,7 @@ export class RunnerSession {
     }
     if (m.type === 'system' && m.subtype === 'init' && this.lifecycle === 'starting') {
       this.setLifecycle('idle');
+      void this.loadModels();
     }
 
     const { appends, patches, composer, turnEnd } = reduceRunnerMessage(this.blockState, msg);

@@ -393,18 +393,24 @@ function syntheticSession(runner: RunnerSession): AgentSession {
   };
 }
 
-/** One sentence saying why the composer is disabled. */
+/**
+ * One sentence saying why the composer is disabled, or nothing when the reason
+ * is already on screen.
+ *
+ * An ended session says so twice over — the header pill reads "Ended" and the
+ * button next to this note reads "Resume here" — so spelling it out a third
+ * time is just noise on the state the pane sits in most often. An error is
+ * different: nothing else reports it, so it keeps its sentence.
+ */
 function readOnlyReason(
   session: AgentSession,
   runner: RunnerSession | undefined,
   action: SecondaryAction | undefined,
-): string {
+): string | undefined {
   if (runner) {
-    return runner.lifecycle === 'error'
-      ? 'This session stopped with an error.'
-      : 'This session has ended.';
+    return runner.lifecycle === 'error' ? 'This session stopped with an error.' : undefined;
   }
-  if (session.status === 'ended') return 'This session has ended.';
+  if (session.status === 'ended') return undefined;
   const where =
     action === 'reveal-panel'
       ? 'a Claude Code panel in this window'

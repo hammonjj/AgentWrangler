@@ -4,6 +4,7 @@ import type {
   ComposerState,
   ConvBlock,
   ConversationCapabilities,
+  ModelChoice,
   PermissionModeName,
   QuestionView,
 } from '../../shared/conversation';
@@ -59,6 +60,7 @@ app.innerHTML = `
   <div id="composerWrite" hidden>
     <div id="composerBar">
       <select id="mode" title="Permission mode"></select>
+      <select id="model" title="Model" hidden></select>
       <span id="queued" hidden></span>
       <span class="grow"></span>
       <button id="stop" class="hdrbtn" hidden>Stop</button>
@@ -88,6 +90,7 @@ const adoptBtn = document.getElementById('adopt') as HTMLButtonElement;
 const pinBtn = document.getElementById('pin') as HTMLButtonElement;
 const releaseBtn = document.getElementById('release') as HTMLButtonElement;
 const modeSel = document.getElementById('mode') as HTMLSelectElement;
+const modelSel = document.getElementById('model') as HTMLSelectElement;
 const queuedEl = document.getElementById('queued')!;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
@@ -612,12 +615,58 @@ function setCaps(next: ConversationCapabilities, composer: ComposerState | undef
 
   composerWrite.hidden = !next.canSend;
   composerRead.hidden = next.canSend;
-  if (!next.canSend) composerNote.textContent = next.readOnlyReason ?? 'Read-only.';
+  // Empty rather than hidden: the note keeps its flex space, so Resume here
+  // stays where the Send button sits instead of jumping to the left edge.
+  if (!next.canSend) composerNote.textContent = next.readOnlyReason ?? '';
   if (composer) setComposer(composer);
+}
+
+/** The list currently rendered, so options are rebuilt only when it changes. */
+let modelsKey = '';
+
+function setModels(models: ModelChoice[] | undefined): void {
+  const list = models ?? [];
+  const key = list.map((m) => `${m.value} ${m.label}`).join('');
+  if (key === modelsKey) return;
+  modelsKey = key;
+  modelSel.textContent = '';
+  for (const m of list) {
+    const opt = document.createElement('option');
+    opt.value = m.value;
+    opt.textContent = m.label;
+    if (m.resolved) opt.dataset.resolved = m.resolved;
+    modelSel.appendChild(opt);
+  }
+  // Nothing to choose between until the CLI has answered; an empty dropdown
+  // would just look broken.
+  modelSel.hidden = list.length === 0;
+}
+
+/**
+ * The CLI reports the wire id it resolved to (`claude-sonnet-4-5-…`) while the
+ * list offers aliases (`sonnet`), so match on `resolved` before falling back to
+ * showing the raw id — the dropdown must never name a model the session is not
+ * actually on.
+ */
+function selectModel(model: string | undefined): void {
+  if (!model || modelSel.options.length === 0) return;
+  const opts = Array.from(modelSel.options);
+  const match = opts.find((o) => o.value === model) ?? opts.find((o) => o.dataset.resolved === model);
+  if (match) {
+    modelSel.value = match.value;
+    return;
+  }
+  const extra = document.createElement('option');
+  extra.value = model;
+  extra.textContent = model;
+  modelSel.appendChild(extra);
+  modelSel.value = model;
 }
 
 function setComposer(c: ComposerState): void {
   if (c.permissionMode) modeSel.value = c.permissionMode;
+  setModels(c.models);
+  selectModel(c.model);
   stopBtn.hidden = !c.busy;
   sendBtn.disabled = false; // sends queue behind a running turn, so never blocked
   queuedEl.hidden = c.queued === 0;
@@ -745,6 +794,7 @@ adoptBtn.addEventListener('click', () => {
 sendBtn.addEventListener('click', sendMessage);
 stopBtn.addEventListener('click', () => post({ type: 'interrupt' }));
 modeSel.addEventListener('change', () => post({ type: 'setPermissionMode', mode: modeSel.value as PermissionModeName }));
+modelSel.addEventListener('change', () => post({ type: 'setModel', model: modelSel.value }));
 
 msgEl.addEventListener('input', autoGrow);
 msgEl.addEventListener('keydown', (e) => {

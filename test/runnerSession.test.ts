@@ -7,7 +7,19 @@ import type { ConvBlock } from '../src/shared/conversation';
  * messages into, records what the session sends back, and lets a test call the
  * `canUseTool` callback the way the CLI would. No process is ever spawned.
  */
-function fakeQuery() {
+/**
+ * What `supportedModels()` answers, in the SDK's `ModelInfo` shape. The last
+ * two rows are the awkward ones: a row with no usable `value`, and one with an
+ * empty `displayName`.
+ */
+const MODELS: unknown = [
+  { value: 'default', displayName: 'Default (recommended)', description: 'x', resolvedModel: 'claude-sonnet-4-5-20250929' },
+  { value: 'opus', displayName: 'Opus', description: 'x' },
+  { value: '', displayName: 'Nameless', description: 'x' },
+  { value: 'haiku', displayName: '', description: 'x' },
+];
+
+function fakeQuery(models: unknown = MODELS) {
   let emit!: (msg: unknown) => void;
   let finish!: () => void;
   let fail!: (err: unknown) => void;
@@ -49,6 +61,7 @@ function fakeQuery() {
     close: 0,
     permissionMode: [] as string[],
     model: [] as (string | undefined)[],
+    supportedModels: 0,
     sent: [] as unknown[],
     options: undefined as any,
   };
@@ -69,6 +82,11 @@ function fakeQuery() {
       setModel: async (model?: string) => {
         calls.model.push(model);
       },
+      supportedModels: async () => {
+        calls.supportedModels++;
+        if (models instanceof Error) throw models;
+        return models;
+      },
       close: () => {
         calls.close++;
         finish();
@@ -80,8 +98,8 @@ function fakeQuery() {
   return { query, emit, finish, fail, calls };
 }
 
-function makeSession(cwd = '/Users/test/proj') {
-  const fake = fakeQuery();
+function makeSession(cwd = '/Users/test/proj', models?: unknown) {
+  const fake = fakeQuery(models === undefined ? MODELS : models);
   const appended: ConvBlock[] = [];
   const patches: { id: string; block: Record<string, unknown> }[] = [];
   const session = new RunnerSession(
@@ -260,6 +278,34 @@ describe('RunnerSession', () => {
     expect(fake.calls.permissionMode).toEqual(['plan']);
     expect(fake.calls.model).toEqual(['claude-haiku-4-5-20251001']);
     expect(session.composer.permissionMode).toBe('plan');
+  });
+
+  it('asks the CLI for the model list once init proves the control channel is up', async () => {
+    const { session, fake } = makeSession();
+    expect(fake.calls.supportedModels).toBe(0);
+
+    fake.emit({ type: 'system', subtype: 'init', session_id: 'abc-123', permissionMode: 'default' });
+    await settle();
+
+    // The valueless row is dropped, and a blank display name falls back to the id.
+    expect(session.composer.models).toEqual([
+      { value: 'default', label: 'Default (recommended)', resolved: 'claude-sonnet-4-5-20250929' },
+      { value: 'opus', label: 'Opus', resolved: undefined },
+      { value: 'haiku', label: 'haiku', resolved: undefined },
+    ]);
+
+    // A re-emitted init must not ask again: the list cannot change mid-session.
+    fake.emit({ type: 'system', subtype: 'init', session_id: 'abc-123', permissionMode: 'default' });
+    await settle();
+    expect(fake.calls.supportedModels).toBe(1);
+  });
+
+  it('keeps running when the CLI cannot list models, so the pane just hides the dropdown', async () => {
+    const { session, fake } = makeSession('/Users/test/proj', new Error('too old'));
+    fake.emit({ type: 'system', subtype: 'init', session_id: 'abc-123', permissionMode: 'default' });
+    await settle();
+    expect(session.composer.models).toBeUndefined();
+    expect(session.lifecycle).toBe('idle');
   });
 
   it('ends by closing stdin, and settles anything still parked on a human', async () => {

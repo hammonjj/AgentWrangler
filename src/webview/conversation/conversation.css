@@ -407,7 +407,8 @@ body,
 #composerBar .grow {
   flex: 1 1 auto;
 }
-#mode {
+#mode,
+#model {
   font-family: inherit;
   font-size: inherit;
   padding: 1px 4px;
@@ -415,8 +416,15 @@ body,
   border: 1px solid var(--vscode-dropdown-border, var(--aw-rule));
   background: var(--vscode-dropdown-background, transparent);
   color: var(--vscode-dropdown-foreground, inherit);
+  /* The pane is used at ~300px, where two dropdowns at their natural width
+     (as wide as "Auto-accept edits") would push Stop off the bar. Let them
+     shrink instead, but only once the row actually runs out of room. */
+  flex: 0 1 auto;
+  min-width: 3.5em;
 }
 #queued {
+  flex: 0 0 auto;
+  white-space: nowrap;
   padding: 0 7px;
   border-radius: 8px;
   border: 1px solid currentColor;

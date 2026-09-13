@@ -146,10 +146,29 @@ export interface ConversationCapabilities {
   readOnlyReason?: string;
 }
 
+/**
+ * One row of the model dropdown, as the CLI itself advertises it. The list is
+ * asked for rather than hardcoded so the dropdown offers exactly the models
+ * this account can use.
+ */
+export interface ModelChoice {
+  /** What `setModel` is called with — usually an alias like `sonnet`. */
+  value: string;
+  label: string;
+  /**
+   * The wire id `value` resolves to. The CLI reports the *resolved* id as the
+   * current model, so without this the dropdown could not tell which row is
+   * selected.
+   */
+  resolved?: string;
+}
+
 /** Live state of a session this extension drives. Absent for transcript-backed panes. */
 export interface ComposerState {
   permissionMode: PermissionModeName;
   model?: string;
+  /** Absent until the CLI answers; the dropdown stays hidden until then. */
+  models?: ModelChoice[];
   slashCommands: string[];
   busy: boolean;
   queued: number;
