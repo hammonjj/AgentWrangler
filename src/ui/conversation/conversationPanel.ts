@@ -14,6 +14,7 @@ import type { DictationService } from '../../core/dictation';
 import type { SessionStore } from '../../core/sessionStore';
 import type { SessionActions } from '../actions';
 import type { SessionLocator } from '../sessionLocator';
+import type { DiffContentProvider } from './diffView';
 import { ConversationHost, type ConversationProvider } from './conversationHost';
 
 export const CONVERSATION_PANEL_TYPE = 'agentWrangler.conversation';
@@ -41,6 +42,7 @@ export class ConversationPanelManager implements vscode.Disposable {
     private actions: SessionActions,
     private locator: SessionLocator,
     private dictation: DictationService,
+    private diffs: DiffContentProvider,
   ) {}
 
   /**
@@ -161,6 +163,7 @@ export class ConversationPanelManager implements vscode.Disposable {
       this.actions,
       this.locator,
       this.dictation,
+      this.diffs,
       (title) => {
         panel.title = pinnedKey === undefined ? title : `📌 ${title}`;
       },

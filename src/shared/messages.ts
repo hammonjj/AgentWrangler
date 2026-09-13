@@ -118,6 +118,12 @@ export type ConversationToHost =
   | { type: 'pin' }
   | { type: 'resumeHere' }
   | { type: 'requestToolResult'; id: string }
+  /**
+   * Open an edit's patch in VSCode's diff editor. The patch travels with the
+   * message because the webview is what holds the rendered blocks — the host
+   * hands them over at `init` and does not keep a copy.
+   */
+  | { type: 'openDiff'; file: string; patch: string }
   | { type: 'openExternal'; url: string }
   | { type: 'openFile'; path: string }
   /**

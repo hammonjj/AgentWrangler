@@ -447,6 +447,40 @@ body,
   border-color: var(--vscode-focusBorder);
 }
 
+/* ---- diff ---- */
+
+/* Path on the left, the way out to the real editor on the right. */
+.difftop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.difftop span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diffopen {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-textLink-foreground));
+  font-family: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+.diffopen:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
+}
+.diffopen:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
 /* ---- attachments ---- */
 
 /* Thumbnails of what is about to be sent. Wraps, because a bug report is often

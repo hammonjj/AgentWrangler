@@ -251,12 +251,25 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       }
       if (b.result) {
         if (b.result.diff) {
+          const { file: filePath, patch } = b.result.diff;
           const file = document.createElement('div');
-          file.className = 'sub';
-          setText(file, b.result.diff.file);
+          file.className = 'sub difftop';
+          const name = document.createElement('span');
+          setText(name, filePath);
+          // The +/- block below is for a glance. Anything worth reading properly
+          // wants syntax highlighting and side-by-side, which is a real editor.
+          const open = document.createElement('button');
+          open.className = 'diffopen';
+          open.textContent = 'Open in diff editor';
+          open.title = 'Show this change side by side, with syntax highlighting';
+          open.addEventListener('click', (e) => {
+            e.stopPropagation();
+            post({ type: 'openDiff', file: filePath, patch });
+          });
+          file.append(name, open);
           const pre = document.createElement('pre');
           pre.className = 'tdiff';
-          renderDiff(pre, b.result.diff.patch);
+          renderDiff(pre, patch);
           d.append(file, pre);
         }
         if (b.result.text) {

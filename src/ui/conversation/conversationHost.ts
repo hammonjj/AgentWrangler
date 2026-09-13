@@ -22,6 +22,7 @@ import { buildWebviewHtml } from '../html';
 import { adoptActionFor, SECONDARY_LABEL, secondaryActionFor, type SecondaryAction } from '../openTarget';
 import type { SessionLocator } from '../sessionLocator';
 import { isInThisWorkspace } from '../workspace';
+import { DiffContentProvider } from './diffView';
 import { RunnerSource } from './runnerSource';
 import type { ConversationSource } from './source';
 import { TranscriptSource } from './transcriptSource';
@@ -66,6 +67,7 @@ export class ConversationHost {
     private actions: SessionActions,
     private locator: SessionLocator,
     private dictation: DictationService,
+    private diffs: DiffContentProvider,
     private onTitle: (title: string) => void,
   ) {
     webview.options = {
@@ -316,6 +318,9 @@ export class ConversationHost {
       }
       case 'dictate':
         await this.dictate(m.action);
+        return;
+      case 'openDiff':
+        await this.diffs.open(m.file, m.patch);
         return;
       case 'openExternal':
         this.actions.openExternal(m.url);
