@@ -37,6 +37,8 @@ import {
   ConversationPanelManager,
   ConversationPanelSerializer,
 } from './ui/conversation/conversationPanel';
+import { FileSuggestService } from './core/fileSuggest';
+import { DiffContentProvider } from './ui/conversation/diffView';
 import type { ConversationLauncher } from './ui/dashboardHost';
 import { DASHBOARD_PANEL_TYPE, DashboardPanelManager, DashboardPanelSerializer } from './ui/dashboardPanel';
 import { DashboardViewProvider } from './ui/dashboardView';
@@ -416,6 +418,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // The conversation pane: one reusable panel that row clicks swap, plus a
   // pinned panel per session the user wants to keep on screen.
+  // Serves the two sides of an edit's diff to VSCode's diff editor.
+  const diffs = new DiffContentProvider();
+  context.subscriptions.push(diffs);
+
+  // Files offered after an `@` in the composer, per session folder.
+  const fileSuggest = new FileSuggestService();
+
   const conversations = new ConversationPanelManager(
     context.extensionUri,
     store,
@@ -424,6 +433,8 @@ export function activate(context: vscode.ExtensionContext): void {
     actions,
     locator,
     dictation,
+    diffs,
+    fileSuggest,
   );
   context.subscriptions.push(
     conversations,

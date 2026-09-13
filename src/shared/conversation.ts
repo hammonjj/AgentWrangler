@@ -43,6 +43,37 @@ export interface QuestionOptionView {
   description: string;
 }
 
+/**
+ * An image on its way *out* — pasted or dropped into the composer. The read
+ * side has counted `image` blocks since phase 1 (`imageCount` on a user block);
+ * this is the other direction.
+ *
+ * Base64 because that is the shape the Messages API wants and the shape the
+ * clipboard gives, so nothing has to touch disk on the way.
+ */
+export interface ImageAttachment {
+  /** `image/png`, `image/jpeg`, `image/gif`, `image/webp` — what the API accepts. */
+  mediaType: string;
+  /** Base64 payload, without the `data:...;base64,` prefix. */
+  data: string;
+}
+
+/** Media types the Messages API accepts; anything else is refused before it is encoded. */
+export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
+
+/**
+ * Per-image ceiling. The API rejects images past ~5 MB, and a rejection arrives
+ * as a failed turn long after the paste, so the composer refuses it at the
+ * point where the user can still do something about it.
+ */
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/** Base64 costs 4 bytes per 3, so this is the decoded size of an encoded payload. */
+export function decodedBytes(base64: string): number {
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
 export interface QuestionView {
   question: string;
   header: string;

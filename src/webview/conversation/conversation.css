@@ -455,6 +455,132 @@ body,
   border-color: var(--vscode-focusBorder);
 }
 
+/* ---- @ mentions ---- */
+
+/* Sits in the composer's flow directly above the textarea rather than floating
+   over the transcript: the pane is often narrow, and a popup that covers the
+   last reply hides the thing being talked about. */
+.mentions {
+  max-height: 180px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-menu-border, var(--aw-rule));
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
+}
+.mentions .mrow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mentions .mrow.on,
+.mentions .mrow:hover {
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-list-activeSelectionForeground, inherit);
+}
+/* Name first and directory after it, both truncating from the left of the
+   path, because the end of a path is the part that identifies the file. */
+.mentions .mname {
+  flex: 0 0 auto;
+}
+.mentions .mdir {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+
+/* ---- diff ---- */
+
+/* Path on the left, the way out to the real editor on the right. */
+.difftop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.difftop span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diffopen {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-textLink-foreground));
+  font-family: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+.diffopen:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
+}
+.diffopen:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* ---- attachments ---- */
+
+/* Thumbnails of what is about to be sent. Wraps, because a bug report is often
+   three screenshots and they should not squeeze the composer. */
+#attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.attach {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-input-border, var(--aw-rule));
+  overflow: hidden;
+  background: var(--vscode-input-background);
+}
+.attach img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Always present rather than hover-only: on a 56px tile there is no room to
+   hunt for it, and a wrongly pasted screenshot should be one obvious click to
+   undo. */
+.attach .attachx {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--vscode-badge-background, rgba(0, 0, 0, 0.65));
+  color: var(--vscode-badge-foreground, #fff);
+  font-size: 10px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.attach .attachx:hover {
+  background: var(--vscode-inputValidation-errorBorder, #f14c4c);
+}
+.attach .attachx:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
 /* ---- dictation ---- */
 
 /* The microphone is drawn in CSS rather than shipped as an icon font or an

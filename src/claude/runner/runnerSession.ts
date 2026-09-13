@@ -27,6 +27,7 @@ import type {
   BlockPatch,
   ComposerState,
   ConvBlock,
+  ImageAttachment,
   ModelChoice,
   PermissionModeName,
   QuestionView,
@@ -37,6 +38,16 @@ import { createRunnerState, noteBlock, reduceRunnerMessage, type RunnerBlocksSta
 import { InputQueue } from '../../core/runner/inputQueue';
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
+
+/**
+ * What a user message carries. The SDK re-exports neither `MessageParam` nor
+ * the block types, so the two shapes we actually send are spelled out here and
+ * cast at the boundary, rather than importing from `@anthropic-ai/sdk` just for
+ * a type.
+ */
+type UserContent =
+  | string
+  | ({ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } })[];
 
 export interface RunnerDeps {
   query: QueryFn;
@@ -138,13 +149,37 @@ export class RunnerSession {
     void this.pump();
   }
 
-  send(text: string): void {
-    if (!this.canSend || !text.trim()) return;
+  send(text: string, images?: ImageAttachment[]): void {
+    const pics = images ?? [];
+    // An image on its own is a real message ("what is wrong with this?"), so
+    // emptiness is judged on both halves rather than on the text alone.
+    if (!this.canSend || (!text.trim() && pics.length === 0)) return;
     // The CLI does not echo our own sends back, so the pane has to show them.
-    this.append([{ kind: 'user', id: `u:${Date.now()}:${this.blocks.length}`, ts: new Date().toISOString(), text: capText(text) }]);
+    this.append([
+      {
+        kind: 'user',
+        id: `u:${Date.now()}:${this.blocks.length}`,
+        ts: new Date().toISOString(),
+        text: capText(text),
+        imageCount: pics.length || undefined,
+      },
+    ]);
+    // A string content is the common case and the one the CLI logs most
+    // readably; blocks are used only when there is actually an image.
+    const content: UserContent =
+      pics.length === 0
+        ? text
+        : [
+            ...pics.map((img) => ({
+              type: 'image' as const,
+              source: { type: 'base64' as const, media_type: img.mediaType, data: img.data },
+            })),
+            // Text last: the model reads the instruction after the thing it refers to.
+            ...(text.trim() ? [{ type: 'text' as const, text }] : []),
+          ];
     this.input.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
     } as SDKUserMessage);
     this.setComposer({ busy: true });

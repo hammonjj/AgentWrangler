@@ -4,10 +4,12 @@ import type {
   ComposerState,
   ConvBlock,
   ConversationCapabilities,
+  ImageAttachment,
   ModelChoice,
   PermissionModeName,
   QuestionView,
 } from '../../shared/conversation';
+import { decodedBytes, IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES } from '../../shared/conversation';
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
@@ -65,6 +67,8 @@ app.innerHTML = `
       <span class="grow"></span>
       <button id="stop" class="hdrbtn" hidden>Stop</button>
     </div>
+    <div id="mentions" class="mentions" role="listbox" hidden></div>
+    <div id="attachments" hidden></div>
     <div id="composerInput">
       <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
       <button id="mic" class="micbtn" title="Dictate a message" aria-label="Dictate a message"></button>
@@ -96,6 +100,8 @@ const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
+const attachmentsEl = document.getElementById('attachments')!;
+const mentionsEl = document.getElementById('mentions')!;
 
 /** Block id → its node, so a patch updates in place instead of re-rendering. */
 const nodes = new Map<string, HTMLElement>();
@@ -250,12 +256,25 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       }
       if (b.result) {
         if (b.result.diff) {
+          const { file: filePath, patch } = b.result.diff;
           const file = document.createElement('div');
-          file.className = 'sub';
-          setText(file, b.result.diff.file);
+          file.className = 'sub difftop';
+          const name = document.createElement('span');
+          setText(name, filePath);
+          // The +/- block below is for a glance. Anything worth reading properly
+          // wants syntax highlighting and side-by-side, which is a real editor.
+          const open = document.createElement('button');
+          open.className = 'diffopen';
+          open.textContent = 'Open in diff editor';
+          open.title = 'Show this change side by side, with syntax highlighting';
+          open.addEventListener('click', (e) => {
+            e.stopPropagation();
+            post({ type: 'openDiff', file: filePath, patch });
+          });
+          file.append(name, open);
           const pre = document.createElement('pre');
           pre.className = 'tdiff';
-          renderDiff(pre, b.result.diff.patch);
+          renderDiff(pre, patch);
           d.append(file, pre);
         }
         if (b.result.text) {
@@ -689,11 +708,190 @@ function autoGrow(): void {
   msgEl.style.height = `${Math.min(msgEl.scrollHeight, MAX_COMPOSER_PX)}px`;
 }
 
+// ---- @ mentions ----
+
+/**
+ * The `@token` the caret is sitting in, or nothing.
+ *
+ * Anchored to a word boundary so an email address or a decorator does not open
+ * the picker, and stopped at whitespace so the token ends where the path does.
+ * Exported shape: where it starts, and what has been typed so far.
+ */
+function mentionAt(value: string, caret: number): { start: number; query: string } | undefined {
+  const upto = value.slice(0, caret);
+  const at = upto.lastIndexOf('@');
+  if (at < 0) return undefined;
+  // Only after whitespace or at the very start: `foo@bar` is not a mention.
+  if (at > 0 && !/\s/.test(upto[at - 1])) return undefined;
+  const query = upto.slice(at + 1);
+  if (/\s/.test(query)) return undefined;
+  return { start: at, query };
+}
+
+let mentionFiles: string[] = [];
+let mentionIndex = 0;
+/** The token the current list belongs to, so a stale answer is ignored. */
+let mentionQuery: string | undefined;
+
+function mentionsOpen(): boolean {
+  return !mentionsEl.hidden;
+}
+
+function closeMentions(): void {
+  mentionsEl.hidden = true;
+  mentionFiles = [];
+  mentionQuery = undefined;
+}
+
+function renderMentions(): void {
+  mentionsEl.textContent = '';
+  if (mentionFiles.length === 0) {
+    mentionsEl.hidden = true;
+    return;
+  }
+  mentionFiles.forEach((file, i) => {
+    const row = document.createElement('div');
+    row.className = i === mentionIndex ? 'mrow on' : 'mrow';
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', String(i === mentionIndex));
+
+    // Basename bold, directory muted: the name is what is being looked for and
+    // the path is how you tell two files of that name apart.
+    const slash = file.lastIndexOf('/');
+    const dir = document.createElement('span');
+    dir.className = 'mdir';
+    setText(dir, slash < 0 ? '' : file.slice(0, slash + 1));
+    const name = document.createElement('span');
+    name.className = 'mname';
+    setText(name, slash < 0 ? file : file.slice(slash + 1));
+
+    row.append(name, dir);
+    row.addEventListener('mousedown', (e) => {
+      // mousedown, not click: the textarea must not lose focus first.
+      e.preventDefault();
+      acceptMention(i);
+    });
+    mentionsEl.appendChild(row);
+  });
+  mentionsEl.hidden = false;
+}
+
+function acceptMention(i: number): void {
+  const file = mentionFiles[i];
+  const here = mentionAt(msgEl.value, msgEl.selectionStart ?? 0);
+  if (!file || !here) return closeMentions();
+  const before = msgEl.value.slice(0, here.start);
+  const after = msgEl.value.slice((msgEl.selectionStart ?? 0));
+  // A trailing space: a mention is nearly always followed by more sentence.
+  msgEl.value = `${before}@${file} ${after}`;
+  const caret = before.length + file.length + 2;
+  msgEl.setSelectionRange(caret, caret);
+  closeMentions();
+  autoGrow();
+  msgEl.focus();
+}
+
+function updateMentions(): void {
+  const here = mentionAt(msgEl.value, msgEl.selectionStart ?? 0);
+  if (!here) return closeMentions();
+  mentionQuery = here.query;
+  post({ type: 'fileSuggest', query: here.query });
+}
+
+msgEl.addEventListener('input', updateMentions);
+// Moving the caret out of a token closes the picker; typing is handled above.
+msgEl.addEventListener('click', () => {
+  if (mentionsOpen()) updateMentions();
+});
+
+// ---- attachments ----
+
+/** Pasted images waiting to go with the next message, newest last. */
+let attachments: ImageAttachment[] = [];
+
+function renderAttachments(): void {
+  attachmentsEl.hidden = attachments.length === 0;
+  attachmentsEl.textContent = '';
+  attachments.forEach((img, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'attach';
+
+    // `img-src` allows `data:`, so the thumbnail is the image itself rather
+    // than a paperclip: what was pasted is worth seeing before it is sent.
+    const thumb = document.createElement('img');
+    thumb.src = `data:${img.mediaType};base64,${img.data}`;
+    thumb.alt = `Attached image ${i + 1}`;
+    chip.appendChild(thumb);
+
+    const x = document.createElement('button');
+    x.className = 'attachx';
+    x.textContent = '✕';
+    x.title = 'Remove this image';
+    x.setAttribute('aria-label', `Remove attached image ${i + 1}`);
+    x.addEventListener('click', () => {
+      attachments.splice(i, 1);
+      renderAttachments();
+      msgEl.focus();
+    });
+    chip.appendChild(x);
+
+    attachmentsEl.appendChild(chip);
+  });
+}
+
+/** Read one clipboard/dropped file into the shape the wire wants. */
+function addImageFile(file: File): void {
+  if (!IMAGE_MEDIA_TYPES.includes(file.type as (typeof IMAGE_MEDIA_TYPES)[number])) {
+    note(`Agent Wrangler cannot send ${file.type || 'that file'} — images only (PNG, JPEG, GIF, WebP).`);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    // A data URL is `data:<type>;base64,<payload>`; the API wants the payload.
+    const data = String(reader.result).split(',')[1] ?? '';
+    if (decodedBytes(data) > MAX_IMAGE_BYTES) {
+      // Refused here rather than by the API, which would reject it as a failed
+      // turn long after the paste, when the image is no longer on the clipboard.
+      note(`That image is too large to send (limit ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)} MB).`);
+      return;
+    }
+    attachments.push({ mediaType: file.type, data });
+    renderAttachments();
+  };
+  reader.readAsDataURL(file);
+}
+
+function note(text: string): void {
+  appendBlocks([{ kind: 'note', id: `n${Date.now()}`, tone: 'warn', text }]);
+}
+
+msgEl.addEventListener('paste', (e: ClipboardEvent) => {
+  const files = Array.from(e.clipboardData?.items ?? [])
+    .filter((it) => it.kind === 'file')
+    .map((it) => it.getAsFile())
+    .filter((f): f is File => f !== null);
+  if (files.length === 0) return; // ordinary text paste, leave it alone
+  e.preventDefault();
+  for (const f of files) addImageFile(f);
+});
+
+// Dropping a screenshot onto the composer is the same gesture as pasting one.
+for (const ev of ['dragover', 'drop'] as const) {
+  msgEl.addEventListener(ev, (e: DragEvent) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    if (ev === 'drop') for (const f of Array.from(e.dataTransfer.files)) addImageFile(f);
+  });
+}
+
 function sendMessage(): void {
   const text = msgEl.value.trim();
-  if (!text) return;
-  post({ type: 'send', text });
+  // An image on its own is a real message; only both being empty is a no-op.
+  if (!text && attachments.length === 0) return;
+  post({ type: 'send', text, images: attachments.length > 0 ? attachments : undefined });
   msgEl.value = '';
+  attachments = [];
+  renderAttachments();
   autoGrow();
   stick = true;
   scrollToBottom();
@@ -798,6 +996,27 @@ modelSel.addEventListener('change', () => post({ type: 'setModel', model: modelS
 
 msgEl.addEventListener('input', autoGrow);
 msgEl.addEventListener('keydown', (e) => {
+  // The mention picker owns these keys while it is open, so Enter completes a
+  // path instead of sending a half-typed message.
+  if (mentionsOpen() && !e.isComposing) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      mentionIndex = (mentionIndex + step + mentionFiles.length) % mentionFiles.length;
+      renderMentions();
+      return;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      acceptMention(mentionIndex);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMentions();
+      return;
+    }
+  }
   if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
   e.preventDefault();
   sendMessage();
@@ -852,6 +1071,13 @@ window.addEventListener('message', (e: MessageEvent) => {
       if (pre) setText(pre as HTMLElement, m.text);
       break;
     }
+    case 'fileSuggestions':
+      // Ignore an answer to a keystroke the user has already typed past.
+      if (m.query !== mentionQuery) break;
+      mentionFiles = m.files;
+      mentionIndex = 0;
+      renderMentions();
+      break;
     case 'dictation':
       setMicState(m.state, m.message);
       if (m.text) insertDictated(m.text);

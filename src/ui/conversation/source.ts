@@ -12,7 +12,7 @@
  * capabilities the webview renders buttons from.
  */
 import type { Disposable } from '../../core/events';
-import type { BlockPatch, ComposerState, ConvBlock, PermissionModeName } from '../../shared/conversation';
+import type { BlockPatch, ComposerState, ConvBlock, ImageAttachment, PermissionModeName } from '../../shared/conversation';
 import type { AgentSession } from '../../shared/model';
 
 export interface ConversationInit {
@@ -42,7 +42,7 @@ export interface ConversationSource extends Disposable {
   answer?(requestId: string, answers: Record<string, string>): Promise<boolean>;
   decidePlan?(requestId: string, approve: boolean, feedback?: string): Promise<boolean>;
 
-  send?(text: string): Promise<void>;
+  send?(text: string, images?: ImageAttachment[]): Promise<void>;
   interrupt?(): Promise<void>;
   setPermissionMode?(mode: PermissionModeName): Promise<void>;
   setModel?(model?: string): Promise<void>;

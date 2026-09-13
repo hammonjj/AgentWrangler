@@ -11,6 +11,7 @@ import * as vscode from 'vscode';
 import type { RunnerService } from '../../claude/runner/runnerService';
 import type { RunnerSession } from '../../claude/runner/runnerSession';
 import { DictationSetupError, type DictationService } from '../../core/dictation';
+import type { FileSuggestService } from '../../core/fileSuggest';
 import type { AgentProvider } from '../../core/provider';
 import type { SessionStore } from '../../core/sessionStore';
 import type { ConversationCapabilities } from '../../shared/conversation';
@@ -22,6 +23,7 @@ import { buildWebviewHtml } from '../html';
 import { adoptActionFor, SECONDARY_LABEL, secondaryActionFor, type SecondaryAction } from '../openTarget';
 import type { SessionLocator } from '../sessionLocator';
 import { isInThisWorkspace } from '../workspace';
+import { DiffContentProvider } from './diffView';
 import { RunnerSource } from './runnerSource';
 import type { ConversationSource } from './source';
 import { TranscriptSource } from './transcriptSource';
@@ -66,6 +68,8 @@ export class ConversationHost {
     private actions: SessionActions,
     private locator: SessionLocator,
     private dictation: DictationService,
+    private diffs: DiffContentProvider,
+    private files: FileSuggestService,
     private onTitle: (title: string) => void,
   ) {
     webview.options = {
@@ -268,7 +272,7 @@ export class ConversationHost {
         await this.sendInit();
         return;
       case 'send':
-        await source?.send?.(m.text);
+        await source?.send?.(m.text, m.images);
         return;
       case 'interrupt':
         await source?.interrupt?.();
@@ -317,6 +321,17 @@ export class ConversationHost {
       case 'dictate':
         await this.dictate(m.action);
         return;
+      case 'openDiff':
+        await this.diffs.open(m.file, m.patch);
+        return;
+      case 'fileSuggest': {
+        const cwd = this.session?.cwd;
+        if (!cwd) return;
+        const files = await this.files.suggest(cwd, m.query);
+        // Discard if the pane moved on to another session while we listed.
+        if (this.session?.cwd === cwd) this.post({ type: 'fileSuggestions', query: m.query, files });
+        return;
+      }
       case 'openExternal':
         this.actions.openExternal(m.url);
         return;

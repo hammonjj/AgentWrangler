@@ -7,6 +7,7 @@ import type {
   ComposerState,
   ConversationCapabilities,
   ConvBlock,
+  ImageAttachment,
   PermissionModeName,
 } from './conversation';
 import type { HookHealth, ProjectDTO, SessionDTO } from './model';
@@ -99,11 +100,16 @@ export type HostToConversation =
    * block — a missing tool, usually, which the host has already offered to fix.
    */
   | { type: 'dictation'; state: 'idle' | 'recording' | 'transcribing'; text?: string; message?: string }
+  /**
+   * Answer to `fileSuggest`. `query` comes back so a slow answer to an earlier
+   * keystroke cannot replace the list for what is on screen now.
+   */
+  | { type: 'fileSuggestions'; query: string; files: string[] }
   | { type: 'error'; text: string };
 
 export type ConversationToHost =
   | { type: 'ready' }
-  | { type: 'send'; text: string }
+  | { type: 'send'; text: string; images?: ImageAttachment[] }
   | { type: 'interrupt' }
   | { type: 'decide'; requestId: string; decision: 'allow' | 'always' | 'deny'; message?: string }
   | { type: 'answer'; requestId: string; answers: Record<string, string> }
@@ -117,10 +123,18 @@ export type ConversationToHost =
   | { type: 'pin' }
   | { type: 'resumeHere' }
   | { type: 'requestToolResult'; id: string }
+  /**
+   * Open an edit's patch in VSCode's diff editor. The patch travels with the
+   * message because the webview is what holds the rendered blocks — the host
+   * hands them over at `init` and does not keep a copy.
+   */
+  | { type: 'openDiff'; file: string; patch: string }
   | { type: 'openExternal'; url: string }
   | { type: 'openFile'; path: string }
   /**
    * The microphone button. `stop` transcribes what was recorded and answers
    * with a `dictation` message; `cancel` throws it away without transcribing.
    */
-  | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' };
+  | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' }
+  /** An `@` is being typed: what files in the session's folder match so far. */
+  | { type: 'fileSuggest'; query: string };

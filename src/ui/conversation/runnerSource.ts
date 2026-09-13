@@ -8,7 +8,7 @@
  */
 import type { RunnerSession } from '../../claude/runner/runnerSession';
 import type { Disposable } from '../../core/events';
-import type { BlockPatch, ComposerState, ConvBlock, PermissionModeName } from '../../shared/conversation';
+import type { BlockPatch, ComposerState, ConvBlock, ImageAttachment, PermissionModeName } from '../../shared/conversation';
 import type { ConversationInit, ConversationSource } from './source';
 
 export class RunnerSource implements ConversationSource {
@@ -60,8 +60,8 @@ export class RunnerSource implements ConversationSource {
     return this.runner.decidePlan(requestId, approve, feedback);
   }
 
-  async send(text: string): Promise<void> {
-    this.runner.send(text);
+  async send(text: string, images?: ImageAttachment[]): Promise<void> {
+    this.runner.send(text, images);
   }
 
   async interrupt(): Promise<void> {
