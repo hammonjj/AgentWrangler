@@ -4,9 +4,11 @@ import type {
   ComposerState,
   ConvBlock,
   ConversationCapabilities,
+  ImageAttachment,
   PermissionModeName,
   QuestionView,
 } from '../../shared/conversation';
+import { decodedBytes, IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES } from '../../shared/conversation';
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
@@ -63,6 +65,7 @@ app.innerHTML = `
       <span class="grow"></span>
       <button id="stop" class="hdrbtn" hidden>Stop</button>
     </div>
+    <div id="attachments" hidden></div>
     <div id="composerInput">
       <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
       <button id="mic" class="micbtn" title="Dictate a message" aria-label="Dictate a message"></button>
@@ -93,6 +96,7 @@ const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
+const attachmentsEl = document.getElementById('attachments')!;
 
 /** Block id → its node, so a patch updates in place instead of re-rendering. */
 const nodes = new Map<string, HTMLElement>();
@@ -640,11 +644,94 @@ function autoGrow(): void {
   msgEl.style.height = `${Math.min(msgEl.scrollHeight, MAX_COMPOSER_PX)}px`;
 }
 
+// ---- attachments ----
+
+/** Pasted images waiting to go with the next message, newest last. */
+let attachments: ImageAttachment[] = [];
+
+function renderAttachments(): void {
+  attachmentsEl.hidden = attachments.length === 0;
+  attachmentsEl.textContent = '';
+  attachments.forEach((img, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'attach';
+
+    // `img-src` allows `data:`, so the thumbnail is the image itself rather
+    // than a paperclip: what was pasted is worth seeing before it is sent.
+    const thumb = document.createElement('img');
+    thumb.src = `data:${img.mediaType};base64,${img.data}`;
+    thumb.alt = `Attached image ${i + 1}`;
+    chip.appendChild(thumb);
+
+    const x = document.createElement('button');
+    x.className = 'attachx';
+    x.textContent = '✕';
+    x.title = 'Remove this image';
+    x.setAttribute('aria-label', `Remove attached image ${i + 1}`);
+    x.addEventListener('click', () => {
+      attachments.splice(i, 1);
+      renderAttachments();
+      msgEl.focus();
+    });
+    chip.appendChild(x);
+
+    attachmentsEl.appendChild(chip);
+  });
+}
+
+/** Read one clipboard/dropped file into the shape the wire wants. */
+function addImageFile(file: File): void {
+  if (!IMAGE_MEDIA_TYPES.includes(file.type as (typeof IMAGE_MEDIA_TYPES)[number])) {
+    note(`Agent Wrangler cannot send ${file.type || 'that file'} — images only (PNG, JPEG, GIF, WebP).`);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    // A data URL is `data:<type>;base64,<payload>`; the API wants the payload.
+    const data = String(reader.result).split(',')[1] ?? '';
+    if (decodedBytes(data) > MAX_IMAGE_BYTES) {
+      // Refused here rather than by the API, which would reject it as a failed
+      // turn long after the paste, when the image is no longer on the clipboard.
+      note(`That image is too large to send (limit ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)} MB).`);
+      return;
+    }
+    attachments.push({ mediaType: file.type, data });
+    renderAttachments();
+  };
+  reader.readAsDataURL(file);
+}
+
+function note(text: string): void {
+  appendBlocks([{ kind: 'note', id: `n${Date.now()}`, tone: 'warn', text }]);
+}
+
+msgEl.addEventListener('paste', (e: ClipboardEvent) => {
+  const files = Array.from(e.clipboardData?.items ?? [])
+    .filter((it) => it.kind === 'file')
+    .map((it) => it.getAsFile())
+    .filter((f): f is File => f !== null);
+  if (files.length === 0) return; // ordinary text paste, leave it alone
+  e.preventDefault();
+  for (const f of files) addImageFile(f);
+});
+
+// Dropping a screenshot onto the composer is the same gesture as pasting one.
+for (const ev of ['dragover', 'drop'] as const) {
+  msgEl.addEventListener(ev, (e: DragEvent) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    if (ev === 'drop') for (const f of Array.from(e.dataTransfer.files)) addImageFile(f);
+  });
+}
+
 function sendMessage(): void {
   const text = msgEl.value.trim();
-  if (!text) return;
-  post({ type: 'send', text });
+  // An image on its own is a real message; only both being empty is a no-op.
+  if (!text && attachments.length === 0) return;
+  post({ type: 'send', text, images: attachments.length > 0 ? attachments : undefined });
   msgEl.value = '';
+  attachments = [];
+  renderAttachments();
   autoGrow();
   stick = true;
   scrollToBottom();

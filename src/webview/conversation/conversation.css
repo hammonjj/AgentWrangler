@@ -447,6 +447,56 @@ body,
   border-color: var(--vscode-focusBorder);
 }
 
+/* ---- attachments ---- */
+
+/* Thumbnails of what is about to be sent. Wraps, because a bug report is often
+   three screenshots and they should not squeeze the composer. */
+#attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.attach {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-input-border, var(--aw-rule));
+  overflow: hidden;
+  background: var(--vscode-input-background);
+}
+.attach img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Always present rather than hover-only: on a 56px tile there is no room to
+   hunt for it, and a wrongly pasted screenshot should be one obvious click to
+   undo. */
+.attach .attachx {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--vscode-badge-background, rgba(0, 0, 0, 0.65));
+  color: var(--vscode-badge-foreground, #fff);
+  font-size: 10px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.attach .attachx:hover {
+  background: var(--vscode-inputValidation-errorBorder, #f14c4c);
+}
+.attach .attachx:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+
 /* ---- dictation ---- */
 
 /* The microphone is drawn in CSS rather than shipped as an icon font or an

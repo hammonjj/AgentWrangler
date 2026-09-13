@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RunnerSession, type QueryFn } from '../src/claude/runner/runnerSession';
-import type { ConvBlock } from '../src/shared/conversation';
+import type { ConvBlock, ImageAttachment } from '../src/shared/conversation';
 
 /**
  * A stand-in for the SDK's `query`: it hands the session a stream we push
@@ -129,6 +129,52 @@ describe('RunnerSession', () => {
     session.send('   ');
     await settle();
     expect(appended).toHaveLength(0);
+  });
+
+  describe('images', () => {
+    const png: ImageAttachment = { mediaType: 'image/png', data: 'aGVsbG8=' };
+
+    it('sends a plain string when there is no image, which is what the CLI logs most readably', async () => {
+      const { session, fake } = makeSession();
+      session.send('just text');
+      await settle();
+      expect(fake.calls.sent[0]).toMatchObject({ message: { content: 'just text' } });
+    });
+
+    it('sends image blocks before the text, so the instruction follows what it refers to', async () => {
+      const { session, fake } = makeSession();
+      session.send('what is wrong here?', [png]);
+      await settle();
+      expect((fake.calls.sent[0] as { message: { content: unknown[] } }).message.content).toEqual([
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+        { type: 'text', text: 'what is wrong here?' },
+      ]);
+    });
+
+    it('counts the images on the block the pane shows, matching what the transcript reader does', async () => {
+      const { session, appended } = makeSession();
+      session.send('look', [png, png]);
+      await settle();
+      expect(appended[0]).toMatchObject({ kind: 'user', imageCount: 2 });
+    });
+
+    it('sends an image with no text at all, which is a real message', async () => {
+      const { session, fake, appended } = makeSession();
+      session.send('   ', [png]);
+      await settle();
+      expect(appended).toHaveLength(1);
+      // No empty text block trailing the image.
+      expect((fake.calls.sent[0] as { message: { content: unknown[] } }).message.content).toEqual([
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+      ]);
+    });
+
+    it('still ignores a send that is empty on both halves', async () => {
+      const { session, appended } = makeSession();
+      session.send('   ', []);
+      await settle();
+      expect(appended).toHaveLength(0);
+    });
   });
 
   it('learns its session id from the stream', async () => {

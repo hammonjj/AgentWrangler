@@ -7,6 +7,7 @@ import type {
   ComposerState,
   ConversationCapabilities,
   ConvBlock,
+  ImageAttachment,
   PermissionModeName,
 } from './conversation';
 import type { HookHealth, ProjectDTO, SessionDTO } from './model';
@@ -103,7 +104,7 @@ export type HostToConversation =
 
 export type ConversationToHost =
   | { type: 'ready' }
-  | { type: 'send'; text: string }
+  | { type: 'send'; text: string; images?: ImageAttachment[] }
   | { type: 'interrupt' }
   | { type: 'decide'; requestId: string; decision: 'allow' | 'always' | 'deny'; message?: string }
   | { type: 'answer'; requestId: string; answers: Record<string, string> }

@@ -268,7 +268,7 @@ export class ConversationHost {
         await this.sendInit();
         return;
       case 'send':
-        await source?.send?.(m.text);
+        await source?.send?.(m.text, m.images);
         return;
       case 'interrupt':
         await source?.interrupt?.();
