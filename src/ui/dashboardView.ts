@@ -3,7 +3,14 @@ import type { ArchiveService } from '../core/archive';
 import type { ColumnPrefsService } from '../core/columnPrefs';
 import type { SessionStore } from '../core/sessionStore';
 import type { SessionActions } from './actions';
-import { DashboardHost, type HookHealthSource, type UsageSource, type RunnerOwnership } from './dashboardHost';
+import {
+  DashboardHost,
+  type ConversationLauncher,
+  type HookHealthSource,
+  type ProjectSource,
+  type RunnerOwnership,
+  type UsageSource,
+} from './dashboardHost';
 import type { SessionLocator } from './sessionLocator';
 
 /** Dashboard docked in the bottom panel, next to Terminal. */
@@ -20,6 +27,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     private usage: UsageSource,
     private columns: ColumnPrefsService,
     private runners: RunnerOwnership,
+    private projects: ProjectSource,
+    private launcher: ConversationLauncher,
   ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -34,6 +43,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       this.usage,
       this.columns,
       this.runners,
+      this.projects,
+      this.launcher,
     );
     view.onDidDispose(() => host.dispose());
   }

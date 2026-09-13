@@ -683,6 +683,51 @@ conversation with context intact; Release to terminal → terminal opens with th
 resumed and the pane goes read-only; reload the window → the last shown session comes back
 by itself, others offer Resume here.
 
+### Phase 3.5 — The launcher: start a conversation from the dashboard — **SHIPPED 2026-09-12**
+
+Asked for ahead of phase 4: the dashboard should be the place agents are *deployed* from, not
+only watched in. Phase 2 had put `newConversation` behind a title-bar `+` and a modal quick
+pick, which is a command, not a hub.
+
+**What shipped.**
+
+- A sticky bar at the top of the dashboard: a project `<select>` taking the free width, a
+  **+ New** button pinned right. One row, because the dashboard is used at ~300px.
+- **The folder list comes from `~/.claude.json`'s `projects` map**, whose keys are real
+  absolute paths. `~/.claude/projects/` was rejected as the source: its names are slugs and
+  `slugForCwd` is lossy in the reverse direction. Recency uses the *forward* slug — path →
+  `~/.claude/projects/<slug>` → newest transcript mtime — which is exact. Workspace folders
+  and live session cwds are merged in, and a session's `lastActivityAt` beats a file mtime for
+  the same folder. Deleted folders are dropped; nothing can spawn in them.
+- **"New projects" need no detection.** Claude Code writes the key itself the first time a
+  folder is used, so re-reading the file is the whole mechanism. `ProjectsService` caches with
+  a 30s TTL because a dashboard snapshot fires on every store update and the scan is a readdir
+  plus a stat per transcript; the dropdown's `mousedown` triggers a re-read.
+- **Browsed folders are held in memory by `ProjectsService.add`.** A folder Claude Code has
+  never run in is in no config file, so a re-scan alone would drop it the moment it was
+  chosen. It stops needing that once a conversation has run there.
+- **The bar lives outside `#app`.** `render()` replaces `app.innerHTML` wholesale on every
+  snapshot; a `<select>` inside it would be torn out from under an open dropdown every couple
+  of seconds on a busy machine. Options are also rebuilt only when the list actually changes,
+  and never while the select has focus — a stale list waits for the blur.
+- `thead th` was sticky at `top: 0`, which the bar now occupies; both share `--aw-bar-h`.
+- The selected folder is **webview state**, not workspace or global: two windows are two jobs,
+  and a shared setting would have each moving where the other starts next. Same reasoning as
+  `RunnerRegistry` in phase 3, one level down.
+- `HostToDashboard` became a union (`snapshot` | `projectPicked`). The webview has to be told
+  which entry to select after a browse, and the list alone cannot say — a browsed folder is
+  not necessarily the newest.
+- The palette command and title-bar `+` still work, now sharing the same list and order.
+- Found while testing: `ProjectsService.refresh` called `extra()` before the `??=`, so
+  concurrent callers each gathered workspace and session folders even though only one scan
+  ran. Gathering moved inside a `scan()` method, which `??=` short-circuits past.
+- Tests: 351 pass. New is `test/projects.test.ts` (19) — ranking, config parsing, the forward
+  slug lookup, deleted-folder filtering, and the service's TTL/sharing/browse behaviour, all
+  against temp dirs so nothing reads the real `~/.claude`.
+- Not done: the dropdown does not filter the session list. Decided against — picking where to
+  start work and choosing what to look at are different questions, and folding them together
+  would make every row click ambiguous.
+
 ### Phase 4 — Later, only if wanted
 
 - A detached broker process owning runner children so a reload loses nothing at all.

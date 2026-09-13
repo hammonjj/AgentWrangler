@@ -28,6 +28,7 @@ import {
   sectionOf,
   workingElapsedMs,
   type HookHealth,
+  type ProjectDTO,
   type SectionId,
   type SessionDTO,
 } from '../../shared/model';
@@ -45,6 +46,12 @@ interface WebviewState {
   collapsed?: string[];
   /** Hook-health kind whose banner the user hid. A different kind brings the banner back. */
   bannerDismissed?: string;
+  /**
+   * Folder the launcher is pointed at. Per-webview on purpose: two windows are
+   * usually two different jobs, and a shared setting would have each one
+   * changing where the other starts its next conversation.
+   */
+  project?: string;
 }
 
 declare function acquireVsCodeApi(): {
@@ -96,9 +103,10 @@ function saveColumns(next: ColumnPrefs): void {
 const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 let bannerDismissed = saved?.bannerDismissed;
+let project = saved?.project;
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed });
+  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project });
 }
 
 function esc(s: string): string {
@@ -545,6 +553,91 @@ function menuHtml(): string {
 </div>`;
 }
 
+// ---- launcher ----
+
+/**
+ * The project dropdown and its New button live OUTSIDE `#app`, which `render()`
+ * replaces wholesale on every snapshot. Inside it, an open dropdown would be
+ * torn out from under the pointer every time any session changed status — which
+ * on a busy machine is every couple of seconds.
+ */
+const bar = document.createElement('div');
+bar.id = 'bar';
+bar.innerHTML = `<select id="proj" title="Where a new conversation starts"></select>
+<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>`;
+app.insertAdjacentElement('beforebegin', bar);
+
+const projSel = bar.querySelector<HTMLSelectElement>('#proj')!;
+const newBtn = bar.querySelector<HTMLButtonElement>('#new')!;
+
+/** Sentinel for the Browse… row. No real folder is the empty string. */
+const BROWSE = '';
+
+let projects: ProjectDTO[] = [];
+/** The `<option>` set last written, so an unchanged list never touches the DOM. */
+let optionSig = ' ';
+/** A list that arrived while the dropdown had focus, to apply once it does not. */
+let optionsStale = false;
+
+/** The folder New will use: the saved one while it still exists, else the most recent. */
+function currentProject(): string | undefined {
+  if (project && projects.some((p) => p.dir === project)) return project;
+  return projects[0]?.dir;
+}
+
+function renderLauncher(): void {
+  const sig = projects.map((p) => `${p.dir} ${p.name}`).join('\n');
+  if (sig !== optionSig) {
+    // Rebuilding options under an open dropdown closes it mid-choice. The list
+    // is not urgent; it can wait for the blur.
+    if (document.activeElement === projSel) {
+      optionsStale = true;
+      return;
+    }
+    optionSig = sig;
+    optionsStale = false;
+    const opts = projects.map(
+      (p) => `<option value="${esc(p.dir)}" title="${esc(p.dir)}">${esc(p.name)}</option>`,
+    );
+    // Always last, and always present: with no history at all it is the only way in.
+    opts.push(`<option value="${BROWSE}">Browse…</option>`);
+    projSel.innerHTML = opts.join('');
+  }
+
+  const cur = currentProject();
+  projSel.value = cur ?? BROWSE;
+  projSel.title = cur ?? 'Choose a folder to start a conversation in';
+  newBtn.disabled = cur === undefined;
+}
+
+projSel.addEventListener('mousedown', () => {
+  // About to drop down: a folder may have been used in another window since the
+  // last scan. The answer arrives as a snapshot and lands on the next blur.
+  post({ type: 'refreshProjects' });
+});
+
+projSel.addEventListener('change', () => {
+  if (projSel.value === BROWSE) {
+    // Put the selection back straight away: the dialog is modal and may be
+    // cancelled, and "Browse…" is not a place a conversation can start.
+    projSel.value = currentProject() ?? BROWSE;
+    post({ type: 'browseProject' });
+    return;
+  }
+  project = projSel.value;
+  saveState();
+  renderLauncher();
+});
+
+projSel.addEventListener('blur', () => {
+  if (optionsStale) renderLauncher();
+});
+
+newBtn.addEventListener('click', () => {
+  const cwd = currentProject();
+  if (cwd) post({ type: 'newConversation', cwd });
+});
+
 function render(): void {
   // A drag owns the widths until the pointer is released; re-rendering under it
   // would replace the <th> being dragged.
@@ -590,8 +683,23 @@ function render(): void {
 
 window.addEventListener('message', (e: MessageEvent) => {
   const m = e.data as HostToDashboard;
+  if (m.type === 'projectPicked') {
+    project = m.dir;
+    // The scan that will contain it is still running, and a selection with no
+    // option to match would show as blank; carry it until the snapshot lands.
+    if (!projects.some((p) => p.dir === m.dir)) {
+      projects = [{ dir: m.dir, name: m.dir.split(/[\\/]/).filter(Boolean).pop() ?? m.dir }, ...projects];
+    }
+    saveState();
+    renderLauncher();
+    return;
+  }
   if (m.type === 'snapshot') {
     sessions = m.sessions;
+    if (m.projects) {
+      projects = m.projects;
+      renderLauncher();
+    }
     // A card the user opened or closed is about one prompt. Once that session
     // is no longer blocked the override has outlived its subject, and the next
     // prompt should open by itself.

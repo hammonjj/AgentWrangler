@@ -190,6 +190,20 @@ export function workingElapsedMs(p: TurnProgress, nowMs: number): number {
 /** DTO sent over the webview wire — AgentSession is already JSON-safe. */
 export type SessionDTO = AgentSession;
 
+/**
+ * A folder a conversation can be started in: somewhere Claude Code has already
+ * been used, a workspace folder, or one the user browsed to. `dir` is the real
+ * absolute path and the identity; `name` is only what the dropdown has room to
+ * show at 300px, and is not unique (two checkouts of one repo share a basename,
+ * which is why the full path rides along as the option's tooltip).
+ */
+export interface ProjectDTO {
+  dir: string;
+  name: string;
+  /** Newest transcript activity in this folder, when anything is known. Absent = never used. */
+  lastUsedAt?: number;
+}
+
 export const STATUS_RANK: Record<SessionStatus, number> = {
   blocked: 0,
   waiting: 1,
