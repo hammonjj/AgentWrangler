@@ -75,6 +75,30 @@ export const MAX_COLUMN_WIDTH = 800;
 export interface ColumnPrefs {
   hidden?: ColumnId[];
   widths?: Partial<Record<ColumnId, number>>;
+  /** Schema of the stored widths. Absent means "saved before widths worked". */
+  v?: number;
+}
+
+/** Bumped when a stored value stops meaning what it meant when it was written. */
+export const COLUMN_PREFS_VERSION = 1;
+
+/**
+ * Drop widths that were measured against a table which was not obeying them.
+ *
+ * Before the CSSOM fix, the width rode to the browser in a `style` attribute
+ * that the webview CSP dropped, so every render fell back to `table-layout:
+ * fixed` splitting the table equally. A drag then measured *that* split as its
+ * starting width and saved it — and because the drag itself set `style.width`
+ * through the CSSOM, it appeared to work right up until the next snapshot put
+ * it back. Dragging harder saved a bigger wrong number each time; widths in the
+ * hundreds are the residue.
+ *
+ * Those numbers are not a layout anyone chose, so they go once. Hidden columns
+ * are a real choice and are kept.
+ */
+export function migrateColumnPrefs(prefs: ColumnPrefs): ColumnPrefs {
+  if (prefs.v === COLUMN_PREFS_VERSION) return prefs;
+  return { ...prefs, widths: {}, v: COLUMN_PREFS_VERSION };
 }
 
 const BY_ID = new Map<ColumnId, ColumnDef>(COLUMNS.map((c) => [c.id, c]));
@@ -163,8 +187,8 @@ export function sanitizeColumnPrefs(raw: unknown): ColumnPrefs {
   // Always the same shape, junk in or not: the service compares serialized
   // prefs to decide whether anything changed, and `{}` vs `{hidden:[]}` would
   // read as a change on every startup.
-  const obj: { hidden?: unknown; widths?: unknown } =
-    typeof raw === 'object' && raw !== null ? (raw as { hidden?: unknown; widths?: unknown }) : {};
+  const obj: { hidden?: unknown; widths?: unknown; v?: unknown } =
+    typeof raw === 'object' && raw !== null ? (raw as { hidden?: unknown; widths?: unknown; v?: unknown }) : {};
 
   const hidden = Array.isArray(obj.hidden) ? [...new Set(obj.hidden.filter(isColumnId))] : [];
 
@@ -176,5 +200,7 @@ export function sanitizeColumnPrefs(raw: unknown): ColumnPrefs {
       widths[k] = Math.min(MAX_COLUMN_WIDTH, Math.max(def.minWidth, Math.round(v)));
     }
   }
-  return { hidden, widths };
+  // Carried through rather than defaulted, because its absence is the signal
+  // `migrateColumnPrefs` reads.
+  return typeof obj.v === 'number' ? { hidden, widths, v: obj.v } : { hidden, widths };
 }
