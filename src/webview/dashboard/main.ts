@@ -113,6 +113,34 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
+/** A length this file computed: `12px`, `37.5%`. Anything else is not painted. */
+const LENGTH = /^\d+(\.\d+)?(px|%)$/;
+
+/**
+ * Draw the table, then paint the lengths that are data rather than design.
+ *
+ * `style="width:150px"` in the HTML above would be an INLINE STYLE, and the
+ * webview CSP has no `'unsafe-inline'` in `style-src`, so the browser drops the
+ * attribute on the floor — silently, since a blocked style is a console
+ * violation and not an error. That is why dragged column widths used to vanish
+ * the moment the table re-rendered: with every `<th>` back to `auto`, fixed
+ * table layout simply split the width equally, and a drag appeared to resize
+ * every column at once.
+ *
+ * The same property set through the CSSOM is not an inline style and is not
+ * blocked. So widths ride in `data-w` (and the picker's offset in `data-top`)
+ * and land here, after the HTML is in the document.
+ */
+function paint(html: string): void {
+  app.innerHTML = html;
+  for (const el of app.querySelectorAll<HTMLElement>('[data-w]')) {
+    if (LENGTH.test(el.dataset.w!)) el.style.width = el.dataset.w!;
+  }
+  for (const el of app.querySelectorAll<HTMLElement>('[data-top]')) {
+    if (LENGTH.test(el.dataset.top!)) el.style.top = el.dataset.top!;
+  }
+}
+
 const ICON_EYE =
   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 3c-3.5 0-6.2 2.4-7.5 5 1.3 2.6 4 5 7.5 5s6.2-2.4 7.5-5c-1.3-2.6-4-5-7.5-5zm0 8.5A3.5 3.5 0 1 1 8 4.5a3.5 3.5 0 0 1 0 7zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>';
 const ICON_ARCHIVE =
@@ -191,7 +219,7 @@ function statusChip(s: SessionDTO): string {
     const pct = todo.total > 0 ? Math.round((todo.completed / todo.total) * 100) : 0;
     const label = todo.active ? ` title="${esc(todo.active)}"` : '';
     chips.push(
-      `<span class="chip todo"${label}><span class="fill" style="width:${pct}%"></span><span class="txt">${todo.completed}/${todo.total}</span></span>`,
+      `<span class="chip todo"${label}><span class="fill" data-w="${pct}%"></span><span class="txt">${todo.completed}/${todo.total}</span></span>`,
     );
   }
   return chips.join('');
@@ -469,7 +497,7 @@ function usageCardHtml(w: UsageWindow, snap: UsageSnapshot): string {
       : '<span class="ureset"></span>';
   return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap))}">
   <div class="uhead"><span class="ulabel">${esc(w.label)}</span><span class="upct">${pct}%</span></div>
-  <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(w.label)}"><span class="ufill" style="width:${pct}%"></span></div>
+  <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(w.label)}"><span class="ufill" data-w="${pct}%"></span></div>
   ${resets}
 </div>`;
 }
@@ -483,7 +511,7 @@ function spendCardHtml(snap: UsageSnapshot): string {
   const title = `Extra usage: ${spendText(s)} of credits spent this month (${pct}%). These cover you past the plan limits.`;
   return `<div class="ucard ${sev}" title="${esc(title)}">
   <div class="uhead"><span class="ulabel">Extra usage</span><span class="upct">${pct}%</span></div>
-  <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Extra usage"><span class="ufill" style="width:${pct}%"></span></div>
+  <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Extra usage"><span class="ufill" data-w="${pct}%"></span></div>
   <span class="ureset">${esc(spendText(s))}</span>
 </div>`;
 }
@@ -513,18 +541,19 @@ function usageHtml(): string {
 // ---- column header, resize handles, picker ----
 
 /**
- * The header row. Widths are inline because they are data, not style: a width
- * the user dragged has to survive every re-render and reach the other dashboard
- * unchanged. Each header carries a grab handle on its LEFT edge — the divider
- * it shares with the column before it, which is both the thing the eye aims at
- * and the edge that moves when that column is resized.
+ * The header row. Widths ride on the cells as data (`paint` puts them into the
+ * CSSOM) rather than as style, because they are data: a width the user dragged
+ * has to survive every re-render and reach the other dashboard unchanged. Each
+ * header carries a grab handle on its LEFT edge — the divider it shares with
+ * the column before it, which is both the thing the eye aims at and the edge
+ * that moves when that column is resized.
  */
 function headHtml(): string {
   const ths = cols()
     .map((c) => {
       const w = columnWidth(columns, c);
       const title = c.title ? ` title="${esc(c.title)}"` : '';
-      return `<th class="h-${c.id}" data-col="${c.id}" style="width:${w}px"${title}><span class="rz" data-rz="${c.id}"></span>${esc(c.label)}</th>`;
+      return `<th class="h-${c.id}" data-col="${c.id}" data-w="${w}px"${title}><span class="rz" data-rz="${c.id}"></span>${esc(c.label)}</th>`;
     })
     .join('');
   return `<thead><tr>
@@ -546,7 +575,7 @@ function menuHtml(): string {
     const note = folded ? '<span class="cmnote">too narrow</span>' : '';
     return `<label class="cmrow"><input type="checkbox" data-col="${c.id}"${hidden ? '' : ' checked'}>${esc(c.label)}${note}</label>`;
   }).join('');
-  return `<div class="colmenu" style="top:${menuTop}px" role="menu">
+  return `<div class="colmenu" data-top="${menuTop}px" role="menu">
   <div class="cmhead">Columns</div>
   ${rows}
   <button class="cmreset" data-cols="reset">Reset widths</button>
@@ -683,8 +712,8 @@ function render(): void {
 
   if (sessions.length === 0) {
     menuTop = undefined; // no table, so no button to close the picker with
-    app.innerHTML = `${usageHtml()}${bannerHtml()}<div class="empty">No agent sessions found.
-<div class="hint">Sessions are discovered from <code>~/.claude</code>. Start a Claude Code session anywhere and it will appear here.</div></div>`;
+    paint(`${usageHtml()}${bannerHtml()}<div class="empty">No agent sessions found.
+<div class="hint">Sessions are discovered from <code>~/.claude</code>. Start a Claude Code session anywhere and it will appear here.</div></div>`);
     return;
   }
 
@@ -713,7 +742,7 @@ function render(): void {
     html += '</tbody>';
   }
   html += '</table>';
-  app.innerHTML = html;
+  paint(html);
 }
 
 window.addEventListener('message', (e: MessageEvent) => {

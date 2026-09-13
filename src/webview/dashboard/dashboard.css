@@ -209,10 +209,12 @@ table {
 }
 
 /* Widths live on the header cells, not <col>s: with `table-layout: fixed` the
-   first row defines the columns. The configurable columns get theirs inline
-   from the saved layout (see shared/columns.ts) — these two are chrome, and the
-   Agent column deliberately has none, so it absorbs every drag. Border-box so a
-   width read back off the element is the width that was written. */
+   first row defines the columns. The configurable columns get theirs from the
+   saved layout, set through the CSSOM because the CSP drops inline styles (see
+   `paint` in main.ts) — these two are chrome, and the Agent column deliberately
+   has none, so it is the only `auto` column and therefore the one that absorbs
+   every drag. Border-box so a width read back off the element is the width that
+   was written. */
 th,
 td {
   box-sizing: border-box;
