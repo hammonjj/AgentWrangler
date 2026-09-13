@@ -100,6 +100,11 @@ export type HostToConversation =
    * block — a missing tool, usually, which the host has already offered to fix.
    */
   | { type: 'dictation'; state: 'idle' | 'recording' | 'transcribing'; text?: string; message?: string }
+  /**
+   * Answer to `fileSuggest`. `query` comes back so a slow answer to an earlier
+   * keystroke cannot replace the list for what is on screen now.
+   */
+  | { type: 'fileSuggestions'; query: string; files: string[] }
   | { type: 'error'; text: string };
 
 export type ConversationToHost =
@@ -130,4 +135,6 @@ export type ConversationToHost =
    * The microphone button. `stop` transcribes what was recorded and answers
    * with a `dictation` message; `cancel` throws it away without transcribing.
    */
-  | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' };
+  | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' }
+  /** An `@` is being typed: what files in the session's folder match so far. */
+  | { type: 'fileSuggest'; query: string };

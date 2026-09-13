@@ -787,12 +787,46 @@ Asked for after the launcher: a microphone button like Claude Code's, filling th
 - Not done: no live partial text while speaking (whisper.cpp transcribes a finished file), and
   no audio level meter. Both would need a streaming backend.
 
-### Phase 4 — Later, only if wanted
+### Phase 4a — Composer polish — **SHIPPED 2026-09-13**
+
+Chosen ahead of the broker: three self-contained wins against one architectural change whose
+gap phase 3's resume had already narrowed to "the turn in flight".
+
+**Image paste.** The *read* side already counted `image` blocks — `imageCount` on a user block
+has been rendered since phase 1 — so only the write side was missing. Paste or drop gives a
+thumbnail above the textarea (the CSP allows `data:` in `img-src`, so the chip is the image);
+the message goes as image blocks with the text *after* them, so the instruction follows what
+it refers to. An image alone is a real message, so emptiness is judged on both halves. Type
+and the 5 MB ceiling are enforced in the composer, because the API's rejection arrives as a
+failed turn long after the clipboard has moved on.
+
+**Diff in the real editor.** A button on any tool card carrying a patch. Both sides are
+reconstructed from the patch, never read off disk: a transcript can be weeks old and the file
+changed many times since, so the current file is not the other half of that edit. Hunk headers
+go into *both* sides, where they read as unchanged context — that separates the disjoint
+regions and stops the editor aligning the end of one hunk with the start of the next. The tab
+says "changed region" because that is all it is. `splitUnifiedPatch` lives in `shared/diff.ts`
+for the same reason `markdown.ts` does: `src/ui/**` imports `vscode` and cannot be unit-tested.
+
+**`@` mentions — not via the SDK.** The plan named the `file_suggestions` control request.
+That subtype exists in the wire protocol but **`Query` does not expose it in v0.3.268**, so
+the list is built host-side instead: `git ls-files --cached --others --exclude-standard`
+(tracked *and* new-but-not-ignored, since the file being discussed is often the one written
+this morning), falling back to a bounded walk outside a repository. Ranking is subsequence
+matching scored **in basename coordinates** — measuring the offset from the start of the whole
+path instead ranks by how shallow the directory is, which put `test/dictation.test.ts` ahead
+of `src/core/dictation.ts` for "dictation". Caught by a test.
+
+- *Unverified*: whether the CLI expands an `@path` in stream-json user text the way the TUI
+  does. The feature does not depend on it — a correct path in the prompt is useful either way,
+  and the picker's job is to get it right without typing it.
+- Tests: 417 pass. New are `test/diff.test.ts` (6), `test/fileSuggest.test.ts` (17) and image
+  cases in `runnerSession.test.ts` (5).
+
+### Phase 4b — Later, only if wanted
 
 - A detached broker process owning runner children so a reload loses nothing at all.
-- Image paste into the composer (content block `{type:'image', source:{type:'base64', media_type, data}}`).
-- File `@` mentions via the SDK's file-suggestion control request; open tool-result diffs in
-  VSCode's diff editor; `supportedDialogKinds: ['refusal_fallback_prompt']` with a dialog card.
+- `supportedDialogKinds: ['refusal_fallback_prompt']` with a dialog card.
 - Terminal-in-this-window sessions: `terminal.sendText` for single-line messages (explicitly
   labelled "typed into the terminal").
 

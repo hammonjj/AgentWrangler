@@ -14,6 +14,7 @@ import type { DictationService } from '../../core/dictation';
 import type { SessionStore } from '../../core/sessionStore';
 import type { SessionActions } from '../actions';
 import type { SessionLocator } from '../sessionLocator';
+import type { FileSuggestService } from '../../core/fileSuggest';
 import type { DiffContentProvider } from './diffView';
 import { ConversationHost, type ConversationProvider } from './conversationHost';
 
@@ -43,6 +44,7 @@ export class ConversationPanelManager implements vscode.Disposable {
     private locator: SessionLocator,
     private dictation: DictationService,
     private diffs: DiffContentProvider,
+    private files: FileSuggestService,
   ) {}
 
   /**
@@ -164,6 +166,7 @@ export class ConversationPanelManager implements vscode.Disposable {
       this.locator,
       this.dictation,
       this.diffs,
+      this.files,
       (title) => {
         panel.title = pinnedKey === undefined ? title : `📌 ${title}`;
       },

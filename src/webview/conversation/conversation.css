@@ -447,6 +447,48 @@ body,
   border-color: var(--vscode-focusBorder);
 }
 
+/* ---- @ mentions ---- */
+
+/* Sits in the composer's flow directly above the textarea rather than floating
+   over the transcript: the pane is often narrow, and a popup that covers the
+   last reply hides the thing being talked about. */
+.mentions {
+  max-height: 180px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-menu-border, var(--aw-rule));
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background));
+}
+.mentions .mrow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mentions .mrow.on,
+.mentions .mrow:hover {
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-list-activeSelectionForeground, inherit);
+}
+/* Name first and directory after it, both truncating from the left of the
+   path, because the end of a path is the part that identifies the file. */
+.mentions .mname {
+  flex: 0 0 auto;
+}
+.mentions .mdir {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+
 /* ---- diff ---- */
 
 /* Path on the left, the way out to the real editor on the right. */

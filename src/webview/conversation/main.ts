@@ -65,6 +65,7 @@ app.innerHTML = `
       <span class="grow"></span>
       <button id="stop" class="hdrbtn" hidden>Stop</button>
     </div>
+    <div id="mentions" class="mentions" role="listbox" hidden></div>
     <div id="attachments" hidden></div>
     <div id="composerInput">
       <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
@@ -97,6 +98,7 @@ const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const attachmentsEl = document.getElementById('attachments')!;
+const mentionsEl = document.getElementById('mentions')!;
 
 /** Block id → its node, so a patch updates in place instead of re-rendering. */
 const nodes = new Map<string, HTMLElement>();
@@ -657,6 +659,102 @@ function autoGrow(): void {
   msgEl.style.height = `${Math.min(msgEl.scrollHeight, MAX_COMPOSER_PX)}px`;
 }
 
+// ---- @ mentions ----
+
+/**
+ * The `@token` the caret is sitting in, or nothing.
+ *
+ * Anchored to a word boundary so an email address or a decorator does not open
+ * the picker, and stopped at whitespace so the token ends where the path does.
+ * Exported shape: where it starts, and what has been typed so far.
+ */
+function mentionAt(value: string, caret: number): { start: number; query: string } | undefined {
+  const upto = value.slice(0, caret);
+  const at = upto.lastIndexOf('@');
+  if (at < 0) return undefined;
+  // Only after whitespace or at the very start: `foo@bar` is not a mention.
+  if (at > 0 && !/\s/.test(upto[at - 1])) return undefined;
+  const query = upto.slice(at + 1);
+  if (/\s/.test(query)) return undefined;
+  return { start: at, query };
+}
+
+let mentionFiles: string[] = [];
+let mentionIndex = 0;
+/** The token the current list belongs to, so a stale answer is ignored. */
+let mentionQuery: string | undefined;
+
+function mentionsOpen(): boolean {
+  return !mentionsEl.hidden;
+}
+
+function closeMentions(): void {
+  mentionsEl.hidden = true;
+  mentionFiles = [];
+  mentionQuery = undefined;
+}
+
+function renderMentions(): void {
+  mentionsEl.textContent = '';
+  if (mentionFiles.length === 0) {
+    mentionsEl.hidden = true;
+    return;
+  }
+  mentionFiles.forEach((file, i) => {
+    const row = document.createElement('div');
+    row.className = i === mentionIndex ? 'mrow on' : 'mrow';
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', String(i === mentionIndex));
+
+    // Basename bold, directory muted: the name is what is being looked for and
+    // the path is how you tell two files of that name apart.
+    const slash = file.lastIndexOf('/');
+    const dir = document.createElement('span');
+    dir.className = 'mdir';
+    setText(dir, slash < 0 ? '' : file.slice(0, slash + 1));
+    const name = document.createElement('span');
+    name.className = 'mname';
+    setText(name, slash < 0 ? file : file.slice(slash + 1));
+
+    row.append(name, dir);
+    row.addEventListener('mousedown', (e) => {
+      // mousedown, not click: the textarea must not lose focus first.
+      e.preventDefault();
+      acceptMention(i);
+    });
+    mentionsEl.appendChild(row);
+  });
+  mentionsEl.hidden = false;
+}
+
+function acceptMention(i: number): void {
+  const file = mentionFiles[i];
+  const here = mentionAt(msgEl.value, msgEl.selectionStart ?? 0);
+  if (!file || !here) return closeMentions();
+  const before = msgEl.value.slice(0, here.start);
+  const after = msgEl.value.slice((msgEl.selectionStart ?? 0));
+  // A trailing space: a mention is nearly always followed by more sentence.
+  msgEl.value = `${before}@${file} ${after}`;
+  const caret = before.length + file.length + 2;
+  msgEl.setSelectionRange(caret, caret);
+  closeMentions();
+  autoGrow();
+  msgEl.focus();
+}
+
+function updateMentions(): void {
+  const here = mentionAt(msgEl.value, msgEl.selectionStart ?? 0);
+  if (!here) return closeMentions();
+  mentionQuery = here.query;
+  post({ type: 'fileSuggest', query: here.query });
+}
+
+msgEl.addEventListener('input', updateMentions);
+// Moving the caret out of a token closes the picker; typing is handled above.
+msgEl.addEventListener('click', () => {
+  if (mentionsOpen()) updateMentions();
+});
+
 // ---- attachments ----
 
 /** Pasted images waiting to go with the next message, newest last. */
@@ -848,6 +946,27 @@ modeSel.addEventListener('change', () => post({ type: 'setPermissionMode', mode:
 
 msgEl.addEventListener('input', autoGrow);
 msgEl.addEventListener('keydown', (e) => {
+  // The mention picker owns these keys while it is open, so Enter completes a
+  // path instead of sending a half-typed message.
+  if (mentionsOpen() && !e.isComposing) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      mentionIndex = (mentionIndex + step + mentionFiles.length) % mentionFiles.length;
+      renderMentions();
+      return;
+    }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      acceptMention(mentionIndex);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeMentions();
+      return;
+    }
+  }
   if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
   e.preventDefault();
   sendMessage();
@@ -902,6 +1021,13 @@ window.addEventListener('message', (e: MessageEvent) => {
       if (pre) setText(pre as HTMLElement, m.text);
       break;
     }
+    case 'fileSuggestions':
+      // Ignore an answer to a keystroke the user has already typed past.
+      if (m.query !== mentionQuery) break;
+      mentionFiles = m.files;
+      mentionIndex = 0;
+      renderMentions();
+      break;
     case 'dictation':
       setMicState(m.state, m.message);
       if (m.text) insertDictated(m.text);
