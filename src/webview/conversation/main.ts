@@ -65,6 +65,7 @@ app.innerHTML = `
     </div>
     <div id="composerInput">
       <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button id="mic" class="micbtn" title="Dictate a message" aria-label="Dictate a message"></button>
       <button id="send" class="askbtn primary">Send</button>
     </div>
   </div>
@@ -90,6 +91,7 @@ const modeSel = document.getElementById('mode') as HTMLSelectElement;
 const queuedEl = document.getElementById('queued')!;
 const stopBtn = document.getElementById('stop') as HTMLButtonElement;
 const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
+const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 
 /** Block id → its node, so a patch updates in place instead of re-rendering. */
@@ -648,6 +650,71 @@ function sendMessage(): void {
   scrollToBottom();
 }
 
+// ---- dictation ----
+
+type MicState = 'idle' | 'recording' | 'transcribing';
+let micState: MicState = 'idle';
+
+const MIC_LABEL: Record<MicState, string> = {
+  idle: 'Dictate a message',
+  recording: 'Stop recording and insert the text',
+  transcribing: 'Transcribing…',
+};
+
+function setMicState(state: MicState, message?: string): void {
+  micState = state;
+  micBtn.classList.toggle('recording', state === 'recording');
+  micBtn.classList.toggle('busy', state === 'transcribing');
+  // Only `transcribing` disables it: while recording the button is the way to
+  // stop, and disabling it there would trap the microphone open.
+  micBtn.disabled = state === 'transcribing';
+  micBtn.title = message ?? MIC_LABEL[state];
+  micBtn.setAttribute('aria-label', message ?? MIC_LABEL[state]);
+}
+
+/**
+ * Drop dictated text in at the cursor rather than replacing what is there: the
+ * usual reason to dictate is to finish a sentence that was started by hand.
+ */
+function insertDictated(text: string): void {
+  if (!text) return;
+  const start = msgEl.selectionStart ?? msgEl.value.length;
+  const end = msgEl.selectionEnd ?? start;
+  const before = msgEl.value.slice(0, start);
+  const after = msgEl.value.slice(end);
+  // A space only where one is actually missing, so dictating twice does not
+  // build up a gap and dictating into an empty box does not start with one.
+  const pad = before.length > 0 && !/\s$/.test(before) ? ' ' : '';
+  msgEl.value = `${before}${pad}${text}${after}`;
+  const caret = before.length + pad.length + text.length;
+  msgEl.setSelectionRange(caret, caret);
+  autoGrow();
+  msgEl.focus();
+}
+
+// Escape abandons a recording. Without it the only way out of a mistaken click
+// is to stop and then delete whatever the room was transcribed as.
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && micState === 'recording') {
+    setMicState('idle');
+    post({ type: 'dictate', action: 'cancel' });
+  }
+});
+
+micBtn.addEventListener('click', () => {
+  if (micState === 'transcribing') return;
+  if (micState === 'recording') {
+    setMicState('transcribing');
+    post({ type: 'dictate', action: 'stop' });
+  } else {
+    // Optimistic: the host confirms with a `dictation` message, and turns it
+    // back if a tool is missing. Waiting for that first would make the button
+    // feel dead for as long as it takes to find ffmpeg.
+    setMicState('recording');
+    post({ type: 'dictate', action: 'start' });
+  }
+});
+
 // ---- events ----
 
 scroller.addEventListener('scroll', () => {
@@ -735,6 +802,10 @@ window.addEventListener('message', (e: MessageEvent) => {
       if (pre) setText(pre as HTMLElement, m.text);
       break;
     }
+    case 'dictation':
+      setMicState(m.state, m.message);
+      if (m.text) insertDictated(m.text);
+      break;
     case 'error':
       appendBlocks([{ kind: 'note', id: `e${Date.now()}`, tone: 'error', text: m.text }]);
       break;

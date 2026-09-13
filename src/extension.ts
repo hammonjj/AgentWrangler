@@ -1,4 +1,5 @@
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { resolveClaudeBinary } from './claude/binary';
@@ -21,6 +22,7 @@ import { fetchUsage } from './claude/usageFetch';
 import { ArchiveService } from './core/archive';
 import { ColumnPrefsService } from './core/columnPrefs';
 import { DEFAULT_CONFIG, type ConfigGetter, type WranglerConfig } from './core/config';
+import { DictationService } from './core/dictation';
 import { HiddenProjectsService } from './core/hiddenProjects';
 import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
@@ -398,6 +400,20 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   };
 
+  // One microphone, so one recorder for the whole window however many panes are open.
+  const dictation = new DictationService({
+    spawn,
+    settings: () => {
+      const cfg = vscode.workspace.getConfiguration('agentWrangler');
+      return {
+        ffmpegPath: cfg.get<string>('dictation.ffmpegPath', ''),
+        whisperPath: cfg.get<string>('dictation.whisperPath', ''),
+        modelPath: cfg.get<string>('dictation.modelPath', ''),
+        inputDevice: cfg.get<string>('dictation.inputDevice', ':default'),
+      };
+    },
+  });
+
   // The conversation pane: one reusable panel that row clicks swap, plus a
   // pinned panel per session the user wants to keep on screen.
   const conversations = new ConversationPanelManager(
@@ -407,6 +423,7 @@ export function activate(context: vscode.ExtensionContext): void {
     runners,
     actions,
     locator,
+    dictation,
   );
   context.subscriptions.push(
     conversations,

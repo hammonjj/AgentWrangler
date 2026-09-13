@@ -92,6 +92,13 @@ export type HostToConversation =
   | { type: 'session'; session: SessionDTO; caps: ConversationCapabilities }
   | { type: 'composer'; composer: ComposerState }
   | { type: 'toolResult'; id: string; text: string }
+  /**
+   * Where dictation has got to. `text` arrives once, with `state: 'idle'`, and
+   * is what the composer inserts; an empty string means nothing was said.
+   * `message` is a problem worth showing on the button rather than as an error
+   * block — a missing tool, usually, which the host has already offered to fix.
+   */
+  | { type: 'dictation'; state: 'idle' | 'recording' | 'transcribing'; text?: string; message?: string }
   | { type: 'error'; text: string };
 
 export type ConversationToHost =
@@ -111,4 +118,9 @@ export type ConversationToHost =
   | { type: 'resumeHere' }
   | { type: 'requestToolResult'; id: string }
   | { type: 'openExternal'; url: string }
-  | { type: 'openFile'; path: string };
+  | { type: 'openFile'; path: string }
+  /**
+   * The microphone button. `stop` transcribes what was recorded and answers
+   * with a `dictation` message; `cancel` throws it away without transcribing.
+   */
+  | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' };

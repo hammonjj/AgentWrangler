@@ -745,6 +745,48 @@ pick, which is a command, not a hub.
   start work and choosing what to look at are different questions, and folding them together
   would make every row click ambiguous.
 
+### Phase 3.6 — Dictation in the composer — **SHIPPED 2026-09-12**
+
+Asked for after the launcher: a microphone button like Claude Code's, filling the composer.
+
+**What was ruled out, and why — verified, not assumed.**
+
+- **`webkitSpeechRecognition` in the webview.** Electron ships without the Google speech key;
+  it fails with a `network` error. Not usable, in any webview, ever.
+- **VSCode's own speech API.** Proposed-only (`ms-vscode.vscode-speech`, reserved for Copilot
+  Chat). Would need VSCode relaunched with `--enable-proposed-api`, so not shippable.
+- **Claude Code's own transcription.** Its extension captures the mic in the *extension host*
+  via a bundled native module (`resources/audio-capture/<arch>/audio-capture.node`, 16 kHz mono
+  PCM, `sox`/`arecord` fallback) and streams to an Anthropic service gated on
+  `authMethod === "claudeai"`. The endpoint is not public, so only the architecture was copied.
+
+**What shipped.**
+
+- `ffmpeg -f avfoundation` records to a temp WAV; `whisper-cli` transcribes it locally. No key,
+  no network, ~460 ms for a six-second sentence on an M4. **The first run takes ~15 s** while
+  Metal compiles shaders into its cache; every run after is ~100 ms + audio length.
+- **Recording happens in the extension host, not the webview.** A webview is an iframe with its
+  own permission story and `getUserMedia` there is a fight with the CSP and the embedder; a
+  child process is just VSCode asking for the microphone, which macOS already understands.
+- **`q` on ffmpeg's stdin, never a signal.** Verified over a pipe: a killed ffmpeg leaves a RIFF
+  header claiming zero samples, which Whisper reads as an empty recording — a silent failure.
+- **Tools are searched on `PATH` and in the Homebrew prefixes.** A GUI VSCode is launched by
+  `launchd` with `/usr/bin:/bin:/usr/sbin:/sbin`, so *every* Homebrew binary is invisible to the
+  extension host. "It works in my terminal" is not evidence here.
+- **Whisper narrates silence** — `[BLANK_AUDIO]`, `(dramatic music)`, `[ Silence ]`. A line that
+  is nothing but a bracketed phrase is dropped; dictated speech never looks like that.
+- One `DictationService` per window: one microphone, so a second pane asking to record is told
+  no rather than quietly stealing the first one's audio.
+- Missing pieces are named and offered, not installed silently: a terminal with the `brew`
+  command, or a progress-barred model download to `~/.cache/agent-wrangler/whisper/`.
+- Text lands at the cursor with a space only where one is missing, so dictating to finish a
+  half-typed sentence works. Escape abandons a recording.
+- Tests: 384 pass. New is `test/dictation.test.ts` (24) — the `PATH` fallback, the setup-error
+  remedies, transcript cleaning, and the service lifecycle against an injected `spawn` so no
+  process is created and no microphone is opened.
+- Not done: no live partial text while speaking (whisper.cpp transcribes a finished file), and
+  no audio level meter. Both would need a streaming backend.
+
 ### Phase 4 — Later, only if wanted
 
 - A detached broker process owning runner children so a reload loses nothing at all.

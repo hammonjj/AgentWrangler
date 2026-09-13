@@ -10,12 +10,14 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { RunnerService } from '../../claude/runner/runnerService';
 import type { RunnerSession } from '../../claude/runner/runnerSession';
+import { DictationSetupError, type DictationService } from '../../core/dictation';
 import type { AgentProvider } from '../../core/provider';
 import type { SessionStore } from '../../core/sessionStore';
 import type { ConversationCapabilities } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import type { AgentSession, SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
+import { offerDictationSetup } from '../dictationSetup';
 import { buildWebviewHtml } from '../html';
 import { adoptActionFor, SECONDARY_LABEL, secondaryActionFor, type SecondaryAction } from '../openTarget';
 import type { SessionLocator } from '../sessionLocator';
@@ -63,6 +65,7 @@ export class ConversationHost {
     private runners: RunnerService,
     private actions: SessionActions,
     private locator: SessionLocator,
+    private dictation: DictationService,
     private onTitle: (title: string) => void,
   ) {
     webview.options = {
@@ -311,6 +314,9 @@ export class ConversationHost {
         if (text !== undefined) this.post({ type: 'toolResult', id: m.id, text });
         return;
       }
+      case 'dictate':
+        await this.dictate(m.action);
+        return;
       case 'openExternal':
         this.actions.openExternal(m.url);
         return;
@@ -322,6 +328,44 @@ export class ConversationHost {
 
   private tooLate(): void {
     vscode.window.setStatusBarMessage('Agent Wrangler: that prompt has already been answered.', 4000);
+  }
+
+  /**
+   * Drive the microphone. Every path ends by telling the webview what state it
+   * is in, because the button cannot un-stick itself: it went red on a click
+   * and only a message from here turns it back.
+   */
+  private async dictate(action: 'start' | 'stop' | 'cancel'): Promise<void> {
+    if (action === 'cancel') {
+      this.dictation.cancel();
+      this.post({ type: 'dictation', state: 'idle' });
+      return;
+    }
+
+    if (action === 'start') {
+      try {
+        const began = this.dictation.start();
+        this.post(
+          began
+            ? { type: 'dictation', state: 'recording' }
+            : { type: 'dictation', state: 'idle', message: 'Already recording in another conversation.' },
+        );
+      } catch (e) {
+        this.post({ type: 'dictation', state: 'idle', message: 'Dictation is not set up.' });
+        if (e instanceof DictationSetupError) await offerDictationSetup(e);
+        else void vscode.window.showErrorMessage(`Agent Wrangler: dictation failed — ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    this.post({ type: 'dictation', state: 'transcribing' });
+    try {
+      const text = await this.dictation.stop();
+      this.post({ type: 'dictation', state: 'idle', text });
+    } catch (e) {
+      this.post({ type: 'dictation', state: 'idle', message: 'Could not transcribe.' });
+      void vscode.window.showErrorMessage(`Agent Wrangler: dictation failed — ${(e as Error).message}`);
+    }
   }
 }
 

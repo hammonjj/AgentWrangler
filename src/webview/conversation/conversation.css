@@ -447,6 +447,90 @@ body,
   border-color: var(--vscode-focusBorder);
 }
 
+/* ---- dictation ---- */
+
+/* The microphone is drawn in CSS rather than shipped as an icon font or an
+   SVG file: it is a capsule, a stem and a base, and that is cheaper than
+   another asset in the bundle and another URI past the CSP. */
+.micbtn {
+  flex: 0 0 auto;
+  position: relative;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+}
+.micbtn:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+.micbtn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+.micbtn:disabled {
+  cursor: default;
+}
+
+/* Capsule. */
+.micbtn::before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  width: 7px;
+  height: 11px;
+  margin-left: -3.5px;
+  border-radius: 3.5px;
+  background: currentColor;
+}
+/* Cradle and stem, as a U with a line under it. */
+.micbtn::after {
+  content: '';
+  position: absolute;
+  top: 13px;
+  left: 50%;
+  width: 13px;
+  height: 7px;
+  margin-left: -6.5px;
+  border: 1.5px solid currentColor;
+  border-top: none;
+  border-radius: 0 0 7px 7px;
+  box-shadow: 0 5px 0 -5.75px currentColor;
+}
+
+/* Recording: red, and pulsing, because a microphone left open by accident is
+   the failure that matters here. */
+.micbtn.recording {
+  color: var(--vscode-inputValidation-errorBorder, #f14c4c);
+  background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.12));
+  animation: micpulse 1.4s ease-in-out infinite;
+}
+.micbtn.busy {
+  opacity: 0.55;
+}
+
+@keyframes micpulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Someone who has asked not to see motion still needs to know it is live;
+   the colour carries that on its own. */
+@media (prefers-reduced-motion: reduce) {
+  .micbtn.recording {
+    animation: none;
+  }
+}
+
 /* A reply still arriving gets a caret, so a pause reads as thinking. */
 .blk.assistant.streaming .body > :last-child::after {
   content: '▍';
