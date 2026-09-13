@@ -21,6 +21,7 @@ import { fetchUsage } from './claude/usageFetch';
 import { ArchiveService } from './core/archive';
 import { ColumnPrefsService } from './core/columnPrefs';
 import { DEFAULT_CONFIG, type ConfigGetter, type WranglerConfig } from './core/config';
+import { HiddenProjectsService } from './core/hiddenProjects';
 import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
@@ -422,12 +423,16 @@ export function activate(context: vscode.ExtensionContext): void {
   // Folders the launcher offers. Claude Code's own history is the bulk of it;
   // the workspace and anything currently running are added so a folder is
   // never missing just because it has not been used through the CLI yet.
-  const projects = new ProjectsService(() => ({
-    workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
-    sessions: store.sessions
-      .filter((s): s is typeof s & { cwd: string } => typeof s.cwd === 'string')
-      .map((s) => ({ dir: s.cwd, lastUsedAt: s.lastActivityAt })),
-  }));
+  const hiddenProjects = new HiddenProjectsService(context.globalState);
+  const projects = new ProjectsService(
+    () => ({
+      workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
+      sessions: store.sessions
+        .filter((s): s is typeof s & { cwd: string } => typeof s.cwd === 'string')
+        .map((s) => ({ dir: s.cwd, lastUsedAt: s.lastActivityAt })),
+    }),
+    { hidden: hiddenProjects },
+  );
 
   // Defined as closures rather than direct references: `newConversation` is
   // declared further down, and only the calls happen after activation.
@@ -564,6 +569,9 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showErrorMessage(`Agent Wrangler: ${cwd} no longer exists.`);
       return undefined;
     }
+    // Working in a folder is the strongest possible statement that it belongs
+    // in the list, so it also undoes a removal — the same rule as browsing.
+    projects.add(cwd);
     const cfg = vscode.workspace.getConfiguration('agentWrangler');
     const model = cfg.get<string>('runner.model', '').trim();
     const runner = runners.start({

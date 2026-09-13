@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { Emitter, type Disposable, type Listener } from '../core/events';
 import type { ProjectDTO } from '../shared/model';
 import { claudeHome, isSessionJsonlName, projectsDir, slugForCwd } from './paths';
 
@@ -134,6 +135,16 @@ async function existingDirs(dirs: string[]): Promise<string[]> {
   return results.filter((d): d is string => d !== undefined);
 }
 
+/**
+ * The removal list, behind an interface so this module stays free of storage:
+ * `HiddenProjectsService` is the implementation.
+ */
+export interface HiddenProjects {
+  readonly value: ReadonlySet<string>;
+  hide(dir: string): void;
+  unhide(dir: string): void;
+}
+
 /** What a caller contributes on top of Claude Code's own history — workspace folders and live session cwds. */
 export interface ExtraProjects {
   /** Always offered, even when Claude Code has never run there. */
@@ -173,6 +184,7 @@ export class ProjectsService {
   private cache: ProjectDTO[] = [];
   private readAt = 0;
   private inFlight: Promise<ProjectDTO[]> | undefined;
+  private emitter = new Emitter<void>();
   /**
    * Folders browsed to in this window. A folder Claude Code has never run in is
    * in no config file, so a re-scan alone would drop it the moment it was
@@ -183,24 +195,49 @@ export class ProjectsService {
 
   constructor(
     private extra: () => ExtraProjects,
-    private ttlMs = 30_000,
-    /** Overridden only by tests, which must never read the real `~/.claude`. */
-    private paths: { file?: string; root?: string } = {},
+    private opts: {
+      ttlMs?: number;
+      /** Folders the user removed from the dropdown. Absent = nothing is hidden. */
+      hidden?: HiddenProjects;
+      /** Overridden only by tests, which must never read the real `~/.claude`. */
+      file?: string;
+      root?: string;
+    } = {},
   ) {}
+
+  /** Fires when the list is curated, so a second dashboard does not keep offering a removed folder. */
+  readonly onDidChange = (listener: Listener<void>): Disposable => this.emitter.event(listener);
 
   /** Last known list. Empty until the first `refresh` resolves. */
   get value(): ProjectDTO[] {
     return this.cache;
   }
 
-  /** Offer this folder from now on, whatever the config says. */
+  /**
+   * Offer this folder from now on, whatever the config says — and undo a
+   * removal, since browsing back to a folder is how the user asks for it again.
+   */
   add(dir: string): void {
     this.browsed.add(dir);
+    this.opts.hidden?.unhide(dir);
+    this.readAt = 0; // the list the user is about to see must contain it
+  }
+
+  /**
+   * Take a folder out of the dropdown. It stays in `~/.claude.json` — that file
+   * is Claude Code's, not ours — so the removal is recorded and applied on every
+   * scan instead.
+   */
+  remove(dir: string): void {
+    this.browsed.delete(dir);
+    this.opts.hidden?.hide(dir);
+    this.cache = this.cache.filter((p) => p.dir !== dir);
+    this.emitter.fire();
   }
 
   /** Re-read unless the cache is younger than the TTL. `force` ignores it. */
   async refresh(opts: { force?: boolean } = {}): Promise<ProjectDTO[]> {
-    if (!opts.force && Date.now() - this.readAt < this.ttlMs) return this.cache;
+    if (!opts.force && Date.now() - this.readAt < (this.opts.ttlMs ?? 30_000)) return this.cache;
     // `??=` short-circuits, so concurrent callers (two dashboards, or a snapshot
     // racing a dropdown) join the scan already running instead of starting one —
     // and `scan` is a method rather than an expression so that gathering the
@@ -211,8 +248,10 @@ export class ProjectsService {
 
   private scan(): Promise<ProjectDTO[]> {
     const extra = this.extra();
-    return readProjects({ ...extra, workspaceFolders: [...extra.workspaceFolders, ...this.browsed] }, this.paths)
-      .then((list) => {
+    return readProjects({ ...extra, workspaceFolders: [...extra.workspaceFolders, ...this.browsed] }, this.opts)
+      .then((all) => {
+        const hidden = this.opts.hidden?.value;
+        const list = hidden && hidden.size > 0 ? all.filter((p) => !hidden.has(p.dir)) : all;
         this.cache = list;
         this.readAt = Date.now();
         return list;

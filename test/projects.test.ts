@@ -8,6 +8,7 @@ import {
   rankProjects,
   readConfigProjectDirs,
   readProjects,
+  type HiddenProjects,
 } from '../src/claude/projects';
 import { slugForCwd } from '../src/claude/paths';
 
@@ -195,8 +196,17 @@ describe('readProjects', () => {
 
 describe('ProjectsService', () => {
   /** Always isolated: a service pointed at the real `~/.claude.json` would read the machine's own projects. */
-  function service(extra: () => { workspaceFolders: string[]; sessions: { dir: string; lastUsedAt?: number }[] }, ttlMs?: number) {
-    return new ProjectsService(extra, ttlMs, { file: configWith([]), root: projectsRoot([]) });
+  function service(
+    extra: () => { workspaceFolders: string[]; sessions: { dir: string; lastUsedAt?: number }[] },
+    opts: { ttlMs?: number; hidden?: HiddenProjects } = {},
+  ) {
+    return new ProjectsService(extra, { ...opts, file: configWith([]), root: projectsRoot([]) });
+  }
+
+  /** The storage-free half of `HiddenProjectsService`, which lives in core and needs none of it here. */
+  function hiddenSet(): HiddenProjects & { value: Set<string> } {
+    const value = new Set<string>();
+    return { value, hide: (d) => void value.add(d), unhide: (d) => void value.delete(d) };
   }
 
   it('does not re-scan inside the TTL, and does on force', async () => {
@@ -207,7 +217,7 @@ describe('ProjectsService', () => {
     const svc = service(() => {
       calls++;
       return { workspaceFolders: [one], sessions: [] };
-    }, 60_000);
+    }, { ttlMs: 60_000 });
 
     await svc.refresh();
     await svc.refresh();
@@ -244,5 +254,72 @@ describe('ProjectsService', () => {
 
   it('starts empty, so a dashboard that has not scanned yet sends no project list', () => {
     expect(service(() => ({ workspaceFolders: [], sessions: [] })).value).toEqual([]);
+  });
+
+  it('drops a removed folder from the cache at once, without waiting for a scan', async () => {
+    const base = tmp();
+    const keep = path.join(base, 'keep');
+    const drop = path.join(base, 'drop');
+    fs.mkdirSync(keep);
+    fs.mkdirSync(drop);
+    const svc = service(() => ({ workspaceFolders: [keep, drop], sessions: [] }), { hidden: hiddenSet() });
+
+    await svc.refresh({ force: true });
+    expect(svc.value.map((p) => p.name).sort()).toEqual(['drop', 'keep']);
+
+    svc.remove(drop);
+    expect(svc.value.map((p) => p.name)).toEqual(['keep']);
+  });
+
+  it('keeps a removed folder out on the next scan, though the workspace still offers it', async () => {
+    const base = tmp();
+    const drop = path.join(base, 'drop');
+    fs.mkdirSync(drop);
+    // The source keeps producing it — the config and the workspace are not ours
+    // to edit — so only the hidden set can keep it out.
+    const svc = service(() => ({ workspaceFolders: [drop], sessions: [] }), { hidden: hiddenSet() });
+
+    await svc.refresh({ force: true });
+    svc.remove(drop);
+    expect(await svc.refresh({ force: true })).toEqual([]);
+  });
+
+  it('brings a removed folder back when it is browsed to again', async () => {
+    const base = tmp();
+    const dir = path.join(base, 'proj');
+    fs.mkdirSync(dir);
+    const svc = service(() => ({ workspaceFolders: [dir], sessions: [] }), { hidden: hiddenSet() });
+
+    svc.remove(dir);
+    expect(await svc.refresh({ force: true })).toEqual([]);
+
+    svc.add(dir);
+    expect((await svc.refresh({ force: true })).map((p) => p.dir)).toEqual([dir]);
+  });
+
+  it('shows a re-added folder without waiting out the TTL', async () => {
+    const base = tmp();
+    const dir = path.join(base, 'proj');
+    fs.mkdirSync(dir);
+    // `add` happens because the user browsed to it and is about to look at the
+    // list; a cache that was fresh a second ago must not hide their own choice.
+    const svc = service(() => ({ workspaceFolders: [], sessions: [] }), { ttlMs: 60_000 });
+
+    await svc.refresh();
+    svc.add(dir);
+    expect((await svc.refresh()).map((p) => p.dir)).toEqual([dir]);
+  });
+
+  it('fires so a second dashboard stops offering what the first removed', async () => {
+    const base = tmp();
+    const dir = path.join(base, 'proj');
+    fs.mkdirSync(dir);
+    const svc = service(() => ({ workspaceFolders: [dir], sessions: [] }), { hidden: hiddenSet() });
+    let fired = 0;
+    svc.onDidChange(() => fired++);
+
+    await svc.refresh({ force: true });
+    svc.remove(dir);
+    expect(fired).toBe(1);
   });
 });

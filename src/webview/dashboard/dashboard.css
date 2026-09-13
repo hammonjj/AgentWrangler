@@ -38,22 +38,127 @@ body {
   border-bottom: 1px solid var(--vscode-panel-border, transparent);
 }
 
-/* The elastic half. `min-width: 0` is what lets it shrink below the width of
-   its longest option instead of shoving the button out of a 300px dock — a
-   flex item's default `min-width: auto` is its content, and a <select>'s
-   content is its widest <option>. The option text is the basename for the same
-   reason; the full path is on the title. */
-#bar select {
+/* The elastic half. `min-width: 0` is what lets it shrink below its content
+   instead of shoving the New button out of a 300px dock — a flex item's
+   default `min-width: auto` is its content width. The label is the folder's
+   basename for the same reason; the full path is on the title. */
+#bar .projbtn {
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   height: 22px;
-  padding: 0 4px;
+  padding: 0 4px 0 6px;
   border: 1px solid var(--vscode-dropdown-border, transparent);
   border-radius: 3px;
   color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
   background: var(--vscode-dropdown-background, var(--vscode-input-background));
   font-family: inherit;
   font-size: 0.92em;
+  text-align: left;
+  cursor: pointer;
+}
+#bar .projbtn #projname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#bar .projbtn .chev {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+/* Anchored to #bar, which is already positioned (sticky), so no measured
+   offset has to be written into a style attribute — the CSP drops those. */
+.projmenu {
+  position: absolute;
+  top: 100%;
+  left: 6px;
+  right: 6px;
+  z-index: 1;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-top: 2px;
+  padding: 4px;
+  border-radius: 5px;
+  background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+.projmenu .pmrow {
+  display: flex;
+  align-items: center;
+  border-radius: 3px;
+}
+.projmenu .pmrow:hover,
+.projmenu .pmrow:focus-within {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+}
+.projmenu .pmname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.projmenu .pmrow.on .pmname {
+  font-weight: 600;
+}
+/* Always laid out, so rows do not reflow on hover and move the X out from
+   under the pointer; only its ink comes and goes. */
+.projmenu .pmx {
+  flex: 0 0 auto;
+  width: 20px;
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.9em;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+}
+.projmenu .pmrow:hover .pmx,
+.projmenu .pmx:focus-visible {
+  opacity: 0.7;
+}
+.projmenu .pmx:hover {
+  opacity: 1;
+  color: var(--aw-stuck);
+}
+.projmenu .pmempty {
+  padding: 4px 6px;
+  color: var(--vscode-descriptionForeground);
+}
+.projmenu .pmbrowse {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+  padding: 4px 6px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+.projmenu .pmbrowse:hover {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
 }
 
 #bar .newbtn {
@@ -75,8 +180,9 @@ body {
   opacity: 0.5;
   cursor: default;
 }
-#bar select:focus-visible,
-#bar .newbtn:focus-visible {
+#bar .projbtn:focus-visible,
+#bar .newbtn:focus-visible,
+.projmenu button:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: -1px;
 }

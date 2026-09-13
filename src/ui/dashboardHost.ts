@@ -51,6 +51,9 @@ export interface ProjectSource {
   refresh(opts?: { force?: boolean }): Promise<ProjectDTO[]>;
   /** Keep offering a folder the config has never heard of (one just browsed to). */
   add(dir: string): void;
+  /** Stop offering a folder. Persisted, since the next scan would otherwise find it again. */
+  remove(dir: string): void;
+  onDidChange(listener: () => void): Disposable;
 }
 
 /** Starting a conversation is the extension's job, not the dashboard's; it only asks. */
@@ -105,6 +108,8 @@ export class DashboardHost {
       // Taking a session over (or handing it back) changes what its row says
       // without changing anything the store tracks.
       this.runners.onDidChange(() => this.pushSnapshot()),
+      // A folder removed from one dashboard's dropdown is removed from both.
+      this.projects.onDidChange(() => this.pushSnapshot()),
     );
   }
 
@@ -198,6 +203,11 @@ export class DashboardHost {
         break;
       case 'browseProject':
         void this.browseProject();
+        break;
+      case 'removeProject':
+        // Drops it from the cache synchronously and fires, which is what pushes
+        // the new list — here and to every other dashboard.
+        this.projects.remove(m.dir);
         break;
       case 'refreshProjects':
         void this.refreshProjects();

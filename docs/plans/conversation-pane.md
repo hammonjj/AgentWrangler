@@ -721,9 +721,26 @@ pick, which is a command, not a hub.
 - Found while testing: `ProjectsService.refresh` called `extra()` before the `??=`, so
   concurrent callers each gathered workspace and session folders even though only one scan
   ran. Gathering moved inside a `scan()` method, which `??=` short-circuits past.
-- Tests: 351 pass. New is `test/projects.test.ts` (19) — ranking, config parsing, the forward
-  slug lookup, deleted-folder filtering, and the service's TTL/sharing/browse behaviour, all
-  against temp dirs so nothing reads the real `~/.claude`.
+- **Removing a folder from the dropdown** (asked for straight after the first cut). A native
+  `<select>` cannot do it — an `<option>` renders as text and holds no buttons — so the
+  dropdown became a popup of real rows, each a name button plus an X. It is anchored to the
+  already-sticky `#bar` with `top: 100%`, so unlike `.colmenu` it needs no measured offset and
+  therefore no inline `style` for the CSP to drop.
+- **A removal is recorded, not applied to the source.** `~/.claude.json` is Claude Code's
+  file; the list is rebuilt from it on every scan, so `HiddenProjectsService` (globalState,
+  like the column layout — curation is about the machine, not one window) holds the removals
+  and `ProjectsService.scan` filters them out. `ProjectsService.onDidChange` is what gets a
+  removal to the *other* dashboard, mirroring how columns propagate.
+- **Navigating to a folder un-removes it**: `add()` is called by both the browse dialog and
+  `startConversation`, and clears the hidden flag. Nothing else does — a session appearing in
+  a removed folder from a terminal elsewhere leaves the list alone, because hiding is explicit
+  curation and silent un-hiding would make the X feel broken. `add()` also zeroes `readAt`:
+  the user is about to look at the list and a cache that was fresh a second ago must not hide
+  their own choice.
+- Tests: 360 pass. New are `test/projects.test.ts` (24) — ranking, config parsing, the forward
+  slug lookup, deleted-folder filtering, TTL/sharing/browse, and the remove/re-add rules — and
+  `test/hiddenProjects.test.ts` (4), all against temp dirs so nothing reads the real
+  `~/.claude`.
 - Not done: the dropdown does not filter the session list. Decided against — picking where to
   start work and choosing what to look at are different questions, and folding them together
   would make every row click ambiguous.

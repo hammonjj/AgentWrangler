@@ -64,6 +64,8 @@ export type DashboardToHost =
   | { type: 'newConversation'; cwd: string }
   /** "Browse…" was chosen: open the folder dialog. A choice comes back as `projectPicked`. */
   | { type: 'browseProject' }
+  /** The X on a dropdown row: stop offering this folder. Browsing back to it undoes this. */
+  | { type: 'removeProject'; dir: string }
   /** The dropdown was opened — re-scan, since a folder may have been used elsewhere since the last snapshot. */
   | { type: 'refreshProjects' };
 

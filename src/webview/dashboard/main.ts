@@ -563,21 +563,21 @@ function menuHtml(): string {
  */
 const bar = document.createElement('div');
 bar.id = 'bar';
-bar.innerHTML = `<select id="proj" title="Where a new conversation starts"></select>
-<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>`;
+// A <select> cannot carry a per-row button: an <option> renders as text and
+// nothing else. So the dropdown is a popup of real rows — the folder on the
+// left, the X that stops offering it on the right.
+bar.innerHTML = `<button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
+<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
+<div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
 app.insertAdjacentElement('beforebegin', bar);
 
-const projSel = bar.querySelector<HTMLSelectElement>('#proj')!;
+const projBtn = bar.querySelector<HTMLButtonElement>('#proj')!;
+const projName = bar.querySelector<HTMLElement>('#projname')!;
+const projMenu = bar.querySelector<HTMLElement>('#projmenu')!;
 const newBtn = bar.querySelector<HTMLButtonElement>('#new')!;
 
-/** Sentinel for the Browse… row. No real folder is the empty string. */
-const BROWSE = '';
-
 let projects: ProjectDTO[] = [];
-/** The `<option>` set last written, so an unchanged list never touches the DOM. */
-let optionSig = ' ';
-/** A list that arrived while the dropdown had focus, to apply once it does not. */
-let optionsStale = false;
+let menuOpen = false;
 
 /** The folder New will use: the saved one while it still exists, else the most recent. */
 function currentProject(): string | undefined {
@@ -586,52 +586,87 @@ function currentProject(): string | undefined {
 }
 
 function renderLauncher(): void {
-  const sig = projects.map((p) => `${p.dir} ${p.name}`).join('\n');
-  if (sig !== optionSig) {
-    // Rebuilding options under an open dropdown closes it mid-choice. The list
-    // is not urgent; it can wait for the blur.
-    if (document.activeElement === projSel) {
-      optionsStale = true;
-      return;
-    }
-    optionSig = sig;
-    optionsStale = false;
-    const opts = projects.map(
-      (p) => `<option value="${esc(p.dir)}" title="${esc(p.dir)}">${esc(p.name)}</option>`,
-    );
-    // Always last, and always present: with no history at all it is the only way in.
-    opts.push(`<option value="${BROWSE}">Browse…</option>`);
-    projSel.innerHTML = opts.join('');
-  }
-
   const cur = currentProject();
-  projSel.value = cur ?? BROWSE;
-  projSel.title = cur ?? 'Choose a folder to start a conversation in';
+  projName.textContent = cur ? (projects.find((p) => p.dir === cur)?.name ?? cur) : 'Choose a folder…';
+  projBtn.title = cur ?? 'Choose a folder to start a conversation in';
   newBtn.disabled = cur === undefined;
+  // An open menu is showing the list that just changed, so redraw it in place
+  // rather than closing it out from under the pointer.
+  if (menuOpen) renderMenu();
 }
 
-projSel.addEventListener('mousedown', () => {
-  // About to drop down: a folder may have been used in another window since the
-  // last scan. The answer arrives as a snapshot and lands on the next blur.
+function renderMenu(): void {
+  const cur = currentProject();
+  const rows = projects
+    .map(
+      (p) => `<div class="pmrow${p.dir === cur ? ' on' : ''}">
+<button class="pmname" data-dir="${esc(p.dir)}" role="option" aria-selected="${p.dir === cur}" title="${esc(p.dir)}">${esc(p.name)}</button>
+<button class="pmx" data-rm="${esc(p.dir)}" title="Remove ${esc(p.name)} from this list. Browsing to it again brings it back." aria-label="Remove ${esc(p.name)} from this list">✕</button>
+</div>`,
+    )
+    .join('');
+  const empty = projects.length === 0 ? '<div class="pmempty">No folders yet</div>' : '';
+  // Always present: with nothing in the list it is the only way in, and it is
+  // also the only way a removed folder comes back.
+  projMenu.innerHTML = `${empty}${rows}<button class="pmbrowse" data-browse="1">Browse…</button>`;
+}
+
+function openProjMenu(): void {
+  menuOpen = true;
+  projMenu.hidden = false;
+  projBtn.setAttribute('aria-expanded', 'true');
+  renderMenu();
+  // A folder may have been used in another window since the last scan. The
+  // answer arrives as a snapshot and redraws the menu under the pointer.
   post({ type: 'refreshProjects' });
+}
+
+function closeProjMenu(): void {
+  if (!menuOpen) return;
+  menuOpen = false;
+  projMenu.hidden = true;
+  projBtn.setAttribute('aria-expanded', 'false');
+}
+
+projBtn.addEventListener('click', () => {
+  if (menuOpen) closeProjMenu();
+  else openProjMenu();
 });
 
-projSel.addEventListener('change', () => {
-  if (projSel.value === BROWSE) {
-    // Put the selection back straight away: the dialog is modal and may be
-    // cancelled, and "Browse…" is not a place a conversation can start.
-    projSel.value = currentProject() ?? BROWSE;
+projMenu.addEventListener('click', (e) => {
+  const target = e.target as HTMLElement;
+
+  const rm = target.closest<HTMLElement>('[data-rm]');
+  if (rm) {
+    // The menu stays open: clearing three stale folders should be three clicks,
+    // not three round trips through opening it again.
+    post({ type: 'removeProject', dir: rm.dataset.rm! });
+    return;
+  }
+  if (target.closest('[data-browse]')) {
+    closeProjMenu();
     post({ type: 'browseProject' });
     return;
   }
-  project = projSel.value;
-  saveState();
-  renderLauncher();
+  const pick = target.closest<HTMLElement>('[data-dir]');
+  if (pick) {
+    project = pick.dataset.dir!;
+    saveState();
+    closeProjMenu();
+    renderLauncher();
+    projBtn.focus();
+  }
 });
 
-projSel.addEventListener('blur', () => {
-  if (optionsStale) renderLauncher();
-});
+// Anywhere outside dismisses, the way a dropdown does. Capture, because the
+// table's own click handler stops propagation on most of what it handles.
+document.addEventListener(
+  'click',
+  (e) => {
+    if (menuOpen && !bar.contains(e.target as Node)) closeProjMenu();
+  },
+  true,
+);
 
 newBtn.addEventListener('click', () => {
   const cwd = currentProject();
@@ -817,7 +852,12 @@ app.addEventListener('contextmenu', (e) => {
 });
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeMenu();
+  if (e.key !== 'Escape') return;
+  closeMenu();
+  if (menuOpen) {
+    closeProjMenu();
+    projBtn.focus(); // Escape should leave focus somewhere, not on a hidden row
+  }
 });
 
 // Only the fold threshold matters here: widths are absolute and do not care how
