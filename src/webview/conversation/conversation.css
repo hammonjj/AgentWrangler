@@ -467,6 +467,19 @@ body,
   border-color: var(--vscode-focusBorder);
 }
 
+/* Dragging files anywhere over the pane lights up the box they will land in —
+   the drop target is the whole pane, so the cue has to say where the result of
+   it will appear. Drawn on the row rather than the textarea so the outline does
+   not fight the focus ring. */
+#composerInput.dropping {
+  outline: 1px dashed var(--vscode-focusBorder);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+#composerInput.dropping #msg {
+  background: var(--vscode-list-dropBackground, var(--vscode-input-background));
+}
+
 /* ---- @ mentions ---- */
 
 /* Sits in the composer's flow directly above the textarea rather than floating

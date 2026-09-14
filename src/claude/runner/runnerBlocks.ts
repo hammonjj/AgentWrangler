@@ -297,8 +297,15 @@ function reduceSystem(state: RunnerBlocksState, msg: any): RunnerReduction {
         },
       };
 
+    // A status only ever *raises* busy. The turn is what owns that flag — it is
+    // set when the message is sent and cleared by the `result` that ends the
+    // turn — and the status subtype carries values we have not enumerated
+    // (anything that is not `requesting`/`compacting` reads as "not generating
+    // right now", which is also true while a five-minute build runs). Clearing
+    // it here put the button back to Send in the middle of a turn.
     case 'status': {
-      const composer: Partial<ComposerState> = { busy: msg.status === 'requesting' || msg.status === 'compacting' };
+      const composer: Partial<ComposerState> = {};
+      if (msg.status === 'requesting' || msg.status === 'compacting') composer.busy = true;
       if (typeof msg.permissionMode === 'string') composer.permissionMode = msg.permissionMode;
       return { appends: [], patches: [], composer };
     }

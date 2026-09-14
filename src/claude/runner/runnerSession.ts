@@ -84,6 +84,8 @@ interface PendingAsk {
 const MAX_BLOCKS = 2000;
 /** How long a graceful `end()` waits for the CLI to exit before killing it. */
 const END_GRACE_MS = 5000;
+/** Silence after an interrupt that counts as the turn being over (see `interrupt`). */
+const INTERRUPT_GRACE_MS = 5000;
 /** Attempts at the model list before giving up on a CLI that cannot answer. */
 const MAX_MODEL_ASKS = 3;
 
@@ -101,6 +103,8 @@ export class RunnerSession {
   private blockState: RunnerBlocksState = createRunnerState();
   private pending = new Map<string, PendingAsk>();
   private truncated = false;
+  /** Armed by `interrupt`, cleared by the turn actually ending. */
+  private interruptTimer?: ReturnType<typeof setTimeout>;
   /** The model list has been answered, so `init` does not ask for it again. */
   private modelsLoaded = false;
   private modelAttempts = 0;
@@ -192,12 +196,27 @@ export class RunnerSession {
     this.setLifecycle('running');
   }
 
+  /**
+   * Stop the turn. The pane's Stop button is the Send button wearing its other
+   * face, so `busy` has to come back down or the composer is stuck offering to
+   * interrupt a turn that is over. Normally the `result` message does that;
+   * whether an interrupt always produces one is not documented, so a watchdog
+   * calls the turn over after a few seconds of silence.
+   */
   async interrupt(): Promise<void> {
     try {
       await this.query?.interrupt();
     } catch (err) {
       this.deps.log(`runner interrupt failed: ${String(err)}`);
     }
+    clearTimeout(this.interruptTimer);
+    this.interruptTimer = setTimeout(() => {
+      this.interruptTimer = undefined;
+      if (!this.composer.busy) return;
+      this.deps.log('runner interrupt produced no result; treating the turn as over');
+      this.setComposer({ busy: false });
+      this.setLifecycle('idle');
+    }, INTERRUPT_GRACE_MS);
   }
 
   async setPermissionMode(mode: PermissionModeName): Promise<void> {
@@ -325,6 +344,7 @@ export class RunnerSession {
   }
 
   dispose(): void {
+    clearTimeout(this.interruptTimer);
     void this.end();
     this.appendEmitter.dispose();
     this.patchEmitter.dispose();
@@ -443,6 +463,8 @@ export class RunnerSession {
     if (appends.length > 0) this.append(appends);
     if (composer) this.setComposer(composer);
     if (turnEnd) {
+      clearTimeout(this.interruptTimer);
+      this.interruptTimer = undefined;
       this.setLifecycle(turnEnd.queued > 0 ? 'running' : 'idle');
       this.setComposer({ busy: turnEnd.queued > 0, queued: turnEnd.queued });
     }
@@ -479,6 +501,8 @@ export class RunnerSession {
     // A finished session never goes back to running.
     if (this.lifecycle === 'ended' || this.lifecycle === 'error') return;
     this.lifecycle = next;
+    // A process that has gone is not mid-turn, whatever the last message said.
+    if (next === 'ended' || next === 'error') this.setComposer({ busy: false, queued: 0 });
     this.stateEmitter.fire(next);
   }
 }
