@@ -470,7 +470,7 @@ for both the runner and `resumeInTerminal`. (Today PATH has 2.1.236 and the exte
 |---|---|---|
 | `agentWrangler.rowClickOpens` | `"conversation"` | `"conversation"` \| `"wherever-it-runs"` (old behaviour). |
 | `agentWrangler.conversation.openBeside` | `true` | First open uses `ViewColumn.Beside`; `false` → `Active`. |
-| `agentWrangler.runner.defaultPermissionMode` | `"default"` | Mode for sessions started here. |
+| `agentWrangler.runner.defaultPermissionMode` | `"acceptEdits"` | Mode for sessions started here. |
 | `agentWrangler.runner.model` | `""` | Empty = Claude Code's default. |
 | `agentWrangler.runner.autoResumeLastOnStartup` | `true` | Re-adopt the session the pane was showing when the window died. |
 

@@ -127,7 +127,7 @@ Transcripts and hook logs are both read incrementally (bounded tail reads with a
 
 ## Settings
 
-`agentWrangler.rowClickOpens` (`conversation` — or `wherever-it-runs` for the pre-pane behaviour) · `conversation.openBeside` (true) · `runner.defaultPermissionMode` (`default`) · `runner.model` (empty — Claude Code's own default) · `runner.autoResumeLastOnStartup` (true) · `agentWrangler.dashboardLocation` (`editor` — or `panel` for the bottom panel) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting, blocked or done) · `pollIntervalSeconds` (5)
+`agentWrangler.rowClickOpens` (`conversation` — or `wherever-it-runs` for the pre-pane behaviour) · `conversation.openBeside` (true) · `runner.defaultPermissionMode` (`acceptEdits` — or `default` to be asked every time, `plan` to plan first) · `runner.model` (empty — Claude Code's own default) · `runner.autoResumeLastOnStartup` (true) · `agentWrangler.dashboardLocation` (`editor` — or `panel` for the bottom panel) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting, blocked or done) · `pollIntervalSeconds` (5)
 
 ## Development
 

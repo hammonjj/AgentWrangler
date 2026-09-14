@@ -142,7 +142,7 @@
             "Accept file edits without asking; still ask for everything else.",
             "Plan first: no tools run until you approve a plan."
           ],
-          "default": "default",
+          "default": "acceptEdits",
           "description": "Permission mode for conversations started from Agent Wrangler. Changeable per session from the pane."
         },
         "agentWrangler.runner.autoResumeLastOnStartup": {

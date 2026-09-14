@@ -272,7 +272,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const runner = runners.start({
       cwd: s.cwd,
       resume: s.sessionId,
-      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'default'),
+      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
       model: model || undefined,
     });
     conversations.showRunner(runner);
@@ -673,7 +673,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const model = cfg.get<string>('runner.model', '').trim();
     const runner = runners.start({
       cwd,
-      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'default'),
+      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
       model: model || undefined,
     });
     conversations.showRunner(runner);
@@ -802,7 +802,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const runner = runners.start({
       cwd: record.cwd,
       resume: record.sessionId,
-      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'default'),
+      permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
       model: model || undefined,
     });
     log(`resumed ${record.sessionId} after a reload`);
