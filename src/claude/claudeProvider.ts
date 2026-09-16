@@ -221,6 +221,10 @@ export class ClaudeProvider implements AgentProvider {
       transcriptPath: idx?.path,
       pid: r.pid,
       prLink: s?.prLink,
+      // The transcript's birth time, not the registry's `startedAt`: this
+      // process may be the third one to pick up a conversation that began
+      // yesterday, and the age of the conversation is what the column is for.
+      conversationStartedAt: s?.startedAtMs,
     };
   }
 
@@ -286,6 +290,7 @@ export class ClaudeProvider implements AgentProvider {
       lastActivityAt: s.mtimeMs,
       transcriptPath: t.path,
       prLink: s.prLink,
+      conversationStartedAt: s.startedAtMs,
     };
   }
 

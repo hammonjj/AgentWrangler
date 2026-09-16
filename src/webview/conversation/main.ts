@@ -13,7 +13,7 @@ import type {
 import { decodedBytes, IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES } from '../../shared/conversation';
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
-import { STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
+import { displayTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -49,7 +49,7 @@ app.innerHTML = `
   <span id="meta"></span>
   <span id="spacer"></span>
   <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
-  <button id="pin" class="hdrbtn" title="Open this conversation in its own tab">Pin</button>
+  <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
 </div>
 <div id="banner" hidden></div>
 <div id="scroll"><div id="notch" hidden>earlier messages not shown</div><div id="blocks"></div></div>
@@ -608,7 +608,7 @@ function setStatus(status: SessionStatus, estimated: boolean): void {
 }
 
 function setMeta(session: SessionDTO): void {
-  ttl.textContent = session.title;
+  ttl.textContent = displayTitle(session);
   meta.textContent = [session.projectName, session.gitBranch !== 'HEAD' ? session.gitBranch : undefined, session.name]
     .filter(Boolean)
     .join(' · ');
@@ -1129,7 +1129,7 @@ jump.addEventListener('click', () => {
 });
 
 goToBtn.addEventListener('click', () => post({ type: 'goTo' }));
-pinBtn.addEventListener('click', () => post({ type: 'pin' }));
+pinBtn.addEventListener('click', () => post({ type: 'openInTab' }));
 releaseBtn.addEventListener('click', () => post({ type: 'release' }));
 adoptBtn.addEventListener('click', () => {
   // The host confirms before doing anything; disabling here only stops a

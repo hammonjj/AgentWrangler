@@ -24,12 +24,17 @@ import { ColumnPrefsService } from './core/columnPrefs';
 import { DEFAULT_CONFIG, type ConfigGetter, type WranglerConfig } from './core/config';
 import { DictationService } from './core/dictation';
 import { HiddenProjectsService } from './core/hiddenProjects';
+import { MAX_NICKNAME_LENGTH, NicknameService } from './core/nicknameService';
+import { PinService } from './core/pinService';
+import { autoPauseDecision, maxUsagePercent } from './core/autoPause';
+import { PauseService } from './core/pauseService';
+import { readStoppedPids } from './core/procTree';
 import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
 import { UsageService } from './core/usageService';
 import type { PermissionModeName } from './shared/conversation';
-import { STATUS_LABEL, type AgentSession, type OpenTarget, type SessionStatus } from './shared/model';
+import { displayLabel, displayTitle, STATUS_LABEL, type AgentSession, type OpenTarget, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
 import {
   CONVERSATION_PANEL_TYPE,
@@ -85,6 +90,8 @@ export function activate(context: vscode.ExtensionContext): void {
       pollIntervalSeconds: c.get('pollIntervalSeconds', DEFAULT_CONFIG.pollIntervalSeconds),
       showUsage: c.get('showUsage', DEFAULT_CONFIG.showUsage),
       usagePollIntervalSeconds: c.get('usagePollIntervalSeconds', DEFAULT_CONFIG.usagePollIntervalSeconds),
+      autoPauseEnabled: c.get('autoPause.enabled', DEFAULT_CONFIG.autoPauseEnabled),
+      autoPausePercent: c.get('autoPause.percent', DEFAULT_CONFIG.autoPausePercent),
     };
     return cfg;
   };
@@ -95,6 +102,30 @@ export function activate(context: vscode.ExtensionContext): void {
   const turnStats = new TurnStats(context.globalState);
   const provider = new ClaudeProvider(getConfig, log, turnStats);
   const archive = new ArchiveService(context.globalState);
+  // Which agents are frozen. Nothing is persisted: the answer is the process
+  // state itself, which every window reads the same way and which a reload
+  // cannot lose. See the header of pauseService.ts for why the persisted
+  // version of this was wrong.
+  const pause = new PauseService(
+    {
+      signal: (pid, sig) => process.kill(pid, sig),
+      isAlive: isPidAlive,
+      stopped: readStoppedPids,
+    },
+    log,
+  );
+  // Rows kept at the top, and the names the user gave them. Global state like
+  // the archive: both are about the session, not about the window looking at it.
+  const pins = new PinService(context.globalState);
+  const nicknames = new NicknameService(context.globalState);
+  // Applied in the store rather than at each render, because the dashboard, the
+  // conversation pane, the status bar, the quick picks, the toasts and the
+  // terminal label do not share a decoration step — only the store.
+  store.useNicknames((key) => nicknames.get(key));
+  // A rename changes nothing a provider scan would notice, so the store has to
+  // be told to re-apply and re-fire, or the new name waits for the session to
+  // do something before it appears.
+  context.subscriptions.push(nicknames.onDidChange(() => store.renameApplied()));
   // Column widths and the hidden set: a preference, so global state rather than
   // per-webview state — the same layout in the editor tab, the dock, and after
   // a restart.
@@ -114,7 +145,14 @@ export function activate(context: vscode.ExtensionContext): void {
   usage.start();
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('agentWrangler.showUsage') || e.affectsConfiguration('agentWrangler.usagePollIntervalSeconds')) {
+      // autoPause.enabled belongs here too: it decides whether usage is read at
+      // all when the cards are hidden, so turning it on must start the reads.
+      if (
+        e.affectsConfiguration('agentWrangler.showUsage') ||
+        e.affectsConfiguration('agentWrangler.usagePollIntervalSeconds') ||
+        e.affectsConfiguration('agentWrangler.autoPause.enabled') ||
+        e.affectsConfiguration('agentWrangler.autoPause.percent')
+      ) {
         void usage.refresh();
       }
     }),
@@ -202,7 +240,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // Owned by another window of this VSCode: focus it and have its
         // Agent Wrangler instance reveal the panel or terminal there.
         void relay.request(s.sessionId, s.cwd ?? '', s.pid);
-        vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${s.name ?? s.title} in its window…`, 4000);
+        vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${displayLabel(s)} in its window…`, 4000);
         return;
       case 'resume':
         resumeInTerminal(s, getConfig);
@@ -229,7 +267,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     if (kind === 'adopt') {
       const choice = await vscode.window.showWarningMessage(
-        `Take over ${s.name ?? s.title} in this window?`,
+        `Take over ${displayLabel(s)} in this window?`,
         {
           modal: true,
           detail:
@@ -245,12 +283,16 @@ export function activate(context: vscode.ExtensionContext): void {
       const now = store.get(s.key) ?? s;
       if (adoptActionFor(now, runners.owns(now.sessionId)) !== 'adopt') {
         void vscode.window.showInformationMessage(
-          `Agent Wrangler: ${now.name ?? now.title} started working again; take it over once it is idle.`,
+          `Agent Wrangler: ${displayLabel(now)} started working again; take it over once it is idle.`,
         );
         return;
       }
 
       if (now.pid !== undefined) {
+      // A stopped process cannot act on SIGTERM, so ending a paused session
+      // would burn the whole grace period and then SIGKILL it — the one outcome
+      // that can strand a half-written transcript line. Let it run first.
+        if (pause.isPaused(now.pid)) pause.resume(now.pid);
         const outcome = await endProcess(now.pid, {
           kill: (pid, signal) => process.kill(pid, signal),
           isAlive: isPidAlive,
@@ -259,7 +301,7 @@ export function activate(context: vscode.ExtensionContext): void {
         log(`adopt ${now.sessionId}: ending pid ${now.pid} → ${outcome}`);
         if (outcome === 'refused') {
           void vscode.window.showErrorMessage(
-            `Agent Wrangler: could not stop the process running ${now.name ?? now.title}, so it was not taken over. ` +
+            `Agent Wrangler: could not stop the process running ${displayLabel(now)}, so it was not taken over. ` +
               'Two processes on one session would corrupt its transcript.',
           );
           return;
@@ -295,7 +337,7 @@ export function activate(context: vscode.ExtensionContext): void {
    * where that cost gets stated instead.
    */
   const confirmAndCloseSession = async (s: AgentSession): Promise<void> => {
-    const label = s.name ?? s.title;
+    const label = displayLabel(s);
     if (!runners.owns(s.sessionId) && s.pid === undefined) {
       void vscode.window.showWarningMessage(
         `Agent Wrangler: no process is known for ${label}, so there is nothing to close.`,
@@ -324,6 +366,10 @@ export function activate(context: vscode.ExtensionContext): void {
       await runners.end(runner);
       log(`closed ${now.sessionId}: ended the runner in this window`);
     } else if (now.pid !== undefined) {
+      // A stopped process cannot act on SIGTERM, so ending a paused session
+      // would burn the whole grace period and then SIGKILL it — the one outcome
+      // that can strand a half-written transcript line. Let it run first.
+      if (pause.isPaused(now.pid)) pause.resume(now.pid);
       const outcome = await endProcess(now.pid, {
         kill: (pid, signal) => process.kill(pid, signal),
         isAlive: isPidAlive,
@@ -342,6 +388,110 @@ export function activate(context: vscode.ExtensionContext): void {
     // the row the user just acted on does not sit there looking alive.
     void store.forceRefresh();
   };
+
+  /**
+   * Freeze or thaw one session.
+   *
+   * No confirm, deliberately. Closing a session asks first because it cannot be
+   * taken back; pausing can, by pressing the same thing again, and a dialog in
+   * front of the button you reach for when you are watching the last of your
+   * tokens disappear is friction in exactly the wrong place.
+   */
+  const setPaused = (s: AgentSession, wanted: boolean): void => {
+    const label = displayLabel(s);
+    const outcome = wanted ? pause.pause(s.pid) : pause.resume(s.pid);
+    log(`${wanted ? 'pause' : 'resume'} ${s.sessionId} (pid ${s.pid ?? '?'}) → ${outcome}`);
+    if (outcome === 'gone') {
+      void vscode.window.showWarningMessage(
+        `Agent Wrangler: the process running ${label} is gone, so there was nothing to ${wanted ? 'pause' : 'resume'}.`,
+      );
+      return;
+    }
+    if (outcome === 'refused') {
+      void vscode.window.showErrorMessage(
+        `Agent Wrangler: could not ${wanted ? 'pause' : 'resume'} ${label} — the signal was refused. ` +
+          'It may belong to another user.',
+      );
+      return;
+    }
+    vscode.window.setStatusBarMessage(`Agent Wrangler: ${label} ${wanted ? 'paused' : 'resumed'}`, 4000);
+    // A resumed session starts writing again immediately; a paused one has just
+    // stopped. Either way the row is out of date the moment the signal lands.
+    void store.forceRefresh();
+  };
+
+  /**
+   * Everything at once — the token-emergency button.
+   *
+   * Archived sessions are included. Archiving is about what is in the way on
+   * screen, not about what is spending, and a forgotten agent grinding through
+   * a plan in a folder you stopped looking at is precisely what this is for.
+   */
+  const setPausedAll = (wanted: boolean, why?: string): boolean => {
+    let acted = false;
+    if (wanted) {
+      const candidates = store.sessions
+        .filter((s) => s.status !== 'ended' && s.pid !== undefined && !pause.isPaused(s.pid))
+        .map((s) => s.pid);
+      if (candidates.length === 0) {
+        // Only worth saying when a human pressed the button. Auto-pause reaching
+        // an empty machine is not news, and the caller uses the `false` to stay
+        // armed rather than spending its one shot on nothing.
+        if (!why) void vscode.window.showInformationMessage('Agent Wrangler: nothing is running to pause.');
+        return false;
+      }
+      const r = pause.pauseAll(candidates);
+      acted = r.ok > 0;
+      log(`pause all${why ? ` (${why})` : ''}: ${r.ok} paused, ${r.gone} already gone, ${r.refused} refused`);
+      const trouble = r.refused > 0 ? `, ${r.refused} refused the signal` : '';
+      void vscode.window.showInformationMessage(
+        `Agent Wrangler: paused ${r.ok} agent${r.ok === 1 ? '' : 's'}${trouble}${why ? ` — ${why}` : ''}.`,
+      );
+    } else {
+      const r = pause.resumeAll();
+      acted = r.ok > 0;
+      log(`resume all: ${r.ok} resumed, ${r.gone} gone, ${r.refused} refused`);
+      const trouble = r.refused > 0 ? `, ${r.refused} refused the signal` : '';
+      void vscode.window.showInformationMessage(
+        `Agent Wrangler: resumed ${r.ok} agent${r.ok === 1 ? '' : 's'}${trouble}.`,
+      );
+    }
+    void store.forceRefresh();
+    return acted;
+  };
+
+  /**
+   * Auto-pause: stop everything by itself when the plan is nearly spent.
+   *
+   * Armed state is per-window and deliberately not persisted. Two windows both
+   * firing is harmless — the second finds everything paused already and pauses
+   * nothing — whereas a persisted flag would have a restart mid-window decide
+   * it had already fired and sail past the threshold in silence.
+   *
+   * It only disarms once it has actually stopped something. The first usage
+   * reading lands within milliseconds of activation (it is adopted from the
+   * shared cache file), long before the provider's first scan has found any
+   * sessions, so a window reloaded while over the threshold would otherwise
+   * spend its one shot on an empty store and never fire again for the rest of
+   * the limit window.
+   */
+  let autoPauseArmed = true;
+  context.subscriptions.push(
+    usage.onDidChange(() => {
+      const cfg = getConfig();
+      const percent = maxUsagePercent(usage.usage.last);
+      const decision = autoPauseDecision(
+        percent,
+        { enabled: cfg.autoPauseEnabled, percent: cfg.autoPausePercent },
+        autoPauseArmed,
+      );
+      if (!decision.fire) {
+        autoPauseArmed = decision.armed;
+        return;
+      }
+      if (setPausedAll(true, `plan usage reached ${percent}%`)) autoPauseArmed = false;
+    }),
+  );
 
   const actions: SessionActions = {
     smartOpen(key) {
@@ -371,7 +521,7 @@ export function activate(context: vscode.ExtensionContext): void {
         log(`goTo ${s.name ?? s.sessionId}: process ${loc.kind} → ${target}`);
         if (target === 'conversation') {
           vscode.window.setStatusBarMessage(
-            `Agent Wrangler: ${s.name ?? s.title} runs outside this VSCode; nothing here can reveal it.`,
+            `Agent Wrangler: ${displayLabel(s)} runs outside this VSCode; nothing here can reveal it.`,
             4000,
           );
           return;
@@ -379,8 +529,32 @@ export function activate(context: vscode.ExtensionContext): void {
         goToSession(s, target, loc);
       })();
     },
-    pin(key) {
+    openInTab(key) {
       conversations.pin(key);
+    },
+    togglePinned(key) {
+      pins.toggle(key);
+      // Wanting a row out of the way and at the top of the table at once is not
+      // a state worth being able to reach, so the two clear each other.
+      if (pins.isPinned(key)) archive.set(key, false);
+    },
+    rename(key) {
+      const s = store.get(key);
+      if (!s) return;
+      void (async () => {
+        const value = await vscode.window.showInputBox({
+          title: `Name for ${s.title}`,
+          prompt: 'Your own name for this conversation. Leave it blank to go back to the name it came with.',
+          value: s.nickname ?? '',
+          placeHolder: s.title,
+          validateInput: (v) =>
+            v.trim().length > MAX_NICKNAME_LENGTH ? `Keep it to ${MAX_NICKNAME_LENGTH} characters or fewer.` : undefined,
+        });
+        // Escape gives undefined and must change nothing; an empty string is a
+        // deliberate "use its own title again", which is what clearing does.
+        if (value === undefined) return;
+        nicknames.set(key, value);
+      })();
     },
     adopt(key) {
       const s = store.get(key);
@@ -393,7 +567,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!s || !runner) return;
       void (async () => {
         const choice = await vscode.window.showWarningMessage(
-          `Hand ${s.name ?? s.title} back to a terminal?`,
+          `Hand ${displayLabel(s)} back to a terminal?`,
           {
             modal: true,
             detail:
@@ -412,6 +586,14 @@ export function activate(context: vscode.ExtensionContext): void {
       const s = store.get(key);
       if (!s) return;
       void confirmAndCloseSession(s);
+    },
+    pauseSession(key, wanted) {
+      const s = store.get(key);
+      if (!s) return;
+      setPaused(s, wanted);
+    },
+    pauseAll(wanted) {
+      setPausedAll(wanted);
     },
     resume(key) {
       const s = store.get(key);
@@ -464,7 +646,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // The prompt was answered in Claude Code first, or the hook gave up
         // waiting; either way there is nothing left to decide from here.
         vscode.window.setStatusBarMessage(
-          `Agent Wrangler: ${s.name ?? s.title} is no longer waiting on that permission.`,
+          `Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`,
           4000,
         );
       });
@@ -552,6 +734,8 @@ export function activate(context: vscode.ExtensionContext): void {
     runners,
     projects,
     launcher,
+    pause,
+    pins,
   );
   context.subscriptions.push(
     dashboardPanel,
@@ -570,6 +754,8 @@ export function activate(context: vscode.ExtensionContext): void {
         runners,
         projects,
         launcher,
+        pause,
+        pins,
       ),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
@@ -583,7 +769,7 @@ export function activate(context: vscode.ExtensionContext): void {
     else void vscode.commands.executeCommand('agentWrangler.dashboard.focus');
   };
 
-  createStatusBar(store, archive, context);
+  createStatusBar(store, archive, pause, context);
 
   // Opt-in "waiting on you" toasts, with a per-session cooldown.
   const lastToastAt = new Map<string, number>();
@@ -597,10 +783,10 @@ export function activate(context: vscode.ExtensionContext): void {
         lastToastAt.set(s.key, now);
         const msg =
           s.status === 'blocked'
-            ? `${s.title} needs your permission${s.blockedReason ? ` for ${s.blockedReason}` : ''}`
+            ? `${displayTitle(s)} needs your permission${s.blockedReason ? ` for ${s.blockedReason}` : ''}`
             : s.status === 'done'
-              ? `${s.title} is done`
-              : `${s.title} is waiting on you`;
+              ? `${displayTitle(s)} is done`
+              : `${displayTitle(s)} is waiting on you`;
         void vscode.window
           .showInformationMessage(msg, 'Open', 'Dashboard')
           .then((choice) => {
@@ -621,7 +807,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const picked = await vscode.window.showQuickPick(
       candidates.map((s) => ({
-        label: `${QUICKPICK_ICON[s.status]} ${s.title}`,
+        label: `${QUICKPICK_ICON[s.status]} ${displayTitle(s)}`,
         description: [s.projectName, STATUS_LABEL[s.status]].filter(Boolean).join(' · '),
         detail: s.subtitle,
         key: s.key,
@@ -721,16 +907,30 @@ export function activate(context: vscode.ExtensionContext): void {
       'agentWrangler.openConversation',
       withSession((k) => actions.smartOpen(k)),
     ),
+    // The command id still says "pin" because ids are the stable thing a
+    // keybinding points at; only what it is called changed, when pinning a row
+    // took the word.
     vscode.commands.registerCommand(
       'agentWrangler.pinConversation',
-      withSession((k) => actions.pin(k)),
+      withSession((k) => actions.openInTab(k)),
     ),
+    vscode.commands.registerCommand('agentWrangler.renameConversation', withSession((k) => actions.rename(k))),
+    vscode.commands.registerCommand('agentWrangler.pinToTop', withSession((k) => actions.togglePinned(k))),
     vscode.commands.registerCommand('agentWrangler.goToSession', withSession((k) => actions.goTo(k))),
     vscode.commands.registerCommand(
       'agentWrangler.resumeInTerminal',
       withSession((k) => actions.resume(k), (s) => s.status === 'ended'),
     ),
     vscode.commands.registerCommand('agentWrangler.copySessionId', withSession((k) => actions.copyId(k))),
+    vscode.commands.registerCommand('agentWrangler.pauseAll', () => setPausedAll(true)),
+    vscode.commands.registerCommand('agentWrangler.resumeAll', () => setPausedAll(false)),
+    vscode.commands.registerCommand(
+      'agentWrangler.pauseSession',
+      withSession(
+        (k) => actions.pauseSession(k, !pause.isPaused(store.get(k)?.pid)),
+        (s) => s.status !== 'ended' && s.pid !== undefined,
+      ),
+    ),
     vscode.commands.registerCommand(
       'agentWrangler.revealTranscript',
       withSession((k) => actions.reveal(k), (s) => s.transcriptPath !== undefined),

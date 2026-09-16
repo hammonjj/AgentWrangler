@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
 import type { ColumnPrefsService } from '../core/columnPrefs';
 import type { Disposable } from '../core/events';
+import type { PauseService } from '../core/pauseService';
+import type { PinService } from '../core/pinService';
 import type { SessionStore } from '../core/sessionStore';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { HookHealth, ProjectDTO } from '../shared/model';
@@ -79,6 +81,8 @@ export class DashboardHost {
     private runners: RunnerOwnership,
     private projects: ProjectSource,
     private launcher: ConversationLauncher,
+    private pause: PauseService,
+    private pins: PinService,
   ) {
     webview.options = {
       enableScripts: true,
@@ -110,6 +114,12 @@ export class DashboardHost {
       this.runners.onDidChange(() => this.pushSnapshot()),
       // A folder removed from one dashboard's dropdown is removed from both.
       this.projects.onDidChange(() => this.pushSnapshot()),
+      // Pausing is machine-wide and its record is global state, so a pause from
+      // any window has to reach every dashboard's rows and its bar button.
+      this.pause.onDidChange(() => this.pushSnapshot()),
+      // Pinning moves a row between sections without changing anything the
+      // store tracks, so the push has to come from here.
+      this.pins.onDidChange(() => this.pushSnapshot()),
     );
   }
 
@@ -131,7 +141,9 @@ export class DashboardHost {
     const livePids = raw
       .filter((s) => s.provider === 'claude' && s.status !== 'ended' && s.pid !== undefined)
       .map((s) => s.pid as number);
-    const locations = await this.locator.locateMany(livePids);
+    // Both ask the OS about the same pids and neither depends on the other:
+    // where each process lives, and which of them are stopped.
+    const [locations] = await Promise.all([this.locator.locateMany(livePids), this.pause.refresh(livePids)]);
     if (seq !== this.snapshotSeq) return; // superseded while we waited
 
     const behavior = vscode.workspace
@@ -149,6 +161,9 @@ export class DashboardHost {
       return {
         ...s,
         archived: this.archive.isArchived(s.key),
+        pinned: this.pins.isPinned(s.key) || undefined,
+        pinnedAt: this.pins.pinnedAt(s.key),
+        paused: this.pause.isPaused(s.pid) || undefined,
         runnerOwned: runnerOwned || undefined,
         openTarget: openTargetFor(s, location, isInThisWorkspace(s.cwd), behavior),
       };
@@ -178,12 +193,21 @@ export class DashboardHost {
         this.actions.smartOpen(m.key);
         break;
       case 'action':
-        if (m.action === 'pin') this.actions.pin(m.key);
+        if (m.action === 'openInTab') this.actions.openInTab(m.key);
+        else if (m.action === 'pin') this.actions.togglePinned(m.key);
+        else if (m.action === 'rename') this.actions.rename(m.key);
         else if (m.action === 'resume') this.actions.resume(m.key);
-        else if (m.action === 'archive') this.archive.toggle(m.key);
+        else if (m.action === 'archive') {
+          this.archive.toggle(m.key);
+          // The mirror of what pinning does to archiving: the two are opposite
+          // instructions and cannot both be in force.
+          if (this.archive.isArchived(m.key)) this.pins.set(m.key, false);
+        }
         else if (m.action === 'copyId') this.actions.copyId(m.key);
         else if (m.action === 'goTo') this.actions.goTo(m.key);
         else if (m.action === 'close') this.actions.closeSession(m.key);
+        else if (m.action === 'pause') this.actions.pauseSession(m.key, true);
+        else if (m.action === 'unpause') this.actions.pauseSession(m.key, false);
         else if (m.action === 'allow' || m.action === 'deny' || m.action === 'always') {
           this.actions.decidePermission(m.key, m.action);
         }
@@ -214,6 +238,9 @@ export class DashboardHost {
         break;
       case 'refreshProjects':
         void this.refreshProjects();
+        break;
+      case 'pauseAll':
+        this.actions.pauseAll(m.pause);
         break;
     }
   }

@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
 import type { ColumnPrefsService } from '../core/columnPrefs';
+import type { PauseService } from '../core/pauseService';
+import type { PinService } from '../core/pinService';
 import type { SessionStore } from '../core/sessionStore';
 import type { SessionActions } from './actions';
 import {
@@ -40,6 +42,8 @@ export class DashboardPanelManager implements vscode.Disposable {
     private runners: RunnerOwnership,
     private projects: ProjectSource,
     private launcher: ConversationLauncher,
+    private pause: PauseService,
+    private pins: PinService,
   ) {}
 
   /** True once a tab exists — created here, or restored by VSCode on reload. */
@@ -90,6 +94,8 @@ export class DashboardPanelManager implements vscode.Disposable {
       this.runners,
       this.projects,
       this.launcher,
+      this.pause,
+      this.pins,
     );
     panel.onDidDispose(() => {
       this.host?.dispose();

@@ -1,4 +1,5 @@
 import type { UsageError, UsageSnapshot, UsageState } from '../shared/usage';
+import { maxUsagePercent, usageIntervalSeconds } from './autoPause';
 import type { ConfigGetter } from './config';
 import { Emitter, type Disposable, type Listener } from './events';
 import type { UsageCache } from './usageCache';
@@ -54,8 +55,21 @@ export class UsageService implements Disposable {
     return this.state;
   }
 
+  /** Whether the dashboard should render the cards. */
   get enabled(): boolean {
     return this.getConfig().showUsage;
+  }
+
+  /**
+   * Whether to keep reading at all. Not the same question as `enabled`: hiding
+   * the cards is a preference about a 300px dock, but auto-pause reads the same
+   * numbers, and letting a display setting quietly switch off a spending guard
+   * is exactly the kind of coupling nobody would guess at from the setting's
+   * description.
+   */
+  private get reading(): boolean {
+    const c = this.getConfig();
+    return c.showUsage || c.autoPauseEnabled;
   }
 
   start(): void {
@@ -74,14 +88,26 @@ export class UsageService implements Disposable {
     await this.tick(opts.force === true);
   }
 
+  /**
+   * The current cadence. Not a constant: as a limit is approached the cards
+   * stop being a background fact and become the thing being watched, so the
+   * interval tightens (see `usageIntervalSeconds`). The setting's own 15s floor
+   * still applies, and the shared cache means this is one read per interval for
+   * the whole machine however many windows are open.
+   */
   private intervalMs(): number {
-    return Math.max(15, this.getConfig().usagePollIntervalSeconds) * 1000;
+    const cfg = this.getConfig();
+    const seconds = usageIntervalSeconds(cfg.usagePollIntervalSeconds, maxUsagePercent(this.state.last), {
+      enabled: cfg.autoPauseEnabled,
+      percent: cfg.autoPausePercent,
+    });
+    return Math.max(15, seconds) * 1000;
   }
 
   private async tick(force: boolean): Promise<void> {
     if (this.disposed || this.inFlight) return;
-    if (!this.enabled) {
-      // Disabled: clear anything shown and check back in case it is re-enabled.
+    if (!this.reading) {
+      // Off entirely: clear anything held and check back in case it returns.
       if (this.state.last || this.state.error) {
         this.state = {};
         this.emitter.fire();

@@ -28,7 +28,18 @@ export class ArchiveService {
   }
 
   toggle(key: string): void {
-    if (!this.keys.delete(key)) this.keys.add(key);
+    this.set(key, !this.isArchived(key));
+  }
+
+  /**
+   * Explicit form, for the caller that has to clear this without knowing the
+   * current value — pinning a row has to unarchive it, since wanting something
+   * out of the way and at the top at once is not a state worth reaching.
+   */
+  set(key: string, archived: boolean): void {
+    if (archived === this.keys.has(key)) return;
+    if (archived) this.keys.add(key);
+    else this.keys.delete(key);
     void this.storage.update(STORAGE_KEY, [...this.keys]);
     this.emitter.fire();
   }

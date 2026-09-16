@@ -16,10 +16,11 @@ import {
 } from '../../shared/columns';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
-import { clampMenuPosition, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
+import { canPauseSession, clampMenuPosition, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
 import {
   askLine,
   capitalize,
+  displayLabel,
   etaText,
   formatAge,
   formatDuration,
@@ -195,7 +196,7 @@ function rowMenuHtml(): string {
         }>${esc(i.label)}</button>`,
     )
     .join('');
-  return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(s.name ?? s.title)}">${rows}</div>`;
+  return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}">${rows}</div>`;
 }
 
 /**
@@ -213,6 +214,17 @@ function rowMenuHtml(): string {
  */
 function hereChip(s: SessionDTO): string {
   return s.runnerOwned ? '<span class="chip here" title="Running in this window — you can type into it">here</span>' : '';
+}
+
+/**
+ * A frozen session. Worth a chip of its own as well as the section, because the
+ * status underneath it (Busy, Blocked) is still on the row and would otherwise
+ * read as something that is still happening.
+ */
+function pausedChip(s: SessionDTO): string {
+  return s.paused
+    ? '<span class="chip paused" title="Stopped, and spending nothing. Right-click → Resume agent to let it run again.">paused</span>'
+    : '';
 }
 
 function statusChip(s: SessionDTO): string {
@@ -363,15 +375,29 @@ function rowTitle(s: SessionDTO): string {
   // Pin and archive used to be buttons on the row and are now in the menu, so
   // the tooltip is what carries the discovery — nothing else on the row hints
   // that a right-click does anything.
-  const more = '\nRight-click for pin, archive and more.';
+  const more = '\nRight-click to pin, rename, archive and more.';
+  // The row shows the nickname instead of the title, so this is the only place
+  // the name it came with is still readable.
+  const renamed = s.nickname ? `\n\nRenamed by you. Its own title is "${s.title}".` : '';
   const est =
     s.statusIsEstimated && s.status !== 'ended'
       ? '\n\nStatus is estimated from the transcript — this session started before hooks were installed. Restart it for exact status.'
       : '';
+  // A paused session is silent for a reason we know, so it says the reason
+  // rather than the two paragraphs below — both of which describe a session
+  // that stopped on its own, which is exactly what this one did not do.
+  //
+  // It does not name the status it was paused at. Status is derived from
+  // transcript activity, and a paused process makes none, so a session frozen
+  // while Busy is relabelled Possibly stuck a few minutes later — the tooltip
+  // would then confidently report a status the session never had.
+  const paused = s.paused
+    ? '\n\nPaused: its process is stopped, so it is spending nothing and its status has stopped moving. Resume it from the row menu or the bar button and it carries on from exactly where it was.'
+    : '';
   // "Stuck" is a silence, and generation is silent too; say so where the label
   // is read, so a red row prompts a look rather than a restart.
   const stuck =
-    s.status === 'stuck'
+    s.status === 'stuck' && !s.paused
       ? `\n\nNo transcript or hook activity for ${formatAge(Date.now(), s.lastActivityAt)}. A long think or a large file write is silent like this too — check the session before assuming it is wedged.`
       : '';
   // Done vs Waiting is read off the reply text; say so, since it is a judgment.
@@ -379,7 +405,7 @@ function rowTitle(s: SessionDTO): string {
     s.status === 'done'
       ? '\n\nFinished its turn without asking you anything — the last message reads as a report. Waiting would mean it ended on a question or a choice.'
       : '';
-  return `${hint}${more}${est}${stuck}${done}${progressTooltip(s)}`;
+  return `${hint}${more}${renamed}${est}${paused}${stuck}${done}${progressTooltip(s)}`;
 }
 
 /** Branch, minus the detached-HEAD placeholder, which names nothing. */
@@ -424,12 +450,45 @@ const CELL: Record<ColumnId, (s: SessionDTO) => string> = {
   },
   pr: (s) => `<td class="c-pr">${prHtml(s)}</td>`,
   eta: etaCell,
-  age: (s) => `<td class="c-age" data-age-ts="${s.lastActivityAt}">${formatAge(Date.now(), s.lastActivityAt)}</td>`,
+  age: ageCell,
 };
 
+/**
+ * How old the *conversation* is — time since its first prompt, across however
+ * many processes and resumes it has taken since.
+ *
+ * It used to count from the last activity, which answered a question the table
+ * already answers twice over: a busy row has its tool's elapsed time and an ETA,
+ * and an idle row's silence is the whole point of it being idle. "How long has
+ * this been going" is the thing nothing else says, and it is what decides
+ * whether an agent has been at one task all morning.
+ *
+ * The fallbacks are ordered by how close they get to that meaning: the
+ * transcript's birth time is exact; the registry's `startedAt` is this
+ * *process*, which for a resumed session is too late but never too early; and
+ * last activity is what is left when there is no transcript at all. The tooltip
+ * says which one it is rather than presenting a guess as a fact.
+ */
+function ageCell(s: SessionDTO): string {
+  const now = Date.now();
+  const since = s.conversationStartedAt ?? s.startedAt ?? s.lastActivityAt;
+  const lastSeen = `last activity ${formatAge(now, s.lastActivityAt)} ago`;
+  const title =
+    s.conversationStartedAt !== undefined
+      ? `Conversation started ${formatAge(now, since)} ago · ${lastSeen}`
+      : s.startedAt !== undefined
+        ? `This process started ${formatAge(now, since)} ago — the conversation itself may be older · ${lastSeen}`
+        : `No start time known, so this is ${lastSeen}`;
+  return `<td class="c-age" title="${esc(title)}" data-age-ts="${since}">${formatAge(now, since)}</td>`;
+}
+
 function rowHtml(s: SessionDTO, span: number): string {
-  const titleLine =
-    s.name && s.title !== s.name
+  // A nickname replaces the whole line, registry handle included: the point of
+  // naming something is that the name is what you see. The title it came with
+  // is not lost — it moves to the row's tooltip.
+  const titleLine = s.nickname
+    ? esc(s.nickname)
+    : s.name && s.title !== s.name
       ? `<span class="nm">${esc(s.name)}</span><span class="sep">·</span>${esc(s.title)}`
       : esc(s.title);
   const kindChip =
@@ -454,10 +513,10 @@ function rowHtml(s: SessionDTO, span: number): string {
   const secondLine = meta ? `<div class="sub"><span class="meta">${meta}</span></div>` : '';
 
   const est = s.statusIsEstimated && s.status !== 'ended' ? ' est' : '';
-  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
+  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${pausedChip(s)}${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -615,8 +674,13 @@ bar.id = 'bar';
 // A <select> cannot carry a per-row button: an <option> renders as text and
 // nothing else. So the dropdown is a popup of real rows — the folder on the
 // left, the X that stops offering it on the right.
+// The bar has two halves with opposite jobs. On the left, starting work: the
+// folder and the button that spawns an agent in it. Pushed to the right, the
+// controls that act on everything already running — a group that begins with
+// the pause button and is where anything fleet-wide belongs later.
 bar.innerHTML = `<button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
 <button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
+<div id="ctl" class="ctlgroup"><button id="pauseall" class="ctlbtn"></button></div>
 <div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
 app.insertAdjacentElement('beforebegin', bar);
 
@@ -624,6 +688,7 @@ const projBtn = bar.querySelector<HTMLButtonElement>('#proj')!;
 const projName = bar.querySelector<HTMLElement>('#projname')!;
 const projMenu = bar.querySelector<HTMLElement>('#projmenu')!;
 const newBtn = bar.querySelector<HTMLButtonElement>('#new')!;
+const pauseBtn = bar.querySelector<HTMLButtonElement>('#pauseall')!;
 
 let projects: ProjectDTO[] = [];
 let menuOpen = false;
@@ -722,6 +787,41 @@ newBtn.addEventListener('click', () => {
   if (cwd) post({ type: 'newConversation', cwd });
 });
 
+// ---- fleet controls ----
+
+/**
+ * The pause button is one button with two jobs, for the same reason the
+ * composer's Send/Stop is: the thing to press is always the button in the same
+ * place. Anything paused at all makes it *Resume*, because a half-frozen fleet
+ * is a state you want one click to leave — and it carries the count, since the
+ * rows that would tell you are usually scrolled away.
+ */
+function renderControls(): void {
+  const paused = sessions.filter((s) => s.paused).length;
+  const pausable = sessions.filter((s) => !s.paused && canPauseSession(s)).length;
+  const resuming = paused > 0;
+  pauseBtn.classList.toggle('on', resuming);
+  // U+FE0E pins both glyphs to their text presentation: left alone, macOS
+  // renders ▶ as a colour emoji, which is a different size from ⏸ beside it
+  // and makes the button change width when it changes job.
+  pauseBtn.textContent = resuming ? `▶︎ ${paused}` : '⏸︎';
+  pauseBtn.disabled = !resuming && pausable === 0;
+  pauseBtn.title = resuming
+    ? `Resume ${paused} paused agent${paused === 1 ? '' : 's'}, from exactly where ${paused === 1 ? 'it' : 'they'} stopped`
+    : pausable === 0
+      ? 'Nothing is running to pause'
+      : `Pause all ${pausable} running agent${pausable === 1 ? '' : 's'} on this machine, so they stop spending. Reversible.`;
+  pauseBtn.setAttribute('aria-label', pauseBtn.title);
+}
+
+pauseBtn.addEventListener('click', () => {
+  post({ type: 'pauseAll', pause: !sessions.some((s) => s.paused) });
+});
+
+// Before the first snapshot there is nothing to pause, and a blank button that
+// still takes a click is worse than a disabled one that says so.
+renderControls();
+
 function render(): void {
   // A drag owns the widths until the pointer is released; re-rendering under it
   // would replace the <th> being dragged.
@@ -755,7 +855,15 @@ function render(): void {
   for (const sec of SECTION_ORDER) {
     const rows = groups.get(sec);
     if (!rows || rows.length === 0) continue;
-    rows.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+    // Every other section answers "what moved", so it sorts by recency. Pinned
+    // answers "where did I put that", so it sorts by when each pin was made and
+    // holds still — a pinned row that jumped around whenever its agent wrote a
+    // line would take back the one thing pinning is for.
+    rows.sort(
+      sec === 'pinned'
+        ? (a, b) => (a.pinnedAt ?? 0) - (b.pinnedAt ?? 0)
+        : (a, b) => b.lastActivityAt - a.lastActivityAt,
+    );
     const isCollapsed = collapsed.has(sec);
     html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${sec}">
 <tr class="sec st-${sec}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(SECTION_LABEL[sec])}<span class="count">${rows.length}</span></td></tr>`;
@@ -798,6 +906,8 @@ window.addEventListener('message', (e: MessageEvent) => {
     usage = m.usage;
     // Our own drag already drew this; anything else is another dashboard's.
     if (m.columns) columns = m.columns;
+    // The bar lives outside #app, so `render()` never touches it.
+    renderControls();
     render();
   }
 });

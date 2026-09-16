@@ -40,6 +40,52 @@ describe('UsageService', () => {
     svc.dispose();
   });
 
+  /**
+   * The cadence is not fixed: once a limit is close the cards stop being a
+   * background fact and become the thing being watched — and with auto-pause
+   * armed, a stale reading is the difference between stopping at 98% and
+   * finding out at 100%.
+   */
+  it('speeds up by itself once a limit is close, and settles again when it is not', async () => {
+    const read = okReader(95);
+    const svc = new UsageService(read, new MemoryUsageCache(), () => cfg, undefined, noJitter);
+    svc.start();
+    await flush();
+    expect(read).toHaveBeenCalledTimes(1);
+
+    // The configured 60s would still be waiting here; the near-limit 20s is not.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(read).toHaveBeenCalledTimes(2);
+
+    // Usage drops (the window reset): back to the interval the user set.
+    read.mockImplementation(async (now) => ({ ok: true, snapshot: snap(5, now) }));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(read).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(read).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(read).toHaveBeenCalledTimes(4);
+    svc.dispose();
+  });
+
+  /**
+   * Hiding the cards is a preference about a 300px dock. Auto-pause reads the
+   * same numbers, so a display setting must not quietly switch off a spending
+   * guard — nothing in either setting's description would lead you to expect it.
+   */
+  it('keeps reading for auto-pause when the cards are hidden', async () => {
+    cfg = { ...cfg, showUsage: false, autoPauseEnabled: true };
+    const read = okReader(99);
+    const svc = new UsageService(read, new MemoryUsageCache(), () => cfg, undefined, noJitter);
+    svc.start();
+    await flush();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(svc.usage.last?.windows[0].percent).toBe(99);
+    // Still hidden, though: the dashboard asks `enabled`, not `reading`.
+    expect(svc.enabled).toBe(false);
+    svc.dispose();
+  });
+
   it('two windows sharing a cache make one request between them', async () => {
     const cache = new MemoryUsageCache();
     const readA = okReader(30);

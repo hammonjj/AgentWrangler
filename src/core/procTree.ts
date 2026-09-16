@@ -21,6 +21,60 @@ export type ProcessTable = Map<number, number>;
 /** How far up to walk before assuming a cycle or runaway table. */
 const MAX_ANCESTOR_DEPTH = 32;
 
+/**
+ * Parse `ps -o pid=,stat=` output into the pids the OS currently has stopped.
+ *
+ * `stat` is the process state letter plus flags: `T` is stopped by a signal
+ * (SIGSTOP, or a terminal stop), `t` is stopped by a debugger. Both mean the
+ * same thing here — the process is not running and is not spending anything —
+ * and only the first character is the state, so `T+` and `Te` count too.
+ *
+ * This is what makes pausing honest across windows. A record of "sessions this
+ * window stopped" is bookkeeping that another window cannot see and can
+ * overwrite; the process state is the fact itself, shared by every window for
+ * free, correct after a reload, and true even for a process someone stopped
+ * from a shell with `kill -STOP`.
+ */
+export function parseStoppedPids(text: string): Set<number> {
+  const out = new Set<number>();
+  for (const line of text.split('\n')) {
+    const m = /^\s*(\d+)\s+([A-Za-z])/.exec(line);
+    if (m && (m[2] === 'T' || m[2] === 't')) out.add(Number(m[1]));
+  }
+  return out;
+}
+
+/**
+ * Which of `pids` are stopped right now. Asks about the given pids only, so a
+ * suspended editor or a backgrounded shell job elsewhere on the machine can
+ * never be mistaken for a paused agent.
+ *
+ * Resolves to an empty set when there is nothing to ask about, and to
+ * `undefined` when `ps` could not answer — which callers must treat as "no
+ * information", not as "nothing is paused".
+ */
+export function readStoppedPids(pids: number[]): Promise<Set<number> | undefined> {
+  if (pids.length === 0) return Promise.resolve(new Set());
+  // Our own pid rides along so that `ps` always matches something. `ps -p`
+  // exits non-zero when none of the pids exist, which is otherwise
+  // indistinguishable from `ps` being broken — and reading "they have all
+  // ended" as "I could not tell" would leave ended sessions marked paused for
+  // as long as the window stayed open. A running process is never reported as
+  // stopped, so it cannot show up in the answer.
+  const query = [...pids, process.pid].join(',');
+  return new Promise((resolve) => {
+    cp.execFile('ps', ['-o', 'pid=,stat=', '-p', query], { timeout: 5_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      if (err) {
+        resolve(undefined);
+        return;
+      }
+      const stopped = parseStoppedPids(stdout);
+      stopped.delete(process.pid);
+      resolve(stopped);
+    });
+  });
+}
+
 /** Parse `ps -A -o pid=,ppid=` output: two integers per line, whitespace-separated. */
 export function parseProcessTable(text: string): ProcessTable {
   const table: ProcessTable = new Map();
