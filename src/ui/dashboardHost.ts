@@ -136,7 +136,9 @@ export class DashboardHost {
     const livePids = raw
       .filter((s) => s.provider === 'claude' && s.status !== 'ended' && s.pid !== undefined)
       .map((s) => s.pid as number);
-    const locations = await this.locator.locateMany(livePids);
+    // Both ask the OS about the same pids and neither depends on the other:
+    // where each process lives, and which of them are stopped.
+    const [locations] = await Promise.all([this.locator.locateMany(livePids), this.pause.refresh(livePids)]);
     if (seq !== this.snapshotSeq) return; // superseded while we waited
 
     const behavior = vscode.workspace
@@ -154,7 +156,7 @@ export class DashboardHost {
       return {
         ...s,
         archived: this.archive.isArchived(s.key),
-        paused: this.pause.isPaused(s.key) || undefined,
+        paused: this.pause.isPaused(s.pid) || undefined,
         runnerOwned: runnerOwned || undefined,
         openTarget: openTargetFor(s, location, isInThisWorkspace(s.cwd), behavior),
       };

@@ -26,6 +26,7 @@ import { DictationService } from './core/dictation';
 import { HiddenProjectsService } from './core/hiddenProjects';
 import { autoPauseDecision, maxUsagePercent } from './core/autoPause';
 import { PauseService } from './core/pauseService';
+import { readStoppedPids } from './core/procTree';
 import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
@@ -99,17 +100,18 @@ export function activate(context: vscode.ExtensionContext): void {
   const turnStats = new TurnStats(context.globalState);
   const provider = new ClaudeProvider(getConfig, log, turnStats);
   const archive = new ArchiveService(context.globalState);
-  // Which agents are frozen. Global state, like the archive: pausing is about
-  // this machine's token budget and the sessions being stopped mostly belong to
-  // other windows. Persisting it also means a reload cannot strand a stopped
-  // process with no UI left to start it again.
+  // Which agents are frozen. Nothing is persisted: the answer is the process
+  // state itself, which every window reads the same way and which a reload
+  // cannot lose. See the header of pauseService.ts for why the persisted
+  // version of this was wrong.
   const pause = new PauseService(
-    context.globalState,
-    { signal: (pid, sig) => process.kill(pid, sig), isAlive: isPidAlive },
+    {
+      signal: (pid, sig) => process.kill(pid, sig),
+      isAlive: isPidAlive,
+      stopped: readStoppedPids,
+    },
     log,
   );
-  // Anything remembered from a previous run whose process has since gone.
-  pause.reconcile();
   // Column widths and the hidden set: a preference, so global state rather than
   // per-webview state — the same layout in the editor tab, the dock, and after
   // a restart.
@@ -129,7 +131,14 @@ export function activate(context: vscode.ExtensionContext): void {
   usage.start();
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('agentWrangler.showUsage') || e.affectsConfiguration('agentWrangler.usagePollIntervalSeconds')) {
+      // autoPause.enabled belongs here too: it decides whether usage is read at
+      // all when the cards are hidden, so turning it on must start the reads.
+      if (
+        e.affectsConfiguration('agentWrangler.showUsage') ||
+        e.affectsConfiguration('agentWrangler.usagePollIntervalSeconds') ||
+        e.affectsConfiguration('agentWrangler.autoPause.enabled') ||
+        e.affectsConfiguration('agentWrangler.autoPause.percent')
+      ) {
         void usage.refresh();
       }
     }),
@@ -266,6 +275,10 @@ export function activate(context: vscode.ExtensionContext): void {
       }
 
       if (now.pid !== undefined) {
+      // A stopped process cannot act on SIGTERM, so ending a paused session
+      // would burn the whole grace period and then SIGKILL it — the one outcome
+      // that can strand a half-written transcript line. Let it run first.
+        if (pause.isPaused(now.pid)) pause.resume(now.pid);
         const outcome = await endProcess(now.pid, {
           kill: (pid, signal) => process.kill(pid, signal),
           isAlive: isPidAlive,
@@ -339,6 +352,10 @@ export function activate(context: vscode.ExtensionContext): void {
       await runners.end(runner);
       log(`closed ${now.sessionId}: ended the runner in this window`);
     } else if (now.pid !== undefined) {
+      // A stopped process cannot act on SIGTERM, so ending a paused session
+      // would burn the whole grace period and then SIGKILL it — the one outcome
+      // that can strand a half-written transcript line. Let it run first.
+      if (pause.isPaused(now.pid)) pause.resume(now.pid);
       const outcome = await endProcess(now.pid, {
         kill: (pid, signal) => process.kill(pid, signal),
         isAlive: isPidAlive,
@@ -368,7 +385,7 @@ export function activate(context: vscode.ExtensionContext): void {
    */
   const setPaused = (s: AgentSession, wanted: boolean): void => {
     const label = s.name ?? s.title;
-    const outcome = wanted ? pause.pause(s.key, s.pid) : pause.resume(s.key);
+    const outcome = wanted ? pause.pause(s.pid) : pause.resume(s.pid);
     log(`${wanted ? 'pause' : 'resume'} ${s.sessionId} (pid ${s.pid ?? '?'}) → ${outcome}`);
     if (outcome === 'gone') {
       void vscode.window.showWarningMessage(
@@ -396,16 +413,21 @@ export function activate(context: vscode.ExtensionContext): void {
    * screen, not about what is spending, and a forgotten agent grinding through
    * a plan in a folder you stopped looking at is precisely what this is for.
    */
-  const setPausedAll = (wanted: boolean, why?: string): void => {
+  const setPausedAll = (wanted: boolean, why?: string): boolean => {
+    let acted = false;
     if (wanted) {
       const candidates = store.sessions
-        .filter((s) => s.status !== 'ended' && s.pid !== undefined && !pause.isPaused(s.key))
-        .map((s) => ({ key: s.key, pid: s.pid }));
+        .filter((s) => s.status !== 'ended' && s.pid !== undefined && !pause.isPaused(s.pid))
+        .map((s) => s.pid);
       if (candidates.length === 0) {
-        void vscode.window.showInformationMessage('Agent Wrangler: nothing is running to pause.');
-        return;
+        // Only worth saying when a human pressed the button. Auto-pause reaching
+        // an empty machine is not news, and the caller uses the `false` to stay
+        // armed rather than spending its one shot on nothing.
+        if (!why) void vscode.window.showInformationMessage('Agent Wrangler: nothing is running to pause.');
+        return false;
       }
       const r = pause.pauseAll(candidates);
+      acted = r.ok > 0;
       log(`pause all${why ? ` (${why})` : ''}: ${r.ok} paused, ${r.gone} already gone, ${r.refused} refused`);
       const trouble = r.refused > 0 ? `, ${r.refused} refused the signal` : '';
       void vscode.window.showInformationMessage(
@@ -413,6 +435,7 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     } else {
       const r = pause.resumeAll();
+      acted = r.ok > 0;
       log(`resume all: ${r.ok} resumed, ${r.gone} gone, ${r.refused} refused`);
       const trouble = r.refused > 0 ? `, ${r.refused} refused the signal` : '';
       void vscode.window.showInformationMessage(
@@ -420,6 +443,7 @@ export function activate(context: vscode.ExtensionContext): void {
       );
     }
     void store.forceRefresh();
+    return acted;
   };
 
   /**
@@ -429,6 +453,13 @@ export function activate(context: vscode.ExtensionContext): void {
    * firing is harmless — the second finds everything paused already and pauses
    * nothing — whereas a persisted flag would have a restart mid-window decide
    * it had already fired and sail past the threshold in silence.
+   *
+   * It only disarms once it has actually stopped something. The first usage
+   * reading lands within milliseconds of activation (it is adopted from the
+   * shared cache file), long before the provider's first scan has found any
+   * sessions, so a window reloaded while over the threshold would otherwise
+   * spend its one shot on an empty store and never fire again for the rest of
+   * the limit window.
    */
   let autoPauseArmed = true;
   context.subscriptions.push(
@@ -440,8 +471,11 @@ export function activate(context: vscode.ExtensionContext): void {
         { enabled: cfg.autoPauseEnabled, percent: cfg.autoPausePercent },
         autoPauseArmed,
       );
-      autoPauseArmed = decision.armed;
-      if (decision.fire) setPausedAll(true, `plan usage reached ${percent}%`);
+      if (!decision.fire) {
+        autoPauseArmed = decision.armed;
+        return;
+      }
+      if (setPausedAll(true, `plan usage reached ${percent}%`)) autoPauseArmed = false;
     }),
   );
 
@@ -848,7 +882,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       'agentWrangler.pauseSession',
       withSession(
-        (k) => actions.pauseSession(k, !pause.isPaused(k)),
+        (k) => actions.pauseSession(k, !pause.isPaused(store.get(k)?.pid)),
         (s) => s.status !== 'ended' && s.pid !== undefined,
       ),
     ),

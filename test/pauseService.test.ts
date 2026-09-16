@@ -1,176 +1,195 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { KeyValueStorage } from '../src/core/archive';
 import { PauseService, type SignalControl } from '../src/core/pauseService';
 
-function storage(): KeyValueStorage & { data: Map<string, unknown> } {
-  const data = new Map<string, unknown>();
-  return {
-    data,
-    get: <T,>(key: string, dflt: T): T => (data.has(key) ? (data.get(key) as T) : dflt),
-    update: (key: string, value: unknown) => data.set(key, value),
-  };
-}
-
-/** A fake process table: which pids are alive, and every signal that was sent. */
-function control(alive: number[] = [1, 2, 3]) {
+/**
+ * A fake machine: which pids exist, which the OS has stopped, and every signal
+ * that was aimed at them. `signal` moves the stopped set the way a real kernel
+ * would, so `refresh()` reads back what the service actually did.
+ */
+function machine(alive: number[] = [1, 2, 3]) {
   const live = new Set(alive);
+  const stopped = new Set<number>();
   const sent: { pid: number; signal: string }[] = [];
   const refuse = new Set<number>();
+  /** Set to true to make `ps` unanswerable. */
+  let blind = false;
+
   const ctl: SignalControl = {
     signal(pid, signal) {
       if (refuse.has(pid)) throw new Error('EPERM');
       sent.push({ pid, signal });
+      if (signal === 'SIGSTOP') stopped.add(pid);
+      else stopped.delete(pid);
     },
     isAlive: (pid) => live.has(pid),
+    stopped: async (pids) =>
+      blind ? undefined : new Set([...pids].filter((p) => stopped.has(p) && live.has(p))),
   };
-  return { ctl, sent, live, refuse };
+  return { ctl, sent, live, stopped, refuse, blind: (v: boolean) => (blind = v) };
 }
 
 describe('PauseService', () => {
-  let store: ReturnType<typeof storage>;
-  let c: ReturnType<typeof control>;
+  let m: ReturnType<typeof machine>;
   let svc: PauseService;
 
   beforeEach(() => {
-    store = storage();
-    c = control();
-    svc = new PauseService(store, c.ctl);
+    m = machine();
+    svc = new PauseService(m.ctl);
   });
 
-  it('stops a process with SIGSTOP and remembers it', () => {
-    expect(svc.pause('claude:a', 1)).toBe('paused');
-    expect(c.sent).toEqual([{ pid: 1, signal: 'SIGSTOP' }]);
-    expect(svc.isPaused('claude:a')).toBe(true);
+  it('stops a process with SIGSTOP and reports it as paused', () => {
+    expect(svc.pause(1)).toBe('paused');
+    expect(m.sent).toEqual([{ pid: 1, signal: 'SIGSTOP' }]);
+    expect(svc.isPaused(1)).toBe(true);
     expect(svc.count).toBe(1);
   });
 
-  it('continues it again with SIGCONT and forgets it', () => {
-    svc.pause('claude:a', 1);
-    expect(svc.resume('claude:a')).toBe('resumed');
-    expect(c.sent[1]).toEqual({ pid: 1, signal: 'SIGCONT' });
-    expect(svc.isPaused('claude:a')).toBe(false);
+  it('continues it again with SIGCONT', () => {
+    svc.pause(1);
+    expect(svc.resume(1)).toBe('resumed');
+    expect(m.sent[1]).toEqual({ pid: 1, signal: 'SIGCONT' });
+    expect(svc.isPaused(1)).toBe(false);
   });
 
-  it('does not stop the same session twice', () => {
-    svc.pause('claude:a', 1);
-    expect(svc.pause('claude:a', 1)).toBe('already');
-    expect(c.sent).toHaveLength(1);
+  it('does not stop the same process twice', () => {
+    svc.pause(1);
+    expect(svc.pause(1)).toBe('already');
+    expect(m.sent).toHaveLength(1);
   });
 
-  it('refuses to pause a session with no pid, rather than guessing at one', () => {
-    expect(svc.pause('claude:a', undefined)).toBe('gone');
-    expect(c.sent).toHaveLength(0);
-    expect(svc.isPaused('claude:a')).toBe(false);
+  it('refuses to act with no pid, rather than guessing at one', () => {
+    expect(svc.pause(undefined)).toBe('gone');
+    expect(svc.resume(undefined)).toBe('gone');
+    expect(m.sent).toHaveLength(0);
   });
 
   it('reports a dead pid as gone and signals nothing', () => {
-    expect(svc.pause('claude:a', 99)).toBe('gone');
-    expect(c.sent).toHaveLength(0);
+    expect(svc.pause(99)).toBe('gone');
+    expect(m.sent).toHaveLength(0);
   });
 
-  it('reports a refused signal without recording a pause that did not happen', () => {
-    c.refuse.add(1);
-    expect(svc.pause('claude:a', 1)).toBe('refused');
-    expect(svc.isPaused('claude:a')).toBe(false);
+  it('reports a refused SIGSTOP without claiming the process is paused', () => {
+    m.refuse.add(1);
+    expect(svc.pause(1)).toBe('refused');
+    expect(svc.isPaused(1)).toBe(false);
   });
 
   /**
-   * The one genuinely destructive way to get this wrong: pids are recycled, and
-   * a SIGCONT aimed at whatever inherited the number would hit a stranger's
-   * process. So the pid is captured at pause time and checked for liveness
-   * before the signal — a dead one is forgotten, never signalled.
+   * The asymmetry is deliberate. A refused SIGSTOP means nothing was stopped,
+   * so the row must not say "paused". A refused SIGCONT means the process is
+   * *still stopped*, so the row must keep offering Resume — dropping it would
+   * leave a frozen process with no way back.
    */
-  it('does not signal a pid that died while paused', () => {
-    svc.pause('claude:a', 1);
-    c.live.delete(1);
-    expect(svc.resume('claude:a')).toBe('gone');
-    expect(c.sent.filter((s) => s.signal === 'SIGCONT')).toHaveLength(0);
-    expect(svc.isPaused('claude:a')).toBe(false);
+  it('keeps a process paused when SIGCONT is refused', () => {
+    svc.pause(1);
+    m.refuse.add(1);
+    expect(svc.resume(1)).toBe('refused');
+    expect(svc.isPaused(1)).toBe(true);
   });
 
-  it('signals the pid captured at pause time, not one supplied later', () => {
-    svc.pause('claude:a', 2);
-    svc.resume('claude:a');
-    expect(c.sent).toEqual([
-      { pid: 2, signal: 'SIGSTOP' },
-      { pid: 2, signal: 'SIGCONT' },
-    ]);
+  it('lets go of a process that died while it was stopped', () => {
+    svc.pause(1);
+    m.live.delete(1);
+    expect(svc.resume(1)).toBe('gone');
+    expect(svc.isPaused(1)).toBe(false);
+    expect(m.sent.filter((s) => s.signal === 'SIGCONT')).toHaveLength(0);
   });
 
-  it('survives a reload: the paused set is read back from storage', () => {
-    svc.pause('claude:a', 1);
-    const revived = new PauseService(store, c.ctl);
-    expect(revived.isPaused('claude:a')).toBe(true);
-    expect(revived.resume('claude:a')).toBe('resumed');
-  });
+  describe('refresh', () => {
+    /**
+     * The whole point of reading the OS rather than keeping records: a process
+     * this window never touched — stopped by another window, or by hand from a
+     * shell — is still a paused agent, and has to be resumable from here.
+     */
+    it('finds a process something else stopped', async () => {
+      m.stopped.add(2);
+      await svc.refresh([1, 2, 3]);
+      expect(svc.isPaused(2)).toBe(true);
+      expect(svc.resume(2)).toBe('resumed');
+    });
 
-  it('ignores junk in storage rather than throwing on startup', () => {
-    store.data.set('agentWrangler.pausedSessions', [{ key: 'claude:a' }, null, { pid: 3 }, 'nope']);
-    expect(new PauseService(store, c.ctl).count).toBe(0);
-  });
+    it('drops a process something else continued', async () => {
+      svc.pause(1);
+      m.stopped.delete(1);
+      await svc.refresh([1]);
+      expect(svc.isPaused(1)).toBe(false);
+    });
 
-  it('reconcile drops records whose process has gone, and keeps the rest', () => {
-    svc.pause('claude:a', 1);
-    svc.pause('claude:b', 2);
-    c.live.delete(1);
-    expect(svc.reconcile()).toBe(true);
-    expect(svc.keys()).toEqual(['claude:b']);
-    // Nothing left to clean up, so nothing changes and no event is worth firing.
-    expect(svc.reconcile()).toBe(false);
+    it('only asks about the pids given, so an unrelated stopped process is never adopted', async () => {
+      m.stopped.add(42); // a suspended editor, say
+      await svc.refresh([1, 2, 3]);
+      expect(svc.isPaused(42)).toBe(false);
+      expect(svc.count).toBe(0);
+    });
+
+    /**
+     * "ps could not answer" is not "nothing is paused". Rendering it that way
+     * would drop the Resume button for processes that are still frozen.
+     */
+    it('leaves the set alone when the OS cannot be read', async () => {
+      svc.pause(1);
+      m.blind(true);
+      await svc.refresh([1]);
+      expect(svc.isPaused(1)).toBe(true);
+    });
+
+    // A session can drop out of a snapshot briefly; that must not un-pause it.
+    it('keeps a paused pid it was not asked about', async () => {
+      svc.pause(1);
+      await svc.refresh([2, 3]);
+      expect(svc.isPaused(1)).toBe(true);
+    });
+
+    it('fires only when the set actually changes, since it runs every snapshot', async () => {
+      let fired = 0;
+      svc.onDidChange(() => fired++);
+      m.stopped.add(1);
+      await svc.refresh([1, 2]);
+      expect(fired).toBe(1);
+      await svc.refresh([1, 2]);
+      expect(fired).toBe(1);
+    });
   });
 
   describe('sweeps', () => {
     it('pauses every candidate and counts what happened', () => {
-      const r = svc.pauseAll([
-        { key: 'claude:a', pid: 1 },
-        { key: 'claude:b', pid: 2 },
-        { key: 'claude:c', pid: 99 }, // not alive
-        { key: 'claude:d' }, // no pid
-      ]);
+      const r = svc.pauseAll([1, 2, 99, undefined]);
       expect(r).toEqual({ ok: 2, gone: 2, refused: 0 });
       expect(svc.count).toBe(2);
     });
 
     it('skips what is already paused, so a second press is not a second signal', () => {
-      svc.pause('claude:a', 1);
-      const r = svc.pauseAll([
-        { key: 'claude:a', pid: 1 },
-        { key: 'claude:b', pid: 2 },
-      ]);
-      expect(r.ok).toBe(1);
-      expect(c.sent.filter((s) => s.pid === 1)).toHaveLength(1);
+      svc.pause(1);
+      expect(svc.pauseAll([1, 2]).ok).toBe(1);
+      expect(m.sent.filter((s) => s.pid === 1)).toHaveLength(1);
     });
 
     it('resumes everything and leaves nothing behind', () => {
-      svc.pauseAll([
-        { key: 'claude:a', pid: 1 },
-        { key: 'claude:b', pid: 2 },
-      ]);
+      svc.pauseAll([1, 2]);
       expect(svc.resumeAll()).toEqual({ ok: 2, gone: 0, refused: 0 });
       expect(svc.count).toBe(0);
     });
 
-    /**
-     * A resume sweep has to clear the record even for the processes it could
-     * not reach, or the paused count would be permanently wrong and the button
-     * would stay stuck on "Resume".
-     */
-    it('clears records for processes that died while the fleet was paused', () => {
-      svc.pauseAll([
-        { key: 'claude:a', pid: 1 },
-        { key: 'claude:b', pid: 2 },
-      ]);
-      c.live.delete(1);
+    it('clears processes that died while the fleet was paused', () => {
+      svc.pauseAll([1, 2]);
+      m.live.delete(1);
       expect(svc.resumeAll()).toEqual({ ok: 1, gone: 1, refused: 0 });
       expect(svc.count).toBe(0);
+    });
+
+    it('resumes what another window paused, once a refresh has seen it', async () => {
+      m.stopped.add(3);
+      await svc.refresh([1, 2, 3]);
+      expect(svc.resumeAll().ok).toBe(1);
+      expect(m.sent).toEqual([{ pid: 3, signal: 'SIGCONT' }]);
     });
   });
 
   it('fires a change event on pause and on resume, so every dashboard redraws', () => {
     let fired = 0;
     svc.onDidChange(() => fired++);
-    svc.pause('claude:a', 1);
-    svc.resume('claude:a');
+    svc.pause(1);
+    svc.resume(1);
     expect(fired).toBe(2);
   });
 });

@@ -27,7 +27,6 @@ import {
   SECTION_LABEL,
   SECTION_ORDER,
   sectionOf,
-  STATUS_LABEL,
   workingElapsedMs,
   type HookHealth,
   type ProjectDTO,
@@ -383,8 +382,13 @@ function rowTitle(s: SessionDTO): string {
   // A paused session is silent for a reason we know, so it says the reason
   // rather than the two paragraphs below — both of which describe a session
   // that stopped on its own, which is exactly what this one did not do.
+  //
+  // It does not name the status it was paused at. Status is derived from
+  // transcript activity, and a paused process makes none, so a session frozen
+  // while Busy is relabelled Possibly stuck a few minutes later — the tooltip
+  // would then confidently report a status the session never had.
   const paused = s.paused
-    ? `\n\nPaused: its process is stopped and spending nothing. It was ${STATUS_LABEL[s.status].toLowerCase()} when it was stopped, and takes that up again when you resume it.`
+    ? '\n\nPaused: its process is stopped, so it is spending nothing and its status has stopped moving. Resume it from the row menu or the bar button and it carries on from exactly where it was.'
     : '';
   // "Stuck" is a silence, and generation is silent too; say so where the label
   // is read, so a red row prompts a look rather than a restart.

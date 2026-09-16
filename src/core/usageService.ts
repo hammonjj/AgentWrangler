@@ -55,8 +55,21 @@ export class UsageService implements Disposable {
     return this.state;
   }
 
+  /** Whether the dashboard should render the cards. */
   get enabled(): boolean {
     return this.getConfig().showUsage;
+  }
+
+  /**
+   * Whether to keep reading at all. Not the same question as `enabled`: hiding
+   * the cards is a preference about a 300px dock, but auto-pause reads the same
+   * numbers, and letting a display setting quietly switch off a spending guard
+   * is exactly the kind of coupling nobody would guess at from the setting's
+   * description.
+   */
+  private get reading(): boolean {
+    const c = this.getConfig();
+    return c.showUsage || c.autoPauseEnabled;
   }
 
   start(): void {
@@ -93,8 +106,8 @@ export class UsageService implements Disposable {
 
   private async tick(force: boolean): Promise<void> {
     if (this.disposed || this.inFlight) return;
-    if (!this.enabled) {
-      // Disabled: clear anything shown and check back in case it is re-enabled.
+    if (!this.reading) {
+      // Off entirely: clear anything held and check back in case it returns.
       if (this.state.last || this.state.error) {
         this.state = {};
         this.emitter.fire();

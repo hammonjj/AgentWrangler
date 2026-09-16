@@ -40,7 +40,7 @@ export function createStatusBar(
     // is a snapshot of the moment it was stopped, so a paused *blocked* session
     // would ring a bell for a prompt that nothing can act on until it is
     // resumed, and a paused *busy* one would be counted as work in progress.
-    const visible = store.sessions.filter((s) => !archive.isArchived(s.key) && !pause.isPaused(s.key));
+    const visible = store.sessions.filter((s) => !archive.isArchived(s.key) && !pause.isPaused(s.pid));
     const blocked = visible.filter((s) => s.status === 'blocked');
     const waiting = visible.filter((s) => s.status === 'waiting');
     const done = visible.filter((s) => s.status === 'done');

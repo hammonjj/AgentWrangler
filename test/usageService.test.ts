@@ -68,6 +68,24 @@ describe('UsageService', () => {
     svc.dispose();
   });
 
+  /**
+   * Hiding the cards is a preference about a 300px dock. Auto-pause reads the
+   * same numbers, so a display setting must not quietly switch off a spending
+   * guard — nothing in either setting's description would lead you to expect it.
+   */
+  it('keeps reading for auto-pause when the cards are hidden', async () => {
+    cfg = { ...cfg, showUsage: false, autoPauseEnabled: true };
+    const read = okReader(99);
+    const svc = new UsageService(read, new MemoryUsageCache(), () => cfg, undefined, noJitter);
+    svc.start();
+    await flush();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(svc.usage.last?.windows[0].percent).toBe(99);
+    // Still hidden, though: the dashboard asks `enabled`, not `reading`.
+    expect(svc.enabled).toBe(false);
+    svc.dispose();
+  });
+
   it('two windows sharing a cache make one request between them', async () => {
     const cache = new MemoryUsageCache();
     const readA = okReader(30);
