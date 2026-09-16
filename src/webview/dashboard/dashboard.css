@@ -10,6 +10,13 @@
   --aw-ended: var(--vscode-disabledForeground, #888);
 }
 
+/* An author `display` beats the user-agent `[hidden]` rule at any specificity,
+   so one ordinary layout rule is enough to make `el.hidden = true` do nothing.
+   Stated once here rather than found again later. See conversation.css. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;

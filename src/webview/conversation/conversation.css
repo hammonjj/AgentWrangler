@@ -9,6 +9,19 @@
   --aw-rule: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
 }
 
+/*
+ * `hidden` must win over our own `display`. The browser's `[hidden]` rule lives
+ * in the user-agent stylesheet, and *any* author declaration beats it whatever
+ * the specificity, so a rule as ordinary as `#composerRead { display: flex }`
+ * silently turns `el.hidden = true` into a no-op. That is how the read-only
+ * note ("This session runs in another VSCode window…") stayed on screen above
+ * the composer after the pane became typeable, and how the plan-feedback box
+ * showed with nothing asking for it.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body,
 #app {

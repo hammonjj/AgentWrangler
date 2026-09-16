@@ -35,6 +35,30 @@ describe('webview markup', () => {
     expect(offenders).toEqual([]);
   });
 
+  /**
+   * The other silent-styling trap: `el.hidden = true` is a user-agent rule, and
+   * any author `display` beats it regardless of specificity. `#composerRead {
+   * display: flex }` was enough to keep the read-only note ("This session runs
+   * in another VSCode window…") on screen above the composer's dropdowns in a
+   * pane that had since become typeable.
+   */
+  it('makes the hidden attribute win over every stylesheet', () => {
+    const sheets = fs
+      .readdirSync(path.join(SRC, 'webview'), { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .flatMap((e) =>
+        fs
+          .readdirSync(path.join(SRC, 'webview', e.name))
+          .filter((f) => f.endsWith('.css'))
+          .map((f) => path.join(SRC, 'webview', e.name, f)),
+      );
+    expect(sheets.length).toBeGreaterThan(0);
+    for (const sheet of sheets) {
+      const css = fs.readFileSync(sheet, 'utf8');
+      expect(/\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css), path.relative(SRC, sheet)).toBe(true);
+    }
+  });
+
   it('has a CSP that would drop one', () => {
     const html = fs.readFileSync(path.join(SRC, 'ui', 'html.ts'), 'utf8');
     const csp = /Content-Security-Policy" content="([^"]+)"/.exec(html)?.[1];

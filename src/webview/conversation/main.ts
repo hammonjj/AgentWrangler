@@ -634,7 +634,10 @@ function setCaps(next: ConversationCapabilities, composer: ComposerState | undef
   composerRead.hidden = next.canSend;
   // Empty rather than hidden: the note keeps its flex space, so Resume here
   // stays where the Send button sits instead of jumping to the left edge.
-  if (!next.canSend) composerNote.textContent = next.readOnlyReason ?? '';
+  // Cleared on the way in, so a reason from a read-only state cannot survive
+  // into a typeable one — the row is hidden then, but a stale sentence waiting
+  // in the DOM for the next hiccup is not worth the byte it saves.
+  composerNote.textContent = next.canSend ? '' : (next.readOnlyReason ?? '');
   // The pane is reused when it follows another session, so a turn that was
   // running in the one before must not leave the button saying Stop.
   if (!composer) setBusy(false);
