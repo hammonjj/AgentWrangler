@@ -18,6 +18,13 @@
  * `splitCompleteLines`) plus a per-file byte offset, restarting when a file
  * shrinks. Deliberately NOT routed through `readTranscriptSummary`, whose state
  * record fuses offset bookkeeping with Claude transcript domain fields.
+ *
+ * Every window reads these files independently, and a hook payload carries no
+ * timestamp of its own, so an event's receipt time is whenever *this* extension
+ * host read the line. Two consequences follow: a window that has just started
+ * stamps the whole backlog with one instant (hence `turnStartUncertain`), and a
+ * window that stops reading a file cannot tell that apart from a session going
+ * quiet. `readFile` must therefore always read to the end of what it stat'd.
  */
 import * as fsSync from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -213,7 +220,19 @@ export class HookLog implements Disposable {
     );
   }
 
-  /** Read appended bytes and fold them into session state. Returns true if anything changed. */
+  /**
+   * Read appended bytes and fold them into session state. Returns true if
+   * anything changed.
+   *
+   * Reads in chunks of at most `MAX_CHUNK_BYTES` and keeps going until the
+   * cursor reaches the size we stat'd, because `sizeBytes` is the
+   * skip-if-unchanged guard and may only claim what was actually consumed.
+   * Recording the whole size after a capped read makes the next pass skip the
+   * file until it grows again, so a window that ever fell a chunk behind on a
+   * busy log froze there — and a frozen cursor reads as silence, which is how a
+   * live session ends up in *Possibly stuck* in one window and `busy` in the
+   * one next to it.
+   */
   private async readFile(filePath: string): Promise<boolean> {
     let size: number;
     try {
@@ -228,8 +247,6 @@ export class HookLog implements Disposable {
     const prev = this.cursors.get(filePath);
     // Rotation/truncation: the file shrank below where we were reading.
     const rewritten = prev !== undefined && size < prev.byteOffset;
-    const from = rewritten || prev === undefined ? Math.max(0, size - TAIL_CHUNK_BYTES) : prev.byteOffset;
-    const startsMidLine = from > 0 && (rewritten || prev === undefined);
     // Catching up on a file we've never read: these events already happened, and
     // all of them get this instant as their receipt time.
     const backlog = prev === undefined;
@@ -240,15 +257,59 @@ export class HookLog implements Disposable {
       return false;
     }
 
-    const end = Math.min(size, from + MAX_CHUNK_BYTES);
-    const buf = await readRange(filePath, from, end);
-    if (!buf) return false;
+    let offset = rewritten || backlog ? Math.max(0, size - TAIL_CHUNK_BYTES) : prev.byteOffset;
+    let startsMidLine = offset > 0 && (rewritten || backlog);
 
-    const { lines, endOffset } = splitCompleteLines(buf, startsMidLine);
-    this.cursors.set(filePath, { byteOffset: from + endOffset, sizeBytes: size });
-
-    const now = Date.now();
     const completedTurns: number[] = [];
+    let changed = false;
+    let aborted = false;
+
+    while (offset < size) {
+      const end = Math.min(size, offset + MAX_CHUNK_BYTES);
+      const buf = await readRange(filePath, offset, end);
+      // Read failed, or the file shrank under us: leave the cursor where it is
+      // and let the next pass (which will see the new size) sort it out.
+      if (!buf || buf.length === 0) {
+        aborted = true;
+        break;
+      }
+
+      const { lines, endOffset } = splitCompleteLines(buf, startsMidLine);
+      if (endOffset === 0) {
+        // No line boundary in this chunk. At EOF that is the writer mid-line, so
+        // wait for the rest of it. Short of EOF it is one payload bigger than a
+        // whole chunk, which can never be assembled here: skip past it rather
+        // than wedge the cursor on it for the life of the window.
+        if (end >= size) break;
+        this.log(`hook log: skipping a line over ${MAX_CHUNK_BYTES} bytes in ${path.basename(filePath)}`);
+        offset = end;
+        startsMidLine = true;
+        this.cursors.set(filePath, { byteOffset: offset, sizeBytes: offset });
+        continue;
+      }
+
+      offset += endOffset;
+      startsMidLine = false;
+      // Only what has been consumed, so an abort below still re-reads the rest.
+      this.cursors.set(filePath, { byteOffset: offset, sizeBytes: offset });
+      if (this.applyLines(lines, backlog, completedTurns)) changed = true;
+    }
+
+    // Caught up (or parked on an incomplete trailing line): everything up to
+    // `size` has now been examined, so an unchanged file can be skipped.
+    if (!aborted) this.cursors.set(filePath, { byteOffset: offset, sizeBytes: size });
+
+    // Fired after the pass so a listener always sees fully-applied state.
+    for (const ms of completedTurns) this.turnEmitter.fire(ms);
+    return changed;
+  }
+
+  /**
+   * Fold one chunk's worth of lines into session state, collecting the turns
+   * that finished. Returns true if any line counted.
+   */
+  private applyLines(lines: string[], backlog: boolean, completedTurns: number[]): boolean {
+    const now = Date.now();
     let changed = false;
     for (const line of lines) {
       const event = parseHookLine(line, now);
@@ -272,8 +333,6 @@ export class HookLog implements Disposable {
       this.lastEventAtMs = now;
       changed = true;
     }
-    // Fired after the pass so a listener always sees fully-applied state.
-    for (const ms of completedTurns) this.turnEmitter.fire(ms);
     return changed;
   }
 

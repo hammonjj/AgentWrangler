@@ -125,6 +125,38 @@ describe('HookLog', () => {
     expect(log.get(SID_A)?.status).toBe('blocked');
   });
 
+  it('catches up on a backlog bigger than one read chunk', async () => {
+    // The wedge this guards: a read is capped at MAX_CHUNK_BYTES, so a window
+    // that falls behind on a busy log used to record the whole file size as
+    // "examined" and skip the rest until the file grew again. A log that then
+    // went quiet left the session frozen at an old event — which the status
+    // rules read as silence, i.e. Possibly stuck, while the window next door
+    // showed it busy.
+    await write(1234, ev(SID_A, 'UserPromptSubmit'));
+    await log.scanAll();
+    expect(log.get(SID_A)?.status).toBe('busy');
+
+    // > 1 MB of events arrive between passes, ending in the one that matters.
+    await append(1234, ev(SID_A, 'PostToolBatch').repeat(12_000) + ev(SID_A, 'Stop'));
+    await log.scanAll(); // one pass, however far behind it was
+    expect(log.get(SID_A)?.status).toBe('waiting');
+
+    // And the file is not re-read once it stops growing.
+    const settled = log.get(SID_A)?.lastEventAtMs;
+    await log.scanAll();
+    expect(log.get(SID_A)?.lastEventAtMs).toBe(settled);
+  });
+
+  it('skips a single line too large to ever assemble', async () => {
+    // A payload bigger than a whole chunk can never be split into lines, so the
+    // cursor has to step over it; parking on it would freeze the session's
+    // clock for the life of the window.
+    const huge = JSON.stringify({ hook_event_name: 'PreToolUse', session_id: SID_A, blob: 'x'.repeat(1_200_000) });
+    await write(1234, ev(SID_A, 'UserPromptSubmit') + `${huge}\n` + ev(SID_A, 'Stop'));
+    await log.scanAll();
+    expect(log.get(SID_A)?.status).toBe('waiting'); // read past the monster to the Stop
+  });
+
   it('prunes logs of dead processes outside the ended window', async () => {
     await write(DEAD_PID, ev(SID_A, 'SessionEnd'));
     const file = path.join(dir, `${DEAD_PID}.jsonl`);

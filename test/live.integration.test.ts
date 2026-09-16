@@ -18,6 +18,17 @@ describe.runIf(hasClaude)('live ~/.claude smoke', () => {
     for (const r of registry) {
       expect(isPidAlive(r.pid)).toBe(true);
       expect(r.sessionId).toMatch(/^[0-9a-f-]{36}$/i);
+      // Undocumented, and the only signal that a permission prompt was answered
+      // in the Claude Code window. If a future version stops writing it, or
+      // renames these values, blocked rows go back to clearing only when the
+      // allowed tool finishes — so fail here rather than degrade quietly.
+      if (r.liveStatus !== undefined) {
+        expect(['busy', 'waiting', 'idle', 'shell']).toContain(r.liveStatus);
+        expect(r.statusUpdatedAtMs).toBeGreaterThan(0);
+      }
+    }
+    if (registry.length > 0) {
+      expect(registry.some((r) => r.liveStatus !== undefined)).toBe(true);
     }
 
     const index = new TranscriptIndex();

@@ -39,6 +39,45 @@ export function deriveStatus(i: StatusInput): SessionStatus {
   return busyOrStuck(i);
 }
 
+/** What `blockClearedByClaude` needs off the session's pid file. */
+export interface LiveStatusInput {
+  liveStatus?: string;
+  statusUpdatedAtMs?: number;
+}
+
+/**
+ * True when Claude Code's pid file says a permission prompt we still think is
+ * open has already been answered.
+ *
+ * Hooks cannot tell us this. The event order for a tool that needs permission
+ * is `PreToolUse` → `PermissionRequest` → *the human answers* → `PostToolUse`,
+ * and there is no hook in between — Claude Code 2.1.270 has no
+ * `PermissionGranted` event (only `PermissionDenied`, for the other answer).
+ * `PostToolUse` fires when the tool has *finished*, so allowing a ten-minute
+ * test run in the Claude Code window leaves the row in Blocked on you for the
+ * whole ten minutes, which is exactly backwards: the moment it is allowed is
+ * the moment it stops needing the human.
+ *
+ * The pid file closes the gap. Claude Code rewrites `status` there on every
+ * state change, so it flips to `busy` as the tool starts running, and the
+ * registry watcher already sees that write.
+ *
+ * The timestamp guard is what makes this safe against the opposite mistake —
+ * cancelling a block that has only just opened. `blockedSinceMs` is *our*
+ * receipt time for the `PermissionRequest` line, which is already later than
+ * the moment Claude Code decided to prompt (the hook has to run and we debounce
+ * the read), so a `busy` written before the prompt existed always compares
+ * older and is ignored. Only a status change stamped after the block began can
+ * end it.
+ */
+export function blockClearedByClaude(blockedSinceMs: number | undefined, live: LiveStatusInput): boolean {
+  if (blockedSinceMs === undefined) return false;
+  if (live.liveStatus === undefined || live.statusUpdatedAtMs === undefined) return false;
+  // `waiting` is Claude Code agreeing with us; anything else is it disagreeing.
+  if (live.liveStatus === 'waiting') return false;
+  return live.statusUpdatedAtMs > blockedSinceMs;
+}
+
 /** A finished turn is `waiting` if its reply asks for something, else `done`. */
 export function turnOver(replyText: string | undefined): SessionStatus {
   return needsReply(replyText) ? 'waiting' : 'done';

@@ -3,6 +3,7 @@ import {
   parseHookLine,
   parseTodos,
   reduceHookEvent,
+  settleBlockAt,
   statusFromHookState,
   turnBlockedMsAt,
   type HookSessionState,
@@ -428,5 +429,44 @@ describe('statusFromHookState', () => {
   it('never turns a blocked question into stuck, however long it goes unanswered', () => {
     const asked = feed([{ hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion' }]);
     expect(statusFromHookState(asked, T0 + 86_400_000, threshold)).toBe('blocked');
+  });
+});
+
+describe('settleBlockAt', () => {
+  const blocked: HookSessionState = {
+    sessionId: SID,
+    status: 'blocked',
+    blockedReason: 'Bash',
+    permissionRequestId: '123-456',
+    permissionSuggestions: [],
+    lastEventAtMs: T0,
+    lastEventName: 'PermissionRequest',
+    finished: false,
+    fresh: false,
+    turnToolCalls: 3,
+    turnBlockedMs: 5_000,
+    blockedSinceMs: T0,
+  };
+
+  it('banks the open spell at the given instant and clears the block', () => {
+    const settled = settleBlockAt(blocked, T0 + 20_000);
+    expect(settled.turnBlockedMs).toBe(25_000);
+    expect(settled.blockedSinceMs).toBeUndefined();
+    expect(settled.blockedReason).toBeUndefined();
+    expect(settled.permissionRequestId).toBeUndefined();
+    // The tool the human just allowed is still the one in flight.
+    expect(settled.turnToolCalls).toBe(3);
+  });
+
+  it('stops the clock: blocked time no longer grows with now', () => {
+    const settled = settleBlockAt(blocked, T0 + 20_000);
+    expect(turnBlockedMsAt(settled, T0 + 600_000)).toBe(25_000);
+    // Where the unsettled state would have kept counting the whole command.
+    expect(turnBlockedMsAt(blocked, T0 + 600_000)).toBe(605_000);
+  });
+
+  it('leaves a state with no open spell exactly as it was', () => {
+    const idle = { ...blocked, blockedSinceMs: undefined };
+    expect(settleBlockAt(idle, T0 + 1)).toBe(idle);
   });
 });

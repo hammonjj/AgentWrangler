@@ -17,6 +17,24 @@ export interface RegistryEntry {
    * `name` on an entry is always one worth showing ahead of the title.
    */
   name?: string;
+  /**
+   * Claude Code's own view of what the session is doing, rewritten into the pid
+   * file on every state change. Undocumented; verified in 2.1.270, where the
+   * internal state maps `running → busy`, `requires_action → waiting`,
+   * `idle → idle` (plus `shell` for an idle session with a shell open).
+   *
+   * This is the only push signal for "the human answered a permission prompt":
+   * there is no hook for it, and the next hook event after `PermissionRequest`
+   * is `PostToolUse`, which does not arrive until the tool has *finished*.
+   */
+  liveStatus?: string;
+  /**
+   * Why it is waiting, when `liveStatus` is `waiting`: `permission prompt` or
+   * `input needed` (AskUserQuestion and the `dialog:` tools). Absent otherwise.
+   */
+  waitingFor?: string;
+  /** When `liveStatus` last changed. Claude Code's clock, which is ours too. */
+  statusUpdatedAtMs?: number;
 }
 
 /** Only `<pid>.json` — the sibling `<pid>.<sha256>.key` files are secrets and must never be read. */
@@ -60,7 +78,12 @@ export async function readRegistry(dir: string, alive: (pid: number) => boolean 
     } catch {
       continue;
     }
-    const e = obj as Partial<RegistryEntry> & { nameSource?: unknown };
+    const e = obj as Partial<RegistryEntry> & {
+      nameSource?: unknown;
+      status?: unknown;
+      waitingFor?: unknown;
+      statusUpdatedAt?: unknown;
+    };
     if (!e || typeof e !== 'object') continue;
     if (!Number.isInteger(e.pid) || (e.pid as number) <= 0) continue;
     if (typeof e.sessionId !== 'string' || e.sessionId.length < 8) continue;
@@ -74,6 +97,15 @@ export async function readRegistry(dir: string, alive: (pid: number) => boolean 
       kind: typeof e.kind === 'string' ? (e.kind as SessionKind) : undefined,
       entrypoint: typeof e.entrypoint === 'string' ? e.entrypoint : undefined,
       name: typeof e.name === 'string' && e.nameSource !== 'derived' ? e.name : undefined,
+      liveStatus: typeof e.status === 'string' ? e.status : undefined,
+      waitingFor: typeof e.waitingFor === 'string' ? e.waitingFor : undefined,
+      // Only meaningful alongside a status, and only as a number: a missing or
+      // malformed stamp must read as "no opinion", never as epoch 0, which
+      // would compare older than every block.
+      statusUpdatedAtMs:
+        typeof e.status === 'string' && typeof e.statusUpdatedAt === 'number' && Number.isFinite(e.statusUpdatedAt)
+          ? e.statusUpdatedAt
+          : undefined,
     });
   }
 

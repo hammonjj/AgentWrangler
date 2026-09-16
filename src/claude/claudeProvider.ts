@@ -6,13 +6,13 @@ import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import type { TurnStats } from '../core/turnStats';
 import { clearWorktreeCache, worktreeFor } from '../core/worktree';
 import type { AgentSession, HookHealth, TurnProgress } from '../shared/model';
-import { statusFromHookState, turnBlockedMsAt, type HookSessionState } from './hookEvents';
+import { settleBlockAt, statusFromHookState, turnBlockedMsAt, type HookSessionState } from './hookEvents';
 import { currentState, type InstallState } from './hookInstall';
 import { HookLog, hookLogDir, type PermissionBehavior } from './hookLog';
 import { suggestionDestination, suggestionLabels } from './permissionDetail';
 import { isSessionJsonlName, projectsDir, sessionsDir } from './paths';
 import { readRegistry, type RegistryEntry } from './registry';
-import { deriveStatus, turnOver } from './status';
+import { blockClearedByClaude, deriveStatus, turnOver } from './status';
 import { TranscriptIndex, type IndexedTranscript } from './transcriptIndex';
 import type { TranscriptSummary } from './transcriptTail';
 
@@ -125,7 +125,7 @@ export class ClaudeProvider implements AgentProvider {
       // before the hooks were installed have none (Claude Code snapshots hook
       // config at startup), so they fall back to transcript inference and are
       // flagged estimated rather than silently presented as fact.
-      const hook = this.hooks.get(id);
+      let hook = this.hooks.get(id);
       let status = hook
         ? statusFromHookState(hook, now, stuckThresholdMs)
         : deriveStatus({
@@ -136,6 +136,20 @@ export class ClaudeProvider implements AgentProvider {
             nowMs: now,
             stuckThresholdMs,
           });
+
+      // The one thing hooks cannot report: a permission prompt answered in the
+      // Claude Code window. Nothing fires until the allowed tool *finishes*, so
+      // without this the row sits in Blocked on you for as long as the command
+      // runs. Claude Code's own status in the pid file says otherwise, and says
+      // it at once.
+      if (hook && status === 'blocked' && blockClearedByClaude(hook.blockedSinceMs, r)) {
+        // `idle` means the turn ended outright (a denial that stopped it); the
+        // waiting/done split below then applies as usual.
+        status = r.liveStatus === 'busy' ? 'busy' : 'waiting';
+        // Bank the wait at the moment Claude Code recorded the answer, so the
+        // turn starts counting work again instead of more blocked time.
+        hook = settleBlockAt(hook, r.statusUpdatedAtMs ?? now);
+      }
 
       // A conversation nobody has typed into yet: the process exists (a new
       // panel, a /clear) but there is no transcript and nothing to wait for.

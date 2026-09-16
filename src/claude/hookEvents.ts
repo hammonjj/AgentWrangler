@@ -500,6 +500,22 @@ function unblock(base: HookSessionState, nowMs: number): Pick<HookSessionState, 
 }
 
 /**
+ * A copy of `st` with its open blocked spell banked at `atMs` and the block
+ * itself cleared — what the state *would* be had an event arrived then.
+ *
+ * Used for a permission prompt answered in the Claude Code window, which no
+ * hook reports (see `blockClearedByClaude`). Returning a projection rather than
+ * mutating matters: the log is still the authority, and the `PostToolUse` that
+ * eventually lands banks the same spell itself, a few hundred ms later. Without
+ * this the turn would keep accruing blocked time — and stop accruing working
+ * time — for the whole run of the tool the human just allowed.
+ */
+export function settleBlockAt(st: HookSessionState, atMs: number): HookSessionState {
+  if (st.blockedSinceMs === undefined) return st;
+  return { ...st, ...unblock(st, atMs), ...unblocked() };
+}
+
+/**
  * Blocked time so far this turn, counting a spell that is still open. Without
  * the open spell a session sitting on a permission prompt would keep accruing
  * "working" time it isn't doing.
