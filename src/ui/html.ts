@@ -9,10 +9,35 @@ export function getNonce(): string {
  * Shared webview HTML shell: strict CSP (no inline code), one css + one js
  * bundle from dist/webview.
  */
+export type BundleName = 'dashboard' | 'conversation' | 'workbench';
+
+/**
+ * The markup each bundle finds when it loads.
+ *
+ * The roots are in the document rather than created by the bundle, because the
+ * workbench imports the two pane modules for their side effects and an ES
+ * import is evaluated before the importing module's body — so by the time the
+ * workbench's own code runs, both panes have already looked for their roots.
+ *
+ * `#app` and `#convApp` are two different ids for the same reason: those were
+ * both `#app` when each pane had a webview to itself, and they now share one.
+ */
+const BODY: Record<BundleName, string> = {
+  dashboard: '<div id="app"></div>',
+  conversation: '<div id="convApp"></div>',
+  workbench:
+    '<div id="wb">' +
+    '<div id="wbTable"><div id="app"></div></div>' +
+    '<div id="wbSplit" role="separator" aria-orientation="vertical" tabindex="0" ' +
+    'aria-label="Resize the table and the conversation" title="Drag to resize · double-click to reset"></div>' +
+    '<div id="wbConv"><div id="convApp"></div></div>' +
+    '</div>',
+};
+
 export function buildWebviewHtml(opts: {
   webview: vscode.Webview;
   extensionUri: vscode.Uri;
-  bundleName: 'dashboard' | 'conversation';
+  bundleName: BundleName;
   title: string;
 }): string {
   const { webview, extensionUri, bundleName, title } = opts;
@@ -30,7 +55,7 @@ export function buildWebviewHtml(opts: {
 <title>${title}</title>
 </head>
 <body>
-<div id="app"></div>
+${BODY[bundleName]}
 <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;

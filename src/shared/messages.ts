@@ -54,6 +54,13 @@ export type HostToDashboard =
  * `shared/rowMenu.ts`). `close` ends the process running the session and is the
  * only one of these the user can lose work to, so the host confirms it first.
  */
+/**
+ * Which half of the workbench a message belongs to. The dashboard and the
+ * conversation share one webview, and their message unions overlap (`ready`,
+ * `openExternal`), so every message is addressed rather than sniffed.
+ */
+export type PaneName = 'dashboard' | 'conversation';
+
 export type DashboardAction =
   /** Keep this row in the Pinned section at the top of the table, whatever its status. */
   | 'pin'

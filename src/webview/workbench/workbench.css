@@ -1,0 +1,104 @@
+/*
+ * The frame: table | divider | conversation.
+ *
+ * Only the shell lives here. Each pane brings its own stylesheet, which esbuild
+ * concatenates into this bundle — checked before merging them, the two sheets
+ * share no class and no keyframe name, and the only selectors they both define
+ * are the document-level ones below, which is why those are stated once here
+ * and removed from the panes' own sheets.
+ */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+}
+
+/* An author `display` beats the user-agent `[hidden]` rule at any specificity,
+   so one ordinary layout rule is enough to make `el.hidden = true` do nothing.
+   Both panes rely on this; see conversation.css. */
+[hidden] {
+  display: none !important;
+}
+
+#wb {
+  display: flex;
+  height: 100vh;
+  width: 100%;
+  overflow: hidden;
+}
+
+/*
+ * The table takes its width from `flex-basis`, set by the drag. `min-width: 0`
+ * is what lets it actually shrink to that: a flex item's default `min-width`
+ * is its content width, which for a table is whatever its columns add up to,
+ * so without this the divider would refuse to move left past the widest row.
+ */
+#wbTable {
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+}
+
+/* The conversation takes whatever is left, so the two always fill the tab. */
+#wbConv {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  position: relative;
+  border-left: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+
+#wbConv > #convApp {
+  height: 100%;
+}
+
+/*
+ * The divider. Two pixels of line, but a wider invisible grab area: a 2px
+ * hit target is a pixel-hunt, and this is the one control in the window whose
+ * whole job is being dragged.
+ */
+#wbSplit {
+  flex: 0 0 auto;
+  width: 2px;
+  position: relative;
+  cursor: col-resize;
+  background: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  touch-action: none;
+}
+#wbSplit::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+}
+#wbSplit:hover,
+#wb.dragging #wbSplit {
+  background: var(--vscode-focusBorder);
+}
+#wbSplit:focus-visible {
+  outline: none;
+  background: var(--vscode-focusBorder);
+}
+
+/* While dragging, the pointer owns the divider — stop the panes from selecting
+   text or showing their own hover states under the moving cursor. */
+#wb.dragging {
+  user-select: none;
+  cursor: col-resize;
+}
+#wb.dragging #wbTable,
+#wb.dragging #wbConv {
+  pointer-events: none;
+}

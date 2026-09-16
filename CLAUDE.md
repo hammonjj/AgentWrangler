@@ -1,7 +1,7 @@
 # Agent Wrangler — working rules for coding agents
 
-VSCode extension that monitors every Claude Code session on this machine and (in progress)
-hosts their conversations in one window. Read `README.md` for behaviour, and the active plan
+VSCode extension that monitors every Claude Code session on this machine and hosts their
+conversations, in one tab: the agent table and the conversation side by side. Read `README.md` for behaviour, and the active plan
 in `docs/plans/` before touching anything it covers.
 
 ## Commands
@@ -47,10 +47,21 @@ directory, so each agent has a tree of its own.
 - **The repo is public** (`hammonjj/AgentWrangler`). No real project paths, session titles,
   prompts, transcript content or hook payloads in code, tests, fixtures, docs or commits.
   Fixtures use `/Users/test/proj`-style paths. Never paste `live.integration.test.ts` output anywhere.
-- `src/webview/**` imports only from `src/shared/**`. `src/shared/**` has no `vscode`, Node or
-  DOM imports (it is bundled into both the extension host and the webviews).
+- `src/webview/**` imports only from `src/shared/**` and `src/webview/common/**`.
+  `src/shared/**` has no `vscode`, Node or DOM imports (it is bundled into both the
+  extension host and the webviews); `src/webview/common/**` is browser-only and is where
+  things a webview has exactly one of live — see `paneApi.ts`.
 - Webview CSP forbids inline styles and inline scripts; use classes and the nonce'd bundle.
-- The dashboard is used **narrow** (300–370 CSS px). Layouts must work there first.
+- **The table and the conversation share one webview** (the workbench tab), split by a
+  divider the user drags. Three things a webview has exactly one of — the API handle, the
+  message channel and `setState` — are shared through `src/webview/common/paneApi.ts`. Go
+  through it; calling `acquireVsCodeApi()` a second time throws and kills a pane.
+- **Neither pane may assume it has the window.** The table is usually about half a
+  full-screen window, but the divider moves, so a pane can be 300px inside a 2000px tab.
+  Size off the pane, never the viewport: the table folds its columns below 720px from a
+  `ResizeObserver` and exposes that as `#app.narrow`, which is why its narrow styles are a
+  class and not a `@media` query. Scope element selectors to a pane root (`#app`,
+  `#convApp`) or they leak — the conversation renders markdown tables.
 - Never read `~/.claude/sessions/*.key` files: they are secrets.
 - New source and test files are TypeScript.
 
@@ -59,7 +70,8 @@ directory, so each agent has a tree of its own.
 `src/claude/*` Claude Code provider (registry, transcript tail/index, hook events + log +
 installer, status) · `src/core/*` provider-agnostic store, config, services · `src/ui/*`
 webview hosts, click routing, relay, terminal · `src/webview/*` browser bundles (one dir per
-webview, entry `main.ts` + a `.css`) · `src/shared/*` model and wire protocol · `test/*` vitest.
+bundle, entry `main.ts` + a `.css`; `workbench` is what ships and imports the `dashboard`
+and `conversation` panes, `common/` is shared browser-only code) · `src/shared/*` model and wire protocol · `test/*` vitest.
 
 ## Verification
 

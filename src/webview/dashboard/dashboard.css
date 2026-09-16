@@ -256,7 +256,17 @@ body {
 
 /* ---- table ---- */
 
-table {
+/*
+ * Everything below is scoped to #app, the table pane's root.
+ *
+ * These were bare `table` / `th` / `td` selectors when this stylesheet had a
+ * webview to itself. It now shares one with the conversation pane, whose
+ * markdown renderer emits real tables — so unscoped, a reply containing a table
+ * would silently inherit the agent table's fixed layout, sticky header and
+ * row borders.
+ */
+
+#app table {
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
@@ -269,18 +279,18 @@ table {
    has none, so it is the only `auto` column and therefore the one that absorbs
    every drag. Border-box so a width read back off the element is the width that
    was written. */
-th,
-td {
+#app th,
+#app td {
   box-sizing: border-box;
 }
-th.h-dot {
+#app th.h-dot {
   width: 26px;
 }
 /* The column picker's button and nothing else: the row actions it used to sit
    above are in the right-click menu now, so this is a 20px button plus the
    cell's own padding rather than a 66px two-button tray. The ~32px that frees
    goes to the Agent column, which is the one that is always short of room. */
-th.h-act {
+#app th.h-act {
   width: 36px;
 }
 
@@ -311,7 +321,7 @@ th.h-act {
   width: 1px;
   background: var(--vscode-panel-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.45)));
 }
-thead th:hover .rz::after {
+#app thead th:hover .rz::after {
   background: var(--vscode-descriptionForeground);
 }
 .rz:hover::after,
@@ -330,7 +340,7 @@ body.resizing {
   user-select: none;
 }
 
-thead th {
+#app thead th {
   position: sticky;
   /* Below the launcher bar, not under it: both stick to the same scrolling
      document, so the header has to start where the bar ends. */
@@ -346,12 +356,12 @@ thead th {
   background: var(--vscode-panel-background, var(--vscode-editor-background));
   border-bottom: 1px solid var(--vscode-panel-border, transparent);
 }
-thead th.h-eta,
-thead th.h-age {
+#app thead th.h-eta,
+#app thead th.h-age {
   text-align: right;
 }
 
-td {
+#app td {
   padding: 4px 8px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -962,53 +972,61 @@ button.colcfg svg {
    column zero pixels and pushed Age off-screen: the dashboard showed a dot, a
    project name and nothing else. Below this width the location moves into the
    row's second line and the title, chips and age keep their space. */
-@media (max-width: 719px) {
-  /* The Project/Worktree/Branch/Model/PR columns are not rendered at all below
-     this width (shared/columns.ts folds them, main.ts moves their contents to
-     the row's second line), so there is nothing to hide here — only the chrome
-     to tighten. Every pixel saved is title. */
-  td,
-  thead th {
-    padding-left: 5px;
-    padding-right: 5px;
-  }
-  th.h-dot {
-    width: 22px;
-  }
-  th.h-act {
-    width: 30px;
-  }
-  tr.permrow > td {
-    padding-left: 12px;
-  }
-  /* Two lines: the title alone on the first, chips leading the location on the
-     second. At 300px a title and a "needs Bash" chip cannot share a line
-     without one of them disappearing. */
-  .c-agent .agent {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    grid-template-areas:
-      'ttl ttl'
-      'chips sub';
-    align-items: baseline;
-  }
-  .c-agent .title {
-    display: contents;
-  }
-  .c-agent .ttl {
-    grid-area: ttl;
-  }
-  .c-agent .chips {
-    grid-area: chips;
-  }
-  .c-agent .chips .chip {
-    margin-left: 0;
-    margin-right: 6px;
-  }
-  .c-agent .sub {
-    grid-area: sub;
-    min-width: 0;
-  }
+/*
+ * The narrow layout, driven by a class rather than a media query.
+ *
+ * A media query asks how wide the *window* is, and this pane shares its window
+ * with the conversation: the table can be 400px inside a 2000px tab, and the
+ * divider moves without the window resizing at all. `main.ts` measures the
+ * pane and sets `.narrow` from the same threshold that folds the columns, so
+ * the chrome and the columns can never disagree.
+ *
+ * The Project/Worktree/Branch/Model/PR columns are not rendered at all at this
+ * width (shared/columns.ts folds them, main.ts moves their contents to the
+ * row's second line), so there is nothing to hide here — only the chrome to
+ * tighten. Every pixel saved is title.
+ */
+#app.narrow td,
+#app.narrow thead th {
+  padding-left: 5px;
+  padding-right: 5px;
+}
+#app.narrow th.h-dot {
+  width: 22px;
+}
+#app.narrow th.h-act {
+  width: 30px;
+}
+#app.narrow tr.permrow > td {
+  padding-left: 12px;
+}
+/* Two lines: the title alone on the first, chips leading the location on the
+   second. At 300px a title and a "needs Bash" chip cannot share a line without
+   one of them disappearing. */
+#app.narrow .c-agent .agent {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    'ttl ttl'
+    'chips sub';
+  align-items: baseline;
+}
+#app.narrow .c-agent .title {
+  display: contents;
+}
+#app.narrow .c-agent .ttl {
+  grid-area: ttl;
+}
+#app.narrow .c-agent .chips {
+  grid-area: chips;
+}
+#app.narrow .c-agent .chips .chip {
+  margin-left: 0;
+  margin-right: 6px;
+}
+#app.narrow .c-agent .sub {
+  grid-area: sub;
+  min-width: 0;
 }
 
 /* ---- plan usage cards ----
@@ -1116,16 +1134,14 @@ button.colcfg svg {
 .usage.err .unote {
   color: var(--aw-blocked);
 }
-@media (max-width: 719px) {
-  .usage {
-    padding: 6px 5px 7px;
-    gap: 5px;
-  }
-  .ucard {
-    flex-basis: 120px;
-    min-width: 120px;
-    padding: 4px 8px 5px;
-  }
+#app.narrow .usage {
+  padding: 6px 5px 7px;
+  gap: 5px;
+}
+#app.narrow .ucard {
+  flex-basis: 120px;
+  min-width: 120px;
+  padding: 4px 8px 5px;
 }
 
 /* ---- hook status banner ---- */

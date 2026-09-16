@@ -9,7 +9,7 @@ import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { HookHealth, ProjectDTO } from '../shared/model';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
-import { buildWebviewHtml } from './html';
+import type { PaneChannel } from './paneChannel';
 import { openTargetFor, type LocationKind, type RowClickBehavior } from './openTarget';
 import type { SessionLocator } from './sessionLocator';
 import { isInThisWorkspace } from './workspace';
@@ -69,8 +69,7 @@ export class DashboardHost {
   private subs: { dispose(): void }[] = [];
 
   constructor(
-    private webview: vscode.Webview,
-    extensionUri: vscode.Uri,
+    private webview: PaneChannel,
     private store: SessionStore,
     private archive: ArchiveService,
     private actions: SessionActions,
@@ -84,20 +83,6 @@ export class DashboardHost {
     private pause: PauseService,
     private pins: PinService,
   ) {
-    webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(extensionUri, 'dist'),
-        vscode.Uri.joinPath(extensionUri, 'media'),
-      ],
-    };
-    webview.html = buildWebviewHtml({
-      webview,
-      extensionUri,
-      bundleName: 'dashboard',
-      title: 'Agent Wrangler',
-    });
-
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
       this.store.onDidUpdate(() => this.pushSnapshot()),

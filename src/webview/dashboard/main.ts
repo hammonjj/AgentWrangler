@@ -16,6 +16,7 @@ import {
 } from '../../shared/columns';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
+import { paneApi } from '../common/paneApi';
 import { canPauseSession, clampMenuPosition, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
 import {
   askLine,
@@ -56,13 +57,11 @@ interface WebviewState {
   project?: string;
 }
 
-declare function acquireVsCodeApi(): {
-  postMessage(msg: unknown): void;
-  getState(): WebviewState | undefined;
-  setState(state: WebviewState): void;
-};
-const vscodeApi = acquireVsCodeApi();
-const post = (msg: DashboardToHost) => vscodeApi.postMessage(msg);
+// Shared with the conversation pane when both live in one webview: the VSCode
+// API may only be acquired once, and messages and saved state are namespaced so
+// the two cannot overwrite each other. See `common/paneApi.ts`.
+const vscodeApi = paneApi<WebviewState>('dashboard');
+const post = (msg: DashboardToHost) => vscodeApi.post(msg);
 
 const app = document.getElementById('app')!;
 let sessions: SessionDTO[] = [];
@@ -74,7 +73,15 @@ let usage: UsageState | undefined;
 // has to feel immediate, so the webview keeps its own copy and posts changes.
 // The snapshot that comes back matches what we already drew.
 let columns: ColumnPrefs = {};
-let narrow = document.documentElement.clientWidth < NARROW_PX;
+/**
+ * Whether the table is narrow enough to fold its optional columns away.
+ *
+ * Measured on the table's own container, not on the window. Sharing a webview
+ * with the conversation pane means the table is only ever part of the width,
+ * and the divider between them moves — so the window can be 2000px wide while
+ * the table has 400px, and the window never resizes when the divider does.
+ */
+let narrow = app.clientWidth > 0 && app.clientWidth < NARROW_PX;
 /** Open column picker, or undefined. The number is where to pin it vertically. */
 let menuTop: number | undefined;
 /** Open row context menu: which row it belongs to, and where it was asked for. */
@@ -874,8 +881,8 @@ function render(): void {
   paint(html);
 }
 
-window.addEventListener('message', (e: MessageEvent) => {
-  const m = e.data as HostToDashboard;
+vscodeApi.onMessage((body) => {
+  const m = body as HostToDashboard;
   if (m.type === 'projectPicked') {
     project = m.dir;
     // The scan that will contain it is still running, and a selection with no
@@ -1054,15 +1061,21 @@ window.addEventListener('keydown', (e) => {
 });
 
 // Only the fold threshold matters here: widths are absolute and do not care how
-// wide the dock is.
+// wide the dock is. A ResizeObserver rather than a window resize listener,
+// because dragging the divider between the panes changes this width without the
+// window changing size at all.
 let lastNarrow = narrow;
-window.addEventListener('resize', () => {
-  narrow = document.documentElement.clientWidth < NARROW_PX;
+const measure = () => {
+  const width = app.clientWidth;
+  if (width === 0) return; // hidden pane: keep the last real answer
+  narrow = width < NARROW_PX;
   if (narrow !== lastNarrow) {
     lastNarrow = narrow;
     render();
   }
-});
+};
+new ResizeObserver(measure).observe(app);
+window.addEventListener('resize', measure);
 
 app.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
