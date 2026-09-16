@@ -25,6 +25,9 @@ function materialFingerprint(s: AgentSession): string {
   return [
     s.status,
     s.title,
+    // A rename changes nothing a provider scan would see, so it has to be
+    // material here or the new name would wait for the session to do something.
+    s.nickname ?? '',
     s.subtitle ?? '',
     s.lastActivityAt,
     s.name ?? '',
@@ -66,7 +69,58 @@ export class SessionStore implements Disposable {
   private refreshQueued = false;
   private disposed = false;
 
+  /**
+   * The user's own name for a session, when they gave one.
+   *
+   * It is applied here rather than where each surface renders, because the
+   * store is the one place every surface goes through. The dashboard decorates
+   * its own snapshots, but the conversation pane, the status bar, the quick
+   * picks, the toasts and the terminal label all read straight from here — a
+   * nickname attached any further downstream would show up in some of those and
+   * not others.
+   */
+  private nicknameFor: (key: string) => string | undefined = () => undefined;
+
   readonly onDidUpdate = (listener: Listener<StoreUpdate>): Disposable => this.emitter.event(listener);
+
+  /**
+   * Supply the nickname lookup. Separate from the constructor so `core` keeps
+   * knowing nothing about where the names are stored.
+   */
+  useNicknames(lookup: (key: string) => string | undefined): void {
+    this.nicknameFor = lookup;
+  }
+
+  /**
+   * The nickname for a key the store may not hold — the conversation pane
+   * builds a session of its own for a runner that has not registered yet, and
+   * it should not be the one surface that ignores a rename.
+   */
+  nicknameOf(key: string): string | undefined {
+    return this.nicknameFor(key);
+  }
+
+  private decorate(s: AgentSession): AgentSession {
+    const nickname = this.nicknameFor(s.key);
+    return nickname === undefined ? s : { ...s, nickname };
+  }
+
+  /**
+   * Re-apply nicknames to what is already held and fire if anything changed.
+   * Renaming touches nothing a provider scan would notice, so without this the
+   * new name would not appear until the session next did something.
+   */
+  renameApplied(): void {
+    const changed: AgentSession[] = [];
+    for (const [key, prev] of this.byKey) {
+      const next = this.decorate({ ...prev, nickname: undefined });
+      if (next.nickname === prev.nickname) continue;
+      this.byKey.set(key, next);
+      changed.push(next);
+    }
+    if (changed.length === 0) return;
+    this.emitter.fire({ sessions: this.sessions, upserted: changed, removedKeys: [], becameWaiting: [] });
+  }
 
   get sessions(): AgentSession[] {
     return [...this.byKey.values()].sort(compareSessions);
@@ -122,7 +176,7 @@ export class SessionStore implements Disposable {
 
   private applySnapshot(all: AgentSession[]): void {
     const next = new Map<string, AgentSession>();
-    for (const s of all) next.set(s.key, s); // last write wins on (impossible) dup keys
+    for (const s of all) next.set(s.key, this.decorate(s)); // last write wins on (impossible) dup keys
 
     const upserted: AgentSession[] = [];
     const becameWaiting: AgentSession[] = [];

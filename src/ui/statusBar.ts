@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
 import type { PauseService } from '../core/pauseService';
 import type { SessionStore } from '../core/sessionStore';
-import { etaText, formatDuration, workingElapsedMs, type AgentSession } from '../shared/model';
+import { displayLabel, etaText, formatDuration, workingElapsedMs, type AgentSession } from '../shared/model';
 
 /** How far into its turn a busy agent is, for the "nothing needs you" tooltip. */
 function progressNote(s: AgentSession): string {
@@ -61,7 +61,7 @@ export function createStatusBar(
       );
       const md = new vscode.MarkdownString();
       const line = (s: (typeof visible)[number]) =>
-        `- ${s.name ?? s.title}${s.name && s.title !== s.name ? ` — ${s.title}` : ''}`;
+        `- ${displayLabel(s)}${!s.nickname && s.name && s.title !== s.name ? ` — ${s.title}` : ''}`;
       if (blocked.length > 0) {
         md.appendMarkdown('**Blocked on you:**\n\n');
         for (const s of blocked.slice(0, 10)) {
@@ -87,9 +87,9 @@ export function createStatusBar(
         `**${busy.length} agent${busy.length === 1 ? '' : 's'} busy** — none waiting on you\n\n`,
       );
       for (const s of busy.slice(0, 10)) {
-        md.appendMarkdown(`- ${s.name ?? s.title}${progressNote(s)}\n`);
+        md.appendMarkdown(`- ${displayLabel(s)}${progressNote(s)}\n`);
       }
-      appendDone(md, done, (s) => `- ${s.name ?? s.title}${s.name && s.title !== s.name ? ` — ${s.title}` : ''}`);
+      appendDone(md, done, (s) => `- ${displayLabel(s)}${!s.nickname && s.name && s.title !== s.name ? ` — ${s.title}` : ''}`);
       item.tooltip = md;
     }
     item.show();

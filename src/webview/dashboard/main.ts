@@ -20,6 +20,7 @@ import { canPauseSession, clampMenuPosition, rowMenuItems, rowMenuSize } from '.
 import {
   askLine,
   capitalize,
+  displayLabel,
   etaText,
   formatAge,
   formatDuration,
@@ -195,7 +196,7 @@ function rowMenuHtml(): string {
         }>${esc(i.label)}</button>`,
     )
     .join('');
-  return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(s.name ?? s.title)}">${rows}</div>`;
+  return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}">${rows}</div>`;
 }
 
 /**
@@ -374,7 +375,10 @@ function rowTitle(s: SessionDTO): string {
   // Pin and archive used to be buttons on the row and are now in the menu, so
   // the tooltip is what carries the discovery — nothing else on the row hints
   // that a right-click does anything.
-  const more = '\nRight-click for pin, archive and more.';
+  const more = '\nRight-click to pin, rename, archive and more.';
+  // The row shows the nickname instead of the title, so this is the only place
+  // the name it came with is still readable.
+  const renamed = s.nickname ? `\n\nRenamed by you. Its own title is "${s.title}".` : '';
   const est =
     s.statusIsEstimated && s.status !== 'ended'
       ? '\n\nStatus is estimated from the transcript — this session started before hooks were installed. Restart it for exact status.'
@@ -401,7 +405,7 @@ function rowTitle(s: SessionDTO): string {
     s.status === 'done'
       ? '\n\nFinished its turn without asking you anything — the last message reads as a report. Waiting would mean it ended on a question or a choice.'
       : '';
-  return `${hint}${more}${est}${paused}${stuck}${done}${progressTooltip(s)}`;
+  return `${hint}${more}${renamed}${est}${paused}${stuck}${done}${progressTooltip(s)}`;
 }
 
 /** Branch, minus the detached-HEAD placeholder, which names nothing. */
@@ -479,8 +483,12 @@ function ageCell(s: SessionDTO): string {
 }
 
 function rowHtml(s: SessionDTO, span: number): string {
-  const titleLine =
-    s.name && s.title !== s.name
+  // A nickname replaces the whole line, registry handle included: the point of
+  // naming something is that the name is what you see. The title it came with
+  // is not lost — it moves to the row's tooltip.
+  const titleLine = s.nickname
+    ? esc(s.nickname)
+    : s.name && s.title !== s.name
       ? `<span class="nm">${esc(s.name)}</span><span class="sep">·</span>${esc(s.title)}`
       : esc(s.title);
   const kindChip =
@@ -847,7 +855,15 @@ function render(): void {
   for (const sec of SECTION_ORDER) {
     const rows = groups.get(sec);
     if (!rows || rows.length === 0) continue;
-    rows.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+    // Every other section answers "what moved", so it sorts by recency. Pinned
+    // answers "where did I put that", so it sorts by when each pin was made and
+    // holds still — a pinned row that jumped around whenever its agent wrote a
+    // line would take back the one thing pinning is for.
+    rows.sort(
+      sec === 'pinned'
+        ? (a, b) => (a.pinnedAt ?? 0) - (b.pinnedAt ?? 0)
+        : (a, b) => b.lastActivityAt - a.lastActivityAt,
+    );
     const isCollapsed = collapsed.has(sec);
     html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${sec}">
 <tr class="sec st-${sec}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(SECTION_LABEL[sec])}<span class="count">${rows.length}</span></td></tr>`;

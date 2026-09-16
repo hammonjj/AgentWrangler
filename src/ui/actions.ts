@@ -8,8 +8,15 @@ export interface SessionActions {
    * have, kept as a deliberate action rather than an accident of clicking.
    */
   goTo(key: string): void;
-  /** Open a conversation panel of this session's own, which is never swapped away. */
-  pin(key: string): void;
+  /**
+   * Open a conversation panel of this session's own, which is never swapped
+   * away. Called `pin` until pinning a dashboard *row* needed that name.
+   */
+  openInTab(key: string): void;
+  /** Keep this row in the Pinned section at the top of the dashboard, or stop. */
+  togglePinned(key: string): void;
+  /** Ask the user what to call this conversation; blank clears back to its own title. */
+  rename(key: string): void;
   /**
    * Pull a session into this window: end whatever process runs it, then resume
    * the same id here. Only offered for an idle or ended session — a turn in

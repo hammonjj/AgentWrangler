@@ -9,6 +9,7 @@
  */
 import * as vscode from 'vscode';
 import type { RunnerService } from '../../claude/runner/runnerService';
+import { displayTitle } from '../../shared/model';
 import type { RunnerSession } from '../../claude/runner/runnerSession';
 import type { DictationService } from '../../core/dictation';
 import type { SessionStore } from '../../core/sessionStore';
@@ -104,7 +105,7 @@ export class ConversationPanelManager implements vscode.Disposable {
     // Hand the reusable pane off to nothing: if it is already showing this
     // session, the pinned copy replaces it as the place it lives.
     const shell = this.adoptShell(
-      vscode.window.createWebviewPanel(CONVERSATION_PINNED_TYPE, session.title, vscode.ViewColumn.Active, {
+      vscode.window.createWebviewPanel(CONVERSATION_PINNED_TYPE, displayTitle(session), vscode.ViewColumn.Active, {
         retainContextWhenHidden: true,
       }),
       key,

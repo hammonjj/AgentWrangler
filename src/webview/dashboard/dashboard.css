@@ -383,6 +383,12 @@ tr.sec.st-done td {
 tr.sec.st-paused td {
   color: var(--aw-paused);
 }
+/* The one section the user filled themselves, so it takes the accent colour
+   rather than a status colour — none of those would be true of a section whose
+   rows can be in any state at all. */
+tr.sec.st-pinned td {
+  color: var(--vscode-textLink-foreground, #569cd6);
+}
 tr.sec .twist {
   display: inline-block;
   width: 15px;

@@ -46,15 +46,25 @@ export type HostToDashboard =
 /**
  * `allow` / `deny` / `always` answer the permission prompt a blocked row is
  * sitting on; `always` also adds the rule Claude Code's "don't ask again" would.
- * `pin` opens a conversation panel of this session's own, which the reusable
- * pane never swaps away from.
+ * `pin` keeps a row in the section at the top of the table; `openInTab` gives
+ * the conversation a panel of its own that the reusable pane never swaps away
+ * from. Both used to be called pinning, which is why the second is spelled out.
  *
  * `copyId`, `goTo` and `close` come from the row's right-click menu (see
  * `shared/rowMenu.ts`). `close` ends the process running the session and is the
  * only one of these the user can lose work to, so the host confirms it first.
  */
 export type DashboardAction =
+  /** Keep this row in the Pinned section at the top of the table, whatever its status. */
   | 'pin'
+  /**
+   * Open the conversation in a tab of its own that row clicks never swap away.
+   * Was called `pin` until pinning a *row* needed the name; the two are
+   * unrelated, and one menu cannot have two items called Pin.
+   */
+  | 'openInTab'
+  /** Ask for the user's own name for this conversation. */
+  | 'rename'
   /** Resume an *ended* session in a terminal. Not the opposite of `pause` — see `unpause`. */
   | 'resume'
   | 'archive'
@@ -144,7 +154,8 @@ export type ConversationToHost =
   | { type: 'release' }
   /** The demoted old behaviour: go to the panel, terminal or window that runs this session. */
   | { type: 'goTo' }
-  | { type: 'pin' }
+  /** The pane's own button for "give this conversation a tab of its own". */
+  | { type: 'openInTab' }
   | { type: 'resumeHere' }
   | { type: 'requestToolResult'; id: string }
   /**

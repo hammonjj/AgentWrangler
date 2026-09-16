@@ -16,7 +16,7 @@ import type { AgentProvider } from '../../core/provider';
 import type { SessionStore } from '../../core/sessionStore';
 import type { ConversationCapabilities } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
-import type { AgentSession, SessionStatus } from '../../shared/model';
+import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
 import { offerDictationSetup } from '../dictationSetup';
 import { buildWebviewHtml } from '../html';
@@ -118,7 +118,7 @@ export class ConversationHost {
   /** Point the pane at a session we have just started, before it has an id. */
   showRunner(runner: RunnerSession): void {
     if (this.binding?.kind === 'runner' && this.binding.runner === runner) return;
-    this.bind({ kind: 'runner', runner }, syntheticSession(runner));
+    this.bind({ kind: 'runner', runner }, syntheticSession(runner, this.store));
   }
 
   dispose(): void {
@@ -132,7 +132,7 @@ export class ConversationHost {
   private bind(binding: Binding, session: AgentSession): void {
     this.binding = binding;
     this.session = session;
-    this.onTitle(session.title);
+    this.onTitle(displayTitle(session));
     this.swapSource(session);
     const runner = this.source instanceof RunnerSource ? this.source.runner : undefined;
     if (runner) this.runners.touch(runner);
@@ -206,11 +206,13 @@ export class ConversationHost {
       // until then the synthetic one carries the pane.
       next =
         this.store.get(`claude:${(binding.runner.sessionId ?? '').toLowerCase()}`) ??
-        syntheticSession(binding.runner);
+        syntheticSession(binding.runner, this.store);
     }
     if (!next) return; // aged out of the store; keep showing what we have
 
-    const titleChanged = next.title !== this.session?.title;
+    // Compare what is actually shown: a rename changes the nickname, not the
+    // title, so comparing titles would leave the tab on the old name.
+    const titleChanged = this.session === undefined || displayTitle(next) !== displayTitle(this.session);
     this.session = next;
 
     // Adopting a session the pane is already showing swaps what feeds it: the
@@ -221,13 +223,13 @@ export class ConversationHost {
     const isRunner = this.source instanceof RunnerSource;
     if (shouldBeRunner !== isRunner) {
       this.swapSource(next);
-      if (titleChanged) this.onTitle(next.title);
+      if (titleChanged) this.onTitle(displayTitle(next));
       if (this.ready) void this.sendInit();
       return;
     }
 
     this.source?.setSession(next);
-    if (titleChanged) this.onTitle(next.title);
+    if (titleChanged) this.onTitle(displayTitle(next));
     void this.pushSession(next);
   }
 
@@ -304,8 +306,8 @@ export class ConversationHost {
       case 'goTo':
         if (key) this.actions.goTo(key);
         return;
-      case 'pin':
-        if (key) this.actions.pin(key);
+      case 'openInTab':
+        if (key) this.actions.openInTab(key);
         return;
       case 'adopt':
       case 'resumeHere':
@@ -385,8 +387,16 @@ export class ConversationHost {
 }
 
 /** A session that exists only as a runner so far: started here, no id yet. */
-function syntheticSession(runner: RunnerSession): AgentSession {
+/**
+ * A session for a runner the store has not registered yet — it has no
+ * transcript until the first prompt, and the dashboard hides sessions that have
+ * none. The nickname is looked up rather than read off a store entry for the
+ * same reason: there is no entry to read it from, and a renamed session being
+ * adopted here should not briefly go back to its old name.
+ */
+function syntheticSession(runner: RunnerSession, store: SessionStore): AgentSession {
   const id = runner.sessionId ?? 'pending';
+  const key = `claude:${id.toLowerCase()}`;
   const status: SessionStatus =
     runner.lifecycle === 'running'
       ? 'busy'
@@ -398,8 +408,9 @@ function syntheticSession(runner: RunnerSession): AgentSession {
   return {
     provider: 'claude',
     sessionId: id,
-    key: `claude:${id.toLowerCase()}`,
+    key,
     title: path.basename(runner.cwd) || 'New conversation',
+    nickname: store.nicknameOf(key),
     cwd: runner.cwd,
     projectName: path.basename(runner.cwd),
     status,

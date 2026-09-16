@@ -50,25 +50,44 @@ export function canPauseSession(s: SessionDTO): boolean {
 }
 
 /**
- * The row menu, in order: the things you do to a row you are keeping (pin, go
- * to it, stop it spending), the one thing you take off it (its id), then the
- * two that change its place in the world — archive, and close.
+ * The row menu, in order: what the row *is* (pin it to the top, rename it),
+ * where to look at it (its own tab, or wherever it runs), what to do to the
+ * agent (pause it), what to take off it (its id), then the two that change its
+ * place in the world — archive, and close.
  *
- * `pause` sits with the first group rather than beside `close`, and is not
- * marked `danger`, because it is the one action here that is fully reversible:
- * it stops a process, it does not end one. `close` is offered even while a turn
- * is in flight, unlike *Take over*: the session that most needs closing is the
- * wedged one, and the modal that follows is where the cost of interrupting it
- * gets spelled out.
+ * `pause` is not marked `danger` even though it stops a process, because it is
+ * fully reversible by the same menu. `close` is offered even while a turn is in
+ * flight, unlike *Take over*: the session that most needs closing is the wedged
+ * one, and the modal that follows is where the cost of interrupting it gets
+ * spelled out.
+ *
+ * Note the two things that used to both be called pinning. Pinning a row keeps
+ * it in the section at the top of the dashboard; opening it in its own tab is
+ * about where the *conversation* is read. They are unrelated, and one menu
+ * cannot have two items called Pin.
  */
 export function rowMenuItems(s: SessionDTO): RowMenuItem[] {
   const items: RowMenuItem[] = [];
 
+  items.push(
+    s.pinned
+      ? { action: 'pin', label: 'Unpin', title: 'Put it back in the section its status belongs to' }
+      : {
+          action: 'pin',
+          label: 'Pin to top',
+          title: 'Keep this one in the Pinned section at the top, whatever it is doing',
+        },
+  );
+  items.push({
+    action: 'rename',
+    label: s.nickname ? 'Rename…' : 'Give it a name…',
+    title: 'Your own name for this conversation. Clear it to get the original back.',
+  });
   // No transcript, nothing to show in a tab of its own.
   if (s.transcriptPath) {
     items.push({
-      action: 'pin',
-      label: 'Pin in its own tab',
+      action: 'openInTab',
+      label: 'Open in its own tab',
       title: 'Open this conversation in a tab that row clicks never swap away',
     });
   }

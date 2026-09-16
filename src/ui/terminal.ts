@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { UUID_RE } from '../claude/paths';
 import type { ConfigGetter } from '../core/config';
-import type { AgentSession } from '../shared/model';
+import { displayLabel, type AgentSession } from '../shared/model';
 
 function quoteIfNeeded(bin: string): string {
   return /\s/.test(bin) ? `"${bin}"` : bin;
@@ -19,7 +19,7 @@ export function resumeInTerminal(session: AgentSession, getConfig: ConfigGetter)
     void vscode.window.showErrorMessage(`Agent Wrangler: project folder no longer exists: ${cwd ?? '(unknown)'}`);
     return;
   }
-  const label = (session.name ?? session.title).slice(0, 30);
+  const label = displayLabel(session).slice(0, 30);
   const terminal = vscode.window.createTerminal({ name: `claude: ${label}`, cwd });
   terminal.show();
   terminal.sendText(`${quoteIfNeeded(getConfig().claudeBinaryPath)} --resume ${session.sessionId}`, true);

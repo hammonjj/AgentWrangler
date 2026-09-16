@@ -24,6 +24,8 @@ import { ColumnPrefsService } from './core/columnPrefs';
 import { DEFAULT_CONFIG, type ConfigGetter, type WranglerConfig } from './core/config';
 import { DictationService } from './core/dictation';
 import { HiddenProjectsService } from './core/hiddenProjects';
+import { MAX_NICKNAME_LENGTH, NicknameService } from './core/nicknameService';
+import { PinService } from './core/pinService';
 import { autoPauseDecision, maxUsagePercent } from './core/autoPause';
 import { PauseService } from './core/pauseService';
 import { readStoppedPids } from './core/procTree';
@@ -32,7 +34,7 @@ import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
 import { UsageService } from './core/usageService';
 import type { PermissionModeName } from './shared/conversation';
-import { STATUS_LABEL, type AgentSession, type OpenTarget, type SessionStatus } from './shared/model';
+import { displayLabel, displayTitle, STATUS_LABEL, type AgentSession, type OpenTarget, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
 import {
   CONVERSATION_PANEL_TYPE,
@@ -112,6 +114,18 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     log,
   );
+  // Rows kept at the top, and the names the user gave them. Global state like
+  // the archive: both are about the session, not about the window looking at it.
+  const pins = new PinService(context.globalState);
+  const nicknames = new NicknameService(context.globalState);
+  // Applied in the store rather than at each render, because the dashboard, the
+  // conversation pane, the status bar, the quick picks, the toasts and the
+  // terminal label do not share a decoration step — only the store.
+  store.useNicknames((key) => nicknames.get(key));
+  // A rename changes nothing a provider scan would notice, so the store has to
+  // be told to re-apply and re-fire, or the new name waits for the session to
+  // do something before it appears.
+  context.subscriptions.push(nicknames.onDidChange(() => store.renameApplied()));
   // Column widths and the hidden set: a preference, so global state rather than
   // per-webview state — the same layout in the editor tab, the dock, and after
   // a restart.
@@ -226,7 +240,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // Owned by another window of this VSCode: focus it and have its
         // Agent Wrangler instance reveal the panel or terminal there.
         void relay.request(s.sessionId, s.cwd ?? '', s.pid);
-        vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${s.name ?? s.title} in its window…`, 4000);
+        vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${displayLabel(s)} in its window…`, 4000);
         return;
       case 'resume':
         resumeInTerminal(s, getConfig);
@@ -253,7 +267,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     if (kind === 'adopt') {
       const choice = await vscode.window.showWarningMessage(
-        `Take over ${s.name ?? s.title} in this window?`,
+        `Take over ${displayLabel(s)} in this window?`,
         {
           modal: true,
           detail:
@@ -269,7 +283,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const now = store.get(s.key) ?? s;
       if (adoptActionFor(now, runners.owns(now.sessionId)) !== 'adopt') {
         void vscode.window.showInformationMessage(
-          `Agent Wrangler: ${now.name ?? now.title} started working again; take it over once it is idle.`,
+          `Agent Wrangler: ${displayLabel(now)} started working again; take it over once it is idle.`,
         );
         return;
       }
@@ -287,7 +301,7 @@ export function activate(context: vscode.ExtensionContext): void {
         log(`adopt ${now.sessionId}: ending pid ${now.pid} → ${outcome}`);
         if (outcome === 'refused') {
           void vscode.window.showErrorMessage(
-            `Agent Wrangler: could not stop the process running ${now.name ?? now.title}, so it was not taken over. ` +
+            `Agent Wrangler: could not stop the process running ${displayLabel(now)}, so it was not taken over. ` +
               'Two processes on one session would corrupt its transcript.',
           );
           return;
@@ -323,7 +337,7 @@ export function activate(context: vscode.ExtensionContext): void {
    * where that cost gets stated instead.
    */
   const confirmAndCloseSession = async (s: AgentSession): Promise<void> => {
-    const label = s.name ?? s.title;
+    const label = displayLabel(s);
     if (!runners.owns(s.sessionId) && s.pid === undefined) {
       void vscode.window.showWarningMessage(
         `Agent Wrangler: no process is known for ${label}, so there is nothing to close.`,
@@ -384,7 +398,7 @@ export function activate(context: vscode.ExtensionContext): void {
    * tokens disappear is friction in exactly the wrong place.
    */
   const setPaused = (s: AgentSession, wanted: boolean): void => {
-    const label = s.name ?? s.title;
+    const label = displayLabel(s);
     const outcome = wanted ? pause.pause(s.pid) : pause.resume(s.pid);
     log(`${wanted ? 'pause' : 'resume'} ${s.sessionId} (pid ${s.pid ?? '?'}) → ${outcome}`);
     if (outcome === 'gone') {
@@ -507,7 +521,7 @@ export function activate(context: vscode.ExtensionContext): void {
         log(`goTo ${s.name ?? s.sessionId}: process ${loc.kind} → ${target}`);
         if (target === 'conversation') {
           vscode.window.setStatusBarMessage(
-            `Agent Wrangler: ${s.name ?? s.title} runs outside this VSCode; nothing here can reveal it.`,
+            `Agent Wrangler: ${displayLabel(s)} runs outside this VSCode; nothing here can reveal it.`,
             4000,
           );
           return;
@@ -515,8 +529,32 @@ export function activate(context: vscode.ExtensionContext): void {
         goToSession(s, target, loc);
       })();
     },
-    pin(key) {
+    openInTab(key) {
       conversations.pin(key);
+    },
+    togglePinned(key) {
+      pins.toggle(key);
+      // Wanting a row out of the way and at the top of the table at once is not
+      // a state worth being able to reach, so the two clear each other.
+      if (pins.isPinned(key)) archive.set(key, false);
+    },
+    rename(key) {
+      const s = store.get(key);
+      if (!s) return;
+      void (async () => {
+        const value = await vscode.window.showInputBox({
+          title: `Name for ${s.title}`,
+          prompt: 'Your own name for this conversation. Leave it blank to go back to the name it came with.',
+          value: s.nickname ?? '',
+          placeHolder: s.title,
+          validateInput: (v) =>
+            v.trim().length > MAX_NICKNAME_LENGTH ? `Keep it to ${MAX_NICKNAME_LENGTH} characters or fewer.` : undefined,
+        });
+        // Escape gives undefined and must change nothing; an empty string is a
+        // deliberate "use its own title again", which is what clearing does.
+        if (value === undefined) return;
+        nicknames.set(key, value);
+      })();
     },
     adopt(key) {
       const s = store.get(key);
@@ -529,7 +567,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!s || !runner) return;
       void (async () => {
         const choice = await vscode.window.showWarningMessage(
-          `Hand ${s.name ?? s.title} back to a terminal?`,
+          `Hand ${displayLabel(s)} back to a terminal?`,
           {
             modal: true,
             detail:
@@ -608,7 +646,7 @@ export function activate(context: vscode.ExtensionContext): void {
         // The prompt was answered in Claude Code first, or the hook gave up
         // waiting; either way there is nothing left to decide from here.
         vscode.window.setStatusBarMessage(
-          `Agent Wrangler: ${s.name ?? s.title} is no longer waiting on that permission.`,
+          `Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`,
           4000,
         );
       });
@@ -697,6 +735,7 @@ export function activate(context: vscode.ExtensionContext): void {
     projects,
     launcher,
     pause,
+    pins,
   );
   context.subscriptions.push(
     dashboardPanel,
@@ -716,6 +755,7 @@ export function activate(context: vscode.ExtensionContext): void {
         projects,
         launcher,
         pause,
+        pins,
       ),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
@@ -743,10 +783,10 @@ export function activate(context: vscode.ExtensionContext): void {
         lastToastAt.set(s.key, now);
         const msg =
           s.status === 'blocked'
-            ? `${s.title} needs your permission${s.blockedReason ? ` for ${s.blockedReason}` : ''}`
+            ? `${displayTitle(s)} needs your permission${s.blockedReason ? ` for ${s.blockedReason}` : ''}`
             : s.status === 'done'
-              ? `${s.title} is done`
-              : `${s.title} is waiting on you`;
+              ? `${displayTitle(s)} is done`
+              : `${displayTitle(s)} is waiting on you`;
         void vscode.window
           .showInformationMessage(msg, 'Open', 'Dashboard')
           .then((choice) => {
@@ -767,7 +807,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const picked = await vscode.window.showQuickPick(
       candidates.map((s) => ({
-        label: `${QUICKPICK_ICON[s.status]} ${s.title}`,
+        label: `${QUICKPICK_ICON[s.status]} ${displayTitle(s)}`,
         description: [s.projectName, STATUS_LABEL[s.status]].filter(Boolean).join(' · '),
         detail: s.subtitle,
         key: s.key,
@@ -867,10 +907,15 @@ export function activate(context: vscode.ExtensionContext): void {
       'agentWrangler.openConversation',
       withSession((k) => actions.smartOpen(k)),
     ),
+    // The command id still says "pin" because ids are the stable thing a
+    // keybinding points at; only what it is called changed, when pinning a row
+    // took the word.
     vscode.commands.registerCommand(
       'agentWrangler.pinConversation',
-      withSession((k) => actions.pin(k)),
+      withSession((k) => actions.openInTab(k)),
     ),
+    vscode.commands.registerCommand('agentWrangler.renameConversation', withSession((k) => actions.rename(k))),
+    vscode.commands.registerCommand('agentWrangler.pinToTop', withSession((k) => actions.togglePinned(k))),
     vscode.commands.registerCommand('agentWrangler.goToSession', withSession((k) => actions.goTo(k))),
     vscode.commands.registerCommand(
       'agentWrangler.resumeInTerminal',
