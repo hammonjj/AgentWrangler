@@ -262,17 +262,24 @@ export function compareSessions(a: AgentSession, b: AgentSession): number {
   return b.lastActivityAt - a.lastActivityAt;
 }
 
-/** Dashboard sections: the six statuses, plus Paused and Archived pinned last. */
+/** Dashboard sections: the six statuses, plus Paused, with Archived pinned last. */
 export type SectionId = SessionStatus | 'paused' | 'archived';
 
+/**
+ * Paused sits above Ended, not below it: a paused agent is still a live process
+ * with a conversation you are coming back to, and the two things you might do
+ * about it — resume it, or decide you are done with it — are both worth seeing
+ * before a list of sessions that are already over. Ended and Archived are the
+ * two archives at the bottom, and Paused is not one of them.
+ */
 export const SECTION_ORDER: SectionId[] = [
   'blocked',
   'waiting',
   'stuck',
   'done',
   'busy',
-  'ended',
   'paused',
+  'ended',
   'archived',
 ];
 

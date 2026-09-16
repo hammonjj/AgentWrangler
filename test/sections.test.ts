@@ -36,8 +36,14 @@ describe('sectionOf', () => {
     expect(sectionOf(session({ paused: true, archived: true }))).toBe('archived');
   });
 
-  it('puts Paused after the statuses and before Archived', () => {
-    expect(SECTION_ORDER.indexOf('paused')).toBe(SECTION_ORDER.indexOf('ended') + 1);
+  /**
+   * A paused agent is a live process you are coming back to, so it belongs
+   * above the two sections that hold sessions you are done with rather than
+   * among them.
+   */
+  it('puts Paused above Ended, with Archived last', () => {
+    expect(SECTION_ORDER.indexOf('paused')).toBeLessThan(SECTION_ORDER.indexOf('ended'));
+    expect(SECTION_ORDER.indexOf('ended')).toBe(SECTION_ORDER.length - 2);
     expect(SECTION_ORDER.indexOf('archived')).toBe(SECTION_ORDER.length - 1);
   });
 
