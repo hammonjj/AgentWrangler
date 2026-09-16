@@ -78,4 +78,40 @@ describe('PinService', () => {
     expect(revived.count).toBe(1);
     expect(revived.isPinned('claude:a')).toBe(true);
   });
+
+  // This runs inside activate(); a throw here would take the extension down
+  // over a preference, so a value that is not even a list has to be survivable.
+  it.each([{}, 'nope', 42, null] as unknown[])('survives a stored value of %s', (junk) => {
+    store.data.set('agentWrangler.pinnedKeys', junk);
+    expect(() => new PinService(store)).not.toThrow();
+    expect(new PinService(store).count).toBe(0);
+  });
+
+  /**
+   * Two windows each hold a copy taken when they started. Writing that copy
+   * back whole would drop whatever the other window has pinned since — the
+   * failure that made a persisted paused-set the wrong design. Only the single
+   * change is applied, to storage as it reads at that moment.
+   */
+  describe('two windows sharing one stored list', () => {
+    it('does not drop a pin the other window made', () => {
+      const other = new PinService(store);
+      svc.set('claude:a', true);
+      other.set('claude:b', true); // `other` never saw a
+      const third = new PinService(store);
+      expect(third.isPinned('claude:a')).toBe(true);
+      expect(third.isPinned('claude:b')).toBe(true);
+    });
+
+    it('does not resurrect a pin the other window removed', () => {
+      svc.set('claude:a', true);
+      const other = new PinService(store);
+      other.set('claude:a', false);
+      // `svc` still has it in memory; its next write must not bring it back.
+      svc.set('claude:b', true);
+      const third = new PinService(store);
+      expect(third.isPinned('claude:a')).toBe(false);
+      expect(third.isPinned('claude:b')).toBe(true);
+    });
+  });
 });

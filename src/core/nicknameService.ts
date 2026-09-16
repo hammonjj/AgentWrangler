@@ -15,6 +15,11 @@
  * What that buys, beyond safety: it works on ended sessions, on sessions this
  * extension has never run, and it is reversible — clearing the nickname brings
  * the original title back, because the original was never touched.
+ *
+ * Stored globally, meaning one map rather than one per window; that is not a
+ * live channel between windows, so a name set elsewhere appears when this
+ * window next reads. Writes apply a single change to freshly-read storage
+ * rather than saving this window's whole map, which would drop it.
  */
 
 import type { KeyValueStorage } from './archive';
@@ -30,11 +35,22 @@ export class NicknameService {
   private emitter = new Emitter<void>();
 
   constructor(private storage: KeyValueStorage) {
-    const raw = storage.get<Record<string, string>>(STORAGE_KEY, {});
-    for (const [key, value] of Object.entries(raw ?? {})) {
-      const clean = cleanNickname(value);
-      if (clean) this.names.set(key, clean);
+    this.names = this.read();
+  }
+
+  /**
+   * Tolerant on purpose: this runs during `activate()`, and a throw here would
+   * take the whole extension down over a preference.
+   */
+  private read(): Map<string, string> {
+    const out = new Map<string, string>();
+    const raw = this.storage.get<unknown>(STORAGE_KEY, {});
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return out;
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      const clean = typeof value === 'string' ? cleanNickname(value) : undefined;
+      if (clean) out.set(key, clean);
     }
+    return out;
   }
 
   readonly onDidChange = (listener: Listener<void>): Disposable => this.emitter.event(listener);
@@ -47,9 +63,13 @@ export class NicknameService {
   set(key: string, nickname: string | undefined): void {
     const clean = cleanNickname(nickname);
     if (clean === this.names.get(key)) return;
-    if (clean) this.names.set(key, clean);
-    else if (!this.names.delete(key)) return;
-    void this.storage.update(STORAGE_KEY, Object.fromEntries(this.names));
+    // One change applied to what storage says now, not this window's whole map
+    // written back — see `PinService.set` for why that distinction matters.
+    const merged = this.read();
+    if (clean) merged.set(key, clean);
+    else merged.delete(key);
+    this.names = merged;
+    void this.storage.update(STORAGE_KEY, Object.fromEntries(merged));
     this.emitter.fire();
   }
 }

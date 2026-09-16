@@ -48,7 +48,7 @@ app.innerHTML = `
   <span id="meta"></span>
   <span id="spacer"></span>
   <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
-  <button id="pin" class="hdrbtn" title="Open this conversation in its own tab">Pin</button>
+  <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
 </div>
 <div id="banner" hidden></div>
 <div id="scroll"><div id="notch" hidden>earlier messages not shown</div><div id="blocks"></div></div>

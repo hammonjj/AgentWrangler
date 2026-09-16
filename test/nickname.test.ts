@@ -84,10 +84,30 @@ describe('NicknameService', () => {
   });
 
   it('ignores junk in storage rather than throwing on startup', () => {
-    store.data.set('agentWrangler.nicknames', { 'claude:a': '   ', 'claude:b': 'fine' });
+    store.data.set('agentWrangler.nicknames', { 'claude:a': '   ', 'claude:b': 'fine', 'claude:c': 42 });
     const revived = new NicknameService(store);
     expect(revived.get('claude:a')).toBeUndefined();
     expect(revived.get('claude:b')).toBe('fine');
+    expect(revived.get('claude:c')).toBeUndefined();
+  });
+
+  it.each([[], 'nope', 42, null] as unknown[])('survives a stored value of %s', (junk) => {
+    store.data.set('agentWrangler.nicknames', junk);
+    expect(() => new NicknameService(store)).not.toThrow();
+  });
+
+  // Same reasoning as PinService: a window writes one change, not its whole map.
+  it('does not drop a name another window set, or resurrect one it cleared', () => {
+    const other = new NicknameService(store);
+    svc.set('claude:a', 'from A');
+    other.set('claude:b', 'from B');
+    expect(new NicknameService(store).get('claude:a')).toBe('from A');
+
+    other.set('claude:a', '');
+    svc.set('claude:c', 'later');
+    const third = new NicknameService(store);
+    expect(third.get('claude:a')).toBeUndefined();
+    expect(third.get('claude:c')).toBe('later');
   });
 });
 
