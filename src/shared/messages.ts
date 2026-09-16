@@ -55,11 +55,16 @@ export type HostToDashboard =
  */
 export type DashboardAction =
   | 'pin'
+  /** Resume an *ended* session in a terminal. Not the opposite of `pause` — see `unpause`. */
   | 'resume'
   | 'archive'
   | 'copyId'
   | 'goTo'
   | 'close'
+  /** Stop this session's process (SIGSTOP) so it spends nothing. */
+  | 'pause'
+  /** Let a paused session run again (SIGCONT). */
+  | 'unpause'
   | 'allow'
   | 'deny'
   | 'always';
@@ -81,7 +86,13 @@ export type DashboardToHost =
   /** The X on a dropdown row: stop offering this folder. Browsing back to it undoes this. */
   | { type: 'removeProject'; dir: string }
   /** The dropdown was opened — re-scan, since a folder may have been used elsewhere since the last snapshot. */
-  | { type: 'refreshProjects' };
+  | { type: 'refreshProjects' }
+  /**
+   * The bar's pause button: freeze every running agent on the machine, or thaw
+   * everything currently frozen. Machine-wide on purpose — the budget being
+   * protected is the account's, not this window's.
+   */
+  | { type: 'pauseAll'; pause: boolean };
 
 // ---- Conversation pane ----
 

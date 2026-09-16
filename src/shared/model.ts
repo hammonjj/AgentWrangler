@@ -111,7 +111,21 @@ export interface AgentSession {
   status: SessionStatus;
   /** ms epoch of last observed activity (transcript mtime, else registry startedAt). */
   lastActivityAt: number;
+  /**
+   * ms epoch the *process* started, from the pid registry. Not the age of the
+   * conversation: a `--resume` starts a new process on an old conversation, so
+   * this is when the session was last picked up, and it is absent entirely for
+   * ended sessions. `conversationStartedAt` is the one to show a human.
+   */
   startedAt?: number;
+  /**
+   * ms epoch the conversation itself began — its first prompt, however many
+   * processes and resumes ago that was. Taken from the transcript file's
+   * creation time, which is exact for the purpose: Claude Code writes no
+   * transcript until the first prompt lands, and a resume appends to the same
+   * file rather than starting a new one.
+   */
+  conversationStartedAt?: number;
   kind?: SessionKind;
   entrypoint?: string;
   transcriptPath?: string;
@@ -119,6 +133,13 @@ export interface AgentSession {
   prLink?: PrLink;
   /** User shoved this session out of the way (host decorates from ArchiveService). */
   archived?: boolean;
+  /**
+   * Its process is stopped (SIGSTOP) and spending nothing until resumed (host
+   * decorates from PauseService). A paused session keeps whatever `status` it
+   * had when it was frozen — that status is simply no longer moving, which is
+   * the point — so the row is grouped by `sectionOf` instead.
+   */
+  paused?: boolean;
   /** What clicking the row does, decided by the host from where the process lives (host decorates). */
   openTarget?: OpenTarget;
   /**
@@ -241,18 +262,37 @@ export function compareSessions(a: AgentSession, b: AgentSession): number {
   return b.lastActivityAt - a.lastActivityAt;
 }
 
-/** Dashboard sections: the six statuses, plus Archived pinned last. */
-export type SectionId = SessionStatus | 'archived';
+/** Dashboard sections: the six statuses, plus Paused and Archived pinned last. */
+export type SectionId = SessionStatus | 'paused' | 'archived';
 
-export const SECTION_ORDER: SectionId[] = ['blocked', 'waiting', 'stuck', 'done', 'busy', 'ended', 'archived'];
+export const SECTION_ORDER: SectionId[] = [
+  'blocked',
+  'waiting',
+  'stuck',
+  'done',
+  'busy',
+  'ended',
+  'paused',
+  'archived',
+];
 
 export const SECTION_LABEL: Record<SectionId, string> = {
   ...STATUS_LABEL,
+  paused: 'Paused',
   archived: 'Archived',
 };
 
+/**
+ * Paused beats the underlying status, because a frozen session's status is a
+ * fact about the moment it was frozen and nothing will move it again — a paused
+ * `busy` row left in Busy would sit there looking like work in progress, and
+ * would drift into *Possibly stuck* ten minutes later, which is exactly the
+ * wrong thing to say about a process someone stopped on purpose. Archived still
+ * beats paused: "out of my way" is the stronger instruction of the two.
+ */
 export function sectionOf(s: AgentSession): SectionId {
-  return s.archived ? 'archived' : s.status;
+  if (s.archived) return 'archived';
+  return s.paused ? 'paused' : s.status;
 }
 
 export function formatDuration(ms: number): string {

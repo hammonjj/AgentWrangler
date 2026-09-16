@@ -59,7 +59,13 @@ export const COLUMNS: readonly ColumnDef[] = [
     defaultWidth: 52,
     minWidth: 40,
   },
-  { id: 'age', label: 'Age', defaultWidth: 48, minWidth: 36 },
+  {
+    id: 'age',
+    label: 'Age',
+    title: 'How long this conversation has been going, counting from its first prompt — not since it last moved.',
+    defaultWidth: 48,
+    minWidth: 36,
+  },
 ];
 
 /** Below this webview width the folding columns give way to the row's second line. */

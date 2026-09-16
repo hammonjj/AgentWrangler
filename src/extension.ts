@@ -24,6 +24,8 @@ import { ColumnPrefsService } from './core/columnPrefs';
 import { DEFAULT_CONFIG, type ConfigGetter, type WranglerConfig } from './core/config';
 import { DictationService } from './core/dictation';
 import { HiddenProjectsService } from './core/hiddenProjects';
+import { autoPauseDecision, maxUsagePercent } from './core/autoPause';
+import { PauseService } from './core/pauseService';
 import { SessionStore } from './core/sessionStore';
 import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
@@ -85,6 +87,8 @@ export function activate(context: vscode.ExtensionContext): void {
       pollIntervalSeconds: c.get('pollIntervalSeconds', DEFAULT_CONFIG.pollIntervalSeconds),
       showUsage: c.get('showUsage', DEFAULT_CONFIG.showUsage),
       usagePollIntervalSeconds: c.get('usagePollIntervalSeconds', DEFAULT_CONFIG.usagePollIntervalSeconds),
+      autoPauseEnabled: c.get('autoPause.enabled', DEFAULT_CONFIG.autoPauseEnabled),
+      autoPausePercent: c.get('autoPause.percent', DEFAULT_CONFIG.autoPausePercent),
     };
     return cfg;
   };
@@ -95,6 +99,17 @@ export function activate(context: vscode.ExtensionContext): void {
   const turnStats = new TurnStats(context.globalState);
   const provider = new ClaudeProvider(getConfig, log, turnStats);
   const archive = new ArchiveService(context.globalState);
+  // Which agents are frozen. Global state, like the archive: pausing is about
+  // this machine's token budget and the sessions being stopped mostly belong to
+  // other windows. Persisting it also means a reload cannot strand a stopped
+  // process with no UI left to start it again.
+  const pause = new PauseService(
+    context.globalState,
+    { signal: (pid, sig) => process.kill(pid, sig), isAlive: isPidAlive },
+    log,
+  );
+  // Anything remembered from a previous run whose process has since gone.
+  pause.reconcile();
   // Column widths and the hidden set: a preference, so global state rather than
   // per-webview state — the same layout in the editor tab, the dock, and after
   // a restart.
@@ -343,6 +358,93 @@ export function activate(context: vscode.ExtensionContext): void {
     void store.forceRefresh();
   };
 
+  /**
+   * Freeze or thaw one session.
+   *
+   * No confirm, deliberately. Closing a session asks first because it cannot be
+   * taken back; pausing can, by pressing the same thing again, and a dialog in
+   * front of the button you reach for when you are watching the last of your
+   * tokens disappear is friction in exactly the wrong place.
+   */
+  const setPaused = (s: AgentSession, wanted: boolean): void => {
+    const label = s.name ?? s.title;
+    const outcome = wanted ? pause.pause(s.key, s.pid) : pause.resume(s.key);
+    log(`${wanted ? 'pause' : 'resume'} ${s.sessionId} (pid ${s.pid ?? '?'}) → ${outcome}`);
+    if (outcome === 'gone') {
+      void vscode.window.showWarningMessage(
+        `Agent Wrangler: the process running ${label} is gone, so there was nothing to ${wanted ? 'pause' : 'resume'}.`,
+      );
+      return;
+    }
+    if (outcome === 'refused') {
+      void vscode.window.showErrorMessage(
+        `Agent Wrangler: could not ${wanted ? 'pause' : 'resume'} ${label} — the signal was refused. ` +
+          'It may belong to another user.',
+      );
+      return;
+    }
+    vscode.window.setStatusBarMessage(`Agent Wrangler: ${label} ${wanted ? 'paused' : 'resumed'}`, 4000);
+    // A resumed session starts writing again immediately; a paused one has just
+    // stopped. Either way the row is out of date the moment the signal lands.
+    void store.forceRefresh();
+  };
+
+  /**
+   * Everything at once — the token-emergency button.
+   *
+   * Archived sessions are included. Archiving is about what is in the way on
+   * screen, not about what is spending, and a forgotten agent grinding through
+   * a plan in a folder you stopped looking at is precisely what this is for.
+   */
+  const setPausedAll = (wanted: boolean, why?: string): void => {
+    if (wanted) {
+      const candidates = store.sessions
+        .filter((s) => s.status !== 'ended' && s.pid !== undefined && !pause.isPaused(s.key))
+        .map((s) => ({ key: s.key, pid: s.pid }));
+      if (candidates.length === 0) {
+        void vscode.window.showInformationMessage('Agent Wrangler: nothing is running to pause.');
+        return;
+      }
+      const r = pause.pauseAll(candidates);
+      log(`pause all${why ? ` (${why})` : ''}: ${r.ok} paused, ${r.gone} already gone, ${r.refused} refused`);
+      const trouble = r.refused > 0 ? `, ${r.refused} refused the signal` : '';
+      void vscode.window.showInformationMessage(
+        `Agent Wrangler: paused ${r.ok} agent${r.ok === 1 ? '' : 's'}${trouble}${why ? ` — ${why}` : ''}.`,
+      );
+    } else {
+      const r = pause.resumeAll();
+      log(`resume all: ${r.ok} resumed, ${r.gone} gone, ${r.refused} refused`);
+      const trouble = r.refused > 0 ? `, ${r.refused} refused the signal` : '';
+      void vscode.window.showInformationMessage(
+        `Agent Wrangler: resumed ${r.ok} agent${r.ok === 1 ? '' : 's'}${trouble}.`,
+      );
+    }
+    void store.forceRefresh();
+  };
+
+  /**
+   * Auto-pause: stop everything by itself when the plan is nearly spent.
+   *
+   * Armed state is per-window and deliberately not persisted. Two windows both
+   * firing is harmless — the second finds everything paused already and pauses
+   * nothing — whereas a persisted flag would have a restart mid-window decide
+   * it had already fired and sail past the threshold in silence.
+   */
+  let autoPauseArmed = true;
+  context.subscriptions.push(
+    usage.onDidChange(() => {
+      const cfg = getConfig();
+      const percent = maxUsagePercent(usage.usage.last);
+      const decision = autoPauseDecision(
+        percent,
+        { enabled: cfg.autoPauseEnabled, percent: cfg.autoPausePercent },
+        autoPauseArmed,
+      );
+      autoPauseArmed = decision.armed;
+      if (decision.fire) setPausedAll(true, `plan usage reached ${percent}%`);
+    }),
+  );
+
   const actions: SessionActions = {
     smartOpen(key) {
       const s = store.get(key);
@@ -412,6 +514,14 @@ export function activate(context: vscode.ExtensionContext): void {
       const s = store.get(key);
       if (!s) return;
       void confirmAndCloseSession(s);
+    },
+    pauseSession(key, wanted) {
+      const s = store.get(key);
+      if (!s) return;
+      setPaused(s, wanted);
+    },
+    pauseAll(wanted) {
+      setPausedAll(wanted);
     },
     resume(key) {
       const s = store.get(key);
@@ -552,6 +662,7 @@ export function activate(context: vscode.ExtensionContext): void {
     runners,
     projects,
     launcher,
+    pause,
   );
   context.subscriptions.push(
     dashboardPanel,
@@ -570,6 +681,7 @@ export function activate(context: vscode.ExtensionContext): void {
         runners,
         projects,
         launcher,
+        pause,
       ),
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
@@ -583,7 +695,7 @@ export function activate(context: vscode.ExtensionContext): void {
     else void vscode.commands.executeCommand('agentWrangler.dashboard.focus');
   };
 
-  createStatusBar(store, archive, context);
+  createStatusBar(store, archive, pause, context);
 
   // Opt-in "waiting on you" toasts, with a per-session cooldown.
   const lastToastAt = new Map<string, number>();
@@ -731,6 +843,15 @@ export function activate(context: vscode.ExtensionContext): void {
       withSession((k) => actions.resume(k), (s) => s.status === 'ended'),
     ),
     vscode.commands.registerCommand('agentWrangler.copySessionId', withSession((k) => actions.copyId(k))),
+    vscode.commands.registerCommand('agentWrangler.pauseAll', () => setPausedAll(true)),
+    vscode.commands.registerCommand('agentWrangler.resumeAll', () => setPausedAll(false)),
+    vscode.commands.registerCommand(
+      'agentWrangler.pauseSession',
+      withSession(
+        (k) => actions.pauseSession(k, !pause.isPaused(k)),
+        (s) => s.status !== 'ended' && s.pid !== undefined,
+      ),
+    ),
     vscode.commands.registerCommand(
       'agentWrangler.revealTranscript',
       withSession((k) => actions.reveal(k), (s) => s.transcriptPath !== undefined),

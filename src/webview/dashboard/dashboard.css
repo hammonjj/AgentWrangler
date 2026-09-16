@@ -8,6 +8,10 @@
   --aw-stuck: var(--vscode-charts-red, #f14c4c);
   --aw-done: var(--vscode-charts-green, #89d185);
   --aw-ended: var(--vscode-disabledForeground, #888);
+  /* Frozen on purpose. Purple because it has to read as a state someone chose,
+     which none of the five status colours — all of them things the agent did —
+     can say without being mistaken for one of those. */
+  --aw-paused: var(--vscode-charts-purple, #b180d7);
 }
 
 html,
@@ -180,8 +184,51 @@ body {
   opacity: 0.5;
   cursor: default;
 }
+/* The bar's other half: controls that act on what is already running, rather
+   than starting anything. Pushed right by the project button's flex-grow, not
+   by a margin, so there is only ever one thing deciding the layout. Divided by
+   a hairline rather than a gap — at 300px a gap is indistinguishable from the
+   flex gap on either side of it. */
+#bar .ctlgroup {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 6px;
+  border-left: 1px solid var(--vscode-panel-border, transparent);
+}
+#bar .ctlbtn {
+  flex: 0 0 auto;
+  min-width: 28px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 3px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-button-secondaryBackground, transparent);
+  font-family: inherit;
+  font-size: 0.92em;
+  line-height: 1;
+  cursor: pointer;
+}
+#bar .ctlbtn:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-button-secondaryHoverBackground));
+}
+#bar .ctlbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* Something is frozen. The button is now the way out of that, so it stops being
+   a quiet toolbar control and takes the paused colour the rows are wearing. */
+#bar .ctlbtn.on {
+  border-color: transparent;
+  background: var(--aw-paused);
+  color: var(--vscode-editor-background);
+}
+
 #bar .projbtn:focus-visible,
 #bar .newbtn:focus-visible,
+#bar .ctlbtn:focus-visible,
 .projmenu button:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: -1px;
@@ -333,6 +380,9 @@ tr.sec.st-stuck td {
 tr.sec.st-done td {
   color: var(--aw-done);
 }
+tr.sec.st-paused td {
+  color: var(--aw-paused);
+}
 tr.sec .twist {
   display: inline-block;
   width: 15px;
@@ -417,6 +467,20 @@ tr.row.est.st-stuck .dot {
 }
 tr.row.est.st-done .dot {
   color: var(--aw-done);
+}
+
+/* Paused replaces whatever the status dot was going to be, and kills the pulse
+   with it: a pulsing dot on a stopped process promises movement that is not
+   coming. It has to sit after the `est` block and match its specificity —
+   `tr.row.est.st-busy .dot` would otherwise repaint a frozen session in the
+   colour of the work it is no longer doing. Estimated or not, paused is the
+   more useful of the two facts, so it wins outright rather than staying hollow. */
+tr.row.paused .dot,
+tr.row.est.paused .dot {
+  background: var(--aw-paused);
+  border-color: var(--aw-paused);
+  color: var(--aw-paused);
+  animation: none;
 }
 
 @keyframes aw-pulse {
@@ -651,6 +715,14 @@ button.pbtn:disabled {
 .chip.tool {
   border-color: var(--aw-busy);
   color: var(--aw-busy);
+}
+/* Stopped, and spending nothing. Filled rather than outlined like the others,
+   because it contradicts the status chips beside it and has to win that
+   argument at a glance. */
+.chip.paused {
+  border-color: var(--aw-paused);
+  background: var(--aw-paused);
+  color: var(--vscode-editor-background);
 }
 
 /* The agent's own checklist — the one place a real percentage exists, so it is

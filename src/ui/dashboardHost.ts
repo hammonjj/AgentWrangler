@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
 import type { ColumnPrefsService } from '../core/columnPrefs';
 import type { Disposable } from '../core/events';
+import type { PauseService } from '../core/pauseService';
 import type { SessionStore } from '../core/sessionStore';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { HookHealth, ProjectDTO } from '../shared/model';
@@ -79,6 +80,7 @@ export class DashboardHost {
     private runners: RunnerOwnership,
     private projects: ProjectSource,
     private launcher: ConversationLauncher,
+    private pause: PauseService,
   ) {
     webview.options = {
       enableScripts: true,
@@ -110,6 +112,9 @@ export class DashboardHost {
       this.runners.onDidChange(() => this.pushSnapshot()),
       // A folder removed from one dashboard's dropdown is removed from both.
       this.projects.onDidChange(() => this.pushSnapshot()),
+      // Pausing is machine-wide and its record is global state, so a pause from
+      // any window has to reach every dashboard's rows and its bar button.
+      this.pause.onDidChange(() => this.pushSnapshot()),
     );
   }
 
@@ -149,6 +154,7 @@ export class DashboardHost {
       return {
         ...s,
         archived: this.archive.isArchived(s.key),
+        paused: this.pause.isPaused(s.key) || undefined,
         runnerOwned: runnerOwned || undefined,
         openTarget: openTargetFor(s, location, isInThisWorkspace(s.cwd), behavior),
       };
@@ -184,6 +190,8 @@ export class DashboardHost {
         else if (m.action === 'copyId') this.actions.copyId(m.key);
         else if (m.action === 'goTo') this.actions.goTo(m.key);
         else if (m.action === 'close') this.actions.closeSession(m.key);
+        else if (m.action === 'pause') this.actions.pauseSession(m.key, true);
+        else if (m.action === 'unpause') this.actions.pauseSession(m.key, false);
         else if (m.action === 'allow' || m.action === 'deny' || m.action === 'always') {
           this.actions.decidePermission(m.key, m.action);
         }
@@ -214,6 +222,9 @@ export class DashboardHost {
         break;
       case 'refreshProjects':
         void this.refreshProjects();
+        break;
+      case 'pauseAll':
+        this.actions.pauseAll(m.pause);
         break;
     }
   }

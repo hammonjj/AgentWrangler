@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  birthTime,
   mergeSummaries,
   parseHeadLines,
   parseSummaryLines,
@@ -179,6 +180,40 @@ describe('mergeSummaries', () => {
     // A new prompt appended: the chunk cleared the reply, and that wins.
     expect(mergeSummaries(prev, { lastMeaningful: { kind: 'user' } }, stat).lastAssistantText).toBeUndefined();
   });
+
+  /**
+   * A file's creation time cannot change, so the first reading is as good as
+   * any later one — and holding it means a filesystem that answers erratically
+   * cannot make the Age column flicker between two numbers.
+   */
+  it('keeps the start time it already had, and takes one when it had none', () => {
+    const base: TranscriptSummary = { headReadDone: true, byteOffset: 1, mtimeMs: 1, sizeBytes: 1 };
+    const stat = { sizeBytes: 2, mtimeMs: 2, byteOffset: 2, startedAtMs: 500 };
+    expect(mergeSummaries(base, {}, stat).startedAtMs).toBe(500);
+    expect(mergeSummaries({ ...base, startedAtMs: 100 }, {}, stat).startedAtMs).toBe(100);
+    expect(mergeSummaries(base, {}, { sizeBytes: 2, mtimeMs: 2, byteOffset: 2 }).startedAtMs).toBeUndefined();
+  });
+});
+
+describe('birthTime', () => {
+  it('takes a plain creation time', () => {
+    expect(birthTime({ birthtimeMs: 1_000, mtimeMs: 2_000 })).toBe(1_000);
+  });
+
+  it('accepts a file created and last written in the same instant', () => {
+    expect(birthTime({ birthtimeMs: 2_000, mtimeMs: 2_000 })).toBe(2_000);
+  });
+
+  /**
+   * Filesystems that do not record a birth time report zero, and some report
+   * one later than the mtime. Neither is a start time, and a conversation that
+   * claims to have begun in 1970 — or in the future — is worse than a blank
+   * the caller can fall back from.
+   */
+  it('rejects the two ways a filesystem says "I do not know"', () => {
+    expect(birthTime({ birthtimeMs: 0, mtimeMs: 2_000 })).toBeUndefined();
+    expect(birthTime({ birthtimeMs: 9_000, mtimeMs: 2_000 })).toBeUndefined();
+  });
 });
 
 describe('readTranscriptSummary (fs integration)', () => {
@@ -195,6 +230,26 @@ describe('readTranscriptSummary (fs integration)', () => {
 
   it('returns undefined for a missing file', async () => {
     expect(await readTranscriptSummary(path.join(dir, 'nope.jsonl'))).toBeUndefined();
+  });
+
+  /**
+   * The Age column's source. It has to survive appends, because that is the
+   * whole difference between the age of the conversation and the age of the
+   * last thing said in it.
+   */
+  it('reports when the conversation began, and does not move as it grows', async () => {
+    await fs.writeFile(file, toBuf([mkUser('start')]));
+    const born = (await fs.stat(file)).birthtimeMs;
+    // A filesystem with no birth time is a supported case, just not this test's.
+    if (!(born > 0)) return;
+
+    const s1 = await readTranscriptSummary(file);
+    expect(s1?.startedAtMs).toBe(born);
+
+    await fs.appendFile(file, toBuf([mkAssistant([mkText('done')], 'end_turn')]));
+    const s2 = await readTranscriptSummary(file, s1);
+    expect(s2?.startedAtMs).toBe(born);
+    expect(s2?.mtimeMs).toBeGreaterThanOrEqual(born);
   });
 
   it('reads incrementally across appends, only new bytes', async () => {

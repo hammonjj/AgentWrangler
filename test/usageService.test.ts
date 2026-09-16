@@ -40,6 +40,34 @@ describe('UsageService', () => {
     svc.dispose();
   });
 
+  /**
+   * The cadence is not fixed: once a limit is close the cards stop being a
+   * background fact and become the thing being watched — and with auto-pause
+   * armed, a stale reading is the difference between stopping at 98% and
+   * finding out at 100%.
+   */
+  it('speeds up by itself once a limit is close, and settles again when it is not', async () => {
+    const read = okReader(95);
+    const svc = new UsageService(read, new MemoryUsageCache(), () => cfg, undefined, noJitter);
+    svc.start();
+    await flush();
+    expect(read).toHaveBeenCalledTimes(1);
+
+    // The configured 60s would still be waiting here; the near-limit 20s is not.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(read).toHaveBeenCalledTimes(2);
+
+    // Usage drops (the window reset): back to the interval the user set.
+    read.mockImplementation(async (now) => ({ ok: true, snapshot: snap(5, now) }));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(read).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(read).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(read).toHaveBeenCalledTimes(4);
+    svc.dispose();
+  });
+
   it('two windows sharing a cache make one request between them', async () => {
     const cache = new MemoryUsageCache();
     const readA = okReader(30);

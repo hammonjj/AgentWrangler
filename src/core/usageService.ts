@@ -1,4 +1,5 @@
 import type { UsageError, UsageSnapshot, UsageState } from '../shared/usage';
+import { maxUsagePercent, usageIntervalSeconds } from './autoPause';
 import type { ConfigGetter } from './config';
 import { Emitter, type Disposable, type Listener } from './events';
 import type { UsageCache } from './usageCache';
@@ -74,8 +75,20 @@ export class UsageService implements Disposable {
     await this.tick(opts.force === true);
   }
 
+  /**
+   * The current cadence. Not a constant: as a limit is approached the cards
+   * stop being a background fact and become the thing being watched, so the
+   * interval tightens (see `usageIntervalSeconds`). The setting's own 15s floor
+   * still applies, and the shared cache means this is one read per interval for
+   * the whole machine however many windows are open.
+   */
   private intervalMs(): number {
-    return Math.max(15, this.getConfig().usagePollIntervalSeconds) * 1000;
+    const cfg = this.getConfig();
+    const seconds = usageIntervalSeconds(cfg.usagePollIntervalSeconds, maxUsagePercent(this.state.last), {
+      enabled: cfg.autoPauseEnabled,
+      percent: cfg.autoPausePercent,
+    });
+    return Math.max(15, seconds) * 1000;
   }
 
   private async tick(force: boolean): Promise<void> {

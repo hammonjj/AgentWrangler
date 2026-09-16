@@ -32,6 +32,11 @@ function materialFingerprint(s: AgentSession): string {
     s.worktree ?? '',
     s.model ?? '',
     s.pid ?? '',
+    // Constant per conversation, but it arrives with the first transcript read
+    // rather than with the row, so the change from absent to known has to be
+    // material or the Age column would keep showing the fallback until
+    // something else happened to the session.
+    s.conversationStartedAt ?? '',
     s.transcriptPath ?? '',
     s.prLink?.prUrl ?? '',
     s.statusIsEstimated ? 'est' : '',

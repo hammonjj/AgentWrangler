@@ -13,6 +13,9 @@ export interface WranglerConfig {
   /** Plan-usage cards above the table (session / weekly limits, as in Claude Code's /usage). */
   showUsage: boolean;
   usagePollIntervalSeconds: number;
+  /** Pause every running agent by itself once a plan limit reaches `autoPausePercent`. */
+  autoPauseEnabled: boolean;
+  autoPausePercent: number;
 }
 
 export const DEFAULT_CONFIG: WranglerConfig = {
@@ -28,9 +31,22 @@ export const DEFAULT_CONFIG: WranglerConfig = {
   notifyOnWaiting: false,
   pollIntervalSeconds: 5,
   showUsage: true,
-  // Five minutes. The cards answer "am I near the weekly limit", which does not
-  // change by the minute; the reset countdown ticks locally between reads.
-  usagePollIntervalSeconds: 300,
+  // One minute. Five was chosen when the cards only answered "am I near the
+  // weekly limit", which does not change by the minute. They are now also what
+  // auto-pause reads, and near a limit the question becomes "how many minutes
+  // are left" — at five-minute granularity a burst of agents can cross 98% and
+  // reach 100% inside a single interval. The read costs no tokens (it is an
+  // account-metadata endpoint, not an inference call) and the cross-window
+  // cache keeps it to one request per interval for the whole machine, so the
+  // only budget being spent is the endpoint's own rate limit. Near a limit the
+  // service tightens this further by itself; see `usageIntervalSeconds`.
+  usagePollIntervalSeconds: 60,
+  // Off by default: freezing every agent on the machine is not something that
+  // should start happening to someone who never asked for it.
+  autoPauseEnabled: false,
+  // 98%, not 100: the reading can be a poll old, and a turn that starts at 99%
+  // still has to finish. Two points is the margin for both.
+  autoPausePercent: 98,
 };
 
 export type ConfigGetter = () => WranglerConfig;

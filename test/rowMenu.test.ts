@@ -21,7 +21,7 @@ const actions = (s: SessionDTO) => rowMenuItems(s).map((i) => i.action);
 
 describe('rowMenuItems', () => {
   it('offers the full menu for a live session with a transcript and a pid', () => {
-    expect(actions(session())).toEqual(['pin', 'goTo', 'copyId', 'archive', 'close']);
+    expect(actions(session())).toEqual(['pin', 'goTo', 'pause', 'copyId', 'archive', 'close']);
   });
 
   it('drops Pin when there is no transcript to show in a tab', () => {
@@ -53,6 +53,36 @@ describe('rowMenuItems', () => {
   // The whole point of Close: adopt withdraws its offer mid-turn, this must not.
   it.each(['busy', 'stuck', 'blocked'] as const)('still offers Close while %s', (status) => {
     expect(actions(session({ status }))).toContain('close');
+  });
+
+  it('offers Pause for a running session, and Resume instead once it is paused', () => {
+    expect(actions(session())).toContain('pause');
+    const paused = actions(session({ paused: true }));
+    expect(paused).toContain('unpause');
+    expect(paused).not.toContain('pause');
+  });
+
+  // Pausing is a signal, so it needs a pid; ending a runner session does not,
+  // because the runner holds the child handle itself.
+  it('drops Pause when there is no pid to signal, even for a runner session', () => {
+    expect(actions(session({ pid: undefined, runnerOwned: true }))).not.toContain('pause');
+  });
+
+  it('drops Pause for an ended session, which has nothing left to stop', () => {
+    expect(actions(session({ status: 'ended' }))).not.toContain('pause');
+  });
+
+  // Pause is reversible by pressing the same menu again; Close is not. Only one
+  // of them gets the red treatment, or the colour stops meaning anything.
+  it('does not mark Pause as dangerous', () => {
+    const item = rowMenuItems(session()).find((i) => i.action === 'pause')!;
+    expect(item.danger).toBeUndefined();
+  });
+
+  // A paused session is still worth opening, copying and archiving, so the rest
+  // of the menu has to survive the swap.
+  it('keeps the rest of the menu on a paused row', () => {
+    expect(actions(session({ paused: true }))).toEqual(['pin', 'goTo', 'unpause', 'copyId', 'archive', 'close']);
   });
 });
 

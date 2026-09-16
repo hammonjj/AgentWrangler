@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
+import type { PauseService } from '../core/pauseService';
 import type { SessionStore } from '../core/sessionStore';
 import { etaText, formatDuration, workingElapsedMs, type AgentSession } from '../shared/model';
 
@@ -23,14 +24,23 @@ function appendDone(md: vscode.MarkdownString, done: AgentSession[], line: (s: A
   for (const s of done.slice(0, 10)) md.appendMarkdown(`${line(s)}\n`);
 }
 
-export function createStatusBar(store: SessionStore, archive: ArchiveService, context: vscode.ExtensionContext): void {
+export function createStatusBar(
+  store: SessionStore,
+  archive: ArchiveService,
+  pause: PauseService,
+  context: vscode.ExtensionContext,
+): void {
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   item.command = 'agentWrangler.openDashboard';
   context.subscriptions.push(item);
 
   const render = () => {
     // Archived sessions are out of sight — they don't count toward the bell.
-    const visible = store.sessions.filter((s) => !archive.isArchived(s.key));
+    // Paused ones are excluded for a different reason: a frozen agent's status
+    // is a snapshot of the moment it was stopped, so a paused *blocked* session
+    // would ring a bell for a prompt that nothing can act on until it is
+    // resumed, and a paused *busy* one would be counted as work in progress.
+    const visible = store.sessions.filter((s) => !archive.isArchived(s.key) && !pause.isPaused(s.key));
     const blocked = visible.filter((s) => s.status === 'blocked');
     const waiting = visible.filter((s) => s.status === 'waiting');
     const done = visible.filter((s) => s.status === 'done');
@@ -87,5 +97,6 @@ export function createStatusBar(store: SessionStore, archive: ArchiveService, co
 
   context.subscriptions.push(store.onDidUpdate(render));
   context.subscriptions.push(archive.onDidChange(render));
+  context.subscriptions.push(pause.onDidChange(render));
   render();
 }

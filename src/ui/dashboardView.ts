@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
 import type { ColumnPrefsService } from '../core/columnPrefs';
+import type { PauseService } from '../core/pauseService';
 import type { SessionStore } from '../core/sessionStore';
 import type { SessionActions } from './actions';
 import {
@@ -29,6 +30,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     private runners: RunnerOwnership,
     private projects: ProjectSource,
     private launcher: ConversationLauncher,
+    private pause: PauseService,
   ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -45,6 +47,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       this.runners,
       this.projects,
       this.launcher,
+      this.pause,
     );
     view.onDidDispose(() => host.dispose());
   }

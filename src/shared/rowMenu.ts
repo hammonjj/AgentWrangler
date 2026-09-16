@@ -37,13 +37,29 @@ export function canCloseSession(s: SessionDTO): boolean {
 }
 
 /**
- * The row menu, in order: the two things you do to a row you are keeping
- * (pin, go to it), the one thing you take off it (its id), then the two that
- * change its place in the world — archive, and close.
+ * Whether there is a process to freeze.
  *
- * `close` is offered even while a turn is in flight, unlike *Take over*: the
- * session that most needs closing is the wedged one, and the modal that follows
- * is where the cost of interrupting it gets spelled out.
+ * Stricter than `canCloseSession` in the one case that matters: a runner-owned
+ * session is closable without a pid because the runner holds the child handle
+ * itself, but pausing is a signal and a signal needs a number. Runner sessions
+ * do register a pid like every other session, so in practice they qualify —
+ * just not *because* they are ours.
+ */
+export function canPauseSession(s: SessionDTO): boolean {
+  return s.status !== 'ended' && s.pid !== undefined;
+}
+
+/**
+ * The row menu, in order: the things you do to a row you are keeping (pin, go
+ * to it, stop it spending), the one thing you take off it (its id), then the
+ * two that change its place in the world — archive, and close.
+ *
+ * `pause` sits with the first group rather than beside `close`, and is not
+ * marked `danger`, because it is the one action here that is fully reversible:
+ * it stops a process, it does not end one. `close` is offered even while a turn
+ * is in flight, unlike *Take over*: the session that most needs closing is the
+ * wedged one, and the modal that follows is where the cost of interrupting it
+ * gets spelled out.
  */
 export function rowMenuItems(s: SessionDTO): RowMenuItem[] {
   const items: RowMenuItem[] = [];
@@ -61,6 +77,19 @@ export function rowMenuItems(s: SessionDTO): RowMenuItem[] {
       action: 'goTo',
       label: 'Go to where it runs',
       title: 'Reveal the terminal, Claude Code panel or VSCode window running this session',
+    });
+  }
+  if (s.paused) {
+    items.push({
+      action: 'unpause',
+      label: 'Resume agent',
+      title: 'Let this session run again, from exactly where it was stopped',
+    });
+  } else if (canPauseSession(s)) {
+    items.push({
+      action: 'pause',
+      label: 'Pause agent',
+      title: 'Stop its process so it spends nothing. Reversible; a turn in flight may have to be retried.',
     });
   }
   items.push({ action: 'copyId', label: 'Copy session id' });

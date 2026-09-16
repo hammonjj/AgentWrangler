@@ -71,6 +71,18 @@
         "title": "Agent Wrangler: Copy Session ID…"
       },
       {
+        "command": "agentWrangler.pauseAll",
+        "title": "Agent Wrangler: Pause All Agents"
+      },
+      {
+        "command": "agentWrangler.resumeAll",
+        "title": "Agent Wrangler: Resume All Paused Agents"
+      },
+      {
+        "command": "agentWrangler.pauseSession",
+        "title": "Agent Wrangler: Pause or Resume an Agent…"
+      },
+      {
         "command": "agentWrangler.revealTranscript",
         "title": "Agent Wrangler: Reveal Transcript in Finder…"
       },
@@ -234,9 +246,21 @@
         },
         "agentWrangler.usagePollIntervalSeconds": {
           "type": "number",
-          "default": 300,
+          "default": 60,
           "minimum": 15,
-          "description": "How often to re-read plan usage, in seconds. The reset countdown ticks locally between reads, and a failed read leaves the last numbers up until the next one."
+          "description": "How often to re-read plan usage, in seconds. Reads cost no tokens and every window shares one read per interval, so the only limit is the endpoint's own. Near a limit (90%, or 10 points below the auto-pause threshold) Agent Wrangler polls every 20s regardless, since that is when the numbers start mattering by the minute. The reset countdown ticks locally between reads, and a failed read leaves the last numbers up until the next one."
+        },
+        "agentWrangler.autoPause.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pause every running agent automatically once a plan limit reaches the percentage below, so a burst of agents cannot spend the rest of the window while you are not looking. Paused agents are stopped, not ended: resume them from the dashboard's pause button and they carry on from where they were. A turn in flight when the pause lands may have to be retried."
+        },
+        "agentWrangler.autoPause.percent": {
+          "type": "number",
+          "default": 98,
+          "minimum": 50,
+          "maximum": 100,
+          "description": "The usage percentage that triggers the automatic pause, across any limit window (5-hour, weekly, or model-scoped). It fires once per approach: after firing it re-arms only when usage falls back below this, so resuming an agent on purpose is not undone at the next poll."
         }
       }
     }

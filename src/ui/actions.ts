@@ -31,6 +31,17 @@ export interface SessionActions {
    * and says plainly when a turn is about to be thrown away.
    */
   closeSession(key: string): void;
+  /**
+   * Freeze one session's process, or thaw it. Unlike `closeSession` this keeps
+   * the process — it simply stops running — so it is offered without a confirm:
+   * the cost of getting it wrong is one click to undo.
+   */
+  pauseSession(key: string, pause: boolean): void;
+  /**
+   * The same across every running agent on the machine, for when the plan is
+   * nearly spent. `pause: false` thaws everything currently frozen.
+   */
+  pauseAll(pause: boolean): void;
   resume(key: string): void;
   copyId(key: string): void;
   reveal(key: string): void;
