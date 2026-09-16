@@ -216,6 +216,17 @@ describe('reduceRunnerMessage', () => {
     });
   });
 
+  it('never lets a status put the composer back to idle mid-turn', () => {
+    // Only the `result` ends a turn. A status that is not `requesting` says
+    // nothing is being generated *this second*, which is also true while a tool
+    // runs — acting on it flicked the Stop button back to Send during a turn.
+    const { composer } = run([
+      { type: 'system', subtype: 'status', status: 'requesting' },
+      { type: 'system', subtype: 'status', status: 'tool_use', permissionMode: 'acceptEdits' },
+    ]);
+    expect(composer).toMatchObject({ busy: true, permissionMode: 'acceptEdits' });
+  });
+
   it('ends the turn idle, and busy again when sends are queued behind it', () => {
     const idle = run([result()]);
     expect(idle.turnEnds).toBe(1);

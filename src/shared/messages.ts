@@ -118,6 +118,12 @@ export type HostToConversation =
    * keystroke cannot replace the list for what is on screen now.
    */
   | { type: 'fileSuggestions'; query: string; files: string[] }
+  /**
+   * Answer to `dropPaths`: `mentions` go in the box as text, `images` join the
+   * pasted ones as attachments, and `notes` are the ones that could not be
+   * taken (unreadable, or an image past the size limit).
+   */
+  | { type: 'dropped'; mentions: string[]; images: ImageAttachment[]; notes: string[] }
   | { type: 'error'; text: string };
 
 export type ConversationToHost =
@@ -150,4 +156,10 @@ export type ConversationToHost =
    */
   | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' }
   /** An `@` is being typed: what files in the session's folder match so far. */
-  | { type: 'fileSuggest'; query: string };
+  | { type: 'fileSuggest'; query: string }
+  /**
+   * Files were dropped on the pane. Only the host can tell an image from a
+   * folder or read either, so the webview hands over the paths and is told what
+   * to put in the composer.
+   */
+  | { type: 'dropPaths'; paths: string[] };

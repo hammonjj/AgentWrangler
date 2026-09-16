@@ -1,4 +1,5 @@
 import './conversation.css';
+import { fileUriToPath, fileUrisToPaths } from '../../shared/attachments';
 import type {
   AskState,
   ComposerState,
@@ -100,6 +101,7 @@ const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const attachmentsEl = document.getElementById('attachments')!;
 const mentionsEl = document.getElementById('mentions')!;
+const composerInput = document.getElementById('composerInput')!;
 
 /** Block id → its node, so a patch updates in place instead of re-rendering. */
 const nodes = new Map<string, HTMLElement>();
@@ -612,7 +614,7 @@ function setMeta(session: SessionDTO): void {
     .join(' · ');
 }
 
-function setCaps(next: ConversationCapabilities, composer: ComposerState | undefined): void {
+function setCaps(next: ConversationCapabilities): void {
   caps = next;
   goToBtn.hidden = !next.goTo;
   if (next.goTo) goToBtn.textContent = next.goTo.label;
@@ -638,10 +640,6 @@ function setCaps(next: ConversationCapabilities, composer: ComposerState | undef
   // into a typeable one — the row is hidden then, but a stale sentence waiting
   // in the DOM for the next hiccup is not worth the byte it saves.
   composerNote.textContent = next.canSend ? '' : (next.readOnlyReason ?? '');
-  // The pane is reused when it follows another session, so a turn that was
-  // running in the one before must not leave the button saying Stop.
-  if (!composer) setBusy(false);
-  if (composer) setComposer(composer);
 }
 
 /** The list currently rendered, so options are rebuilt only when it changes. */
@@ -704,6 +702,18 @@ function setBusy(next: boolean): void {
   sendBtn.textContent = next ? 'Stop' : 'Send';
   sendBtn.title = next ? 'Interrupt what Claude is doing (Enter still queues a message)' : 'Send this message';
   sendBtn.classList.toggle('stop', next);
+}
+
+/**
+ * Back to "nothing is running here": the state a pane starts in, and the one it
+ * is put back into when it is reused for a conversation with no composer of its
+ * own. Only `init` does this — a `session` push arrives every couple of seconds
+ * while the store ticks and carries no composer, so resetting on those was what
+ * flicked the button from Stop back to Send moments after a message was sent.
+ */
+function clearComposer(): void {
+  setBusy(false);
+  queuedEl.hidden = true;
 }
 
 function setComposer(c: ComposerState): void {
@@ -899,13 +909,124 @@ msgEl.addEventListener('paste', (e: ClipboardEvent) => {
   for (const f of files) addImageFile(f);
 });
 
-// Dropping a screenshot onto the composer is the same gesture as pasting one.
-for (const ev of ['dragover', 'drop'] as const) {
-  msgEl.addEventListener(ev, (e: DragEvent) => {
-    if (!e.dataTransfer?.types.includes('Files')) return;
-    e.preventDefault();
-    if (ev === 'drop') for (const f of Array.from(e.dataTransfer.files)) addImageFile(f);
-  });
+// ---- drag and drop ----
+
+/**
+ * Dropping files on the pane is the composer's other way in: an image becomes
+ * an attachment, exactly as a paste does, and anything else — a source file, a
+ * folder — is written into the box as an `@` mention, which is what dragging a
+ * file into the TUI does.
+ *
+ * The *path* is what makes the second half possible, and a dropped `File` in a
+ * webview does not have one, so the paths come from `text/uri-list` — the
+ * Finder and VSCode's own explorer both set it. Only a drop with no path at
+ * all (an image dragged straight out of another app) falls back to reading the
+ * bytes here, which is why that path still only takes images.
+ *
+ * The whole pane is the target rather than the textarea: at 300px the box is a
+ * couple of lines tall, and aiming at it is not the point of the gesture.
+ */
+function dropTypes(t: DataTransfer | null): boolean {
+  if (!t || composerWrite.hidden) return false; // read-only: nothing to drop into
+  return t.types.includes('Files') || t.types.includes('text/uri-list') || t.types.includes('resourceurls');
+}
+
+/** Paths named by a drop, best source first. Empty when it carries none. */
+function droppedPaths(t: DataTransfer): string[] {
+  const uris = fileUrisToPaths(t.getData('text/uri-list'));
+  if (uris.length > 0) return uris;
+  // VSCode's own drags also carry a JSON array of resource URIs, under a name
+  // that has been spelled both ways.
+  const raw = t.getData('resourceurls') || t.getData('ResourceURLs');
+  if (!raw) return [];
+  try {
+    const list: unknown = JSON.parse(raw);
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((u): u is string => typeof u === 'string')
+      .map(fileUriToPath)
+      .filter((p): p is string => p !== undefined);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * `dragleave` fires on every element the pointer crosses on the way through, so
+ * the highlight is counted in and out rather than turned off by the first one.
+ */
+let dragDepth = 0;
+
+function endDrag(): void {
+  dragDepth = 0;
+  composerInput.classList.remove('dropping');
+}
+
+app.addEventListener('dragenter', (e: DragEvent) => {
+  if (!dropTypes(e.dataTransfer)) return;
+  e.preventDefault();
+  dragDepth++;
+  composerInput.classList.add('dropping');
+});
+
+app.addEventListener('dragover', (e: DragEvent) => {
+  if (!dropTypes(e.dataTransfer)) return;
+  e.preventDefault(); // without this the drop never arrives
+  e.dataTransfer!.dropEffect = 'copy';
+});
+
+app.addEventListener('dragleave', () => {
+  if (dragDepth > 0 && --dragDepth === 0) endDrag();
+});
+
+app.addEventListener('dragend', endDrag);
+
+app.addEventListener('drop', (e: DragEvent) => {
+  const t = e.dataTransfer;
+  if (!dropTypes(t)) return;
+  e.preventDefault();
+  endDrag();
+
+  const paths = droppedPaths(t!);
+  if (paths.length > 0) {
+    // The host says what each one turns into; it comes back as `dropped`.
+    post({ type: 'dropPaths', paths });
+    msgEl.focus();
+    return;
+  }
+
+  // No path came with the drop, so there is nothing to mention and the bytes
+  // are all we have — which only helps for an image.
+  const files = Array.from(t!.files);
+  const images = files.filter((f) => IMAGE_MEDIA_TYPES.includes(f.type as (typeof IMAGE_MEDIA_TYPES)[number]));
+  for (const f of images) addImageFile(f);
+  const rest = files.length - images.length;
+  if (rest > 0) {
+    note(
+      `${rest === 1 ? 'That file' : `${rest} of those files`} arrived without a path, so only an image could be taken from it.`,
+    );
+  }
+  msgEl.focus();
+});
+
+/** Write dropped paths into the box as a run of mentions, at the caret. */
+function insertMentions(mentions: string[]): void {
+  if (mentions.length === 0) return;
+  closeMentions();
+  const text = mentions.join(' ');
+  const start = msgEl.selectionStart ?? msgEl.value.length;
+  const end = msgEl.selectionEnd ?? start;
+  const before = msgEl.value.slice(0, start);
+  const after = msgEl.value.slice(end);
+  // A mention has to stay a word of its own, and a drop usually lands in the
+  // middle of a half-typed sentence.
+  const lead = before === '' || /\s$/.test(before) ? '' : ' ';
+  const tail = after.startsWith(' ') || after === '' ? '' : ' ';
+  msgEl.value = `${before}${lead}${text}${tail}${after}`;
+  const caret = before.length + lead.length + text.length;
+  msgEl.setSelectionRange(caret, caret);
+  autoGrow();
+  msgEl.focus();
 }
 
 function sendMessage(): void {
@@ -913,6 +1034,9 @@ function sendMessage(): void {
   // An image on its own is a real message; only both being empty is a no-op.
   if (!text && attachments.length === 0) return;
   post({ type: 'send', text, images: attachments.length > 0 ? attachments : undefined });
+  // The host will say so too, a moment later; doing it here means the button
+  // answers the click that sent the message rather than the round trip.
+  setBusy(true);
   msgEl.value = '';
   attachments = [];
   renderAttachments();
@@ -1068,7 +1192,9 @@ window.addEventListener('message', (e: MessageEvent) => {
       notch.hidden = !m.truncated;
       setMeta(m.session);
       setStatus(m.session.status, m.caps.estimated);
-      setCaps(m.caps, m.composer);
+      setCaps(m.caps);
+      if (m.composer) setComposer(m.composer);
+      else clearComposer();
       setBanner(m.caps);
       stick = true;
       appendBlocks(m.blocks);
@@ -1085,7 +1211,7 @@ window.addEventListener('message', (e: MessageEvent) => {
     case 'session':
       setMeta(m.session);
       setStatus(m.session.status, m.caps.estimated);
-      setCaps(m.caps, undefined);
+      setCaps(m.caps);
       setBanner(m.caps);
       break;
     case 'composer':
@@ -1103,6 +1229,14 @@ window.addEventListener('message', (e: MessageEvent) => {
       mentionFiles = m.files;
       mentionIndex = 0;
       renderMentions();
+      break;
+    case 'dropped':
+      insertMentions(m.mentions);
+      if (m.images.length > 0) {
+        attachments.push(...m.images);
+        renderAttachments();
+      }
+      for (const text of m.notes) note(text);
       break;
     case 'dictation':
       setMicState(m.state, m.message);

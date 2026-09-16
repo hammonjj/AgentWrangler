@@ -6,6 +6,7 @@
  * The shell (a reusable panel, or a pinned one) owns only a lifetime — the same
  * split the dashboard uses between `DashboardHost` and its two shells.
  */
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { RunnerService } from '../../claude/runner/runnerService';
@@ -14,7 +15,9 @@ import { DictationSetupError, type DictationService } from '../../core/dictation
 import type { FileSuggestService } from '../../core/fileSuggest';
 import type { AgentProvider } from '../../core/provider';
 import type { SessionStore } from '../../core/sessionStore';
-import type { ConversationCapabilities } from '../../shared/conversation';
+import { imageMediaType, mentionForPath } from '../../shared/attachments';
+import type { ConversationCapabilities, ImageAttachment } from '../../shared/conversation';
+import { MAX_IMAGE_BYTES } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import type { AgentSession, SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
@@ -35,6 +38,12 @@ const SECONDARY_TARGET: Record<SecondaryAction, NonNullable<ConversationCapabili
   'focus-window': 'window',
   'resume-terminal': 'resume',
 };
+
+/**
+ * Ceiling on one drop. A dragged selection is a handful of files; a number
+ * beyond this is a folder's worth landing in the box by accident.
+ */
+const MAX_DROPPED_PATHS = 20;
 
 /** Provider surface the pane needs: transcript growth, and answering a permission prompt. */
 export interface ConversationProvider extends AgentProvider {
@@ -332,6 +341,9 @@ export class ConversationHost {
         if (this.session?.cwd === cwd) this.post({ type: 'fileSuggestions', query: m.query, files });
         return;
       }
+      case 'dropPaths':
+        await this.dropPaths(m.paths);
+        return;
       case 'openExternal':
         this.actions.openExternal(m.url);
         return;
@@ -339,6 +351,60 @@ export class ConversationHost {
         this.actions.openFile(m.path);
         return;
     }
+  }
+
+  /**
+   * Files dropped on the composer, resolved into what the message will carry.
+   *
+   * An image is attached as an image — the same thing a paste does, and the
+   * only way to send one the model can look at without a tool call. Everything
+   * else is referred to by path, which is what dropping a file into the TUI
+   * writes, and is the cheaper half of the bargain: Claude reads the ones it
+   * actually needs rather than the whole of a dropped folder arriving in the
+   * prompt.
+   */
+  private async dropPaths(paths: string[]): Promise<void> {
+    const cwd = this.session?.cwd ?? '';
+    const mentions: string[] = [];
+    const images: ImageAttachment[] = [];
+    const notes: string[] = [];
+
+    const wanted = [...new Set(paths.filter((p) => p !== ''))];
+    if (wanted.length > MAX_DROPPED_PATHS) {
+      notes.push(`Only the first ${MAX_DROPPED_PATHS} of ${wanted.length} dropped files were taken.`);
+      wanted.length = MAX_DROPPED_PATHS;
+    }
+
+    for (const file of wanted) {
+      const name = path.basename(file);
+      let stat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        stat = await fs.stat(file);
+      } catch {
+        notes.push(`Could not read ${name}.`);
+        continue;
+      }
+      const media = stat.isFile() ? imageMediaType(file) : undefined;
+      if (media === undefined) {
+        mentions.push(mentionForPath(cwd, file));
+        continue;
+      }
+      // Too big to attach is not too big to talk about: the path still goes in,
+      // and Claude's own Read opens it from disk if it needs to.
+      if (stat.size > MAX_IMAGE_BYTES) {
+        notes.push(`${name} is over ${Math.floor(MAX_IMAGE_BYTES / 1024 / 1024)} MB — sent as a path, not an image.`);
+        mentions.push(mentionForPath(cwd, file));
+        continue;
+      }
+      try {
+        images.push({ mediaType: media, data: (await fs.readFile(file)).toString('base64') });
+      } catch {
+        notes.push(`Could not read ${name}.`);
+      }
+    }
+
+    if (mentions.length === 0 && images.length === 0 && notes.length === 0) return;
+    this.post({ type: 'dropped', mentions, images, notes });
   }
 
   private tooLate(): void {

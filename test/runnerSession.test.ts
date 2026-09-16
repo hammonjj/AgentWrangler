@@ -395,6 +395,60 @@ describe('RunnerSession', () => {
     expect(session.lifecycle).toBe('idle');
     expect(session.composer.busy).toBe(false);
   });
+
+  // The pane's Stop button is the Send button wearing its other face, so these
+  // three are about it changing back exactly when the turn really is over.
+  it('stays busy through a turn, whatever the status messages say', async () => {
+    const { session, fake } = makeSession();
+    fake.emit({ type: 'system', subtype: 'init', session_id: 's1', permissionMode: 'default' });
+    await settle();
+    session.send('hello');
+    expect(session.composer.busy).toBe(true);
+
+    fake.emit({ type: 'system', subtype: 'status', status: 'tool_use' });
+    await settle();
+    expect(session.composer.busy).toBe(true);
+  });
+
+  it('gives up on an interrupt the CLI never answers, so Stop cannot stick', async () => {
+    const { session, fake } = makeSession();
+    fake.emit({ type: 'system', subtype: 'init', session_id: 's1', permissionMode: 'default' });
+    await settle();
+    session.send('hello');
+
+    vi.useFakeTimers();
+    try {
+      await session.interrupt();
+      expect(session.composer.busy).toBe(true); // still waiting for a result
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(session.composer.busy).toBe(false);
+      expect(session.lifecycle).toBe('idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets a queued message keep the composer busy after an interrupt', async () => {
+    const { session, fake } = makeSession();
+    fake.emit({ type: 'system', subtype: 'init', session_id: 's1', permissionMode: 'default' });
+    await settle();
+    session.send('hello');
+    await session.interrupt();
+    fake.emit({ type: 'result', subtype: 'success', is_error: false, result: 'stopped', queued_turn_count: 1 });
+    await settle();
+    // The watchdog was disarmed by the result; the queued turn owns busy now.
+    expect(session.composer).toMatchObject({ busy: true, queued: 1 });
+  });
+
+  it('is not mid-turn once the process is gone', async () => {
+    const { session, fake } = makeSession();
+    fake.emit({ type: 'system', subtype: 'init', session_id: 's1', permissionMode: 'default' });
+    await settle();
+    session.send('hello');
+    fake.fail(new Error('spawn died'));
+    await settle();
+    expect(session.composer).toMatchObject({ busy: false, queued: 0 });
+  });
 });
 
 describe('RunnerSession block history', () => {

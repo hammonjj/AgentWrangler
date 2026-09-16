@@ -823,7 +823,49 @@ of `src/core/dictation.ts` for "dictation". Caught by a test.
 - Tests: 417 pass. New are `test/diff.test.ts` (6), `test/fileSuggest.test.ts` (17) and image
   cases in `runnerSession.test.ts` (5).
 
-### Phase 4b — Later, only if wanted
+### Phase 4b — Files dropped on the pane — **SHIPPED 2026-09-14**
+
+The drop target is the **whole pane**, not the textarea: at 300px the box is two lines tall and
+aiming at it is not the point of the gesture. An image is attached as an image — the same
+result as a paste — and anything else, a source file or a folder, is written into the box as an
+`@` mention, relative to the session's folder when it lives inside it, which is what dragging a
+file into the TUI does. Mentioning rather than inlining is the cheaper half of the bargain:
+Claude reads the files it actually needs instead of a dropped folder arriving whole in the
+prompt.
+
+- **A dropped `File` in a webview has no path**, and the path is what the mention half needs.
+  So paths come from the drag's `text/uri-list`, with VSCode's own `resourceurls` JSON array of
+  URIs as a fallback (its explorer sets both, and the name has been spelled both ways). Only a
+  drop carrying no path at all falls back to reading bytes in the webview, which is why that
+  branch still takes images only.
+- *Unverified*: whether a **Finder** drag sets `text/uri-list` on macOS — Chromium suppresses it
+  for OS drags on some platforms, since it leaks local paths to the page. If it does not, a
+  non-image dragged from the Finder lands as the "arrived without a path" note and only the
+  bytes fallback runs. A drag from VSCode's own explorer is the case that is sure to work.
+- **`getData` returns empty during `dragover`** (the drag data store is protected until the
+  drop), so the highlight is decided on `types` alone and paths are read only in `drop`.
+- `dragleave` fires for every element the pointer crosses on the way through, so the highlight
+  is counted in and out rather than cleared by the first one.
+- Resolving a path is the **host's** job: the webview cannot stat, and only a stat tells a
+  folder from a file. An image past the 5 MB ceiling goes in as a mention rather than being
+  refused — Claude's own Read can open it from disk. One drop is capped at 20 paths.
+
+**The Stop button was lying** — found while testing the above, fixed with it because it is the
+same composer state.
+
+- `system`/`status` carries subtypes we have not enumerated, and everything that was not
+  `requesting`/`compacting` read as "not busy" — which is also true while a five-minute build
+  runs, so the button flipped back to Send mid-turn. A status now only ever **raises** `busy`;
+  the turn owns lowering it, via the `result` that ends it.
+- Whether `interrupt()` always produces a `result` is undocumented, so a 5 s watchdog calls the
+  turn over when nothing else does, and a process that ends or errors clears `busy` too.
+- The webview raises `busy` optimistically on send, so the button answers the click rather than
+  the round trip, and a `session` push — which arrives every couple of seconds as the store
+  ticks and carries no composer — no longer resets it. Only `init` does.
+- Tests: 458 pass. New are `test/attachments.test.ts` (14) and five composer-state cases across
+  `runnerBlocks.test.ts` and `runnerSession.test.ts`.
+
+### Later, only if wanted
 
 - A detached broker process owning runner children so a reload loses nothing at all.
 - `supportedDialogKinds: ['refusal_fallback_prompt']` with a dialog card.
