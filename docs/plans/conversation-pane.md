@@ -865,9 +865,47 @@ same composer state.
 - Tests: 458 pass. New are `test/attachments.test.ts` (14) and five composer-state cases across
   `runnerBlocks.test.ts` and `runnerSession.test.ts`.
 
+### Phase 4c — A resumed pane keeps its history — **SHIPPED 2026-09-16**
+
+Reported as "when I reload a window, or at a number of other times, the previous conversation
+gets dropped — I have to ask the agent to replay its last message".
+
+- **The bug was one line of omission.** `RunnerSession.blocks` starts `[]` and is only ever
+  filled by messages the SDK streams from that process onward; `opts.resume` sets `sessionId`
+  and nothing else. So `RunnerSource.init()` returned the blocks of a process that had just
+  started, and every path that turns a session into a runner rendered an empty conversation
+  while the model still held all of it: the reload re-adopt, *Take over here*, and *Resume
+  here*. Take over was the cruellest — the pane had the whole transcript on screen a moment
+  earlier, from `TranscriptSource`, and replaced it with nothing.
+- **The SDK replays nothing to a resuming client.** Worth stating because it is the fact the
+  whole bug rests on: `resume` continues a conversation, it does not re-emit it. The only copy
+  of the past is the transcript file, which is why the fix is a file read and not an SDK option.
+- **Read once, before the process starts.** The read is issued in the `RunnerSession`
+  constructor, ahead of `start()` creating the query, so it snapshots the file as it stood
+  before this process could append to it. That is what makes "history + live blocks" safe to
+  concatenate on every `init()`: the history can never contain the live half, however long the
+  pane stays open or how often it is reopened. Caching the blocks rather than re-reading also
+  means a reopen costs nothing. Block ids cannot collide either — `t:<uuid>` against `r:<n>`.
+- **`TranscriptSource.init` and the new read were the same code**, so it was extracted to
+  `src/claude/transcriptHistory.ts` (`readTranscriptTail`, `loadResumeHistory`,
+  `transcriptPathFor`) and both now share the 512 KB / 300-block window and the truncation
+  notch. `TranscriptSource` keeps the reducer state and byte offset it needs to carry on
+  tailing.
+- **The transcript is found by `slugForCwd(cwd)` + `<id>.jsonl`**, the direction Claude Code
+  itself computes. A wrong cwd finds no file and costs the pane its history and nothing else —
+  the session still starts — so the loader logs its block count, because zero is the signature
+  of exactly the bug this replaced. `loadHistory` is injected through `RunnerDeps` so the
+  session stays filesystem-free under test.
+- Tests: 586 pass. New are `test/transcriptHistory.test.ts` (8) and a
+  `RunnerSession resumed history` block (4), covering the seam rather than the file reading:
+  history is read by id and cwd, a fresh session asks for none, the two halves stay disjoint
+  with unique ids, and a throwing loader leaves the session usable.
+
 ### Later, only if wanted
 
-- A detached broker process owning runner children so a reload loses nothing at all.
+- A detached broker process owning runner children so a reload loses nothing at all. Note that
+  after 4c this buys only the *turn in flight* and the process itself; the conversation now
+  survives on its own.
 - `supportedDialogKinds: ['refusal_fallback_prompt']` with a dialog card.
 - Terminal-in-this-window sessions: `terminal.sendText` for single-line messages (explicitly
   labelled "typed into the terminal").

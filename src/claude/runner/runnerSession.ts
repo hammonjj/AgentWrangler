@@ -34,6 +34,7 @@ import type {
 } from '../../shared/conversation';
 import { capText } from '../../shared/conversation';
 import { parsePermissionSuggestions, permissionDetail, suggestionLabels } from '../permissionDetail';
+import type { ConversationHistory } from '../transcriptHistory';
 import { createRunnerState, noteBlock, reduceRunnerMessage, type RunnerBlocksState } from './runnerBlocks';
 import { InputQueue } from '../../core/runner/inputQueue';
 
@@ -54,6 +55,13 @@ export interface RunnerDeps {
   /** Absolute path of the `claude` to spawn. */
   binary: string;
   log: (msg: string) => void;
+  /**
+   * The conversation a resumed session already has. The SDK replays nothing to
+   * a resuming client — it just continues — so the only copy of what was said
+   * before is the transcript on disk. Injected rather than read here so the
+   * session stays free of the filesystem under test.
+   */
+  loadHistory?: (sessionId: string, cwd: string) => Promise<ConversationHistory>;
 }
 
 export interface RunnerStartOptions {
@@ -103,6 +111,8 @@ export class RunnerSession {
   private blockState: RunnerBlocksState = createRunnerState();
   private pending = new Map<string, PendingAsk>();
   private truncated = false;
+  /** What was said before this process took the conversation over. */
+  private historyPromise?: Promise<ConversationHistory>;
   /** Armed by `interrupt`, cleared by the turn actually ending. */
   private interruptTimer?: ReturnType<typeof setTimeout>;
   /** The model list has been answered, so `init` does not ask for it again. */
@@ -126,7 +136,37 @@ export class RunnerSession {
     this.cwd = opts.cwd;
     if (opts.permissionMode) this.composer.permissionMode = opts.permissionMode;
     if (opts.model) this.composer.model = opts.model;
-    if (opts.resume) this.sessionId = opts.resume;
+    if (opts.resume) {
+      this.sessionId = opts.resume;
+      // Issued here, before `start` creates the query, so it snapshots the file
+      // as it stood before this process could append to it. The new half of the
+      // conversation arrives through `blocks`; the two must not overlap.
+      this.historyPromise = deps.loadHistory
+        ?.(opts.resume, this.cwd)
+        .then((h) => {
+          // Zero blocks here is the signature of a transcript we failed to
+          // find, which looks exactly like the bug this replaced. Say so.
+          deps.log(`runner history for ${opts.resume}: ${h.blocks.length} blocks`);
+          return h;
+        })
+        .catch((err) => {
+          // History is a nicety; failing to read it must not cost the session.
+          deps.log(`runner history unavailable: ${String(err)}`);
+          return { blocks: [], truncated: false };
+        });
+    }
+  }
+
+  /**
+   * Everything said before this process took over, for a session that was
+   * resumed — after a window reload, a Take over, or a Resume here. Empty for a
+   * session started fresh here, which has no past to show.
+   *
+   * This is what stops a resumed pane coming back blank while the model still
+   * holds the whole conversation.
+   */
+  async history(): Promise<ConversationHistory> {
+    return (await this.historyPromise) ?? { blocks: [], truncated: false };
   }
 
   /** True while the pane's composer should be live. */

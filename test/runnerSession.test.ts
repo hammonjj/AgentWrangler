@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { RunnerSession, type QueryFn } from '../src/claude/runner/runnerSession';
+import { RunnerSession, type QueryFn, type RunnerDeps } from '../src/claude/runner/runnerSession';
 import type { ConvBlock, ImageAttachment } from '../src/shared/conversation';
 
 /**
@@ -462,6 +462,98 @@ describe('RunnerSession block history', () => {
     await settle();
     expect(session.blocks.map((b) => b.kind)).toEqual(['assistant']);
     expect(session.blocks[0]).toMatchObject({ text: 'hello' });
+  });
+});
+
+/**
+ * A resumed session's own blocks start at the moment this process took over, so
+ * without the transcript behind them the pane came back blank on every reload,
+ * Take over and Resume here — while the model still held the whole
+ * conversation. These cover the seam, not the file reading (see
+ * `transcriptHistory.test.ts`).
+ */
+describe('RunnerSession resumed history', () => {
+  const PAST: ConvBlock[] = [
+    { kind: 'user', id: 't:a', ts: '2026-08-24T17:00:00.000Z', text: 'where were we' },
+    { kind: 'assistant', id: 't:b', ts: '2026-08-24T17:00:01.000Z', text: 'step three' },
+  ];
+
+  /** `text` only exists on the talking kinds; a tool block would read undefined. */
+  const texts = (blocks: ConvBlock[]): (string | undefined)[] =>
+    blocks.map((b) => ('text' in b ? b.text : undefined));
+
+  function makeResumed(over: { resume?: string; load?: RunnerDeps['loadHistory'] } = {}) {
+    const fake = fakeQuery(MODELS);
+    const asked: { id: string; cwd: string }[] = [];
+    const session = new RunnerSession(
+      { cwd: '/Users/test/proj', resume: over.resume },
+      {
+        query: fake.query,
+        binary: '/fake/claude',
+        log: () => undefined,
+        loadHistory:
+          over.load ??
+          (async (id, cwd) => {
+            asked.push({ id, cwd });
+            return { blocks: PAST, truncated: false };
+          }),
+      },
+    );
+    session.start();
+    return { session, fake, asked };
+  }
+
+  it('reads the conversation it is resuming, by id and cwd', async () => {
+    const { session, asked } = makeResumed({ resume: 's-old' });
+
+    const history = await session.history();
+
+    expect(asked).toEqual([{ id: 's-old', cwd: '/Users/test/proj' }]);
+    expect(texts(history.blocks)).toEqual(['where were we', 'step three']);
+  });
+
+  it('has no history when the session was started fresh here', async () => {
+    const { session, asked } = makeResumed();
+
+    expect(await session.history()).toEqual({ blocks: [], truncated: false });
+    // Nothing to resume means nothing to read: no stray transcript lookup.
+    expect(asked).toEqual([]);
+  });
+
+  it('keeps the past and the live half apart, so neither is shown twice', async () => {
+    const { session, fake } = makeResumed({ resume: 's-old' });
+    fake.emit({
+      type: 'assistant',
+      message: { id: 'm1', model: 'claude-opus-5', content: [{ type: 'text', text: 'step four' }], stop_reason: null },
+      parent_tool_use_id: null,
+    });
+    await settle();
+
+    const history = await session.history();
+
+    // The transcript read is a snapshot from before the process started, so it
+    // can never contain what the process has since said.
+    expect(texts(history.blocks)).toEqual(['where were we', 'step three']);
+    expect(texts(session.blocks)).toEqual(['step four']);
+    // And their ids cannot collide, which is what lets the pane concatenate them.
+    const ids = [...history.blocks, ...session.blocks].map((b) => b.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('still runs when the transcript cannot be read', async () => {
+    const { session, fake } = makeResumed({
+      resume: 's-old',
+      load: async () => {
+        throw new Error('disk gone');
+      },
+    });
+
+    expect(await session.history()).toEqual({ blocks: [], truncated: false });
+
+    // The session itself is unharmed: history is a nicety, not a dependency.
+    fake.emit({ type: 'system', subtype: 'init', session_id: 's-old', permissionMode: 'default' });
+    await settle();
+    expect(session.canSend).toBe(true);
   });
 });
 

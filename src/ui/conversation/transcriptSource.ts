@@ -9,16 +9,13 @@
  */
 import * as fs from 'node:fs/promises';
 import { createTranscriptState, reduceTranscriptLines, type TranscriptState } from '../../claude/transcriptBlocks';
+import { readTranscriptTail } from '../../claude/transcriptHistory';
 import { MAX_CHUNK_BYTES, readRange, splitCompleteLines } from '../../claude/transcriptTail';
 import { Emitter, type Disposable } from '../../core/events';
 import type { BlockPatch, ConvBlock } from '../../shared/conversation';
 import type { AgentSession } from '../../shared/model';
 import type { ConversationInit, ConversationSource } from './source';
 
-/** Tail read on open: enough for a long session's recent history, never the whole file. */
-const INIT_TAIL_BYTES = 512 * 1024;
-/** Blocks rendered on open. The rest of the tail is dropped with a "truncated" notch. */
-const MAX_INIT_BLOCKS = 300;
 /**
  * Backstop poll while a turn is running. The provider's watcher is the real
  * signal; this covers the events a recursive fs.watch misses under load.
@@ -69,40 +66,17 @@ export class TranscriptSource implements ConversationSource {
   onPatch = (listener: (patch: BlockPatch) => void): Disposable => this.patchEmitter.event(listener);
 
   async init(): Promise<ConversationInit> {
-    const filePath = this.session.transcriptPath;
-    this.state = createTranscriptState();
-    this.byteOffset = 0;
+    const read = await readTranscriptTail(this.session.transcriptPath);
+    this.state = read.state;
+    this.byteOffset = read.byteOffset;
 
-    let blocks: ConvBlock[] = [];
-    let truncated = false;
-
-    if (filePath) {
-      let size = 0;
-      try {
-        size = (await fs.stat(filePath)).size;
-      } catch {
-        // Gone or unreadable: show nothing rather than an error page; the
-        // status line already says what happened to the session.
-      }
-      const readStart = Math.max(0, size - INIT_TAIL_BYTES);
-      const buf = await readRange(filePath, readStart, size);
-      if (buf !== undefined) {
-        const split = splitCompleteLines(buf, readStart > 0);
-        // Patches are dropped here on purpose: a result whose call is above the
-        // window has nothing on screen to patch.
-        blocks = reduceTranscriptLines(this.state, split.lines).appends;
-        this.byteOffset = readStart + split.endOffset;
-      }
-      truncated = readStart > 0 || blocks.length > MAX_INIT_BLOCKS;
-      if (blocks.length > MAX_INIT_BLOCKS) blocks = blocks.slice(-MAX_INIT_BLOCKS);
-    }
-
+    let blocks = read.blocks;
     const ask = this.buildAsk();
     if (ask) blocks = [...blocks, ask];
 
     this.ready = true;
     this.armTimer();
-    return { blocks, truncated };
+    return { blocks, truncated: read.truncated };
   }
 
   setSession(session: AgentSession): void {

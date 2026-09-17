@@ -10,6 +10,7 @@
  */
 import { Emitter, type Disposable } from '../../core/events';
 import type { PermissionModeName } from '../../shared/conversation';
+import { loadResumeHistory, type ConversationHistory } from '../transcriptHistory';
 import type { RunnerRegistry } from './runnerRegistry';
 import { RunnerSession, type QueryFn, type RunnerStartOptions } from './runnerSession';
 
@@ -20,6 +21,8 @@ export interface RunnerServiceDeps {
   log: (msg: string) => void;
   /** Remembers what this window was running, so a reload can offer it back. */
   registry?: RunnerRegistry;
+  /** Overridden only by tests; the default reads the session's transcript. */
+  loadHistory?: (sessionId: string, cwd: string) => Promise<ConversationHistory>;
 }
 
 export class RunnerService implements Disposable {
@@ -35,6 +38,7 @@ export class RunnerService implements Disposable {
       query: this.deps.query,
       binary: this.deps.binary(),
       log: this.deps.log,
+      loadHistory: this.deps.loadHistory ?? loadResumeHistory,
     });
     this.sessions.add(session);
     // The id is unknown until the CLI's first init, and ownership answers

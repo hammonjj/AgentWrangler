@@ -5,6 +5,10 @@
  * asks, because it must outlive the pane. Closing the pane disposes this
  * adapter and leaves the session running — which is why `dispose` here only
  * unsubscribes, and never ends anything.
+ *
+ * The one thing it adds is the past: a resumed session's blocks start at the
+ * moment this process took over, so `init` puts the transcript's history in
+ * front of them.
  */
 import type { RunnerSession } from '../../claude/runner/runnerSession';
 import type { Disposable } from '../../core/events';
@@ -17,8 +21,18 @@ export class RunnerSource implements ConversationSource {
 
   constructor(readonly runner: RunnerSession) {}
 
+  /**
+   * The conversation so far: what the session said before this process resumed
+   * it, read from its transcript, followed by what has happened since. The two
+   * cannot overlap — the history is snapshotted before the process starts — and
+   * their block ids cannot collide, `t:` against `r:`.
+   */
   async init(): Promise<ConversationInit> {
-    return { blocks: [...this.runner.blocks], truncated: this.runner.everythingTruncated };
+    const history = await this.runner.history();
+    return {
+      blocks: [...history.blocks, ...this.runner.blocks],
+      truncated: history.truncated || this.runner.everythingTruncated,
+    };
   }
 
   onAppend(listener: (blocks: ConvBlock[]) => void): Disposable {
