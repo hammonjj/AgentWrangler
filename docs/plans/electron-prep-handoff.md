@@ -1,17 +1,34 @@
 # Electron preparation handoff
 
-Status: **implementation committed**, awaiting interactive acceptance and the live-use gate. Work on branch `feat/electron-prep` in `.worktrees/electron-prep`.
+Status: **landed on `main`** (`6b6bea2`, 2026-09-18). The one gate still open is live use — see below.
 
-## Current state (2026-09-18, after the Codex session paused)
+## Current state
 
-The Codex session that wrote this left everything in the working tree. That work is now committed and the branch has caught up with `main`:
+The Codex session that wrote this ran out of credits with the entire implementation sitting
+uncommitted in a worktree. It has since been committed, reconciled with `main`, merged, and
+every worktree and branch retired. `main` is now the only tree and the only branch.
 
-- `bdf1254` — the whole phases 1–4 implementation, plus the phase 4d changes carried from the primary checkout (James confirmed those are his and should land here).
-- `ed59067` — `git merge --no-ff main`, recording the ancestry the hand-applied Codex patch never had. Conflicts all resolved to this branch, since `main` still carries the pre-workbench shape phase 4 deletes (separate dashboard/conversation panels, the relay, "Go to where it runs"). Dropped from `main`'s side: a duplicate `SubagentSummary` declaration and two now-unused `createWebviewBridge` imports.
+- `bdf1254` — phases 1–4, plus the phase-4d changes carried from the primary checkout.
+- `ed59067` — `merge --no-ff main`, recording the ancestry the hand-applied Codex patch never
+  had. Conflicts all resolved to the branch: `main` still carried the pre-workbench shape that
+  phase 4 deletes (separate dashboard/conversation panels, the relay, "Go to where it runs").
+  Dropped from `main`'s side: a duplicate `SubagentSummary` declaration and two then-unused
+  `createWebviewBridge` imports.
+- `6b6bea2` — merge into `main`, which also brought `feat/workbench` home.
 
-Branch is zero behind `main`, working tree clean, typecheck + build + 53 files / 630 tests green.
+Retired: `feat/electron-prep`, `feat/workbench`, `feat/codex-parity`, `feat/codex-subagents`,
+`fix/codex-binary-discovery`. Typecheck, build and 53 files / 630 tests green on `main`.
 
-**The primary checkout's dirty phase-4d changes are now redundant** — they are in `bdf1254`. They are still sitting in `~/Documents/GitHub/AgentWrangler`; clearing them is James's call, not an agent's.
+The plan's own test of done is met in the code: `src/ui/relay.ts`, `secondaryActionFor` and
+`rowClickOpens` are gone. **What is not met is the acceptance gate** — a week of live use
+without reaching for another window. Do not call the plan accepted until that is served.
+
+Still unexercised in VSCode: the combined workbench interactively (provider filter, Codex
+conversation launch, pinned conversation, divider at narrow widths, takeover and cancellation,
+3-session reload recovery, tool expansion, history paging, search, subagents). Known edge cases
+worth review: cross-window simultaneous takeover (the registry is re-read and a window
+serializes its own sends, but there is no cross-process ownership lease), asynchronous source
+switches, and history paging for long active sessions.
 
 Everything below is the original Codex session's account, kept for the reasoning.
 
