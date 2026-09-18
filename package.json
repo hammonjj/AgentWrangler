@@ -29,32 +29,32 @@
       },
       {
         "command": "agentWrangler.newConversation",
-        "title": "Agent Wrangler: New Conversation\u2026",
+        "title": "Agent Wrangler: New Conversation…",
         "icon": "$(add)"
       },
       {
         "command": "agentWrangler.openConversation",
-        "title": "Agent Wrangler: Open Conversation\u2026"
+        "title": "Agent Wrangler: Open Conversation…"
       },
       {
         "command": "agentWrangler.pinConversation",
-        "title": "Agent Wrangler: Open Conversation in Its Own Tab\u2026"
+        "title": "Agent Wrangler: Open Conversation in Its Own Tab…"
       },
       {
         "command": "agentWrangler.pinToTop",
-        "title": "Agent Wrangler: Pin or Unpin a Session\u2026"
+        "title": "Agent Wrangler: Pin or Unpin a Session…"
       },
       {
         "command": "agentWrangler.renameConversation",
-        "title": "Agent Wrangler: Rename a Conversation\u2026"
+        "title": "Agent Wrangler: Rename a Conversation…"
       },
       {
         "command": "agentWrangler.resumeInTerminal",
-        "title": "Agent Wrangler: Resume Session in Terminal\u2026"
+        "title": "Agent Wrangler: Resume Session in Terminal…"
       },
       {
         "command": "agentWrangler.copySessionId",
-        "title": "Agent Wrangler: Copy Session ID\u2026"
+        "title": "Agent Wrangler: Copy Session ID…"
       },
       {
         "command": "agentWrangler.pauseAll",
@@ -66,15 +66,15 @@
       },
       {
         "command": "agentWrangler.pauseSession",
-        "title": "Agent Wrangler: Pause or Resume an Agent\u2026"
+        "title": "Agent Wrangler: Pause or Resume an Agent…"
       },
       {
         "command": "agentWrangler.revealTranscript",
-        "title": "Agent Wrangler: Reveal Transcript in Finder\u2026"
+        "title": "Agent Wrangler: Reveal Transcript in Finder…"
       },
       {
         "command": "agentWrangler.installHooks",
-        "title": "Agent Wrangler: Install Status Hooks\u2026"
+        "title": "Agent Wrangler: Install Status Hooks…"
       },
       {
         "command": "agentWrangler.uninstallHooks",
@@ -172,7 +172,7 @@
           "type": "number",
           "default": 600,
           "minimum": 10,
-          "description": "A busy session with no transcript writes or hook events for this long is shown as POSSIBLY STUCK. Keep it generous: the model is silent while thinking or writing a large file, routinely for 2\u20136 minutes."
+          "description": "A busy session with no transcript writes or hook events for this long is shown as POSSIBLY STUCK. Keep it generous: the model is silent while thinking or writing a large file, routinely for 2–6 minutes."
         },
         "agentWrangler.endedWindowHours": {
           "type": "number",
@@ -242,9 +242,14 @@
     "@types/markdown-it": "14.2.0",
     "@types/node": "^24.0.0",
     "@types/vscode": "1.90.0",
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "markdown-it": "15.0.2",
     "typescript": "^5.9.0",
     "vitest": "^3.0.0"
+  },
+  "allowScripts": {
+    "electron@44.4.3": true
   }
 }

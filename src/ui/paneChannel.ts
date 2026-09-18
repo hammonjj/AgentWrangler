@@ -17,22 +17,33 @@
  * wire format rather than one that depends on where a pane is mounted.
  */
 
-import type * as vscode from 'vscode';
+import type { Disposable } from '../core/events';
 import type { PaneName } from '../shared/messages';
 
 export interface PaneChannel {
-  postMessage(msg: unknown): Thenable<boolean>;
+  postMessage(msg: unknown): PromiseLike<boolean>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  onDidReceiveMessage(listener: (msg: any) => void): vscode.Disposable;
+  onDidReceiveMessage(listener: (msg: any) => void): Disposable;
 }
 
-export function paneChannel(webview: vscode.Webview, pane: PaneName): PaneChannel {
+/**
+ * The half of this that knows about webviews. Structural rather than typed
+ * against `vscode.Webview`, so the Electron shell can hand in its own
+ * `webContents` wrapper without this module importing either host.
+ */
+export interface EnvelopeTransport {
+  postMessage(msg: unknown): PromiseLike<boolean>;
+  onDidReceiveMessage(listener: (msg: unknown) => void): Disposable;
+}
+
+export function paneChannel(webview: EnvelopeTransport, pane: PaneName): PaneChannel {
   return {
     postMessage: (body) => webview.postMessage({ pane, body }),
     onDidReceiveMessage: (listener) =>
-      webview.onDidReceiveMessage((m: { pane?: PaneName; body?: unknown }) => {
+      webview.onDidReceiveMessage((raw) => {
         // The other pane's traffic arrives here too; so does anything VSCode
         // itself sends. Neither is ours.
+        const m = raw as { pane?: PaneName; body?: unknown } | undefined;
         if (!m || typeof m !== 'object' || m.pane !== pane) return;
         listener(m.body);
       }),

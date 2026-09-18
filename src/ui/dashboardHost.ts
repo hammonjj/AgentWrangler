@@ -1,10 +1,10 @@
-import * as vscode from 'vscode';
 import type { ArchiveService } from '../core/archive';
 import type { ColumnPrefsService } from '../core/columnPrefs';
 import type { Disposable } from '../core/events';
 import type { PauseService } from '../core/pauseService';
 import type { PinService } from '../core/pinService';
 import type { SessionStore } from '../core/sessionStore';
+import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { HookHealth, ProjectDTO } from '../shared/model';
 import type { UsageState } from '../shared/usage';
@@ -81,12 +81,14 @@ export class DashboardHost {
     private launcher: ConversationLauncher,
     private pause: PauseService,
     private pins: PinService,
+    private settings: HostSettings,
+    private dialogs: HostDialogs,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
       this.store.onDidUpdate(() => this.pushSnapshot()),
-      vscode.workspace.onDidChangeConfiguration((event) => {
-        if (event.affectsConfiguration('agentWrangler.showCodexSubagents')) {
+      this.settings.onDidChange((affects) => {
+        if (affects('showCodexSubagents')) {
           this.actions.refreshAll();
           void this.pushSnapshot();
         }
@@ -160,7 +162,7 @@ export class DashboardHost {
       usage: this.usage.enabled ? this.usage.usage : undefined,
       codexUsage: this.codexUsage.enabled ? this.codexUsage.usage : undefined,
       columns: this.columns.value,
-      showCodexSubagents: vscode.workspace.getConfiguration('agentWrangler').get('showCodexSubagents', false),
+      showCodexSubagents: this.settings.get('showCodexSubagents', false),
       projects: this.projects.value.length > 0 ? this.projects.value : undefined,
     };
     void this.webview.postMessage(msg);
@@ -211,12 +213,10 @@ export class DashboardHost {
         break;
       case 'setShowCodexSubagents':
         if (typeof m.value === 'boolean') {
-          void vscode.workspace.getConfiguration('agentWrangler')
-            .update('showCodexSubagents', m.value, vscode.ConfigurationTarget.Global)
-            .then(undefined, (error: unknown) => {
-              void vscode.window.showErrorMessage(`Could not change Codex session visibility: ${String(error)}`);
-              void this.pushSnapshot();
-            });
+          void this.settings.update('showCodexSubagents', m.value).catch((error: unknown) => {
+            this.dialogs.error(`Could not change Codex session visibility: ${String(error)}`);
+            void this.pushSnapshot();
+          });
         }
         break;
       case 'setColumns':

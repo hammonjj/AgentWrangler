@@ -16,10 +16,10 @@ import type { SessionStore } from '../../core/sessionStore';
 import type { AgentProvider } from '../../core/provider';
 import type { SessionActions } from '../actions';
 import type { FileSuggestService } from '../../core/fileSuggest';
-import type { DiffContentProvider } from './diffView';
-import { buildWebviewHtml } from '../html';
+import type { DiffViewer } from './diffViewer';
+import { buildWebviewHtml } from '../vscodeHtml';
 import { paneChannel } from '../paneChannel';
-import { ConversationHost, type ConversationProvider } from './conversationHost';
+import { ConversationHost, type ConversationHostUi, type ConversationProvider } from './conversationHost';
 
 export const CONVERSATION_PINNED_TYPE = 'agentWrangler.conversationPinned';
 
@@ -45,8 +45,9 @@ export class ConversationPanelManager implements vscode.Disposable {
     private codexRunners: CodexRunnerService,
     private actions: SessionActions,
     private dictation: DictationService,
-    private diffs: DiffContentProvider,
+    private diffs: DiffViewer | undefined,
     private files: FileSuggestService,
+    private ui: ConversationHostUi,
   ) {}
 
   /** Give this session a panel of its own, which `show` will never swap. */
@@ -121,6 +122,7 @@ export class ConversationPanelManager implements vscode.Disposable {
       (title) => {
         panel.title = `📌 ${title}`;
       },
+      this.ui,
     );
     panel.onDidDispose(() => host.dispose());
     return { panel, host };

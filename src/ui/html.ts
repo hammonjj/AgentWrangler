@@ -1,5 +1,4 @@
 import * as crypto from 'node:crypto';
-import * as vscode from 'vscode';
 
 export function getNonce(): string {
   return crypto.randomBytes(16).toString('hex');
@@ -8,6 +7,11 @@ export function getNonce(): string {
 /**
  * Shared webview HTML shell: strict CSP (no inline code), one css + one js
  * bundle from dist/webview.
+ *
+ * Host-neutral. VSCode rewrites local paths into `vscode-webview-resource:`
+ * URIs and reports the scheme to put in the CSP; an Electron window loads the
+ * same file off disk and uses `'self'`. Both differ only in those three
+ * strings, so they are arguments rather than two copies of the document.
  */
 export type BundleName = 'dashboard' | 'conversation' | 'workbench';
 
@@ -34,29 +38,43 @@ const BODY: Record<BundleName, string> = {
     '</div>',
 };
 
-export function buildWebviewHtml(opts: {
-  webview: vscode.Webview;
-  extensionUri: vscode.Uri;
+export interface WebviewHtmlOptions {
   bundleName: BundleName;
   title: string;
-}): string {
-  const { webview, extensionUri, bundleName, title } = opts;
+  /** Where the bundle's stylesheet is, as the document will see it. */
+  cssHref: string;
+  /** Where the bundle's script is, as the document will see it. */
+  jsSrc: string;
+  /**
+   * What the CSP should allow styles and images from — VSCode's
+   * `webview.cspSource`, or `'self'` in a window loading its own files.
+   */
+  cspSource: string;
+  /**
+   * Stylesheets to load before the bundle's own, in order. The Electron shell
+   * puts the `--vscode-*` token shim here; in VSCode the host injects those
+   * values itself and this is empty.
+   */
+  extraStylesheets?: string[];
+}
+
+export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
+  const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [] } = opts;
   const nonce = getNonce();
-  const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview', `${bundleName}.css`));
-  const jsUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview', `${bundleName}.js`));
+  const links = [...extraStylesheets, cssHref].map((href) => `<link rel="stylesheet" href="${href}">`).join('\n');
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'; img-src ${cspSource} data:;">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="stylesheet" href="${cssUri}">
+${links}
 <title>${title}</title>
 </head>
 <body>
 ${BODY[bundleName]}
-<script nonce="${nonce}" src="${jsUri}"></script>
+<script nonce="${nonce}" src="${jsSrc}"></script>
 </body>
 </html>`;
 }
