@@ -221,7 +221,7 @@
         "agentWrangler.codexBinaryPath": {
           "type": "string",
           "default": "codex",
-          "description": "Codex CLI binary used for monitoring controls and conversations started from Agent Wrangler."
+          "description": "Codex CLI binary used for plan usage and conversations. The default discovers the newest compatible executable bundled with the OpenAI VS Code extension, then falls back to PATH. Set an explicit path to override discovery."
         },
         "agentWrangler.codexRunner.model": {
           "type": "string",

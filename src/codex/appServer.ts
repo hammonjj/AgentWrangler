@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as readline from 'node:readline';
 import { Emitter, type Disposable } from '../core/events';
+import { resolveCodexBinary } from './binary';
 
 export interface RpcNotification { method: string; params?: any }
 export interface RpcServerRequest extends RpcNotification { id: string | number }
@@ -30,7 +31,7 @@ export class CodexAppServer implements Disposable {
   }
 
   private async startInner(): Promise<void> {
-    const child = this.spawnProcess(this.binary(), ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = this.spawnProcess(resolveCodexBinary(this.binary()), ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'pipe'] });
     this.child = child;
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (data) => this.log(`codex app-server: ${String(data).trim()}`));
