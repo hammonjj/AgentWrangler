@@ -10,6 +10,7 @@ import type { UsageSnapshot } from '../src/shared/usage';
 
 function snapshot(...percents: number[]): UsageSnapshot {
   return {
+    spendKnown: true,
     fetchedAtMs: 1_000,
     windows: percents.map((percent, i) => ({
       id: `w${i}`,

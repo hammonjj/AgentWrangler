@@ -56,9 +56,35 @@ describe('parseUsage', () => {
     expect(snap.spend).toEqual({ usedMinor: 0, limitMinor: 100000, exponent: 2, currency: 'USD', percent: 0 });
   });
 
-  it('leaves spend out when credits are disabled', () => {
+  it('leaves spend out when credits are disabled, and says it knows', () => {
     const body = { ...LIVE_BODY, spend: { ...LIVE_BODY.spend, enabled: false } };
-    expect(parseUsage(body, NOW)!.spend).toBeUndefined();
+    const snap = parseUsage(body, NOW)!;
+    expect(snap.spend).toBeUndefined();
+    expect(snap.spendKnown).toBe(true);
+  });
+
+  /**
+   * "Not in this response" and "the account has none" are different claims, and
+   * for a while they arrived here as the same `undefined`. A body that omits
+   * the block would then take the extra-usage card off the dashboard as though
+   * the credits were gone — which is a guess, and the wrong one.
+   */
+  it('does not claim to know when the body omits spend entirely', () => {
+    const { spend: _drop, ...body } = LIVE_BODY;
+    const snap = parseUsage(body, NOW)!;
+    expect(snap.spend).toBeUndefined();
+    expect(snap.spendKnown).toBe(false);
+  });
+
+  it('does not claim to know when spend is on but says no limit', () => {
+    const body = { ...LIVE_BODY, spend: { enabled: true, percent: 0 } };
+    const snap = parseUsage(body, NOW)!;
+    expect(snap.spend).toBeUndefined();
+    expect(snap.spendKnown).toBe(false);
+  });
+
+  it('knows when the credits are there', () => {
+    expect(parseUsage(LIVE_BODY, NOW)!.spendKnown).toBe(true);
   });
 
   it('falls back to the top-level windows when `limits` is absent (older API shape)', () => {

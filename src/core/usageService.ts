@@ -132,8 +132,9 @@ export class UsageService implements Disposable {
       if (this.disposed) return;
       if (res.ok) {
         this.failures = 0;
-        this.state = { last: res.snapshot };
-        await this.cache.write(res.snapshot);
+        const snapshot = this.withCarriedSpend(res.snapshot);
+        this.state = { last: snapshot };
+        await this.cache.write(snapshot);
       } else {
         this.failures++;
         if (this.failures === 1 || this.failures % 10 === 0) {
@@ -149,6 +150,31 @@ export class UsageService implements Disposable {
       this.inFlight = false;
     }
     this.schedule(this.nextWaitMs());
+  }
+
+  /**
+   * Keep the extra-usage figure across a read that did not mention it.
+   *
+   * The windows are always in the body; `spend` is not, and a response that
+   * omits it used to take the card off the dashboard as if the credits were
+   * gone. That is a guess, and the wrong one — the only thing such a response
+   * establishes is that it did not say. So an unknown spend inherits the last
+   * known one, and only an explicit `enabled: false` clears it.
+   *
+   * The carried value is written to the cache too: the cache is "the last good
+   * read", and carrying is what keeps it good. What it is not allowed to do is
+   * outlive an account that really has turned extra usage off, which is why the
+   * explicit case still wins.
+   */
+  private withCarriedSpend(snapshot: UsageSnapshot): UsageSnapshot {
+    if (snapshot.spendKnown) {
+      if (!snapshot.spend && this.state.last?.spend) this.log('usage: extra usage is now reported as disabled');
+      return snapshot;
+    }
+    const carried = this.state.last?.spend;
+    if (!carried) return snapshot;
+    this.log('usage: response did not report extra usage; keeping the last figure');
+    return { ...snapshot, spend: carried };
   }
 
   /** Use the shared cache when it is fresher than the poll interval. True when it was. */

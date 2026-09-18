@@ -35,6 +35,20 @@ export interface UsageSnapshot {
   fetchedAtMs: number;
   windows: UsageWindow[];
   spend?: UsageSpend;
+  /**
+   * Whether this response actually said anything about extra usage.
+   *
+   * `spend` is optional in the body, and "absent" and "turned off" are not the
+   * same fact — but both used to arrive here as `spend: undefined`, so a
+   * response that simply omitted the block erased the card with no way to tell
+   * that from the account genuinely having no credits. The windows never showed
+   * this because they are always present; `spend` is the only optional half.
+   *
+   * True when the body was explicit either way (`enabled: false`, or `enabled:
+   * true` with a limit). False when it said nothing, which is the caller's cue
+   * to keep what it last knew rather than to conclude there is none.
+   */
+  spendKnown: boolean;
 }
 
 /**
@@ -157,19 +171,30 @@ export function parseUsage(body: unknown, nowMs: number): UsageSnapshot | undefi
 
   if (windows.length === 0) return undefined;
 
+  // Three outcomes, not two. `enabled: false` is the account saying it has no
+  // extra usage; a missing block is the response not mentioning it, which is
+  // not the same claim and must not read as "there is none". See `spendKnown`.
   let spend: UsageSpend | undefined;
+  let spendKnown = false;
   const sp = raw.spend;
-  if (sp && typeof sp === 'object' && sp.enabled === true && sp.limit?.amount_minor !== undefined) {
-    spend = {
-      usedMinor: sp.used?.amount_minor ?? 0,
-      limitMinor: sp.limit.amount_minor,
-      exponent: sp.limit.exponent ?? sp.used?.exponent ?? 2,
-      currency: sp.limit.currency ?? sp.used?.currency ?? 'USD',
-      percent: clampPercent(sp.percent),
-    };
+  if (sp && typeof sp === 'object') {
+    if (sp.enabled === false) {
+      spendKnown = true;
+    } else if (sp.enabled === true && sp.limit?.amount_minor !== undefined) {
+      spendKnown = true;
+      spend = {
+        usedMinor: sp.used?.amount_minor ?? 0,
+        limitMinor: sp.limit.amount_minor,
+        exponent: sp.limit.exponent ?? sp.used?.exponent ?? 2,
+        currency: sp.limit.currency ?? sp.used?.currency ?? 'USD',
+        percent: clampPercent(sp.percent),
+      };
+    }
+    // `enabled: true` with no limit says the feature is on but not how much of
+    // it there is, which is not enough to draw a bar. Left unknown.
   }
 
-  return { fetchedAtMs: nowMs, windows, spend };
+  return { fetchedAtMs: nowMs, windows, spend, spendKnown };
 }
 
 // ---- presentation ----

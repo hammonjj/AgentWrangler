@@ -27,7 +27,10 @@ export class FileUsageCache implements UsageCache {
       const text = await fsp.readFile(this.file, 'utf8');
       const snap = JSON.parse(text) as UsageSnapshot;
       if (typeof snap?.fetchedAtMs !== 'number' || !Array.isArray(snap.windows)) return undefined;
-      return snap;
+      // A file written before `spendKnown` existed says nothing about extra
+      // usage, which is exactly what `false` means — so the flag is normalised
+      // rather than left `undefined` behind a type that promises a boolean.
+      return { ...snap, spendKnown: snap.spendKnown === true };
     } catch {
       return undefined;
     }
