@@ -27,7 +27,6 @@ import type { SessionActions } from '../actions';
 import type { PaneChannel } from '../paneChannel';
 import { offerDictationSetup } from '../dictationSetup';
 import { adoptActionFor } from '../openTarget';
-import type { SessionLocator } from '../sessionLocator';
 import { DiffContentProvider } from './diffView';
 import { RunnerSource } from './runnerSource';
 import { CodexTranscriptSource } from './codexTranscriptSource';
@@ -63,7 +62,7 @@ export class ConversationHost {
   private pendingSend?: AbortController;
   private archiveText = new Map<string, string>();
   private subagentFiles = new Map<string, string>();
-  /** Only the newest capability computation may land; the locator read is async. */
+  /** Capability computation is async and can overlap; only the newest may land. */
   private capsSeq = 0;
 
   constructor(
@@ -74,7 +73,6 @@ export class ConversationHost {
     private runners: RunnerService,
     private codexRunners: CodexRunnerService,
     private actions: SessionActions,
-    _locator: SessionLocator,
     private dictation: DictationService,
     private diffs: DiffContentProvider,
     private files: FileSuggestService,

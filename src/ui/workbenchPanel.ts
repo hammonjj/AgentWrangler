@@ -38,7 +38,6 @@ import {
 } from './dashboardHost';
 import { buildWebviewHtml } from './html';
 import { paneChannel } from './paneChannel';
-import type { SessionLocator } from './sessionLocator';
 
 export const WORKBENCH_PANEL_TYPE = 'agentWrangler.workbench';
 
@@ -56,7 +55,6 @@ export interface WorkbenchDeps {
   runnerOwnership: RunnerOwnership;
   runners: RunnerService;
   actions: SessionActions;
-  locator: SessionLocator;
   dictation: DictationService;
   diffs: DiffContentProvider;
   files: FileSuggestService;
@@ -172,7 +170,6 @@ export class WorkbenchPanelManager implements vscode.Disposable {
       this.deps.archive,
       this.deps.actions,
       this.deps.health,
-      this.deps.locator,
       this.deps.usage,
       this.deps.codexUsage,
       this.deps.columns,
@@ -190,7 +187,6 @@ export class WorkbenchPanelManager implements vscode.Disposable {
       this.deps.runners,
       this.deps.codexRunners,
       this.deps.actions,
-      this.deps.locator,
       this.deps.dictation,
       this.deps.diffs,
       this.deps.files,

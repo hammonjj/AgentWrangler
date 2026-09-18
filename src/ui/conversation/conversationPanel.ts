@@ -15,7 +15,6 @@ import type { DictationService } from '../../core/dictation';
 import type { SessionStore } from '../../core/sessionStore';
 import type { AgentProvider } from '../../core/provider';
 import type { SessionActions } from '../actions';
-import type { SessionLocator } from '../sessionLocator';
 import type { FileSuggestService } from '../../core/fileSuggest';
 import type { DiffContentProvider } from './diffView';
 import { buildWebviewHtml } from '../html';
@@ -45,7 +44,6 @@ export class ConversationPanelManager implements vscode.Disposable {
     private runners: RunnerService,
     private codexRunners: CodexRunnerService,
     private actions: SessionActions,
-    private locator: SessionLocator,
     private dictation: DictationService,
     private diffs: DiffContentProvider,
     private files: FileSuggestService,
@@ -117,7 +115,6 @@ export class ConversationPanelManager implements vscode.Disposable {
       this.runners,
       this.codexRunners,
       this.actions,
-      this.locator,
       this.dictation,
       this.diffs,
       this.files,

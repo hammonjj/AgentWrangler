@@ -30,7 +30,26 @@ worth review: cross-window simultaneous takeover (the registry is re-read and a 
 serializes its own sends, but there is no cross-process ownership lease), asynchronous source
 switches, and history paging for long active sessions.
 
-Everything below is the original Codex session's account, kept for the reasoning.
+## Correction: the locator did not survive phase 4
+
+The plan said to keep `src/ui/sessionLocator.ts`, on the grounds that knowing whether a
+session runs elsewhere stays essential to the adopt path's safety. The file was kept; the
+dependency was not. After the jump removal there were **zero calls** to `.locate()` or
+`.locateMany()` — it was still constructed and threaded into both hosts, which took it as an
+unused `_locator` parameter. `src/ui/workspace.ts` (`isInThisWorkspace`) had no importers at
+all.
+
+No safety was lost: the adopt path proves a pid is dead through `readProcessTable` and
+`isPidAlive` in `src/core/procTree.ts`, which never imported `vscode` and is also what backs
+pause and resume. The locator's VSCode-specific part — telling a Claude Code panel from one
+of this window's integrated terminals from another window — only ever meant anything for
+revealing a window, and nothing reveals windows now.
+
+Both files, the `LocationKind` union and the unused parameters were deleted afterwards.
+
+Everything below is the original Codex session's account, kept for the reasoning. Note that
+its phase 4 lines claiming "Locator remains" and "SessionLocator retained" are superseded by
+the correction above.
 
 ---
 

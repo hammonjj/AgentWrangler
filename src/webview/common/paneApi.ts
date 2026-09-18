@@ -20,16 +20,20 @@
  * The envelope is used even when a pane is alone in its own panel (a pinned
  * conversation), so there is exactly one wire format to reason about rather
  * than one that depends on where the pane happens to be mounted.
+ *
+ * The host itself is reached through `createWebviewBridge`, which prefers an
+ * `agentWranglerHost` injected by a preload script and falls back to
+ * `acquireVsCodeApi`. That is the seam a desktop shell would use, and it is
+ * here rather than at each call site because `acquireVsCodeApi` may only be
+ * called once — so this module is the single place that knows what the host is.
  */
 
-declare function acquireVsCodeApi(): {
-  postMessage(msg: unknown): void;
-  setState(state: unknown): void;
-  getState(): unknown;
-};
+import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
+
+declare function acquireVsCodeApi(): WebviewBridge<WorkbenchState>;
 
 /** Once per webview. Both panes share this. */
-const api = acquireVsCodeApi();
+const api = createWebviewBridge<WorkbenchState>(acquireVsCodeApi);
 
 export type PaneName = 'dashboard' | 'conversation';
 

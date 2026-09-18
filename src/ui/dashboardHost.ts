@@ -11,7 +11,6 @@ import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
 import type { PaneChannel } from './paneChannel';
 import { openTargetFor } from './openTarget';
-import type { SessionLocator } from './sessionLocator';
 
 /**
  * Where the banner's facts come from — the Claude provider, in practice. Kept
@@ -74,7 +73,6 @@ export class DashboardHost {
     private archive: ArchiveService,
     private actions: SessionActions,
     private health: HookHealthSource,
-    _locator: SessionLocator,
     private usage: UsageSource,
     private codexUsage: UsageSource,
     private columns: ColumnPrefsService,
@@ -121,7 +119,7 @@ export class DashboardHost {
     this.subs = [];
   }
 
-  /** Snapshots race the locator's process-table read; only the newest one lands. */
+  /** Snapshots are built asynchronously and can overlap; only the newest lands. */
   private snapshotSeq = 0;
 
   private pushSnapshot(): void {

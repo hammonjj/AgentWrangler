@@ -53,7 +53,6 @@ import type { ConversationLauncher } from './ui/dashboardHost';
 import { WORKBENCH_PANEL_TYPE, WorkbenchPanelManager, WorkbenchPanelSerializer } from './ui/workbenchPanel';
 import { watchForDevReload } from './ui/devReload';
 import { adoptActionFor } from './ui/openTarget';
-import { SessionLocator } from './ui/sessionLocator';
 import { createStatusBar } from './ui/statusBar';
 import { resumeInTerminal } from './ui/terminal';
 
@@ -199,7 +198,6 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const showInPane = (s: AgentSession) => workbench.show(s.key);
 
-  const locator = new SessionLocator();
 
   /**
    * Take a session over: end whatever runs it, then resume the same id here.
@@ -639,7 +637,6 @@ export function activate(context: vscode.ExtensionContext): void {
     runners,
     codexRunners,
     actions,
-    locator,
     dictation,
     diffs,
     fileSuggest,
@@ -682,7 +679,6 @@ export function activate(context: vscode.ExtensionContext): void {
     runners,
     codexRunners,
     actions,
-    locator,
     dictation,
     diffs,
     files: fileSuggest,

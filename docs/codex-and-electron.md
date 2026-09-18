@@ -20,14 +20,54 @@ Injected environment, plugin, and AGENTS.md setup messages are skipped when sele
 
 ## Electron seam
 
-The browser bundles use `createWebviewBridge`. In VSCode it wraps `acquireVsCodeApi`; an Electron preload can expose the same narrow `agentWranglerHost` object. Keep the renderer sandboxed, context isolated, and without Node integration. Filesystem access, process discovery, binary spawning, credentials, and App Server must remain in the main/backend process.
+The browser bundles reach the host through `createWebviewBridge`, called in exactly one
+place: `src/webview/common/paneApi.ts`. It prefers a preload-injected `agentWranglerHost`
+and falls back to `acquireVsCodeApi`. It is centralised there because `acquireVsCodeApi`
+may only be called once per webview, so a second call site is not a style question — it
+throws and kills a pane. Keep the renderer sandboxed, context isolated, and without Node
+integration. Filesystem access, process discovery, binary spawning, credentials, and App
+Server must remain in the main/backend process.
 
-The remaining VSCode host APIs should move behind adapters before packaging Electron:
+**Theming is the largest mechanical item in the port, and it is not a seam.** The three
+webview stylesheets use **56 distinct `var(--vscode-*)` custom properties** — button,
+dropdown, badge, charts, editor, list, input, panel and statusBar families. VSCode injects
+those values into every webview and tracks the user's theme. Nothing defines them outside
+VSCode, so a desktop shell renders the UI unstyled until someone authors light and dark
+values for all 56. Budget this before anything else on this page.
 
-- configuration and versioned persistence (`globalState`, `workspaceState`, and `globalStorageUri` today);
-- dialogs, notifications, clipboard, external URLs, file and diff opening;
-- project/workspace discovery, integrated terminal navigation, and window focus;
-- dictation permissions and platform process control.
+The remaining VSCode host APIs should move behind adapters before packaging Electron. The
+dependency is shallow and concentrated — 14 of 86 source files import `vscode`, and more
+than half the call sites are in `extension.ts`, which is mostly activation wiring, dialogs
+and command registration. Ranked by what the work actually is:
+
+- **Swaps, not design.** `globalState` is six preference services (turn stats, archive, pins,
+  nicknames, column prefs, hidden projects) and `workspaceState` is one (`RunnerRegistry`);
+  both `ArchiveService` and `RunnerRegistry` already take a structural `{get, update}`
+  rather than `vscode.Memento`, so the store is a constructor argument. `globalStorageUri`,
+  `extensionUri`, clipboard, `openExternal`, `revealFileInOS` and the folder pickers all have
+  direct equivalents. `asWebviewUri` and `cspSource` mostly disappear under `loadFile`; the
+  nonce logic survives unchanged.
+- **Real UI to build.** Roughly twenty `showInformationMessage`/`showWarningMessage`/
+  `showErrorMessage` sites (several modal, with `detail` and custom buttons), the two
+  `showQuickPick`s and the `showInputBox`, `withProgress` with its cancellation token, the
+  15 registered commands and the command palette that invokes them, and webview-panel
+  serialisation.
+- **No equivalent at all.** `vscode.diff` plus the `TextDocumentContentProvider` behind it —
+  replacing it honestly means bundling Monaco's diff editor. The status bar item, whose
+  `MarkdownString` tooltip and `ThemeColor` background have no analogue; a tray icon or badge
+  is the nearest thing. `openTextDocument`, which presumes an editor exists. And the tab UX
+  itself — a workbench tab beside your code, a pinned conversation in another tab — because
+  windows are not tabs. That last one is a product decision, not a porting task.
+- **Cheaper than it looks.** Workspace discovery: `workspace.workspaceFolders` has two live
+  uses, one of them dev-only, and the launcher already merges Claude Code history and running
+  sessions. The app is machine-wide by design, so "no workspace" costs almost nothing.
+- **Terminal handoff** (*Release*, and the dictation setup's `brew install` helper) types a
+  command into an integrated terminal. There is no `sendText` equivalent; this needs
+  `node-pty` with xterm.js, or a shell-out to the platform terminal.
+- **Dictation** already records in the extension host via `ffmpeg` and `whisper-cli` child
+  processes rather than the webview, so it moves largely intact — `webkitSpeechRecognition`
+  was ruled out long ago and fails in any Electron-based webview, VSCode's included. The
+  work there is the macOS microphone entitlement, not the capture path.
 
 The Electron application should run one backend per OS login, with renderer windows subscribing to snapshots. Runner ownership must use leases keyed by provider and thread so the VSCode extension and desktop app cannot both control one conversation. A renderer reload only reconnects. Surviving full application exit requires a separate daemon and is intentionally a later feature.
 
