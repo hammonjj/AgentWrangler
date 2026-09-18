@@ -24,6 +24,7 @@ function notable(status: AgentSession['status']): boolean {
 function materialFingerprint(s: AgentSession): string {
   return [
     s.status,
+    JSON.stringify(s.subagents ?? null),
     s.title,
     // A rename changes nothing a provider scan would see, so it has to be
     // material here or the new name would wait for the session to do something.

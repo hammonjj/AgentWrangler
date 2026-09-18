@@ -6,6 +6,7 @@
 export interface WranglerConfig {
   claudeBinaryPath: string;
   codexBinaryPath: string;
+  showCodexSubagents: boolean;
   stuckThresholdSeconds: number;
   endedWindowHours: number;
   maxEndedSessions: number;
@@ -22,6 +23,7 @@ export interface WranglerConfig {
 export const DEFAULT_CONFIG: WranglerConfig = {
   claudeBinaryPath: 'claude',
   codexBinaryPath: 'codex',
+  showCodexSubagents: false,
   // Ten minutes, not one. Neither the transcript nor the hooks say anything
   // while the model is generating, and a long think or a big `Write` is
   // routinely silent for 2–6 minutes (measured: gaps of 121s, 388s, 79s and

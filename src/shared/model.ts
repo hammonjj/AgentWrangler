@@ -82,7 +82,15 @@ export interface TurnProgress {
  */
 export type OpenTarget = 'conversation' | 'panel' | 'terminal' | 'window' | 'resume';
 
+export interface SubagentSummary {
+  working: number;
+  attention: number;
+  done: number;
+}
+
 export interface AgentSession {
+  /** Estimated descendant worker status within the discovery window; excludes guardians. */
+  subagents?: SubagentSummary;
   /** Provider id, e.g. 'claude'. */
   provider: string;
   /** Client that originated the session, e.g. vscode, cli, or desktop. */

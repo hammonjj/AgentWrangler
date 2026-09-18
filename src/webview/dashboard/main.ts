@@ -1,3 +1,4 @@
+import { subagentText } from '../../shared/subagents';
 import './dashboard.css';
 import {
   clampResizeWidth,
@@ -78,6 +79,7 @@ let codexUsage: UsageState | undefined;
 // has to feel immediate, so the webview keeps its own copy and posts changes.
 // The snapshot that comes back matches what we already drew.
 let columns: ColumnPrefs = {};
+let showCodexSubagents = false;
 let narrow = document.documentElement.clientWidth < NARROW_PX;
 /** Open column picker, or undefined. The number is where to pin it vertically. */
 let menuTop: number | undefined;
@@ -453,6 +455,11 @@ const CELL: Record<ColumnId, (s: SessionDTO) => string> = {
       ? '<td class="c-model"></td>'
       : `<td class="c-model" title="${esc(s.model ?? label)}">${esc(label)}</td>`;
   },
+  subagents: (s) => {
+    const text = subagentText(s.subagents);
+    const title = text ? `${text}. Estimated from recent worker transcripts, including nested workers; excludes guardian reviews.` : '';
+    return `<td class="c-subagents" title="${esc(title)}">${esc(text)}</td>`;
+  },
   pr: (s) => `<td class="c-pr">${prHtml(s)}</td>`,
   eta: etaCell,
   age: ageCell,
@@ -513,6 +520,7 @@ function rowHtml(s: SessionDTO, span: number): string {
     shown.has('branch') ? '' : branchText(s),
     shown.has('model') ? '' : esc(modelLabel(s.model) ?? ''),
     shown.has('pr') ? '' : prHtml(s),
+    shown.has('subagents') ? '' : esc(subagentText(s.subagents)),
   ]
     .filter(Boolean)
     .join('<span class="sep">·</span>');
@@ -680,6 +688,8 @@ function menuHtml(): string {
   <div class="cmhead">Columns</div>
   ${rows}
   <button class="cmreset" data-cols="reset">Reset widths</button>
+  <div class="cmhead">Codex sessions</div>
+  <label class="cmrow"><input type="checkbox" data-codex-subagents${showCodexSubagents ? ' checked' : ''}>Show internal/subagent sessions</label>
 </div>`;
 }
 
@@ -939,6 +949,7 @@ window.addEventListener('message', (e: MessageEvent) => {
     codexUsage = m.codexUsage;
     // Our own drag already drew this; anything else is another dashboard's.
     if (m.columns) columns = m.columns;
+    showCodexSubagents = m.showCodexSubagents === true;
     // The bar lives outside #app, so `render()` never touches it.
     renderControls();
     render();
@@ -1210,3 +1221,11 @@ setInterval(() => {
 }, 10_000);
 
 post({ type: 'ready' });
+
+// Kept in the column menu so diagnostic visibility is beside the worker summary.
+app.addEventListener('change', (event) => {
+  const input = event.target;
+  if (input instanceof HTMLInputElement && input.hasAttribute('data-codex-subagents')) {
+    post({ type: 'setShowCodexSubagents', value: input.checked });
+  }
+});

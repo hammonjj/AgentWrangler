@@ -11,7 +11,7 @@
  * dragging and the picker menu.
  */
 
-export type ColumnId = 'proj' | 'worktree' | 'branch' | 'model' | 'pr' | 'eta' | 'age';
+export type ColumnId = 'proj' | 'worktree' | 'branch' | 'model' | 'pr' | 'eta' | 'age' | 'subagents';
 
 export interface ColumnDef {
   id: ColumnId;
@@ -50,6 +50,7 @@ export const COLUMNS: readonly ColumnDef[] = [
     minWidth: 48,
     foldsWhenNarrow: true,
   },
+  { id: 'subagents', label: 'Subagents', title: 'Estimated worker activity, including nested workers. Internal guardian reviews are excluded.', defaultWidth: 132, minWidth: 80, foldsWhenNarrow: true },
   { id: 'pr', label: 'PR', defaultWidth: 56, minWidth: 40, foldsWhenNarrow: true },
   {
     id: 'eta',

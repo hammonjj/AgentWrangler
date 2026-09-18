@@ -88,6 +88,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const cfg: WranglerConfig = {
       claudeBinaryPath: c.get('claudeBinaryPath', DEFAULT_CONFIG.claudeBinaryPath),
       codexBinaryPath: c.get('codexBinaryPath', DEFAULT_CONFIG.codexBinaryPath),
+      showCodexSubagents: c.get('showCodexSubagents', DEFAULT_CONFIG.showCodexSubagents),
       stuckThresholdSeconds: c.get('stuckThresholdSeconds', DEFAULT_CONFIG.stuckThresholdSeconds),
       endedWindowHours: c.get('endedWindowHours', DEFAULT_CONFIG.endedWindowHours),
       maxEndedSessions: c.get('maxEndedSessions', DEFAULT_CONFIG.maxEndedSessions),

@@ -223,6 +223,11 @@
           "default": "codex",
           "description": "Codex CLI binary used for monitoring controls and conversations started from Agent Wrangler."
         },
+        "agentWrangler.showCodexSubagents": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show internal and subagent Codex sessions as separate rows for debugging. Main conversations always summarize linked workers in the Subagents column."
+        },
         "agentWrangler.codexRunner.model": {
           "type": "string",
           "default": "",

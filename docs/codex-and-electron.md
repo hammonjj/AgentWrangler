@@ -10,6 +10,14 @@ Wrangler-owned Codex conversations use `codex app-server --stdio`. `CodexAppServ
 
 Codex plan limits come from App Server's `account/rateLimits/read` method and use the existing cached polling service. The dashboard shows the matching provider's cards when filtered and labels both providers in the combined view. Claude's process-level auto-pause remains Claude-specific because an external Codex rollout does not identify a safe process to suspend.
 
+## Main conversations and subagents
+
+Codex rows default to main conversations only. The column menu's **Show internal/subagent sessions** checkbox (also `agentWrangler.showCodexSubagents` in settings) exposes child and internal sessions for diagnostics. This is a display filter, not a change to Codex execution or history.
+
+The **Subagents** column summarizes working, needs-attention, and completed workers, including nested workers linked by explicit `source.subagent.thread_spawn.parent_thread_id` metadata. Guardian reviews and their descendants are excluded. Missing parents, unlinked children, and cyclic ancestry are not assigned to a conversation. Counts cover transcripts in the configured discovery window, not just the latest turn; they may omit older or unavailable children. The main conversation's status remains independent. Worker statuses are transcript estimates, so this column is not a complete approval monitor. In narrow dashboards the summary moves to the row's second line.
+
+Injected environment, plugin, and AGENTS.md setup messages are skipped when selecting Codex conversation titles.
+
 ## Electron seam
 
 The browser bundles use `createWebviewBridge`. In VSCode it wraps `acquireVsCodeApi`; an Electron preload can expose the same narrow `agentWranglerHost` object. Keep the renderer sandboxed, context isolated, and without Node integration. Filesystem access, process discovery, binary spawning, credentials, and App Server must remain in the main/backend process.

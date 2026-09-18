@@ -11,6 +11,9 @@ export interface CodexRolloutSummary {
   path: string;
   cwd?: string;
   source?: string;
+  isSubagent?: boolean;
+  isGuardian?: boolean;
+  parentThreadId?: string;
   title?: string;
   subtitle?: string;
   model?: string;
@@ -35,6 +38,14 @@ function textContent(content: unknown): string | undefined {
   return text || undefined;
 }
 
+/** Setup messages have a user role too; never use them as conversation titles. */
+function promptText(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const stripped = text.replace(/<(recommended_plugins|environment_context)>[\s\S]*?<\/\1>/g, '').trim();
+  if (!stripped || /^# AGENTS\.md instructions for /i.test(stripped)) return undefined;
+  return stripped;
+}
+
 function parseLine(line: string): any | undefined {
   try {
     const value = JSON.parse(line);
@@ -48,6 +59,9 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
   let sessionId: string | undefined;
   let cwd: string | undefined;
   let source: string | undefined;
+  let isSubagent = false;
+  let isGuardian = false;
+  let parentThreadId: string | undefined;
   let title: string | undefined;
   let subtitle: string | undefined;
   let model: string | undefined;
@@ -66,7 +80,17 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
     if (obj.type === 'session_meta' && payload) {
       sessionId = typeof payload.id === 'string' ? payload.id : payload.session_id;
       cwd = typeof payload.cwd === 'string' ? payload.cwd : cwd;
-      source = typeof payload.source === 'string' ? payload.source : payload.originator;
+      let origin = payload.source;
+      if (typeof origin === 'string' && origin.startsWith('{')) {
+        try { origin = JSON.parse(origin); } catch { /* preserve unknown sources */ }
+      }
+      isSubagent = !!origin && typeof origin === 'object' && 'subagent' in origin;
+      const agent = isSubagent ? origin.subagent : undefined;
+      isGuardian = agent?.other === 'guardian';
+      const parent = agent?.thread_spawn?.parent_thread_id;
+      parentThreadId = typeof parent === 'string' && parent.trim() ? parent.toLowerCase() : undefined;
+      source = isSubagent ? (isGuardian ? 'guardian' : 'subagent')
+        : typeof origin === 'string' ? origin : payload.originator;
       model = typeof payload.model === 'string' ? payload.model : model;
       startedAtMs = Number.isFinite(ts) ? ts : startedAtMs;
       const branch = payload.git?.branch ?? payload.git_branch;
@@ -92,7 +116,8 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
     }
     if (obj.type !== 'response_item' || !payload) continue;
     if (payload.type === 'message') {
-      const text = textContent(payload.content);
+      const rawText = textContent(payload.content);
+      const text = payload.role === 'user' ? promptText(rawText) : rawText;
       if (!text) continue;
       if (payload.role === 'user') {
         subtitle = capText(text.replace(/\s+/g, ' '), 220);
@@ -113,6 +138,9 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
     path: filePath,
     cwd,
     source,
+    isSubagent,
+    isGuardian,
+    parentThreadId,
     title,
     subtitle,
     model,

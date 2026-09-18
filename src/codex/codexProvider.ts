@@ -5,6 +5,7 @@ import { Emitter, type Disposable } from '../core/events';
 import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import { worktreeFor } from '../core/worktree';
 import type { AgentSession } from '../shared/model';
+import { summarizeSubagents, visibleCodexSummaries } from './subagents';
 import { codexSessionsDir } from './paths';
 import { findRollouts, readRolloutSummary, rolloutStatus, type CodexRolloutSummary } from './rollout';
 
@@ -69,7 +70,9 @@ export class CodexProvider implements AgentProvider {
   async scan(): Promise<AgentSession[]> {
     const cfg = this.getConfig();
     const now = Date.now();
-    return [...this.summaries.values()]
+    const summaries = [...this.summaries.values()];
+    const subagents = summarizeSubagents(summaries, now, cfg.stuckThresholdSeconds * 1000);
+    return visibleCodexSummaries(summaries, cfg.showCodexSubagents)
       .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
       .slice(0, cfg.maxEndedSessions + 100)
       .map((summary) => {
@@ -77,6 +80,7 @@ export class CodexProvider implements AgentProvider {
         const worktree = worktreeFor(cwd);
         return {
           provider: this.id,
+          subagents: subagents.get(summary.sessionId.toLowerCase()),
           sessionId: summary.sessionId,
           key: `${this.id}:${summary.sessionId.toLowerCase()}`,
           title: summary.title ?? summary.subtitle ?? summary.sessionId.slice(0, 8),

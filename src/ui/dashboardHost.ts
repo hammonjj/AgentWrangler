@@ -102,6 +102,12 @@ export class DashboardHost {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
       this.store.onDidUpdate(() => this.pushSnapshot()),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration('agentWrangler.showCodexSubagents')) {
+          this.actions.refreshAll();
+          void this.pushSnapshot();
+        }
+      }),
       this.archive.onDidChange(() => this.pushSnapshot()),
       // The store only fires on material session changes, so an install that
       // changes nothing about any session still has to reach the banner.
@@ -178,6 +184,7 @@ export class DashboardHost {
       usage: this.usage.enabled ? this.usage.usage : undefined,
       codexUsage: this.codexUsage.enabled ? this.codexUsage.usage : undefined,
       columns: this.columns.value,
+      showCodexSubagents: vscode.workspace.getConfiguration('agentWrangler').get('showCodexSubagents', false),
       projects: this.projects.value.length > 0 ? this.projects.value : undefined,
     };
     void this.webview.postMessage(msg);
@@ -226,6 +233,16 @@ export class DashboardHost {
         break;
       case 'installHooks':
         this.actions.installHooks();
+        break;
+      case 'setShowCodexSubagents':
+        if (typeof m.value === 'boolean') {
+          void vscode.workspace.getConfiguration('agentWrangler')
+            .update('showCodexSubagents', m.value, vscode.ConfigurationTarget.Global)
+            .then(undefined, (error: unknown) => {
+              void vscode.window.showErrorMessage(`Could not change Codex session visibility: ${String(error)}`);
+              void this.pushSnapshot();
+            });
+        }
         break;
       case 'setColumns':
         this.columns.set(m.prefs);
