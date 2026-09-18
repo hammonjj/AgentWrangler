@@ -47,6 +47,10 @@ export interface ConversationSource extends Disposable {
   setPermissionMode?(mode: PermissionModeName): Promise<void>;
   setModel?(model?: string): Promise<void>;
 
-  /** The untruncated text of a tool result the pane only got a prefix of. */
-  fullToolResult?(blockId: string): string | undefined;
+  /**
+   * The whole text of a block the pane was only sent the start of, for the
+   * "Show the rest" button. Undefined when the source no longer holds it: the
+   * pane says so rather than pretending the short text was all of it.
+   */
+  fullBlockText?(blockId: string): string | undefined;
 }

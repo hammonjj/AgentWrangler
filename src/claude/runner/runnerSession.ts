@@ -32,7 +32,8 @@ import type {
   PermissionModeName,
   QuestionView,
 } from '../../shared/conversation';
-import { capText } from '../../shared/conversation';
+import { capBlock } from '../../shared/conversation';
+import { modelChoiceLabel } from '../../shared/modelName';
 import { parsePermissionSuggestions, permissionDetail, suggestionLabels } from '../permissionDetail';
 import type { ConversationHistory } from '../transcriptHistory';
 import { createRunnerState, noteBlock, reduceRunnerMessage, type RunnerBlocksState } from './runnerBlocks';
@@ -113,12 +114,16 @@ export class RunnerSession {
   private truncated = false;
   /** What was said before this process took the conversation over. */
   private historyPromise?: Promise<ConversationHistory>;
+  /** Held-back text of that history's long blocks, for "Show the rest". */
+  private historyOverflow?: Map<string, string>;
   /** Armed by `interrupt`, cleared by the turn actually ending. */
   private interruptTimer?: ReturnType<typeof setTimeout>;
   /** The model list has been answered, so `init` does not ask for it again. */
   private modelsLoaded = false;
   private modelAttempts = 0;
 
+  private resetEmitter = new Emitter<void>();
+  readonly onReset = (listener: () => void): Disposable => this.resetEmitter.event(listener);
   private appendEmitter = new Emitter<ConvBlock[]>();
   private patchEmitter = new Emitter<BlockPatch>();
   private composerEmitter = new Emitter<ComposerState>();
@@ -147,6 +152,7 @@ export class RunnerSession {
           // Zero blocks here is the signature of a transcript we failed to
           // find, which looks exactly like the bug this replaced. Say so.
           deps.log(`runner history for ${opts.resume}: ${h.blocks.length} blocks`);
+          this.historyOverflow = h.overflow;
           return h;
         })
         .catch((err) => {
@@ -167,6 +173,18 @@ export class RunnerSession {
    */
   async history(): Promise<ConversationHistory> {
     return (await this.historyPromise) ?? { blocks: [], truncated: false };
+  }
+
+  /**
+   * The whole text of a block the pane was only sent the start of.
+   *
+   * Two stores, because a resumed session's conversation has two halves: the
+   * transcript read at start (`t:` ids) and what this process has said since
+   * (`r:`, `u:`, `a:`). Undefined when the text has since been evicted, which
+   * the pane reports rather than silently showing the short version again.
+   */
+  fullBlockText(id: string): string | undefined {
+    return this.blockState.overflow.get(id) ?? this.historyOverflow?.get(id);
   }
 
   /** True while the pane's composer should be live. */
@@ -197,6 +215,21 @@ export class RunnerSession {
     }
     void this.pump();
     void this.loadModels();
+    void this.loadCommands();
+  }
+
+  private async refreshContext(): Promise<void> {
+    try {
+      const usage = await this.query?.getContextUsage({ detail: 'summary' });
+      if (usage) this.setComposer({ contextTokens: usage.totalTokens, contextWindow: usage.maxTokens });
+    } catch { /* Optional on older CLIs. No fabricated context percentage. */ }
+  }
+
+  private async loadCommands(): Promise<void> {
+    try {
+      const commands = await this.query?.supportedCommands();
+      if (commands) this.setComposer({ slashCommands: [...new Set(['compact', 'clear', 'context', ...commands.map((c) => c.name)])] });
+    } catch { /* Older CLI: init still supplies the advertised list. */ }
   }
 
   send(text: string, images?: ImageAttachment[]): void {
@@ -205,12 +238,13 @@ export class RunnerSession {
     // emptiness is judged on both halves rather than on the text alone.
     if (!this.canSend || (!text.trim() && pics.length === 0)) return;
     // The CLI does not echo our own sends back, so the pane has to show them.
+    const userId = `u:${Date.now()}:${this.blocks.length}`;
     this.append([
       {
         kind: 'user',
-        id: `u:${Date.now()}:${this.blocks.length}`,
+        id: userId,
         ts: new Date().toISOString(),
-        text: capText(text),
+        ...capBlock(this.blockState.overflow, userId, text),
         imageCount: pics.length || undefined,
       },
     ]);
@@ -298,11 +332,16 @@ export class RunnerSession {
       const models = (await this.query?.supportedModels()) ?? [];
       const choices: ModelChoice[] = models
         .filter((m) => typeof m?.value === 'string' && m.value !== '')
-        .map((m) => ({
-          value: m.value,
-          label: m.displayName || m.value,
-          resolved: typeof m.resolvedModel === 'string' ? m.resolvedModel : undefined,
-        }));
+        .map((m) => {
+          const resolved = typeof m.resolvedModel === 'string' ? m.resolvedModel : undefined;
+          return {
+            value: m.value,
+            // "Default (recommended)" becomes "Default (Sonnet 4.5)": which
+            // model the default *is* is the question the row exists to answer.
+            label: m.displayName ? modelChoiceLabel(m.displayName, resolved) : m.value,
+            resolved,
+          };
+        });
       if (choices.length > 0) {
         this.modelsLoaded = true;
         this.setComposer({ models: choices });
@@ -386,6 +425,7 @@ export class RunnerSession {
   dispose(): void {
     clearTimeout(this.interruptTimer);
     void this.end();
+    this.resetEmitter.dispose();
     this.appendEmitter.dispose();
     this.patchEmitter.dispose();
     this.composerEmitter.dispose();
@@ -435,11 +475,16 @@ export class RunnerSession {
       return { kind: 'question', id, requestId, questions: parseQuestions(input.questions), state: 'pending' };
     }
     if (toolName === 'ExitPlanMode') {
+      // A plan is the one block that is *acted on* rather than read, so the
+      // half of it past the cap has to be reachable: approving half a plan is
+      // approving something you have not read.
+      const capped = capBlock(this.blockState.overflow, id, typeof input.plan === 'string' ? input.plan : '');
       return {
         kind: 'plan',
         id,
         requestId,
-        plan: capText(typeof input.plan === 'string' ? input.plan : ''),
+        plan: capped.text,
+        more: capped.more,
         planFilePath: typeof input.planFilePath === 'string' ? input.planFilePath : undefined,
         state: 'pending',
       };
@@ -489,7 +534,14 @@ export class RunnerSession {
   private onMessage(msg: unknown): void {
     const m = msg as { type?: string; subtype?: string; session_id?: string };
     if (typeof m.session_id === 'string' && m.session_id && this.sessionId !== m.session_id) {
+      const changed = this.sessionId !== undefined;
       this.sessionId = m.session_id;
+      if (changed) {
+        this.blocks.length = 0; this.blockState = createRunnerState();
+        this.historyPromise = undefined; this.historyOverflow = undefined; this.truncated = false;
+        this.setComposer({ costUsd: undefined, contextTokens: undefined, contextWindow: undefined });
+        this.resetEmitter.fire();
+      }
       this.deps.log(`runner session id ${m.session_id} (${this.cwd})`);
     }
     if (m.type === 'system' && m.subtype === 'init') {
@@ -503,6 +555,7 @@ export class RunnerSession {
     if (appends.length > 0) this.append(appends);
     if (composer) this.setComposer(composer);
     if (turnEnd) {
+      void this.refreshContext();
       clearTimeout(this.interruptTimer);
       this.interruptTimer = undefined;
       this.setLifecycle(turnEnd.queued > 0 ? 'running' : 'idle');

@@ -43,7 +43,10 @@ export class RunnerService implements Disposable {
     this.sessions.add(session);
     // The id is unknown until the CLI's first init, and ownership answers
     // change the moment it arrives — as does what is worth remembering.
+    let rememberedId = session.sessionId;
     session.onLifecycle(() => {
+      if (rememberedId && rememberedId !== session.sessionId) this.deps.registry?.forget(rememberedId);
+      rememberedId = session.sessionId;
       if (session.sessionId) this.deps.registry?.remember(session.sessionId, session.cwd);
       this.changeEmitter.fire();
     });
@@ -57,13 +60,17 @@ export class RunnerService implements Disposable {
     if (!sessionId) return undefined;
     const id = sessionId.toLowerCase();
     for (const s of this.sessions) {
-      if (s.sessionId?.toLowerCase() === id) return s;
+      if (s.sessionId?.toLowerCase() === id && s.lifecycle !== 'ended' && s.lifecycle !== 'error') return s;
     }
     return undefined;
   }
 
   owns(sessionId: string | undefined): boolean {
     return this.get(sessionId) !== undefined;
+  }
+
+  wasRunning(sessionId: string): boolean {
+    return !this.owns(sessionId) && (this.deps.registry?.wasRunning(sessionId) ?? false);
   }
 
   list(): RunnerSession[] {
@@ -83,6 +90,7 @@ export class RunnerService implements Disposable {
   async end(session: RunnerSession): Promise<void> {
     if (session.sessionId) this.deps.registry?.forget(session.sessionId);
     await session.end();
+    if (session.sessionId) this.deps.registry?.forget(session.sessionId);
     this.sessions.delete(session);
     this.changeEmitter.fire();
   }

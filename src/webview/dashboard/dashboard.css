@@ -1,6 +1,5 @@
 :root {
-  /* Height of the launcher bar. Shared, because the sticky table header has to
-     come to rest directly beneath it. */
+  /* Height of the launcher bar: fixed, so the row's controls do not grow it. */
   --aw-bar-h: 34px;
   --aw-blocked: var(--vscode-charts-orange, #d18616);
   --aw-waiting: var(--vscode-charts-yellow, #d7ba7d);
@@ -25,20 +24,41 @@ html,
 body {
   margin: 0;
   padding: 0;
+  height: 100%;
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
   color: var(--vscode-foreground);
 }
 
+/* The page itself never scrolls: it is a column of launcher bar, plan-usage
+   strip and table, and only the table moves. Sticky positioning would do it for
+   one of them but not both — the table header would then have to be offset by
+   the bar's height *plus* whatever the usage strip happened to measure, which
+   changes with the dock's width as the cards wrap. A scroll container puts the
+   header at its own top and needs no measuring at all. */
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#app {
+  flex: 1 1 auto;
+  /* Without this a flex item refuses to shrink below its content, so the table
+     would push the column taller than the window instead of scrolling. */
+  min-height: 0;
+  overflow: auto;
+}
+
 /* ---- launcher ---- */
 
-/* One row: the folder to start in, and the button that starts it. Sticky so the
-   only control that creates work stays reachable however long the list gets.
-   Lives outside #app, which the table re-render replaces wholesale. */
+/* One row: the folder to start in, and the button that starts it. Outside the
+   scrolling #app — which the table re-render replaces wholesale — so the only
+   control that creates work stays reachable however long the list gets.
+   `position: relative` is for .projmenu, which hangs off it. */
 #bar {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 3;
+  flex: 0 0 auto;
   box-sizing: border-box;
   height: var(--aw-bar-h);
   display: flex;
@@ -82,8 +102,8 @@ body {
   opacity: 0.7;
 }
 
-/* Anchored to #bar, which is already positioned (sticky), so no measured
-   offset has to be written into a style attribute — the CSP drops those. */
+/* Anchored to #bar, which is already positioned, so no measured offset has to
+   be written into a style attribute — the CSP drops those. */
 .projmenu {
   position: absolute;
   top: 100%;
@@ -183,6 +203,17 @@ body {
   font-family: inherit;
   font-size: 0.92em;
   cursor: pointer;
+}
+
+#bar .providerfilter {
+  height: 22px;
+  min-width: 54px;
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 3px;
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  font: inherit;
+  font-size: 0.86em;
 }
 #bar .newbtn:hover:not(:disabled) {
   background: var(--vscode-button-hoverBackground);
@@ -342,9 +373,9 @@ body.resizing {
 
 #app thead th {
   position: sticky;
-  /* Below the launcher bar, not under it: both stick to the same scrolling
-     document, so the header has to start where the bar ends. */
-  top: var(--aw-bar-h);
+  /* The top of #app, which is the element that scrolls: the launcher bar and
+     the usage strip are outside it and never move, so no offset is needed. */
+  top: 0;
   z-index: 2;
   text-align: left;
   padding: 5px 8px 4px;
@@ -531,9 +562,18 @@ tr.row.est.paused .dot {
   white-space: nowrap;
 }
 /* Chips never shrink. A "needs Bash" the title's ellipsis has eaten is the one
-   thing the row exists to show, so the title gives way first. */
+   thing the row exists to show, so the title gives way first.
+   The gap lives here rather than on each chip so two chips can never end up
+   rim to rim: at 6px — the same as a chip's own side padding — "here" and
+   "Needs ExitPlanMode" read as one run of pill, and which word belongs to
+   which chip stops being obvious. Wider than the padding is what separates
+   them. */
 .c-agent .chips {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-left: 8px;
   white-space: nowrap;
 }
 /* Project · branch · model · PR inline. Only ever emitted for columns that are
@@ -718,8 +758,10 @@ button.pbtn:disabled {
   opacity: 0.55;
 }
 
+/* No margins: every chip sits in `.c-agent .chips`, which spaces them with a
+   gap. A margin here would add to that one and double the first chip's gap
+   from the title. */
 .chip {
-  margin-left: 6px;
   padding: 0 6px;
   border: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, #555));
   border-radius: 9px;
@@ -729,6 +771,14 @@ button.pbtn:disabled {
 .chip.blk {
   border-color: var(--aw-blocked);
   color: var(--aw-blocked);
+}
+.chip.provider {
+  margin-left: 0;
+  font-weight: 600;
+}
+.chip.provider.codex {
+  border-color: var(--vscode-charts-green, #89d185);
+  color: var(--vscode-charts-green, #89d185);
 }
 /* Runs in this window, so the pane can type into it. */
 .chip.here {
@@ -799,7 +849,8 @@ button.pbtn:disabled {
 .c-proj,
 .c-worktree,
 .c-branch,
-.c-model {
+.c-model,
+.c-subagents {
   color: var(--vscode-descriptionForeground);
   font-size: 0.92em;
 }
@@ -1035,6 +1086,13 @@ button.colcfg svg {
    the answer should not need a trip to another panel. Colours follow the
    dashboard's own scale — the bar is busy-blue until 70%, then the waiting
    yellow, then the blocked orange at 90%. */
+
+/* Pinned: the host of the strip, a flex item of the body beside #bar and #app.
+   Empty (cards turned off, or nothing read yet) it is a zero-height nothing,
+   because every rule below hangs off .usage inside it rather than off this. */
+#usage {
+  flex: 0 0 auto;
+}
 
 .usage {
   display: flex;

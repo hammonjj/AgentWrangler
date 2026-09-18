@@ -10,9 +10,8 @@ import type { HookHealth, ProjectDTO } from '../shared/model';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
 import type { PaneChannel } from './paneChannel';
-import { openTargetFor, type LocationKind, type RowClickBehavior } from './openTarget';
+import { openTargetFor } from './openTarget';
 import type { SessionLocator } from './sessionLocator';
-import { isInThisWorkspace } from './workspace';
 
 /**
  * Where the banner's facts come from — the Claude provider, in practice. Kept
@@ -41,6 +40,7 @@ export interface UsageSource {
 /** Just enough of `RunnerService` for the dashboard: "are we running this one?" */
 export interface RunnerOwnership {
   owns(sessionId: string | undefined): boolean;
+  wasRunning?(sessionId: string): boolean;
   onDidChange(listener: () => void): Disposable;
 }
 
@@ -60,7 +60,7 @@ export interface ProjectSource {
 
 /** Starting a conversation is the extension's job, not the dashboard's; it only asks. */
 export interface ConversationLauncher {
-  newConversation(cwd: string): Promise<unknown>;
+  newConversation(cwd: string, provider?: 'claude' | 'codex'): Promise<unknown>;
   /** Run the folder dialog. `undefined` = cancelled, and the dropdown keeps what it had. */
   browseForProject(): Promise<string | undefined>;
 }
@@ -74,8 +74,9 @@ export class DashboardHost {
     private archive: ArchiveService,
     private actions: SessionActions,
     private health: HookHealthSource,
-    private locator: SessionLocator,
+    _locator: SessionLocator,
     private usage: UsageSource,
+    private codexUsage: UsageSource,
     private columns: ColumnPrefsService,
     private runners: RunnerOwnership,
     private projects: ProjectSource,
@@ -86,11 +87,18 @@ export class DashboardHost {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
       this.store.onDidUpdate(() => this.pushSnapshot()),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration('agentWrangler.showCodexSubagents')) {
+          this.actions.refreshAll();
+          void this.pushSnapshot();
+        }
+      }),
       this.archive.onDidChange(() => this.pushSnapshot()),
       // The store only fires on material session changes, so an install that
       // changes nothing about any session still has to reach the banner.
       this.health.onDidChangeHookHealth(() => this.pushSnapshot()),
       this.usage.onDidChange(() => this.pushSnapshot()),
+      this.codexUsage.onDidChange(() => this.pushSnapshot()),
       // Columns are shared across dashboards: a drag in the editor tab reaches
       // the docked one, and neither is the owner of the layout.
       this.columns.onDidChange(() => this.pushSnapshot()),
@@ -128,21 +136,13 @@ export class DashboardHost {
       .map((s) => s.pid as number);
     // Both ask the OS about the same pids and neither depends on the other:
     // where each process lives, and which of them are stopped.
-    const [locations] = await Promise.all([this.locator.locateMany(livePids), this.pause.refresh(livePids)]);
+    await this.pause.refresh(livePids);
     if (seq !== this.snapshotSeq) return; // superseded while we waited
 
-    const behavior = vscode.workspace
-      .getConfiguration('agentWrangler')
-      .get<RowClickBehavior>('rowClickOpens', 'conversation');
     const sessions = raw.map((s) => {
       // Ask the runner first: its child processes are descendants of this
       // extension host, so the process table would call them panel sessions.
       const runnerOwned = this.runners.owns(s.sessionId);
-      const location: LocationKind = runnerOwned
-        ? 'runner'
-        : s.pid === undefined
-          ? 'unavailable'
-          : (locations.get(s.pid) ?? 'unavailable');
       return {
         ...s,
         archived: this.archive.isArchived(s.key),
@@ -150,7 +150,8 @@ export class DashboardHost {
         pinnedAt: this.pins.pinnedAt(s.key),
         paused: this.pause.isPaused(s.pid) || undefined,
         runnerOwned: runnerOwned || undefined,
-        openTarget: openTargetFor(s, location, isInThisWorkspace(s.cwd), behavior),
+        wasRunningHere: this.runners.wasRunning?.(s.sessionId) || undefined,
+        openTarget: openTargetFor(),
       };
     });
     const msg: HostToDashboard = {
@@ -159,7 +160,9 @@ export class DashboardHost {
       nowMs: Date.now(),
       hooks: this.health.hookHealth,
       usage: this.usage.enabled ? this.usage.usage : undefined,
+      codexUsage: this.codexUsage.enabled ? this.codexUsage.usage : undefined,
       columns: this.columns.value,
+      showCodexSubagents: vscode.workspace.getConfiguration('agentWrangler').get('showCodexSubagents', false),
       projects: this.projects.value.length > 0 ? this.projects.value : undefined,
     };
     void this.webview.postMessage(msg);
@@ -171,6 +174,7 @@ export class DashboardHost {
         this.pushSnapshot();
         // A dashboard just opened wants today's numbers, not last minute's.
         void this.usage.refresh();
+        void this.codexUsage.refresh();
         // And a launcher with no folders in it is not a launcher.
         void this.refreshProjects();
         break;
@@ -189,7 +193,6 @@ export class DashboardHost {
           if (this.archive.isArchived(m.key)) this.pins.set(m.key, false);
         }
         else if (m.action === 'copyId') this.actions.copyId(m.key);
-        else if (m.action === 'goTo') this.actions.goTo(m.key);
         else if (m.action === 'close') this.actions.closeSession(m.key);
         else if (m.action === 'pause') this.actions.pauseSession(m.key, true);
         else if (m.action === 'unpause') this.actions.pauseSession(m.key, false);
@@ -203,15 +206,26 @@ export class DashboardHost {
       case 'refresh':
         this.actions.refreshAll();
         void this.usage.refresh({ force: true });
+        void this.codexUsage.refresh({ force: true });
         break;
       case 'installHooks':
         this.actions.installHooks();
+        break;
+      case 'setShowCodexSubagents':
+        if (typeof m.value === 'boolean') {
+          void vscode.workspace.getConfiguration('agentWrangler')
+            .update('showCodexSubagents', m.value, vscode.ConfigurationTarget.Global)
+            .then(undefined, (error: unknown) => {
+              void vscode.window.showErrorMessage(`Could not change Codex session visibility: ${String(error)}`);
+              void this.pushSnapshot();
+            });
+        }
         break;
       case 'setColumns':
         this.columns.set(m.prefs);
         break;
       case 'newConversation':
-        void this.launcher.newConversation(m.cwd);
+        void this.launcher.newConversation(m.cwd, m.provider);
         break;
       case 'browseProject':
         void this.browseProject();

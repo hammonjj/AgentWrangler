@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { RunnerSession, type QueryFn, type RunnerDeps } from '../src/claude/runner/runnerSession';
-import type { ConvBlock, ImageAttachment } from '../src/shared/conversation';
+import { MAX_BLOCK_CHARS, type ConvBlock, type ImageAttachment } from '../src/shared/conversation';
 
 /**
  * A stand-in for the SDK's `query`: it hands the session a stream we push
@@ -315,6 +315,28 @@ describe('RunnerSession', () => {
     await expect(rejected).resolves.toMatchObject({ behavior: 'deny', message: 'too broad' });
   });
 
+  it('holds the rest of a plan too long for the wire, instead of losing it', async () => {
+    // The plan is the block that is acted on rather than read: approving the
+    // half that fitted is approving something you have not seen. A real one
+    // from this repo ran to ~12,000 characters against a 6,000-char cap.
+    const { session, fake, appended } = makeSession();
+    const plan = `# Plan\n\n${'step. '.repeat(2000)}`;
+    expect(plan.length).toBeGreaterThan(MAX_BLOCK_CHARS);
+
+    void fake.calls.options.canUseTool('ExitPlanMode', { plan }, askOptions());
+    await settle();
+
+    const card = appended.find((b) => b.kind === 'plan') as { id: string; plan: string; more?: number };
+    expect(card.plan).toHaveLength(MAX_BLOCK_CHARS);
+    expect(card.more).toBe(plan.length - MAX_BLOCK_CHARS);
+    expect(session.fullBlockText(card.id)).toBe(plan);
+  });
+
+  it('has nothing to show for a block that was never cut', () => {
+    const { session } = makeSession();
+    expect(session.fullBlockText('r:1')).toBeUndefined();
+  });
+
   it('forwards interrupt and mode changes to the CLI', async () => {
     const { session, fake } = makeSession();
     await session.interrupt();
@@ -334,9 +356,10 @@ describe('RunnerSession', () => {
     await settle();
 
     expect(fake.calls.supportedModels).toBe(1);
-    // The valueless row is dropped, and a blank display name falls back to the id.
+    // The valueless row is dropped, a blank display name falls back to the id,
+    // and the CLI's "(recommended)" is replaced by the model it resolves to.
     expect(session.composer.models).toEqual([
-      { value: 'default', label: 'Default (recommended)', resolved: 'claude-sonnet-4-5-20250929' },
+      { value: 'default', label: 'Default (Sonnet 4.5)', resolved: 'claude-sonnet-4-5-20250929' },
       { value: 'opus', label: 'Opus', resolved: undefined },
       { value: 'haiku', label: 'haiku', resolved: undefined },
     ]);
@@ -561,4 +584,19 @@ describe('vitest sanity', () => {
   it('uses fake timers nowhere, so the async tests are real', () => {
     expect(vi.isFakeTimers()).toBe(false);
   });
+});
+
+it('clears the old visible history when /clear changes the session identity', async () => {
+  const { session, fake } = makeSession();
+  fake.emit({ type: 'system', subtype: 'init', session_id: 'old-session' });
+  await settle();
+  session.send('old prompt');
+  let resets = 0; session.onReset(() => resets++);
+  fake.emit({ type: 'system', subtype: 'init', session_id: 'new-session' });
+  await settle();
+  expect(session.sessionId).toBe('new-session');
+  expect(session.blocks).toEqual([]);
+  expect((await session.history()).blocks).toEqual([]);
+  expect(resets).toBe(1);
+  fake.finish();
 });

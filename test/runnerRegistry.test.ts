@@ -62,3 +62,13 @@ describe('RunnerRegistry', () => {
     expect(new RunnerRegistry(memento({ 'agentWrangler.runnerSessions': 'not an array' })).all()).toEqual([]);
   });
 });
+
+it('marks every recent interrupted session, not just the newest, and forgets deliberate ends', () => {
+  const reg = new RunnerRegistry(memento());
+  reg.remember('first', '/Users/test/a', 1000);
+  reg.remember('second', '/Users/test/b', 2000);
+  expect(reg.wasRunning('first', 3000)).toBe(true);
+  expect(reg.wasRunning('second', 3000)).toBe(true);
+  expect(reg.wasRunning('first', RESUME_WINDOW_MS + 1001)).toBe(false);
+  reg.forget('second'); expect(reg.wasRunning('second', 3000)).toBe(false);
+});

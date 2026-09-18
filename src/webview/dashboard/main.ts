@@ -1,3 +1,4 @@
+import { subagentText } from '../../shared/subagents';
 import './dashboard.css';
 import {
   clampResizeWidth,
@@ -40,6 +41,7 @@ import {
   spendText,
   usageErrorText,
   usageSeverity,
+  type UsageError,
   type UsageSnapshot,
   type UsageState,
   type UsageWindow,
@@ -55,6 +57,7 @@ interface WebviewState {
    * changing where the other starts its next conversation.
    */
   project?: string;
+  provider?: 'all' | 'claude' | 'codex';
 }
 
 // Shared with the conversation pane when both live in one webview: the VSCode
@@ -67,12 +70,14 @@ const app = document.getElementById('app')!;
 let sessions: SessionDTO[] = [];
 let hooks: HookHealth | undefined;
 let usage: UsageState | undefined;
+let codexUsage: UsageState | undefined;
 
 // ---- columns ----
 // The layout is the host's (globalState, shared by every dashboard), but a drag
 // has to feel immediate, so the webview keeps its own copy and posts changes.
 // The snapshot that comes back matches what we already drew.
 let columns: ColumnPrefs = {};
+let showCodexSubagents = false;
 /**
  * Whether the table is narrow enough to fold its optional columns away.
  *
@@ -115,9 +120,10 @@ const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
+let providerFilter: 'all' | 'claude' | 'codex' = saved?.provider ?? 'all';
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project });
+  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, provider: providerFilter });
 }
 
 function esc(s: string): string {
@@ -142,36 +148,33 @@ const LENGTH = /^\d+(\.\d+)?(px|%)$/;
  * blocked. So widths ride in `data-w` (and the menus' offsets in `data-top` /
  * `data-left`) and land here, after the HTML is in the document.
  */
-function paint(html: string): void {
-  app.innerHTML = html;
-  for (const el of app.querySelectorAll<HTMLElement>('[data-w]')) {
+function applyStyles(root: HTMLElement): void {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-w]')) {
     if (LENGTH.test(el.dataset.w!)) el.style.width = el.dataset.w!;
   }
-  for (const el of app.querySelectorAll<HTMLElement>('[data-top]')) {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-top]')) {
     if (LENGTH.test(el.dataset.top!)) el.style.top = el.dataset.top!;
   }
-  for (const el of app.querySelectorAll<HTMLElement>('[data-left]')) {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-left]')) {
     if (LENGTH.test(el.dataset.left!)) el.style.left = el.dataset.left!;
   }
+}
+
+function paint(html: string): void {
+  app.innerHTML = html;
+  applyStyles(app);
 }
 
 const ICON_COLUMNS =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1"/><path d="M6.4 2.8v10.4M10.4 2.8v10.4"/></svg>';
 
+function hereChip(s: SessionDTO): string {
+  return s.runnerOwned ? '<span class="chip here">here</span>' : '';
+}
+
 function clickHint(s: SessionDTO): string {
   if (s.runnerOwned) return 'Click to open the conversation — this window runs it, so you can type into it';
-  switch (s.openTarget) {
-    case 'panel':
-      return 'Click to open in the Claude Code panel';
-    case 'terminal':
-      return 'Click to show the terminal running this session';
-    case 'window':
-      return 'Click to jump to this session in its VSCode window';
-    case 'resume':
-      return 'Click to resume in a terminal';
-    default:
-      return 'Click to open the conversation here';
-  }
+  return s.wasRunningHere ? 'Click to resume a session this workspace ran recently' : 'Click to open the conversation here';
 }
 
 /**
@@ -216,12 +219,13 @@ function rowMenuHtml(): string {
  * column (`etaCell`), not here.
  */
 /**
- * Sessions this window runs itself are the ones that can be typed into, which
- * is the single most useful thing to know at a glance about a row.
+ * There was a `here` chip on every session this window runs. It went because it
+ * marked the rule rather than the exception: nearly everything runs in one
+ * window, so it appeared on nearly every row and told the reader nothing they
+ * did not already assume. "Not here" is the fact worth a chip, and that one is
+ * not worth inventing until a second window is actually in use — the row's
+ * click hint and its tooltip already say where a session will open.
  */
-function hereChip(s: SessionDTO): string {
-  return s.runnerOwned ? '<span class="chip here" title="Running in this window — you can type into it">here</span>' : '';
-}
 
 /**
  * A frozen session. Worth a chip of its own as well as the section, because the
@@ -455,6 +459,11 @@ const CELL: Record<ColumnId, (s: SessionDTO) => string> = {
       ? '<td class="c-model"></td>'
       : `<td class="c-model" title="${esc(s.model ?? label)}">${esc(label)}</td>`;
   },
+  subagents: (s) => {
+    const text = subagentText(s.subagents);
+    const title = text ? `${text}. Estimated from recent worker transcripts, including nested workers; excludes guardian reviews.` : '';
+    return `<td class="c-subagents" title="${esc(title)}">${esc(text)}</td>`;
+  },
   pr: (s) => `<td class="c-pr">${prHtml(s)}</td>`,
   eta: etaCell,
   age: ageCell,
@@ -500,6 +509,7 @@ function rowHtml(s: SessionDTO, span: number): string {
       : esc(s.title);
   const kindChip =
     s.kind && s.kind !== 'interactive' ? `<span class="chip kind">${esc(capitalize(s.kind))}</span>` : '';
+  const providerChip = `<span class="chip provider ${esc(s.provider)}" title="${esc(s.client ? `${capitalize(s.provider)} · ${s.client}` : capitalize(s.provider))}">${s.provider === 'codex' ? 'Codex' : 'Claude'}</span>`;
 
   // Anything without a column of its own right now — switched off, or folded
   // away by a narrow dock — rides on the row's second line instead, so hiding a
@@ -514,6 +524,7 @@ function rowHtml(s: SessionDTO, span: number): string {
     shown.has('branch') ? '' : branchText(s),
     shown.has('model') ? '' : esc(modelLabel(s.model) ?? ''),
     shown.has('pr') ? '' : prHtml(s),
+    shown.has('subagents') ? '' : esc(subagentText(s.subagents)),
   ]
     .filter(Boolean)
     .join('<span class="sep">·</span>');
@@ -523,7 +534,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${pausedChip(s)}${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${s.wasRunningHere ? '<span class="chip" title="This workspace ran this session recently. Open it and send to resume.">was here</span>' : ''}${providerChip}${pausedChip(s)}${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -538,7 +549,8 @@ function rowHtml(s: SessionDTO, span: number): string {
  * a guess), or installed while some live sessions still predate the install.
  */
 function bannerHtml(): string {
-  const estimatedLive = sessions.filter((s) => s.status !== 'ended' && s.statusIsEstimated && !s.archived).length;
+  if (providerFilter === 'codex') return '';
+  const estimatedLive = sessions.filter((s) => s.provider === 'claude' && s.status !== 'ended' && s.statusIsEstimated && !s.archived).length;
   const b = hookBanner(hooks, estimatedLive);
   if (!b) return '';
   if (b.dismissible && bannerDismissed === hooks?.kind) return '';
@@ -564,25 +576,26 @@ function resetsAtClock(ms: number): string {
   }
 }
 
-function usageCardTitle(w: UsageWindow, snap: UsageSnapshot): string {
+function usageCardTitle(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' | 'Codex'): string {
   const lines = [`${w.label}: ${Math.round(w.percent)}% of the limit used.`];
   if (w.resetsAtMs !== undefined) {
     lines.push(`Resets ${resetsAtClock(w.resetsAtMs)} (${resetsInText(Date.now(), w.resetsAtMs).toLowerCase()}).`);
   }
   if (w.active) lines.push('This is the window currently constraining requests.');
-  lines.push(`Read ${formatAge(Date.now(), snap.fetchedAtMs)} ago from Claude, the same source as /usage.`);
+  lines.push(`Read ${formatAge(Date.now(), snap.fetchedAtMs)} ago from ${provider}.`);
   return lines.join('\n');
 }
 
-function usageCardHtml(w: UsageWindow, snap: UsageSnapshot): string {
+function usageCardHtml(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' | 'Codex', prefix: boolean): string {
   const pct = Math.round(w.percent);
   const sev = usageSeverity(w.percent);
   const resets =
     w.resetsAtMs !== undefined
       ? `<span class="ureset" data-resets-at="${w.resetsAtMs}">${esc(resetsInText(Date.now(), w.resetsAtMs))}</span>`
       : '<span class="ureset"></span>';
-  return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap))}">
-  <div class="uhead"><span class="ulabel">${esc(w.label)}</span><span class="upct">${pct}%</span></div>
+  const label = prefix ? `${provider} · ${w.label}` : w.label;
+  return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap, provider))}">
+  <div class="uhead"><span class="ulabel">${esc(label)}</span><span class="upct">${pct}%</span></div>
   <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(w.label)}"><span class="ufill" data-w="${pct}%"></span></div>
   ${resets}
 </div>`;
@@ -611,17 +624,54 @@ function spendCardHtml(snap: UsageSnapshot): string {
  * whether the weekly limit is close. There is no refresh button: the palette
  * command "Refresh" forces a read for anyone who wants one now.
  */
-function usageHtml(): string {
-  if (!usage) return '';
-  const { last, error } = usage;
+function providerUsageErrorText(error: UsageError, provider: 'Claude' | 'Codex'): string {
+  if (provider === 'Claude') return usageErrorText(error);
+  if (error.kind === 'no-credentials') return 'No Codex login found on this machine, so plan usage is unavailable.';
+  if (error.kind === 'rate-limited') return 'Codex is rate-limiting usage reads right now. Showing the last numbers.';
+  return `Could not read Codex plan usage${error.detail ? ` (${error.detail})` : ''}.`;
+}
+
+function providerUsageHtml(state: UsageState | undefined, provider: 'Claude' | 'Codex', prefix: boolean): string {
+  if (!state) return '';
+  const { last, error } = state;
 
   if (!last) {
-    const text = error ? usageErrorText(error) : 'Reading plan usage…';
+    const text = error ? providerUsageErrorText(error, provider) : `Reading ${provider} plan usage…`;
     return `<div class="usage${error ? ' err' : ''}" role="status"><span class="unote">${esc(text)}</span></div>`;
   }
 
-  const cards = last.windows.map((w) => usageCardHtml(w, last)).join('') + spendCardHtml(last);
-  return `<div class="usage" role="region" aria-label="Plan usage">${cards}</div>`;
+  const cards = last.windows.map((w) => usageCardHtml(w, last, provider, prefix)).join('')
+    + (provider === 'Claude' ? spendCardHtml(last) : '');
+  return `<div class="usage" role="region" aria-label="${provider} plan usage">${cards}</div>`;
+}
+
+function usageHtml(): string {
+  if (providerFilter === 'claude') return providerUsageHtml(usage, 'Claude', false);
+  if (providerFilter === 'codex') return providerUsageHtml(codexUsage, 'Codex', false);
+  return providerUsageHtml(usage, 'Claude', true) + providerUsageHtml(codexUsage, 'Codex', true);
+}
+
+/**
+ * The cards live OUTSIDE `#app`, like the launcher bar and for the same two
+ * reasons. `render()` replaces `#app` wholesale, and — the point of moving them
+ * here — `#app` is the element that scrolls: anything inside it slides away
+ * once the list is longer than the dock is tall. "How much week do I have left"
+ * is asked while looking at the busy rows at the bottom of the list, so the
+ * answer has to stay on screen with them.
+ */
+const usageEl = document.createElement('div');
+usageEl.id = 'usage';
+app.insertAdjacentElement('beforebegin', usageEl);
+
+/** The strip currently drawn, so a snapshot that changes nothing leaves the bars' transition alone. */
+let usagePainted = '';
+
+function renderUsage(): void {
+  const html = usageHtml();
+  if (html === usagePainted) return;
+  usagePainted = html;
+  usageEl.innerHTML = html;
+  applyStyles(usageEl); // the bars' widths ride in `data-w`; see paint()
 }
 
 // ---- column header, resize handles, picker ----
@@ -665,6 +715,8 @@ function menuHtml(): string {
   <div class="cmhead">Columns</div>
   ${rows}
   <button class="cmreset" data-cols="reset">Reset widths</button>
+  <div class="cmhead">Codex sessions</div>
+  <label class="cmrow"><input type="checkbox" data-codex-subagents${showCodexSubagents ? ' checked' : ''}>Show internal/subagent sessions</label>
 </div>`;
 }
 
@@ -687,15 +739,24 @@ bar.id = 'bar';
 // the pause button and is where anything fleet-wide belongs later.
 bar.innerHTML = `<button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
 <button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
-<div id="ctl" class="ctlgroup"><button id="pauseall" class="ctlbtn"></button></div>
+<div id="ctl" class="ctlgroup"><select id="provider" class="providerfilter" title="Filter sessions by provider"><option value="all">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select><button id="pauseall" class="ctlbtn"></button></div>
 <div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
-app.insertAdjacentElement('beforebegin', bar);
+// First in the body, above the usage strip, which is itself above the scrolling
+// `#app` — the three are a flex column, so only the last one moves.
+document.body.insertAdjacentElement('afterbegin', bar);
 
 const projBtn = bar.querySelector<HTMLButtonElement>('#proj')!;
 const projName = bar.querySelector<HTMLElement>('#projname')!;
 const projMenu = bar.querySelector<HTMLElement>('#projmenu')!;
 const newBtn = bar.querySelector<HTMLButtonElement>('#new')!;
 const pauseBtn = bar.querySelector<HTMLButtonElement>('#pauseall')!;
+const providerSelect = bar.querySelector<HTMLSelectElement>('#provider')!;
+providerSelect.value = providerFilter;
+providerSelect.addEventListener('change', () => {
+  providerFilter = providerSelect.value as typeof providerFilter;
+  saveState();
+  render();
+});
 
 let projects: ProjectDTO[] = [];
 let menuOpen = false;
@@ -711,6 +772,8 @@ function renderLauncher(): void {
   projName.textContent = cur ? (projects.find((p) => p.dir === cur)?.name ?? cur) : 'Choose a folder…';
   projBtn.title = cur ?? 'Choose a folder to start a conversation in';
   newBtn.disabled = cur === undefined;
+  const starts = providerFilter === 'codex' ? 'Codex' : 'Claude Code';
+  newBtn.title = `Start a ${starts} conversation in this folder, running in this window`;
   // An open menu is showing the list that just changed, so redraw it in place
   // rather than closing it out from under the pointer.
   if (menuOpen) renderMenu();
@@ -791,7 +854,7 @@ document.addEventListener(
 
 newBtn.addEventListener('click', () => {
   const cwd = currentProject();
-  if (cwd) post({ type: 'newConversation', cwd });
+  if (cwd) post({ type: 'newConversation', cwd, provider: providerFilter === 'codex' ? 'codex' : 'claude' });
 });
 
 // ---- fleet controls ----
@@ -837,16 +900,18 @@ function render(): void {
     return;
   }
 
-  if (sessions.length === 0) {
+  renderUsage();
+  const visibleSessions = providerFilter === 'all' ? sessions : sessions.filter((s) => s.provider === providerFilter);
+  if (visibleSessions.length === 0) {
     menuTop = undefined; // no table, so no button to close the picker with
     rowMenu = undefined; // and no row for a menu to belong to
-    paint(`${usageHtml()}${bannerHtml()}<div class="empty">No agent sessions found.
-<div class="hint">Sessions are discovered from <code>~/.claude</code>. Start a Claude Code session anywhere and it will appear here.</div></div>`);
+    paint(`${bannerHtml()}<div class="empty">No ${providerFilter === 'all' ? 'agent' : capitalize(providerFilter)} sessions found.
+<div class="hint">Sessions are discovered from <code>~/.claude</code> and <code>~/.codex</code>. Start an agent session anywhere and it will appear here.</div></div>`);
     return;
   }
 
   const groups = new Map<SectionId, SessionDTO[]>();
-  for (const s of sessions) {
+  for (const s of visibleSessions) {
     const sec = sectionOf(s);
     const list = groups.get(sec);
     if (list) list.push(s);
@@ -857,7 +922,7 @@ function render(): void {
   // so widths live on the header cells and a column that is switched off simply
   // is not rendered.
   const span = cols().length + 3; // dot + agent + data columns + actions
-  let html = `${usageHtml()}${bannerHtml()}${menuHtml()}${rowMenuHtml()}<table>${headHtml()}`;
+  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<table>${headHtml()}`;
 
   for (const sec of SECTION_ORDER) {
     const rows = groups.get(sec);
@@ -911,8 +976,10 @@ vscodeApi.onMessage((body) => {
     if (rowMenu && !sessions.some((s) => s.key === rowMenu!.key)) rowMenu = undefined;
     hooks = m.hooks;
     usage = m.usage;
+    codexUsage = m.codexUsage;
     // Our own drag already drew this; anything else is another dashboard's.
     if (m.columns) columns = m.columns;
+    showCodexSubagents = m.showCodexSubagents === true;
     // The bar lives outside #app, so `render()` never touches it.
     renderControls();
     render();
@@ -1190,3 +1257,11 @@ setInterval(() => {
 }, 10_000);
 
 post({ type: 'ready' });
+
+// Kept in the column menu so diagnostic visibility is beside the worker summary.
+app.addEventListener('change', (event) => {
+  const input = event.target;
+  if (input instanceof HTMLInputElement && input.hasAttribute('data-codex-subagents')) {
+    post({ type: 'setShowCodexSubagents', value: input.checked });
+  }
+});

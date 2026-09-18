@@ -88,10 +88,19 @@ export interface QuestionView {
  * place — a tool block gains its result minutes after it appears, and a
  * streaming reply grows word by word.
  */
-export type ConvBlock =
-  | { kind: 'user'; id: string; ts?: string; text: string; imageCount?: number }
-  | { kind: 'assistant'; id: string; ts?: string; msgId?: string; text: string; streaming?: boolean; model?: string }
-  | { kind: 'thinking'; id: string; ts?: string; text: string; streaming?: boolean }
+export type ConvBlock = (
+  | { kind: 'user'; id: string; ts?: string; text: string; more?: number; imageCount?: number }
+  | {
+      kind: 'assistant';
+      id: string;
+      ts?: string;
+      msgId?: string;
+      text: string;
+      more?: number;
+      streaming?: boolean;
+      model?: string;
+    }
+  | { kind: 'thinking'; id: string; ts?: string; text: string; more?: number; streaming?: boolean }
   | {
       kind: 'tool';
       id: string;
@@ -128,9 +137,9 @@ export type ConvBlock =
       state: AskState;
     }
   | { kind: 'question'; id: string; requestId: string; questions: QuestionView[]; state: AskState; answers?: Record<string, string> }
-  | { kind: 'plan'; id: string; requestId: string; plan: string; planFilePath?: string; state: AskState }
+  | { kind: 'plan'; id: string; requestId: string; plan: string; more?: number; planFilePath?: string; state: AskState }
   /** Out-of-band facts: compaction, errors, "this session ended", "adopted here". */
-  | { kind: 'note'; id: string; ts?: string; tone: 'info' | 'warn' | 'error'; text: string };
+  | { kind: 'note'; id: string; ts?: string; tone: 'info' | 'warn' | 'error'; text: string }) & { parentToolUseId?: string };
 
 export type ConvBlockKind = ConvBlock['kind'];
 
@@ -149,9 +158,74 @@ export const MAX_BLOCK_CHARS = 6000;
 /** Longest tool output sent unasked; the rest is fetched on demand. */
 export const MAX_TOOL_RESULT_CHARS = 4000;
 
-/** Cap a string for the wire, marking the cut so the renderer never implies completeness. */
+/**
+ * Cap a string for the wire, marking the cut so the renderer never implies
+ * completeness. For text nobody can ask for the rest of — a note, a banner —
+ * where the marker *is* the whole story. Prose blocks use `capBlock`.
+ */
 export function capText(text: string, max: number = MAX_BLOCK_CHARS): string {
   return text.length > max ? `${text.slice(0, max)}\n… [truncated]` : text;
+}
+
+/** A block's text as it goes on the wire, and how much of it stayed behind. */
+export interface CappedText {
+  text: string;
+  /** Characters cut. Absent when nothing was, which is the common case. */
+  more?: number;
+}
+
+/**
+ * Total characters of held-back text one conversation keeps so the pane can ask
+ * for the rest.
+ *
+ * A budget rather than a count of entries: what costs memory is the length of
+ * what is kept, and one 300 KB reply is worth more of the budget than thirty
+ * 2 KB ones. Oldest goes first, because "show the rest" is asked about
+ * something on screen, and the oldest overflow is the furthest from it.
+ */
+export const MAX_OVERFLOW_CHARS = 2_000_000;
+
+/**
+ * Keep the full text of a block that had to be cut, so `fullBlockText` can
+ * answer for it later. Re-remembering a block moves it to the end, which is
+ * what makes a streaming reply the *last* thing to be evicted rather than the
+ * first.
+ */
+export function rememberFullText(store: Map<string, string>, id: string, text: string): void {
+  store.delete(id);
+  store.set(id, text);
+  let total = 0;
+  for (const v of store.values()) total += v.length;
+  for (const [k, v] of store) {
+    if (total <= MAX_OVERFLOW_CHARS) break;
+    // Never the one just added: it is the one about to be on screen. A single
+    // text bigger than the whole budget therefore survives alone, which beats
+    // holding nothing at all for the block the reader is looking at.
+    if (k === id) continue;
+    store.delete(k);
+    total -= v.length;
+  }
+}
+
+/**
+ * Cap one block's prose, keeping the rest where the pane can ask for it.
+ *
+ * Unlike `capText` this leaves no marker in the text: the block carries `more`
+ * instead, and the renderer turns that into a button. A marker inside the text
+ * would be indistinguishable from something the model actually wrote, and
+ * markdown would render it as part of the last paragraph.
+ *
+ * Re-capping a block that has since become short (a streamed reply rewritten by
+ * its complete message) drops what was held for it, so the pane can never fetch
+ * a stale "rest" that no longer follows the text on screen.
+ */
+export function capBlock(store: Map<string, string>, id: string, text: string, max: number = MAX_BLOCK_CHARS): CappedText {
+  if (text.length <= max) {
+    store.delete(id);
+    return { text };
+  }
+  rememberFullText(store, id, text);
+  return { text: text.slice(0, max), more: text.length - max };
 }
 
 /**
@@ -162,6 +236,9 @@ export function capText(text: string, max: number = MAX_BLOCK_CHARS): string {
 export interface ConversationCapabilities {
   /** The session is driven by this extension, so the composer can send. */
   canSend: boolean;
+  /** Sending takes ownership, possibly after the current turn finishes. */
+  adoptOnSend?: boolean;
+  sendHint?: string;
   canInterrupt: boolean;
   /** Idle and owned elsewhere: its process could be ended and resumed here. */
   canAdopt: boolean;
@@ -169,8 +246,6 @@ export interface ConversationCapabilities {
   canResumeHere: boolean;
   /** Driven here: it could be handed back to a terminal or the Claude Code panel. */
   canRelease: boolean;
-  /** The demoted "go to where it actually runs" action, when there is somewhere to go. */
-  goTo?: { label: string; target: 'panel' | 'terminal' | 'window' | 'resume' };
   /** Status is inferred from the transcript rather than pushed by hooks. */
   estimated: boolean;
   /** Why the composer is disabled, in one sentence, when `canSend` is false. */
@@ -201,6 +276,9 @@ export interface ComposerState {
   /** Absent until the CLI answers; the dropdown stays hidden until then. */
   models?: ModelChoice[];
   slashCommands: string[];
+  costUsd?: number;
+  contextTokens?: number;
+  contextWindow?: number;
   busy: boolean;
   queued: number;
 }

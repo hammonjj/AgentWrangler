@@ -10,6 +10,7 @@
  * one. `state` is what carries that across chunks.
  */
 import {
+  capBlock,
   capText,
   MAX_TOOL_RESULT_CHARS,
   type BlockPatch,
@@ -33,10 +34,16 @@ export interface TranscriptState {
   openAssistant?: { id: string; msgId: string; text: string };
   /** Fallback id source for lines with no uuid. */
   counter: number;
+  /**
+   * Block id → the whole text, for the blocks whose text did not fit the wire
+   * cap. This is what "Show the rest" is answered from, so it has to outlive
+   * the chunk the block was read in. Bounded by `rememberFullText`.
+   */
+  overflow: Map<string, string>;
 }
 
 export function createTranscriptState(): TranscriptState {
-  return { toolBlocks: new Map(), counter: 0 };
+  return { toolBlocks: new Map(), counter: 0, overflow: new Map() };
 }
 
 /** One line's stable block id. Several blocks per line get an index suffix. */
@@ -105,8 +112,9 @@ export function diffFromToolUseResult(tur: unknown): { file: string; patch: stri
   return { file, patch: capText(out.join('\n')) };
 }
 
-function toolResultView(content: unknown, isError: boolean, tur: unknown): ToolResultView {
+function toolResultView(content: unknown, isError: boolean, tur: unknown, overflow: Map<string, string>, id: string): ToolResultView {
   const raw = resultText(content).trim();
+  capBlock(overflow, id, raw, MAX_TOOL_RESULT_CHARS);
   return {
     text: raw.length > MAX_TOOL_RESULT_CHARS ? raw.slice(0, MAX_TOOL_RESULT_CHARS) : raw,
     isError,
@@ -191,7 +199,7 @@ export function reduceTranscriptLines(state: TranscriptState, lines: string[]): 
           const isError = bb.is_error === true;
           patches.push({
             id: target,
-            block: { state: isError ? 'error' : 'done', result: toolResultView(bb.content, isError, obj.toolUseResult) },
+            block: { state: isError ? 'error' : 'done', result: toolResultView(bb.content, isError, obj.toolUseResult, state.overflow, target) },
           });
         }
       }
@@ -211,7 +219,8 @@ export function reduceTranscriptLines(state: TranscriptState, lines: string[]): 
         push({ kind: 'note', id: blockId(state, obj, 0), ts, tone: 'info', text: capText(trimmed.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(), 400) });
         continue;
       }
-      push({ kind: 'user', id: blockId(state, obj, 0), ts, text: capText(trimmed), imageCount: imageCount || undefined });
+      const uid = blockId(state, obj, 0);
+      push({ kind: 'user', id: uid, ts, ...capBlock(state.overflow, uid, trimmed), imageCount: imageCount || undefined });
       continue;
     }
 
@@ -227,16 +236,21 @@ export function reduceTranscriptLines(state: TranscriptState, lines: string[]): 
           const open = state.openAssistant;
           if (open && msgId !== undefined && open.msgId === msgId) {
             open.text = `${open.text}\n${b.text}`;
-            patches.push({ id: open.id, block: { text: capText(open.text) } });
+            // `more` travels with every patch: a reply that has just grown past
+            // the cap has to gain the button, and one the cap no longer bites
+            // on has to lose it, so the field cannot be left off.
+            const capped = capBlock(state.overflow, open.id, open.text);
+            patches.push({ id: open.id, block: { text: capped.text, more: capped.more } });
             return;
           }
           const id = blockId(state, obj, i);
-          appends.push({ kind: 'assistant', id, ts, msgId, model, text: capText(b.text) });
+          appends.push({ kind: 'assistant', id, ts, msgId, model, ...capBlock(state.overflow, id, b.text) });
           state.openAssistant = msgId === undefined ? undefined : { id, msgId, text: b.text };
           return;
         }
         if (b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.trim()) {
-          push({ kind: 'thinking', id: blockId(state, obj, i), ts, text: capText(b.thinking) });
+          const id = blockId(state, obj, i);
+          push({ kind: 'thinking', id, ts, ...capBlock(state.overflow, id, b.thinking) });
           return;
         }
         if (b.type === 'tool_use') {

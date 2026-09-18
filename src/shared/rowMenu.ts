@@ -32,6 +32,7 @@ export interface RowMenuItem {
  * since the runner holds the handle itself.
  */
 export function canCloseSession(s: SessionDTO): boolean {
+  if (s.provider !== 'claude') return false;
   if (s.status === 'ended') return false;
   return s.runnerOwned === true || s.pid !== undefined;
 }
@@ -89,13 +90,6 @@ export function rowMenuItems(s: SessionDTO): RowMenuItem[] {
       action: 'openInTab',
       label: 'Open in its own tab',
       title: 'Open this conversation in a tab that row clicks never swap away',
-    });
-  }
-  if (s.status !== 'ended') {
-    items.push({
-      action: 'goTo',
-      label: 'Go to where it runs',
-      title: 'Reveal the terminal, Claude Code panel or VSCode window running this session',
     });
   }
   if (s.paused) {

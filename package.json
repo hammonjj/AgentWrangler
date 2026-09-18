@@ -1,7 +1,7 @@
 {
   "name": "agent-wrangler",
   "displayName": "Agent Wrangler",
-  "description": "Monitor all your AI agent sessions (Claude Code, more later): who is busy, who is waiting on you, who is done. Click to view live or resume.",
+  "description": "Monitor Claude Code and Codex sessions: who is busy, waiting on you, or done. Open live conversations from one dashboard.",
   "publisher": "local",
   "version": "0.0.1",
   "private": true,
@@ -47,10 +47,6 @@
       {
         "command": "agentWrangler.renameConversation",
         "title": "Agent Wrangler: Rename a Conversation\u2026"
-      },
-      {
-        "command": "agentWrangler.goToSession",
-        "title": "Agent Wrangler: Go to Where a Session Runs\u2026"
       },
       {
         "command": "agentWrangler.resumeInTerminal",
@@ -102,19 +98,6 @@
     "configuration": {
       "title": "Agent Wrangler",
       "properties": {
-        "agentWrangler.rowClickOpens": {
-          "type": "string",
-          "enum": [
-            "conversation",
-            "wherever-it-runs"
-          ],
-          "enumDescriptions": [
-            "Open the session in the Agent Wrangler conversation pane, in this window.",
-            "Go to the Claude Code panel, terminal or VSCode window that runs the session (the behaviour before the conversation pane)."
-          ],
-          "default": "conversation",
-          "description": "What clicking a session row does. The conversation pane keeps you in one window; 'Go to where it runs' is still available from the pane and the command palette."
-        },
         "agentWrangler.runner.defaultPermissionMode": {
           "type": "string",
           "enum": [
@@ -170,6 +153,21 @@
           "default": "claude",
           "description": "Binary used when resuming a session in a terminal (claude --resume <id>)."
         },
+        "agentWrangler.codexBinaryPath": {
+          "type": "string",
+          "default": "codex",
+          "description": "Codex CLI binary used for plan usage and conversations. The default discovers the newest compatible executable bundled with the OpenAI VS Code extension, then falls back to PATH. Set an explicit path to override discovery."
+        },
+        "agentWrangler.showCodexSubagents": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show internal and subagent Codex sessions as separate rows for debugging. Main conversations always summarize linked workers in the Subagents column."
+        },
+        "agentWrangler.codexRunner.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model for Codex conversations started from Agent Wrangler. Empty uses the Codex default."
+        },
         "agentWrangler.stuckThresholdSeconds": {
           "type": "number",
           "default": 600,
@@ -202,7 +200,7 @@
         "agentWrangler.showUsage": {
           "type": "boolean",
           "default": true,
-          "description": "Show plan-usage cards above the agent table: the 5-hour session and weekly limits, as in Claude Code's /usage. Read with the login token Claude Code stored on this machine."
+          "description": "Show provider-specific plan-usage cards above the agent table for Claude Code and Codex. Each provider is read through its own local authenticated client."
         },
         "agentWrangler.usagePollIntervalSeconds": {
           "type": "number",
@@ -221,6 +219,11 @@
           "minimum": 50,
           "maximum": 100,
           "description": "The usage percentage that triggers the automatic pause, across any limit window (5-hour, weekly, or model-scoped). It fires once per approach: after firing it re-arms only when usage falls back below this, so resuming an agent on purpose is not undone at the next poll."
+        },
+        "agentWrangler.runner.confirmTakeoverOnSend": {
+          "type": "boolean",
+          "default": false,
+          "description": "Confirm before taking over an idle external session when sending. Estimated status always requires confirmation."
         }
       }
     }

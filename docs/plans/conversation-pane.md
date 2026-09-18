@@ -1,8 +1,7 @@
 # Conversation pane: work every Claude Code session from one window
 
-Status: **approved plan, not yet implemented.** Branch: `feat/conversation-pane`, which has
-its own worktree at `../AgentWrangler-conversation-pane` — work there, never in the primary
-checkout, which stays on `main`.
+Status: **implemented through phase 4d; further preparation in progress.** See
+`electron-prep-handoff.md` for the current branch, checkpoints, and remaining work.
 Written 2026-09-11 after a design discussion and a live spike; the implementing agent
 should treat every "Verified" item below as fact and every "Unverified" item as something
 to confirm in the first task that touches it.
@@ -900,6 +899,57 @@ gets dropped — I have to ask the agent to replay its last message".
   `RunnerSession resumed history` block (4), covering the seam rather than the file reading:
   history is read by id and cwd, a fresh session asks for none, the two halves stay disjoint
   with unique ids, and a throwing loader leaves the session usable.
+
+### Phase 4d — Nothing is cut off, and no ask has to be hunted for — **SHIPPED 2026-09-17**
+
+Two reports, one root: "the transcript gets truncated, particularly in plan mode or when an
+explanation is long", and "when questions are asked I have to scroll up significantly to see
+where they were asked".
+
+- **The truncation was `MAX_BLOCK_CHARS = 6000`**, a number carried over from the old viewer
+  and applied to every block's prose. Measured on the session that prompted the report (block
+  lengths only — the repo is public): 91 blocks, exactly one over the cap, and it was the
+  **plan, at 11,993 characters**. So the approval card showed half a plan, which is the one
+  block that is acted on rather than read.
+- **The cap stays; what was cut is now reachable.** `capBlock(store, id, text)` replaces
+  `capText` for user/assistant/thinking/plan: it returns `{ text, more }` and keeps the whole
+  string in the source's `overflow` map. The pane renders `more` as a *Show the rest (N more
+  characters)* button, which fetches over `requestBlockText` → `blockText`. `capText` survives
+  for notes, where nothing can be fetched and the `… [truncated]` marker *is* the whole story.
+  No marker is left inside prose any more: it is indistinguishable from something the model
+  wrote, and markdown renders it into the last paragraph.
+- **Held text is bounded by characters, not entries** (`MAX_OVERFLOW_CHARS`, 2 M per
+  conversation, oldest evicted first), because one 300 KB reply is worth more of the budget
+  than thirty 2 KB ones. Re-remembering moves a block to the newest end, so a streaming reply
+  is the last thing evicted rather than the first. A block that shrinks back under the cap
+  drops what was held for it — otherwise the pane could fetch a tail that no longer follows
+  the text on screen.
+- **The overflow lives in the reducer states** (`TranscriptState`, `RunnerBlocksState`), which
+  the sources already own, and travels with `ConversationHistory.overflow` so a *resumed*
+  pane's past expands exactly like its present. `RunnerSession.fullBlockText` checks both.
+- **`fullToolResult` was a stub**: declared on `ConversationSource`, called by the host,
+  implemented by nobody and never asked for by the webview. It is now `fullBlockText`, real on
+  both sources. Tool output keeps its own `MAX_TOOL_RESULT_CHARS` marker and no button — a
+  5 MB file read is not worth holding a copy of.
+- **The two reports were the same bug.** An arriving block auto-scrolled with
+  `scrollTop = scrollHeight`, so an ask card *taller than the pane* — a 12 K plan, a
+  multi-part question — put the buttons on screen and the question above it. The pane now
+  lands on the **top** of an arriving ask (`showAsk`, `ASK_TOP_GAP_PX`), and `init` does the
+  same when it opens on a session that is already waiting.
+- **A strip above the composer** (`#asknav`) names the oldest unanswered ask whenever its card
+  is off screen, and moves the view to its head when clicked, with a one-second flash.
+  Deliberately *not* a docked copy of the card: two live copies of one question is a worse
+  problem than scrolling. It hides itself the moment the head is visible, so it only ever
+  appears when it has something to say. Parking on an ask turns following off (otherwise the
+  next block drags the view away); answering turns it back on (`followAfterAnswer`).
+- **Past asks get no navigator** — decided against a header stepper/list: pending only.
+- Tests: 601 pass. New are `test/capBlock.test.ts` (7), two reducer cases either side
+  (streaming past the cap, and a complete message that shrinks a block back under it), and a
+  runner case for the long plan. The webview half was verified by driving the real
+  `dist/webview/conversation.js` bundle in headless Chrome with a synthetic conversation:
+  on open the plan card's top sits 8 px below the top of the view with the strip hidden;
+  scrolled to the end the strip reads *↑ Plan ready for approval*; clicking it returns the
+  card to +8 px; the button posts `requestBlockText` and the answer replaces the body.
 
 ### Later, only if wanted
 

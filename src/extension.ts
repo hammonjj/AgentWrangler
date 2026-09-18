@@ -2,9 +2,15 @@ import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as vscode from 'vscode';
+import { waitForAdoptable } from './core/adoptQueue';
+import { sessionsDir } from './claude/paths';
 import { resolveClaudeBinary } from './claude/binary';
 import { ClaudeProvider } from './claude/claudeProvider';
-import { isPidAlive } from './claude/registry';
+import { CodexProvider } from './codex/codexProvider';
+import { CodexAppServer } from './codex/appServer';
+import { codexUsageReader } from './codex/usage';
+import { CodexRunnerService } from './codex/runner';
+import { isPidAlive, readRegistry } from './claude/registry';
 import { endProcess } from './claude/runner/adopt';
 import { RunnerRegistry } from './claude/runner/runnerRegistry';
 import { RunnerService } from './claude/runner/runnerService';
@@ -34,7 +40,7 @@ import { TurnStats } from './core/turnStats';
 import { FileUsageCache } from './core/usageCache';
 import { UsageService } from './core/usageService';
 import type { PermissionModeName } from './shared/conversation';
-import { displayLabel, displayTitle, STATUS_LABEL, type AgentSession, type OpenTarget, type SessionStatus } from './shared/model';
+import { displayLabel, displayTitle, STATUS_LABEL, type AgentSession, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
 import {
   CONVERSATION_PINNED_TYPE,
@@ -46,12 +52,10 @@ import { DiffContentProvider } from './ui/conversation/diffView';
 import type { ConversationLauncher } from './ui/dashboardHost';
 import { WORKBENCH_PANEL_TYPE, WorkbenchPanelManager, WorkbenchPanelSerializer } from './ui/workbenchPanel';
 import { watchForDevReload } from './ui/devReload';
-import { adoptActionFor, openTargetFor, type RowClickBehavior } from './ui/openTarget';
-import { CrossWindowRelay } from './ui/relay';
-import { SessionLocator, type SessionLocation } from './ui/sessionLocator';
+import { adoptActionFor } from './ui/openTarget';
+import { SessionLocator } from './ui/sessionLocator';
 import { createStatusBar } from './ui/statusBar';
 import { resumeInTerminal } from './ui/terminal';
-import { isInThisWorkspace } from './ui/workspace';
 
 /** How long to let a session emit its first hook event before calling hooks broken. */
 const HOOK_HEALTH_GRACE_MS = 90_000;
@@ -81,6 +85,8 @@ export function activate(context: vscode.ExtensionContext): void {
     const c = vscode.workspace.getConfiguration('agentWrangler');
     const cfg: WranglerConfig = {
       claudeBinaryPath: c.get('claudeBinaryPath', DEFAULT_CONFIG.claudeBinaryPath),
+      codexBinaryPath: c.get('codexBinaryPath', DEFAULT_CONFIG.codexBinaryPath),
+      showCodexSubagents: c.get('showCodexSubagents', DEFAULT_CONFIG.showCodexSubagents),
       stuckThresholdSeconds: c.get('stuckThresholdSeconds', DEFAULT_CONFIG.stuckThresholdSeconds),
       endedWindowHours: c.get('endedWindowHours', DEFAULT_CONFIG.endedWindowHours),
       maxEndedSessions: c.get('maxEndedSessions', DEFAULT_CONFIG.maxEndedSessions),
@@ -99,6 +105,10 @@ export function activate(context: vscode.ExtensionContext): void {
   // so the baseline is global state shared across windows.
   const turnStats = new TurnStats(context.globalState);
   const provider = new ClaudeProvider(getConfig, log, turnStats);
+  const codexProvider = new CodexProvider(getConfig, log);
+  const codexAppServer = new CodexAppServer(() => getConfig().codexBinaryPath, log);
+  const codexRunners = new CodexRunnerService(codexAppServer);
+  context.subscriptions.push(codexRunners);
   const archive = new ArchiveService(context.globalState);
   // Which agents are frozen. Nothing is persisted: the answer is the process
   // state itself, which every window reads the same way and which a reload
@@ -141,6 +151,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push(usage);
   usage.start();
+  const codexUsage = new UsageService(
+    codexUsageReader(codexAppServer),
+    new FileUsageCache(vscode.Uri.joinPath(context.globalStorageUri, 'codex-usage.json').fsPath),
+    getConfig,
+    (message) => log(`codex ${message}`),
+  );
+  context.subscriptions.push(codexUsage);
+  codexUsage.start();
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       // autoPause.enabled belongs here too: it decides whether usage is read at
@@ -152,6 +170,7 @@ export function activate(context: vscode.ExtensionContext): void {
         e.affectsConfiguration('agentWrangler.autoPause.percent')
       ) {
         void usage.refresh();
+        void codexUsage.refresh();
       }
     }),
   );
@@ -168,83 +187,19 @@ export function activate(context: vscode.ExtensionContext): void {
     registry: runnerRegistry,
   });
   context.subscriptions.push(runners);
+  const runnerOwnership = {
+    owns: (id: string | undefined) => runners.owns(id) || codexRunners.owns(id),
+    wasRunning: (id: string) => runners.wasRunning(id),
+    onDidChange: (listener: () => void) => {
+      const claude = runners.onDidChange(listener);
+      const codex = codexRunners.onDidChange(listener);
+      return { dispose: () => { claude.dispose(); codex.dispose(); } };
+    },
+  };
 
   const showInPane = (s: AgentSession) => workbench.show(s.key);
 
-  const fallbackOpen = (s: AgentSession) => {
-    if (s.status === 'ended') resumeInTerminal(s, getConfig);
-    else showInPane(s);
-  };
-
-  /**
-   * The Claude Code panel for a session: reveals the existing one, or starts one
-   * with --resume=<id>. Only ever called for a session this window owns (or an
-   * ended one), because resuming a session that is still running elsewhere
-   * forks the conversation.
-   */
-  const openInPanel = (s: AgentSession) => {
-    vscode.commands.executeCommand('claude-vscode.editor.open', s.sessionId).then(undefined, (err) => {
-      log(`claude-vscode.editor.open failed (${String(err)}); falling back`);
-      fallbackOpen(s);
-    });
-  };
-
-  // Where each live session's process lives relative to this window: its own
-  // panel, one of its terminals, another window, or outside VSCode entirely.
   const locator = new SessionLocator();
-
-  const relay = new CrossWindowRelay(
-    vscode.Uri.joinPath(context.globalStorageUri, 'relay').fsPath,
-    async (note) => {
-      const s = store.get(`claude:${note.sessionId.toLowerCase()}`);
-      const loc = await locator.locate(note.pid ?? s?.pid, { fresh: true });
-      if (loc.kind === 'terminal') {
-        loc.terminal.show();
-        return true;
-      }
-      if (loc.kind === 'panel') {
-        if (s) openInPanel(s);
-        else void vscode.commands.executeCommand('claude-vscode.editor.open', note.sessionId);
-        return true;
-      }
-      // No process tree to consult: the old rule, ownership by workspace folder.
-      if (loc.kind === 'unavailable' && isInThisWorkspace(note.cwd)) {
-        if (s) openInPanel(s);
-        else void vscode.commands.executeCommand('claude-vscode.editor.open', note.sessionId);
-        return true;
-      }
-      return false;
-    },
-    log,
-  );
-  context.subscriptions.push(relay);
-  void relay.start();
-
-  /**
-   * Go to wherever the session actually runs. This was what a row click did
-   * until the conversation pane existed; it is now a deliberate action, because
-   * being thrown into another VSCode window is only ever welcome on purpose.
-   */
-  const goToSession = (s: AgentSession, target: Exclude<OpenTarget, 'conversation'>, loc: SessionLocation) => {
-    switch (target) {
-      case 'panel':
-        openInPanel(s);
-        return;
-      case 'terminal':
-        if (loc.kind === 'terminal') loc.terminal.show();
-        else openInPanel(s);
-        return;
-      case 'window':
-        // Owned by another window of this VSCode: focus it and have its
-        // Agent Wrangler instance reveal the panel or terminal there.
-        void relay.request(s.sessionId, s.cwd ?? '', s.pid);
-        vscode.window.setStatusBarMessage(`Agent Wrangler: opening ${displayLabel(s)} in its window…`, 4000);
-        return;
-      case 'resume':
-        resumeInTerminal(s, getConfig);
-        return;
-    }
-  };
 
   /**
    * Take a session over: end whatever runs it, then resume the same id here.
@@ -255,7 +210,7 @@ export function activate(context: vscode.ExtensionContext): void {
    * flight, which is why the offer is withdrawn while one is running and
    * re-checked here in case it started between the click and the confirm.
    */
-  const adoptSession = async (s: AgentSession): Promise<void> => {
+  const adoptSession = async (s: AgentSession, confirm = true, signal?: AbortSignal) => {
     const kind = adoptActionFor(s, runners.owns(s.sessionId));
     if (!kind || !s.cwd) return;
     if (!fs.existsSync(s.cwd)) {
@@ -264,11 +219,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }
 
     if (kind === 'adopt') {
-      const choice = await vscode.window.showWarningMessage(
+      const choice = !confirm ? 'Take over' : await vscode.window.showWarningMessage(
         `Take over ${displayLabel(s)} in this window?`,
         {
           modal: true,
           detail:
+            (s.statusIsEstimated ? 'Status is estimated. This may interrupt a turn in flight; that unfinished turn can be lost.\n\n' : '') +
             'The process running it now ends, and this window resumes the same session. Its terminal ' +
             'or Claude Code panel will show it as ended.\n\n' +
             'The conversation is kept — it lives in the transcript — and you can hand it back at any time.',
@@ -276,6 +232,7 @@ export function activate(context: vscode.ExtensionContext): void {
         'Take over',
       );
       if (choice !== 'Take over') return;
+      if (signal?.aborted) throw new Error('Send cancelled; your draft is preserved.');
 
       // It may have started a turn while the dialog was up.
       const now = store.get(s.key) ?? s;
@@ -286,6 +243,12 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
 
+      const live = (await readRegistry(sessionsDir())).filter((entry) => entry.sessionId === now.sessionId);
+      if (live.length > 1 || (live.length === 1 && live[0].pid !== now.pid)) throw new Error('Session ownership changed; takeover cancelled.');
+      if (now.pid !== undefined && isPidAlive(now.pid) && !live.some((entry) => entry.pid === now.pid)) throw new Error('Cannot verify this process belongs to the session.');
+      if (!confirm && live.some((entry) => entry.liveStatus && entry.liveStatus !== 'idle')) throw new Error('Session is no longer idle; your draft is preserved.');
+      if (signal?.aborted) throw new Error('Send cancelled; your draft is preserved.');
+      if (!confirm && ((store.get(s.key) ?? now).statusIsEstimated || adoptActionFor(store.get(s.key) ?? now, runners.owns(s.sessionId)) !== 'adopt')) throw new Error('Session started working again; your draft is preserved.');
       if (now.pid !== undefined) {
       // A stopped process cannot act on SIGTERM, so ending a paused session
       // would burn the whole grace period and then SIGKILL it — the one outcome
@@ -307,6 +270,10 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }
 
+    if ((await readRegistry(sessionsDir())).some((entry) => entry.sessionId === s.sessionId)) throw new Error('Another live process owns this session; takeover cancelled.');
+    if (signal?.aborted) throw new Error('Send cancelled; your draft is preserved.');
+    if (s.pid !== undefined && isPidAlive(s.pid)) throw new Error('The previous process is still alive; takeover was cancelled.');
+    if (s.status !== 'ended' && s.pid === undefined) throw new Error('Cannot prove the previous process has stopped.');
     const cfg = vscode.workspace.getConfiguration('agentWrangler');
     const model = cfg.get<string>('runner.model', '').trim();
     const runner = runners.start({
@@ -317,6 +284,7 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     workbench.showRunner(runner);
     log(`adopted ${s.sessionId} into this window`);
+    return runner;
   };
 
   /**
@@ -491,41 +459,28 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  const adopting = new Set<string>();
   const actions: SessionActions = {
+    async adoptAndSend(key, text, images, signal) {
+      if (adopting.has(key)) throw new Error('A takeover is already pending for this session.');
+      adopting.add(key);
+      try {
+        await waitForAdoptable(store, key, signal, true);
+        const s = store.get(key);
+        if (!s || signal.aborted) throw new Error('Send cancelled; your draft is preserved.');
+        const existing = runners.get(s.sessionId);
+        const confirm = s.statusIsEstimated === true || vscode.workspace.getConfiguration('agentWrangler').get<boolean>('runner.confirmTakeoverOnSend', false);
+        const runner = existing ?? await adoptSession(s, confirm, signal);
+        if (!runner) throw new Error('Takeover cancelled; your draft is preserved.');
+        if (signal.aborted) throw new Error('Send cancelled; session was resumed here but no message was sent.');
+        if (!runner.canSend) throw new Error('The runner failed to start; your draft is preserved.');
+        runner.send(text, images);
+      } finally { adopting.delete(key); }
+    },
     smartOpen(key) {
       const s = store.get(key);
       if (!s) return;
-      const behavior = vscode.workspace
-        .getConfiguration('agentWrangler')
-        .get<RowClickBehavior>('rowClickOpens', 'conversation');
-      if (behavior === 'conversation') {
-        showInPane(s);
-        return;
-      }
-      void (async () => {
-        const loc = await locator.locate(s.pid, { fresh: true });
-        const target = openTargetFor(s, loc.kind, isInThisWorkspace(s.cwd), behavior);
-        log(`open ${s.name ?? s.sessionId}: process ${loc.kind} → ${target}`);
-        if (target === 'conversation') showInPane(s);
-        else goToSession(s, target, loc);
-      })();
-    },
-    goTo(key) {
-      const s = store.get(key);
-      if (!s) return;
-      void (async () => {
-        const loc = await locator.locate(s.pid, { fresh: true });
-        const target = openTargetFor(s, loc.kind, isInThisWorkspace(s.cwd), 'wherever-it-runs');
-        log(`goTo ${s.name ?? s.sessionId}: process ${loc.kind} → ${target}`);
-        if (target === 'conversation') {
-          vscode.window.setStatusBarMessage(
-            `Agent Wrangler: ${displayLabel(s)} runs outside this VSCode; nothing here can reveal it.`,
-            4000,
-          );
-          return;
-        }
-        goToSession(s, target, loc);
-      })();
+      showInPane(s);
     },
     openInTab(key) {
       conversations.pin(key);
@@ -557,7 +512,9 @@ export function activate(context: vscode.ExtensionContext): void {
     adopt(key) {
       const s = store.get(key);
       if (!s) return;
-      void adoptSession(s);
+      if (adopting.has(key)) return;
+      adopting.add(key);
+      void adoptSession(s).catch((e) => vscode.window.showErrorMessage(String(e))).finally(() => adopting.delete(key));
     },
     release(key) {
       const s = store.get(key);
@@ -678,7 +635,9 @@ export function activate(context: vscode.ExtensionContext): void {
     context.extensionUri,
     store,
     provider,
+    codexProvider,
     runners,
+    codexRunners,
     actions,
     locator,
     dictation,
@@ -710,7 +669,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // Defined as closures rather than direct references: `newConversation` is
   // declared further down, and only the calls happen after activation.
   const launcher: ConversationLauncher = {
-    newConversation: (cwd) => newConversation(cwd),
+    newConversation: (cwd, selectedProvider) => selectedProvider === 'codex' ? startCodexConversation(cwd) : newConversation(cwd),
     browseForProject: () => browseForProject(),
   };
 
@@ -719,7 +678,9 @@ export function activate(context: vscode.ExtensionContext): void {
     extensionUri: context.extensionUri,
     store,
     provider,
+    codexProvider,
     runners,
+    codexRunners,
     actions,
     locator,
     dictation,
@@ -728,6 +689,8 @@ export function activate(context: vscode.ExtensionContext): void {
     archive,
     health: provider,
     usage,
+    codexUsage,
+    runnerOwnership,
     columns,
     projects,
     launcher,
@@ -838,6 +801,23 @@ export function activate(context: vscode.ExtensionContext): void {
     return runner;
   };
 
+  const startCodexConversation = async (cwd: string): Promise<void> => {
+    if (!fs.existsSync(cwd)) {
+      void vscode.window.showErrorMessage(`Agent Wrangler: ${cwd} no longer exists.`);
+      return;
+    }
+    projects.add(cwd);
+    try {
+      const cfg = vscode.workspace.getConfiguration('agentWrangler');
+      const model = cfg.get<string>('codexRunner.model', '').trim() || undefined;
+      const runner = await codexRunners.start(cwd, model);
+      workbench.showCodexRunner(runner);
+    } catch (error) {
+      log(`starting Codex conversation failed: ${String(error)}`);
+      void vscode.window.showErrorMessage(`Agent Wrangler: could not start Codex — ${(error as Error).message}`);
+    }
+  };
+
   /**
    * Start a session this window runs itself. The folder matters more than
    * usual here: it is the session's working directory, and unlike the Claude
@@ -888,7 +868,6 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('agentWrangler.renameConversation', withSession((k) => actions.rename(k))),
     vscode.commands.registerCommand('agentWrangler.pinToTop', withSession((k) => actions.togglePinned(k))),
-    vscode.commands.registerCommand('agentWrangler.goToSession', withSession((k) => actions.goTo(k))),
     vscode.commands.registerCommand(
       'agentWrangler.resumeInTerminal',
       withSession((k) => actions.resume(k), (s) => s.status === 'ended'),
@@ -938,6 +917,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   void store.register(provider).catch((err) => log(`provider start failed: ${String(err)}`));
+  void store.register(codexProvider).catch((err) => log(`Codex provider start failed: ${String(err)}`));
   log('Agent Wrangler activated');
   watchForDevReload(context, log);
 

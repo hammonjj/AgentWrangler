@@ -90,6 +90,11 @@ export class TranscriptSource implements ConversationSource {
     this.syncAsk();
   }
 
+  /** Held back by the reducer when a block's text was too long for the wire. */
+  fullBlockText(blockId: string): string | undefined {
+    return this.state.overflow.get(blockId);
+  }
+
   async decide(requestId: string, decision: 'allow' | 'always' | 'deny'): Promise<boolean> {
     if (!this.ask || this.ask.requestId !== requestId || !this.ask.pending) return false;
     const sent = await this.decidePermission(this.session.sessionId, decision);

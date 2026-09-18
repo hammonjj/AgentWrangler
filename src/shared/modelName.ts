@@ -58,3 +58,23 @@ export function modelLabel(id: string | undefined): string | undefined {
   const name = family[0].toUpperCase() + family.slice(1);
   return version.length > 0 ? `${name} ${version}` : name;
 }
+
+/**
+ * How one row of the model dropdown is labelled.
+ *
+ * The CLI names its default row "Default (recommended)", which spends a
+ * parenthesis on advice and never says *which* model default currently means —
+ * the one thing the row is asked. It does report the id the alias resolves to,
+ * so the parenthetical becomes that: "Default (Sonnet 4.5)".
+ *
+ * Only a "(recommended)" tail is rewritten. Every other row already names its
+ * model, and appending the resolved id there would read "Opus (Opus 4.5)".
+ */
+export function modelChoiceLabel(displayName: string, resolved?: string): string {
+  const label = displayName.trim();
+  const m = /^(.*?)\s*\(\s*recommended\s*\)$/i.exec(label);
+  if (!m) return label;
+  const base = m[1].trim() || label;
+  const name = modelLabel(resolved);
+  return name === undefined ? base : `${base} (${name})`;
+}

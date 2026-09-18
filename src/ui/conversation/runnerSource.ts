@@ -75,6 +75,7 @@ export class RunnerSource implements ConversationSource {
   }
 
   async send(text: string, images?: ImageAttachment[]): Promise<void> {
+    if (!this.runner.canSend) throw new Error('The runner stopped; your draft is preserved.');
     this.runner.send(text, images);
   }
 
@@ -88,6 +89,10 @@ export class RunnerSource implements ConversationSource {
 
   async setModel(model?: string): Promise<void> {
     await this.runner.setModel(model);
+  }
+
+  fullBlockText(blockId: string): string | undefined {
+    return this.runner.fullBlockText(blockId);
   }
 
   dispose(): void {

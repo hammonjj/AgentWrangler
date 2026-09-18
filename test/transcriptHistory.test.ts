@@ -133,6 +133,7 @@ describe('loadResumeHistory', () => {
     // else, so the pane still opens and the session still runs.
     const history = await loadResumeHistory(SESSION_ID, '/Users/test/somewhere-else');
 
-    expect(history).toEqual({ blocks: [], truncated: false });
+    expect(history).toMatchObject({ blocks: [], truncated: false });
+    expect(history.overflow?.size ?? 0).toBe(0);
   });
 });

@@ -13,6 +13,9 @@
  */
 
 import * as vscode from 'vscode';
+import type { CodexRunner, CodexRunnerService } from '../codex/runner';
+import type { AgentProvider } from '../core/provider';
+import type { RunnerOwnership } from './dashboardHost';
 import type { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerSession } from '../claude/runner/runnerSession';
 import type { ArchiveService } from '../core/archive';
@@ -48,6 +51,9 @@ export interface WorkbenchDeps {
   extensionUri: vscode.Uri;
   store: SessionStore;
   provider: ConversationProvider;
+  codexProvider: AgentProvider;
+  codexRunners: CodexRunnerService;
+  runnerOwnership: RunnerOwnership;
   runners: RunnerService;
   actions: SessionActions;
   locator: SessionLocator;
@@ -57,6 +63,7 @@ export interface WorkbenchDeps {
   archive: ArchiveService;
   health: HookHealthSource;
   usage: UsageSource;
+  codexUsage: UsageSource;
   columns: ColumnPrefsService;
   projects: ProjectSource;
   launcher: ConversationLauncher;
@@ -116,6 +123,11 @@ export class WorkbenchPanelManager implements vscode.Disposable {
     this.conversation?.showRunner(runner);
   }
 
+  showCodexRunner(runner: CodexRunner): void {
+    this.open();
+    this.conversation?.showCodexRunner(runner);
+  }
+
   /** Take back the panel VSCode restored after a reload. */
   restore(panel: vscode.WebviewPanel, state: unknown): void {
     if (this.panel) {
@@ -162,8 +174,9 @@ export class WorkbenchPanelManager implements vscode.Disposable {
       this.deps.health,
       this.deps.locator,
       this.deps.usage,
+      this.deps.codexUsage,
       this.deps.columns,
-      this.deps.runners,
+      this.deps.runnerOwnership,
       this.deps.projects,
       this.deps.launcher,
       this.deps.pause,
@@ -173,7 +186,9 @@ export class WorkbenchPanelManager implements vscode.Disposable {
       paneChannel(panel.webview, 'conversation'),
       this.deps.store,
       this.deps.provider,
+      this.deps.codexProvider,
       this.deps.runners,
+      this.deps.codexRunners,
       this.deps.actions,
       this.deps.locator,
       this.deps.dictation,

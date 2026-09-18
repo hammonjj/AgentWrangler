@@ -27,6 +27,13 @@ export interface ConversationHistory {
   blocks: ConvBlock[];
   /** Conversation exists above the first block; the pane says so rather than implying a start. */
   truncated: boolean;
+  /**
+   * The whole text of any history block too long for the wire cap, by block id.
+   * It travels with the blocks because the reducer state that produced it is
+   * thrown away here, and "Show the rest" has to work on a resumed pane's past
+   * exactly as it does on what the session says next.
+   */
+  overflow?: Map<string, string>;
 }
 
 export interface TranscriptTailRead extends ConversationHistory {
@@ -77,7 +84,12 @@ export async function readTranscriptTail(filePath: string | undefined): Promise<
   const split = splitCompleteLines(buf, readStart > 0);
   // Patches are dropped here on purpose: a result whose call is above the
   // window has nothing on screen to patch.
-  let blocks = reduceTranscriptLines(state, split.lines).appends;
+  const reduced = reduceTranscriptLines(state, split.lines);
+  let blocks = reduced.appends;
+  for (const patch of reduced.patches) {
+    const index = blocks.findIndex((b) => b.id === patch.id);
+    if (index >= 0) blocks[index] = { ...blocks[index], ...patch.block } as ConvBlock;
+  }
   const truncated = readStart > 0 || blocks.length > MAX_INIT_BLOCKS;
   if (blocks.length > MAX_INIT_BLOCKS) blocks = blocks.slice(-MAX_INIT_BLOCKS);
   return { blocks, truncated, state, byteOffset: readStart + split.endOffset };
@@ -91,6 +103,6 @@ export async function readTranscriptTail(filePath: string | undefined): Promise<
  * live through the runner's own blocks, and the two must never overlap.
  */
 export async function loadResumeHistory(sessionId: string, cwd: string): Promise<ConversationHistory> {
-  const { blocks, truncated } = await readTranscriptTail(transcriptPathFor(sessionId, cwd));
-  return { blocks, truncated };
+  const { blocks, truncated, state } = await readTranscriptTail(transcriptPathFor(sessionId, cwd));
+  return { blocks, truncated, overflow: state.overflow };
 }

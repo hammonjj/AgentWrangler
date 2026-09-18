@@ -8,8 +8,7 @@
  * uses it and asks Claude nothing; one window's read serves them all.
  *
  * File-based rather than in-process on purpose: it lives in the extension's
- * globalStorage, the one place every window already shares (the cross-window
- * relay lives there too).
+ * globalStorage, the one place every window already shares.
  */
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';

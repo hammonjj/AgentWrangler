@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createRunnerState, reduceRunnerMessage, type RunnerBlocksState } from '../src/claude/runner/runnerBlocks';
-import type { ConvBlock } from '../src/shared/conversation';
+import { MAX_BLOCK_CHARS, type ConvBlock } from '../src/shared/conversation';
 
 /** The SDK message shapes this reducer consumes, as the CLI emits them. */
 const init = (over: Record<string, unknown> = {}) => ({
@@ -83,6 +83,36 @@ describe('reduceRunnerMessage', () => {
     ]);
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toMatchObject({ kind: 'assistant', text: 'Hello', streaming: false });
+  });
+
+  it('caps a long explanation as it streams, and keeps the rest for the pane to ask for', () => {
+    // The long-explanation case: text that crosses the cap mid-stream has to
+    // gain `more` while it is still arriving, or the reply simply appears to
+    // stop growing.
+    const half = 'word '.repeat(MAX_BLOCK_CHARS / 5);
+    const { blocks, state } = run([messageStart(), blockStart(0, 'text'), delta(0, half), delta(0, half), blockStop(0)]);
+
+    const block = blocks[0] as { id: string; text: string; more?: number };
+    expect(block.text).toHaveLength(MAX_BLOCK_CHARS);
+    expect(block.more).toBe(half.length * 2 - MAX_BLOCK_CHARS);
+    expect(state.overflow.get(block.id)).toBe(half + half);
+  });
+
+  it('clears `more` when the complete message turns out to fit', () => {
+    // The complete message replaces what was streamed. A block that shrank
+    // below the cap must lose its button, which means `more` has to travel on
+    // the patch rather than being left off it.
+    const { blocks, state } = run([
+      messageStart(),
+      blockStart(0, 'text'),
+      delta(0, 'x'.repeat(MAX_BLOCK_CHARS + 50)),
+      blockStop(0),
+      assistant([{ type: 'text', text: 'the short version' }]),
+    ]);
+
+    const block = blocks[0] as { id: string; text: string; more?: number };
+    expect(block).toMatchObject({ text: 'the short version', more: undefined });
+    expect(state.overflow.has(block.id)).toBe(false);
   });
 
   it('does not render the same reply twice when the complete message follows', () => {
@@ -262,4 +292,22 @@ describe('reduceRunnerMessage', () => {
     ]);
     expect(blocks).toHaveLength(0);
   });
+});
+
+it('keeps child text separate from the parent streaming slot', () => {
+  const state = createRunnerState();
+  reduceRunnerMessage(state, { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+  const child = reduceRunnerMessage(state, { type: 'assistant', parent_tool_use_id: 'task-parent', message: { content: [{ type: 'text', text: 'child answer' }] } });
+  expect(child.patches).toEqual([]);
+  expect(child.appends[0]).toMatchObject({ text: 'child answer', parentToolUseId: 'task-parent' });
+  const parent = reduceRunnerMessage(state, { type: 'assistant', message: { content: [{ type: 'text', text: 'parent answer' }] } });
+  expect(parent.patches[0].block).toMatchObject({ text: 'parent answer' });
+});
+
+it('replaces cumulative cost rather than adding consecutive result totals', () => {
+  const { composer } = run([
+    { type: 'result', subtype: 'success', total_cost_usd: 0.1 },
+    { type: 'result', subtype: 'success', total_cost_usd: 0.2 },
+  ]);
+  expect(composer.costUsd).toBe(0.2);
 });
