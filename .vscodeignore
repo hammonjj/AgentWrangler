@@ -10,3 +10,4 @@ tsconfig.json
 .dev-auto-open
 .dev-reload
 **/*.map
+.worktrees/**
