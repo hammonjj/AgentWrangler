@@ -36,10 +36,58 @@ const host = {
   plugins: [watchLogger],
 };
 
+/**
+ * Electron main process and preload.
+ *
+ * Two bundles because they run in two processes with different privileges: the
+ * preload is what the renderer is given, so nothing but the three bridge
+ * methods may be reachable from it, and bundling it with the main process would
+ * put the whole application in the renderer's address space.
+ *
+ * `electron` is external in both — it is supplied by the runtime, the way
+ * `vscode` is by the editor. The Agent SDK's `import.meta.url` workaround is
+ * the same one the extension bundle needs, for the same reason.
+ */
+const electronMain = {
+  entryPoints: ['src/electron/main.ts'],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node22',
+  external: ['electron', 'vscode'],
+  outfile: 'dist/electron/main.js',
+  sourcemap: true,
+  minify: false,
+  define: { 'import.meta.url': '__aw_import_meta_url' },
+  banner: { js: "var __aw_import_meta_url = require('url').pathToFileURL(__filename).href;" },
+  plugins: [watchLogger],
+};
+
+const electronPreload = {
+  entryPoints: ['src/electron/preload.ts'],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node22',
+  external: ['electron'],
+  outfile: 'dist/electron/preload.js',
+  sourcemap: true,
+  minify: false,
+  plugins: [watchLogger],
+};
+
 /** Browser bundles, one per webview. entryNames '[dir]' collapses
- * src/webview/dashboard/main.ts -> dist/webview/dashboard.js (+ dashboard.css). */
+ * src/webview/dashboard/main.ts -> dist/webview/dashboard.js (+ dashboard.css).
+ * The theme entry is a bare stylesheet — the 56 `--vscode-*` values VSCode
+ * injects and a desktop window has to be given — and collapses the same way,
+ * to dist/webview/theme.css. */
 const web = {
-  entryPoints: ['src/webview/dashboard/main.ts', 'src/webview/conversation/main.ts', 'src/webview/workbench/main.ts'],
+  entryPoints: [
+    'src/webview/dashboard/main.ts',
+    'src/webview/conversation/main.ts',
+    'src/webview/workbench/main.ts',
+    'src/webview/theme/vscodeTokens.css',
+  ],
   bundle: true,
   format: 'iife',
   platform: 'browser',
@@ -51,9 +99,11 @@ const web = {
   plugins: [watchLogger],
 };
 
+const configs = [host, web, electronMain, electronPreload];
+
 if (watch) {
-  const [hostCtx, webCtx] = await Promise.all([esbuild.context(host), esbuild.context(web)]);
-  await Promise.all([hostCtx.watch(), webCtx.watch()]);
+  const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));
+  await Promise.all(contexts.map((c) => c.watch()));
 } else {
-  await Promise.all([esbuild.build(host), esbuild.build(web)]);
+  await Promise.all(configs.map((c) => esbuild.build(c)));
 }

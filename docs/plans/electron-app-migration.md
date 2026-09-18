@@ -55,28 +55,56 @@ Two things already anticipated this and do not change:
 
 ## Phases
 
-### Phase 1 — the seam (no behaviour change)
+### Phase 1 — the seam (no behaviour change) — **done**
 
 `HostServices`, `createApp`, `VscodeHost`, and `extension.ts` rewritten onto them. Nothing
-Electron yet. Test of done: typecheck, tests and `npm run install-local` all green, and the
-extension behaves identically after a reload.
+Electron. Typecheck, build and 53 files / 630 tests green; `extension.ts` went from 1008
+lines to 180 and does nothing it did not do before.
 
-### Phase 2 — the window
+### Phase 2 — the window — **done**
 
 `src/electron/main.ts`, `preload.ts`, an `ElectronHost`, a `WorkbenchWindow` that owns one
-`BrowserWindow` and two `PaneChannel`s over IPC, a JSON-file `MementoLike`, and the theme
-shim. `npm run electron` opens a window showing live sessions and lets you talk to one.
+`BrowserWindow` and two `PaneChannel`s over IPC, JSON-file storage, and the theme shim.
+`npm run electron` opens it.
 
-Test of done: the table lists this machine's real sessions with correct status, clicking a
-row fills the conversation half, and a message sent from the composer reaches a session.
+Verified against the real machine: the table lists this machine's sessions in their correct
+sections with live status chips and tool activity, the usage cards fill, the conversation
+pane restores onto a session and renders it *live* — streaming tool cards, history paging,
+find bar, composer with its permission dropdown and the adopt notice — the divider drags, the
+column folding responds to pane width, the menu works, and `flash` lands in the shell's
+toast. Both panes log that they are talking to the host.
+
+Three things the window needed that the tab did not:
+
+- **A scheme of its own.** `file://` has an opaque origin, so `style-src 'self'` matches
+  nothing and the CSP the panes are written against cannot be expressed. `aw://bundle` is a
+  registered standard scheme serving `dist/webview`, and it is also what confines the window
+  to that directory the way VSCode's `localResourceRoots` did.
+- **`acquireVsCodeApi` referenced lazily.** `createWebviewBridge(acquireVsCodeApi)` evaluated
+  the bare identifier, which is a `ReferenceError` outside VSCode — thrown before the bridge
+  could prefer the preload's host. It is `() => acquireVsCodeApi()` now. This was the whole of
+  "the window opens but is blank".
+- **`ELECTRON_RUN_AS_NODE`.** VSCode sets it in its terminals, so `electron main.js` launched
+  under plain Node and every Electron API was `undefined`. The dev scripts `env -u` it.
+
+Left for later on this phase: the title bar is an ordinary one. `hiddenInset` would give the
+panes the whole window, but the dashboard's header starts at y=0 and its project filter lands
+under the traffic lights; reclaiming those 28px means the panes knowing they are in an app.
 
 ### Phase 3 — the dialogs
 
-The roughly twenty `showInformationMessage`/`showWarningMessage`/`showErrorMessage` sites
-(several modal, with `detail` and custom buttons) become Electron `dialog.showMessageBox`.
-The two quick picks, the input box and the folder picker become real UI: `showOpenDialog`
-covers the folder, the other three need a renderer-side palette. The 15 commands become an
-application menu with the same ids.
+The message boxes and the folder picker are done — `dialog.showMessageBox` and
+`showOpenDialog` — and the fifteen commands are an application menu. **What is left is the
+palette.** `HostDialogs.input` and `HostDialogs.pick` have no native Electron equivalent, so
+today they decline out loud ("…needs VSCode for now") and return `undefined`, which every
+caller already treats as cancelled. That costs three things in the app: renaming a
+conversation, the session picker behind every menu item that needs to ask *which*, and the
+folder list when *New Conversation* is invoked without one. A small renderer-side palette —
+a filtered list and a text field, in a child window — covers all three.
+
+Also here: `openInTab`. In VSCode it gives a conversation an editor tab of its own; here it
+would be a second window, which is a product decision rather than a port. It currently shows
+the session in the one window and says so.
 
 ### Phase 4 — packaging
 
@@ -84,6 +112,11 @@ application menu with the same ids.
 `docs/codex-and-electron.md` § "Packaging hazards": binaries and hook helpers outside ASAR,
 hook helpers in stable user data, a versioned preference migration, and re-testing the Claude
 SDK's ESM/CJS bundle under Electron.
+
+One thing to settle first: `package.json`'s `main` is `./dist/extension.js`, which is what
+VSCode loads, and Electron reads the same field. The dev scripts sidestep it by passing the
+entry explicitly (`electron dist/electron/main.js`); a packaged app needs its own
+`package.json` in the app directory rather than this one.
 
 ### Later, deliberately not now
 
@@ -108,10 +141,32 @@ SDK's ESM/CJS bundle under Electron.
 - `npm run install-local` from this worktree installs *this* build over the one James uses.
   Say so when it happens, and never reload his window.
 
+## Running it
+
+```
+npm run electron          # build, then open the window
+npm run electron:nobuild  # open it against the current dist/
+```
+
+Both `env -u ELECTRON_RUN_AS_NODE` first: VSCode sets that variable in its terminals and it
+makes the Electron binary behave as plain Node, so without it the app launches with every
+Electron API `undefined` and dies on the first one.
+
+State lives in `~/Library/Application Support/Agent Wrangler` — `settings.json` (what
+`agentWrangler.*` was), `state.json` (pins, nicknames, archive, columns, turn stats),
+`surface.json` (the runner registry), `window.json` (which conversation was showing) and
+`agent-wrangler.log`, which is the output channel's replacement and is where a renderer error
+turns up.
+
 ## State
 
 - Worktree and branch created; `electron@44` and `electron-builder@26` installed. `npm install`
   replaced the `node_modules` symlink with a real tree, so this worktree no longer shares the
   primary checkout's modules and the primary checkout is untouched.
 - App icons committed: `build/icon.icns`, `build/icon.png` (1024²) and `build/icons/*.png`
-  from James's `agentwrangler.iconset`.
+  from James's `agentwrangler.iconset`. Only `icon.png` is used so far — it is the window
+  icon; the `.icns` is for phase 4.
+- **`npm run install-local` has deliberately not been run from this worktree.** It would put
+  this branch's build over the extension James uses all day, and while the refactor is
+  behaviour-neutral and green, nothing has exercised it inside VSCode yet. Install from `main`
+  unless he asks otherwise.

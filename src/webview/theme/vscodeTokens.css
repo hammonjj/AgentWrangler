@@ -261,3 +261,41 @@ body {
 [hidden] {
   display: none !important;
 }
+
+/* ---- the shell's status line ----
+   VSCode has a status bar for `HostDialogs.flash` — "Copied session id …", "that
+   prompt has already been answered". This window has to grow one. The preload
+   builds the nodes (it belongs to the window, not to either pane); these are the
+   rules it uses, since the CSP drops an inline style without saying so. */
+
+#awToasts {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  /* The panes own every click in the window; this only ever reports. */
+  pointer-events: none;
+}
+
+.aw-toast {
+  max-width: 460px;
+  padding: 6px 10px;
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background);
+  color: var(--vscode-foreground);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+  font-size: var(--vscode-font-size);
+  animation: aw-toast-life 4s ease forwards;
+}
+
+@keyframes aw-toast-life {
+  0% { opacity: 0; transform: translateY(4px); }
+  6% { opacity: 1; transform: none; }
+  85% { opacity: 1; }
+  100% { opacity: 0; }
+}

@@ -32,8 +32,16 @@ import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBri
 
 declare function acquireVsCodeApi(): WebviewBridge<WorkbenchState>;
 
-/** Once per webview. Both panes share this. */
-const api = createWebviewBridge<WorkbenchState>(acquireVsCodeApi);
+/**
+ * Once per webview. Both panes share this.
+ *
+ * Wrapped in a lambda rather than passed by name: outside VSCode there is no
+ * `acquireVsCodeApi` binding at all, and evaluating the bare identifier throws
+ * a `ReferenceError` before `createWebviewBridge` gets the chance to prefer the
+ * host the preload injected. Inside the lambda it is only reached if there was
+ * no such host, which is exactly when it does exist.
+ */
+const api = createWebviewBridge<WorkbenchState>(() => acquireVsCodeApi());
 
 export type PaneName = 'dashboard' | 'conversation';
 
