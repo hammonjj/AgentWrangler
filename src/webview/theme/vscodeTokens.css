@@ -262,6 +262,41 @@ body {
   display: none !important;
 }
 
+/* ---- the window's inset ----
+   In VSCode the panes sit inside an editor tab, and the room around them is the
+   editor's: a sidebar, a tab bar, the gap a tab leaves at its edges. A window has
+   none of that, so the same markup ends up flush against the frame and reads as
+   cramped. The shell supplies the missing space here rather than in the pane
+   stylesheets, because it is a fact about the window and not about the panes —
+   the extension must keep looking exactly as it does.
+
+   `body.aw-shell` rather than `body`: `workbench.css` is concatenated after this
+   file and sets `body { padding: 0 }` and `#wb { height: 100vh }`, so these have
+   to win on specificity. `100vh` is also why `#wb` is re-heighted — the viewport
+   does not shrink by the padding, and the bottom of the conversation would fall
+   off the screen. */
+
+body.aw-shell {
+  box-sizing: border-box;
+  padding: 10px 12px 12px;
+}
+
+body.aw-shell #wb {
+  height: 100%;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  /* The panes paint to their own edges; the radius has to clip them or the
+     corners show square fills over the rounded border. `#wb` already hides
+     overflow for the divider drag, so this only adds the rounding. */
+  overflow: hidden;
+}
+
+/* The conversation's left border is the divider's job in a tab, where `#wb` has
+   no frame of its own. Inside one it doubles the line next to the drag handle. */
+body.aw-shell #wbConv {
+  border-left: none;
+}
+
 /* ---- the shell's status line ----
    VSCode has a status bar for `HostDialogs.flash` — "Copied session id …", "that
    prompt has already been answered". This window has to grow one. The preload

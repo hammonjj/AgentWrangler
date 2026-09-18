@@ -13,7 +13,7 @@ export function getNonce(): string {
  * same file off disk and uses `'self'`. Both differ only in those three
  * strings, so they are arguments rather than two copies of the document.
  */
-export type BundleName = 'dashboard' | 'conversation' | 'workbench';
+export type BundleName = 'dashboard' | 'conversation' | 'workbench' | 'preferences';
 
 /**
  * The markup each bundle finds when it loads.
@@ -29,6 +29,7 @@ export type BundleName = 'dashboard' | 'conversation' | 'workbench';
 const BODY: Record<BundleName, string> = {
   dashboard: '<div id="app"></div>',
   conversation: '<div id="convApp"></div>',
+  preferences: '<div id="prefsApp"></div>',
   workbench:
     '<div id="wb">' +
     '<div id="wbTable"><div id="app"></div></div>' +
@@ -56,12 +57,24 @@ export interface WebviewHtmlOptions {
    * values itself and this is empty.
    */
   extraStylesheets?: string[];
+  /**
+   * A class on `<body>`, so a host can style the document it owns without the
+   * panes knowing. The Electron shell sets `aw-shell`, which is what gives the
+   * window its inset — in VSCode that space comes from the editor's own chrome
+   * around the tab, and there is no chrome in a window.
+   *
+   * It also settles a specificity question: the pane bundles set `body {…}`
+   * and are loaded last, so a plain `body` rule in the shell's stylesheet would
+   * lose. `body.aw-shell` wins on specificity rather than on order.
+   */
+  bodyClass?: string;
 }
 
 export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
-  const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [] } = opts;
+  const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [], bodyClass } = opts;
   const nonce = getNonce();
   const links = [...extraStylesheets, cssHref].map((href) => `<link rel="stylesheet" href="${href}">`).join('\n');
+  const bodyAttr = bodyClass ? ` class="${bodyClass}"` : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -72,7 +85,7 @@ export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
 ${links}
 <title>${title}</title>
 </head>
-<body>
+<body${bodyAttr}>
 ${BODY[bundleName]}
 <script nonce="${nonce}" src="${jsSrc}"></script>
 </body>

@@ -91,6 +91,40 @@ Left for later on this phase: the title bar is an ordinary one. `hiddenInset` wo
 panes the whole window, but the dashboard's header starts at y=0 and its project filter lands
 under the traffic lights; reclaiming those 28px means the panes knowing they are in an app.
 
+### Phase 2a — the window's own chrome — **done**
+
+**The inset.** In VSCode the room around the panes is the editor's — a sidebar, a tab bar,
+the gap a tab leaves at its edges. A window has none of that, so the same markup sat flush
+against the frame and read as cramped. The shell supplies it: `renderWebviewHtml` takes a
+`bodyClass`, Electron passes `aw-shell`, and the theme sheet pads the body and puts a rounded
+hairline frame around `#wb`. It is in the shell's stylesheet rather than the panes' because it
+is a fact about the window — the extension has to keep looking exactly as it does. The
+selectors are `body.aw-shell …` rather than `body …` because `workbench.css` is concatenated
+after and sets `padding: 0` and `height: 100vh`; this has to win on specificity, not order.
+
+**Preferences (⌘,).** VSCode generates its settings UI from
+`contributes.configuration`; the app has to draw its own, and a second hand-kept list of
+twenty-two settings would drift on the first one added — silently, because the app would
+simply not offer it. So the settings are declared once in `src/shared/settings.ts`,
+`test/settingsSchema.test.ts` fails if that and `package.json` stop matching field for field,
+and `src/webview/preferences/` renders the declaration. A new setting is now declared once
+and appears in both front ends.
+
+Two rules the window follows, both in `settingUpdate` in `src/shared/preferences.ts` so they
+are testable without a window:
+
+- **Only a declared key, only its declared type.** `pollIntervalSeconds` written as a string
+  would read back as `NaN` and stop the poll with no error anywhere.
+- **The default is stored by absence.** Setting a field back to its default removes the key
+  rather than writing the value, and an unchanged field is not written at all — every text
+  input commits on blur, so tabbing through would otherwise persist all twenty-two. Writing
+  `600` because that is today's `stuckThresholdSeconds` default would pin the user to today's
+  number if it were ever revised.
+
+`openOnStartup` is the one setting the app hides: it has a single window and always opens it.
+`SettingSpec.hosts` is how that is said, and the test asserts the list of hidden ones is
+exactly that.
+
 ### Phase 3 — the dialogs
 
 The message boxes and the folder picker are done — `dialog.showMessageBox` and
@@ -153,10 +187,14 @@ makes the Electron binary behave as plain Node, so without it the app launches w
 Electron API `undefined` and dies on the first one.
 
 State lives in `~/Library/Application Support/Agent Wrangler` — `settings.json` (what
-`agentWrangler.*` was), `state.json` (pins, nicknames, archive, columns, turn stats),
-`surface.json` (the runner registry), `window.json` (which conversation was showing) and
-`agent-wrangler.log`, which is the output channel's replacement and is where a renderer error
-turns up.
+`agentWrangler.*` was, and holding only what has been deliberately changed), `state.json`
+(pins, nicknames, archive, columns, turn stats), `surface.json` (the runner registry),
+`window.json` (which conversation was showing) and `agent-wrangler.log`, which is the output
+channel's replacement and is where a renderer error turns up.
+
+Adding a setting: put it in `src/shared/settings.ts` and in `package.json`'s
+`contributes.configuration`. `npm test` tells you if the two disagree; nothing else has to
+change, in either front end.
 
 ## State
 

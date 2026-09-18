@@ -13,7 +13,11 @@ import { Menu, type MenuItemConstructorOptions, app, shell } from 'electron';
 import type { AgentWranglerApp } from '../app/createApp';
 import type { WorkbenchSurface } from '../host/hostServices';
 
-export function installApplicationMenu(wrangler: AgentWranglerApp, surface: WorkbenchSurface): void {
+export function installApplicationMenu(
+  wrangler: AgentWranglerApp,
+  surface: WorkbenchSurface,
+  openPreferences: () => void,
+): void {
   const mac = process.platform === 'darwin';
 
   const appMenu: MenuItemConstructorOptions[] = mac
@@ -22,6 +26,10 @@ export function installApplicationMenu(wrangler: AgentWranglerApp, surface: Work
           label: app.name,
           submenu: [
             { role: 'about' },
+            { type: 'separator' },
+            // ⌘, where macOS puts it. VSCode's settings UI has no counterpart
+            // here, so this window renders `src/shared/settings.ts` instead.
+            { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: openPreferences },
             { type: 'separator' },
             { label: 'Install Status Hooks…', click: () => void wrangler.installHooks() },
             { label: 'Remove Status Hooks', click: () => void wrangler.uninstallHooks() },
@@ -52,6 +60,8 @@ export function installApplicationMenu(wrangler: AgentWranglerApp, surface: Work
         ...(mac
           ? ([{ role: 'close' }] as MenuItemConstructorOptions[])
           : ([
+              { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: openPreferences },
+              { type: 'separator' },
               { label: 'Install Status Hooks…', click: () => void wrangler.installHooks() },
               { label: 'Remove Status Hooks', click: () => void wrangler.uninstallHooks() },
               { type: 'separator' },

@@ -58,19 +58,25 @@ export function serveBundles(distDir: string): void {
     const url = new URL(request.url);
     const name = decodeURIComponent(url.pathname).replace(/^\/+/, '');
 
-    const document = /^(dashboard|conversation|workbench)\.html$/.exec(name);
+    const document = /^(dashboard|conversation|workbench|preferences)\.html$/.exec(name);
     if (document) {
       const bundle = document[1] as BundleName;
       return new Response(
         renderWebviewHtml({
           bundleName: bundle,
-          title: 'Agent Wrangler',
+          // The document's title is the window's title here, unlike in VSCode
+          // where the tab is named by the panel. A second window called "Agent
+          // Wrangler" tells you nothing in the Window menu or ⌘-tab.
+          title: bundle === 'preferences' ? 'Preferences' : 'Agent Wrangler',
           cssHref: `${ORIGIN}/${bundle}.css`,
           jsSrc: `${ORIGIN}/${bundle}.js`,
           cspSource: ORIGIN,
           // The 56 `--vscode-*` values, the body defaults and the toast rules.
           // First, so a pane stylesheet can override anything it wants to.
           extraStylesheets: [`${ORIGIN}/theme.css`],
+          // What tells the theme sheet it is in a window: the inset, the frame
+          // around the panes. See `vscodeTokens.css`.
+          bodyClass: 'aw-shell',
         }),
         { headers: { 'content-type': TYPES['.html'] } },
       );

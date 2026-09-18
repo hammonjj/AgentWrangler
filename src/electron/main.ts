@@ -26,6 +26,7 @@ import { registerBundleScheme, serveBundles } from './bundleProtocol';
 import { createElectronHost } from './electronHost';
 import { installApplicationMenu } from './menu';
 import { JsonStore } from './jsonStore';
+import { PreferencesWindow } from './preferencesWindow';
 import { WorkbenchWindow } from './workbenchWindow';
 
 // Before anything reads `getPath('userData')` — which is derived from it — and
@@ -118,7 +119,18 @@ void app.whenReady().then(() => {
     },
   });
   wrangler.attachSurface(window);
-  installApplicationMenu(wrangler, window);
+
+  // ⌘, — the app's answer to VSCode's settings UI. It renders
+  // `src/shared/settings.ts`, which is also what `package.json`'s
+  // `contributes.configuration` is tested against, so both front ends offer
+  // the same settings and a new one is declared once.
+  const preferences = new PreferencesWindow({
+    settings: host.settingsStore,
+    log,
+    appRoot: APP_ROOT,
+    parentWindow: () => window?.browserWindow,
+  });
+  installApplicationMenu(wrangler, window, () => preferences.open());
 
   app.on('second-instance', () => window?.open());
   // macOS: the dock icon after every window has been closed. The backend is
@@ -130,6 +142,7 @@ void app.whenReady().then(() => {
 
   app.on('before-quit', () => {
     log('Agent Wrangler quitting');
+    preferences.dispose();
     window?.dispose();
     wrangler.dispose();
     host.disposeAll();

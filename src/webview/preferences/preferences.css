@@ -1,0 +1,202 @@
+/*
+ * The Preferences window.
+ *
+ * Its own document, so unlike the two panes it does have the window to itself
+ * and may size off the viewport. It still scopes everything to `#prefsApp`, for
+ * the same reason the panes do: `preferences.css` and the shell's stylesheet
+ * are loaded together, and a bare `h1` or `input` rule here would be a rule
+ * about every document the shell serves.
+ *
+ * `--vscode-*` throughout rather than a palette of its own — the window has to
+ * look like the rest of the app in both themes, and those values are already
+ * defined for exactly that.
+ */
+
+[hidden] {
+  display: none !important;
+}
+
+#prefsApp {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 18px 22px 28px;
+  overflow-y: auto;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+#prefsApp * {
+  box-sizing: border-box;
+}
+
+#prefsApp .pf-top {
+  margin-bottom: 20px;
+}
+
+#prefsApp h1 {
+  margin: 0 0 2px;
+  font-size: 1.45em;
+  font-weight: 600;
+}
+
+#prefsApp h2 {
+  margin: 0;
+  padding: 18px 0 8px;
+  font-size: 0.85em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+#prefsApp .pf-group {
+  margin-bottom: 6px;
+}
+
+#prefsApp .pf-row {
+  padding: 12px 0 14px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+#prefsApp .pf-group .pf-row:last-child {
+  border-bottom: none;
+}
+
+#prefsApp .pf-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+#prefsApp .pf-label {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.95em;
+  color: var(--vscode-foreground);
+}
+
+#prefsApp .pf-desc {
+  margin: 3px 0 0;
+  max-width: 62ch;
+  line-height: 1.45;
+  color: var(--vscode-descriptionForeground);
+}
+
+#prefsApp .pf-enumhint {
+  margin: 6px 0 0;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+#prefsApp .pf-body {
+  margin-top: 8px;
+}
+
+/* A checkbox belongs beside its name, not under its paragraph. The row is
+   re-ordered rather than built differently, so one renderer covers all four
+   types.
+
+   The row's class is `pf-type-boolean` and the control's is `pf-check`: rows and
+   controls are kept in separate namespaces because they nest, and a row that
+   matched its own input's selector inherited the input's width. */
+#prefsApp .pf-type-boolean {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    'control head'
+    '.       desc';
+  column-gap: 9px;
+  align-items: baseline;
+}
+
+#prefsApp .pf-type-boolean .pf-head {
+  grid-area: head;
+}
+#prefsApp .pf-type-boolean .pf-desc {
+  grid-area: desc;
+}
+#prefsApp .pf-type-boolean .pf-body {
+  grid-area: control;
+  margin-top: 0;
+}
+
+#prefsApp .pf-input {
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-dropdown-border));
+  border-radius: 3px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+#prefsApp input.pf-input {
+  width: 100%;
+  max-width: 52ch;
+  font-family: var(--vscode-editor-font-family);
+}
+
+/* `input.pf-number`, not `.pf-number`: the rule above it is `input.pf-input`,
+   which carries a type selector and would otherwise win the width. */
+#prefsApp input.pf-number {
+  width: 11ch;
+}
+
+#prefsApp .pf-select {
+  min-width: 22ch;
+  max-width: 52ch;
+  border-color: var(--vscode-dropdown-border);
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  font-family: var(--vscode-editor-font-family);
+}
+
+#prefsApp .pf-input:focus,
+#prefsApp .pf-check:focus-visible,
+#prefsApp .pf-reset:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+#prefsApp .pf-check {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--vscode-button-background);
+}
+
+/*
+ * Reset is only offered where there is something to reset to. Hidden rather
+ * than disabled: a permanently greyed button on twenty-two rows is noise, and
+ * the rows that have moved off their default are exactly the ones worth
+ * noticing.
+ */
+#prefsApp .pf-reset {
+  padding: 1px 7px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  font-family: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+  visibility: hidden;
+}
+
+#prefsApp .pf-row.changed .pf-reset {
+  visibility: visible;
+}
+
+#prefsApp .pf-reset:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+/* The one mark that says "you changed this", so a scan down the window finds
+   what has been touched without reading every value. */
+#prefsApp .pf-row.changed .pf-label::after {
+  content: '•';
+  margin-left: 6px;
+  color: var(--vscode-charts-blue);
+}
