@@ -8,6 +8,8 @@ External Codex sessions remain observational. Their rollout lifecycle gives Busy
 
 Wrangler-owned Codex conversations use `codex app-server --stdio`. `CodexAppServer` contains the JSON-RPC transport and `CodexRunner` reduces thread, turn, item, streaming, and approval events into the same block/composer contracts used by the existing pane. A pane subscription is disposable independently of the runner, so closing a view does not end work.
 
+Codex plan limits come from App Server's `account/rateLimits/read` method and use the existing cached polling service. The dashboard shows the matching provider's cards when filtered and labels both providers in the combined view. Claude's process-level auto-pause remains Claude-specific because an external Codex rollout does not identify a safe process to suspend.
+
 ## Electron seam
 
 The browser bundles use `createWebviewBridge`. In VSCode it wraps `acquireVsCodeApi`; an Electron preload can expose the same narrow `agentWranglerHost` object. Keep the renderer sandboxed, context isolated, and without Node integration. Filesystem access, process discovery, binary spawning, credentials, and App Server must remain in the main/backend process.

@@ -27,6 +27,7 @@ export type HostToDashboard =
       nowMs: number;
       hooks?: HookHealth;
       usage?: UsageState;
+      codexUsage?: UsageState;
       /** Saved column layout. Absent only before the host has read storage once. */
       columns?: ColumnPrefs;
       /**

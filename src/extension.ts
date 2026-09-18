@@ -6,6 +6,7 @@ import { resolveClaudeBinary } from './claude/binary';
 import { ClaudeProvider } from './claude/claudeProvider';
 import { CodexProvider } from './codex/codexProvider';
 import { CodexAppServer } from './codex/appServer';
+import { codexUsageReader } from './codex/usage';
 import { CodexRunnerService } from './codex/runner';
 import { isPidAlive } from './claude/registry';
 import { endProcess } from './claude/runner/adopt';
@@ -106,7 +107,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const turnStats = new TurnStats(context.globalState);
   const provider = new ClaudeProvider(getConfig, log, turnStats);
   const codexProvider = new CodexProvider(getConfig, log);
-  const codexRunners = new CodexRunnerService(new CodexAppServer(() => getConfig().codexBinaryPath, log));
+  const codexAppServer = new CodexAppServer(() => getConfig().codexBinaryPath, log);
+  const codexRunners = new CodexRunnerService(codexAppServer);
   context.subscriptions.push(codexRunners);
   const archive = new ArchiveService(context.globalState);
   // Which agents are frozen. Nothing is persisted: the answer is the process
@@ -150,6 +152,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push(usage);
   usage.start();
+  const codexUsage = new UsageService(
+    codexUsageReader(codexAppServer),
+    new FileUsageCache(vscode.Uri.joinPath(context.globalStorageUri, 'codex-usage.json').fsPath),
+    getConfig,
+    (message) => log(`codex ${message}`),
+  );
+  context.subscriptions.push(codexUsage);
+  codexUsage.start();
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       // autoPause.enabled belongs here too: it decides whether usage is read at
@@ -161,6 +171,7 @@ export function activate(context: vscode.ExtensionContext): void {
         e.affectsConfiguration('agentWrangler.autoPause.percent')
       ) {
         void usage.refresh();
+        void codexUsage.refresh();
       }
     }),
   );
@@ -747,6 +758,7 @@ export function activate(context: vscode.ExtensionContext): void {
     provider,
     locator,
     usage,
+    codexUsage,
     columns,
     runnerOwnership,
     projects,
@@ -767,6 +779,7 @@ export function activate(context: vscode.ExtensionContext): void {
         provider,
         locator,
         usage,
+        codexUsage,
         columns,
         runnerOwnership,
         projects,

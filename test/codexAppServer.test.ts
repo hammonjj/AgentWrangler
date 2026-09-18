@@ -38,4 +38,18 @@ describe('CodexAppServer', () => {
     expect(requests[0].id).toBe(7);
     server.dispose();
   });
+
+  it('rejects startup cleanly when the Codex binary cannot be spawned', async () => {
+    const child: any = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => true;
+    const server = new CodexAppServer(() => 'missing-codex', () => undefined, (() => {
+      queueMicrotask(() => child.emit('error', new Error('spawn ENOENT')));
+      return child;
+    }) as any);
+    await expect(server.start()).rejects.toThrow('spawn ENOENT');
+    server.dispose();
+  });
 });

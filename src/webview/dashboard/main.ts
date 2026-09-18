@@ -40,6 +40,7 @@ import {
   spendText,
   usageErrorText,
   usageSeverity,
+  type UsageError,
   type UsageSnapshot,
   type UsageState,
   type UsageWindow,
@@ -70,6 +71,7 @@ const app = document.getElementById('app')!;
 let sessions: SessionDTO[] = [];
 let hooks: HookHealth | undefined;
 let usage: UsageState | undefined;
+let codexUsage: UsageState | undefined;
 
 // ---- columns ----
 // The layout is the host's (globalState, shared by every dashboard), but a drag
@@ -535,6 +537,7 @@ function rowHtml(s: SessionDTO, span: number): string {
  * a guess), or installed while some live sessions still predate the install.
  */
 function bannerHtml(): string {
+  if (providerFilter === 'codex') return '';
   const estimatedLive = sessions.filter((s) => s.provider === 'claude' && s.status !== 'ended' && s.statusIsEstimated && !s.archived).length;
   const b = hookBanner(hooks, estimatedLive);
   if (!b) return '';
@@ -561,25 +564,26 @@ function resetsAtClock(ms: number): string {
   }
 }
 
-function usageCardTitle(w: UsageWindow, snap: UsageSnapshot): string {
+function usageCardTitle(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' | 'Codex'): string {
   const lines = [`${w.label}: ${Math.round(w.percent)}% of the limit used.`];
   if (w.resetsAtMs !== undefined) {
     lines.push(`Resets ${resetsAtClock(w.resetsAtMs)} (${resetsInText(Date.now(), w.resetsAtMs).toLowerCase()}).`);
   }
   if (w.active) lines.push('This is the window currently constraining requests.');
-  lines.push(`Read ${formatAge(Date.now(), snap.fetchedAtMs)} ago from Claude, the same source as /usage.`);
+  lines.push(`Read ${formatAge(Date.now(), snap.fetchedAtMs)} ago from ${provider}.`);
   return lines.join('\n');
 }
 
-function usageCardHtml(w: UsageWindow, snap: UsageSnapshot): string {
+function usageCardHtml(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' | 'Codex', prefix: boolean): string {
   const pct = Math.round(w.percent);
   const sev = usageSeverity(w.percent);
   const resets =
     w.resetsAtMs !== undefined
       ? `<span class="ureset" data-resets-at="${w.resetsAtMs}">${esc(resetsInText(Date.now(), w.resetsAtMs))}</span>`
       : '<span class="ureset"></span>';
-  return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap))}">
-  <div class="uhead"><span class="ulabel">${esc(w.label)}</span><span class="upct">${pct}%</span></div>
+  const label = prefix ? `${provider} · ${w.label}` : w.label;
+  return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap, provider))}">
+  <div class="uhead"><span class="ulabel">${esc(label)}</span><span class="upct">${pct}%</span></div>
   <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(w.label)}"><span class="ufill" data-w="${pct}%"></span></div>
   ${resets}
 </div>`;
@@ -608,17 +612,31 @@ function spendCardHtml(snap: UsageSnapshot): string {
  * whether the weekly limit is close. There is no refresh button: the palette
  * command "Refresh" forces a read for anyone who wants one now.
  */
-function usageHtml(): string {
-  if (!usage) return '';
-  const { last, error } = usage;
+function providerUsageErrorText(error: UsageError, provider: 'Claude' | 'Codex'): string {
+  if (provider === 'Claude') return usageErrorText(error);
+  if (error.kind === 'no-credentials') return 'No Codex login found on this machine, so plan usage is unavailable.';
+  if (error.kind === 'rate-limited') return 'Codex is rate-limiting usage reads right now. Showing the last numbers.';
+  return `Could not read Codex plan usage${error.detail ? ` (${error.detail})` : ''}.`;
+}
+
+function providerUsageHtml(state: UsageState | undefined, provider: 'Claude' | 'Codex', prefix: boolean): string {
+  if (!state) return '';
+  const { last, error } = state;
 
   if (!last) {
-    const text = error ? usageErrorText(error) : 'Reading plan usage…';
+    const text = error ? providerUsageErrorText(error, provider) : `Reading ${provider} plan usage…`;
     return `<div class="usage${error ? ' err' : ''}" role="status"><span class="unote">${esc(text)}</span></div>`;
   }
 
-  const cards = last.windows.map((w) => usageCardHtml(w, last)).join('') + spendCardHtml(last);
-  return `<div class="usage" role="region" aria-label="Plan usage">${cards}</div>`;
+  const cards = last.windows.map((w) => usageCardHtml(w, last, provider, prefix)).join('')
+    + (provider === 'Claude' ? spendCardHtml(last) : '');
+  return `<div class="usage" role="region" aria-label="${provider} plan usage">${cards}</div>`;
+}
+
+function usageHtml(): string {
+  if (providerFilter === 'claude') return providerUsageHtml(usage, 'Claude', false);
+  if (providerFilter === 'codex') return providerUsageHtml(codexUsage, 'Codex', false);
+  return providerUsageHtml(usage, 'Claude', true) + providerUsageHtml(codexUsage, 'Codex', true);
 }
 
 // ---- column header, resize handles, picker ----
@@ -918,6 +936,7 @@ window.addEventListener('message', (e: MessageEvent) => {
     if (rowMenu && !sessions.some((s) => s.key === rowMenu!.key)) rowMenu = undefined;
     hooks = m.hooks;
     usage = m.usage;
+    codexUsage = m.codexUsage;
     // Our own drag already drew this; anything else is another dashboard's.
     if (m.columns) columns = m.columns;
     // The bar lives outside #app, so `render()` never touches it.

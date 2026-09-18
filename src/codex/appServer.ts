@@ -34,6 +34,10 @@ export class CodexAppServer implements Disposable {
     this.child = child;
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (data) => this.log(`codex app-server: ${String(data).trim()}`));
+    // A missing/misconfigured binary reports through ChildProcess's `error`
+    // event rather than `exit`. Always consume it so monitoring can continue
+    // even when interactive Codex support is unavailable.
+    child.on('error', (error) => this.onExit(error));
     child.on('exit', (code, signal) => this.onExit(new Error(`Codex App Server exited (${code ?? signal ?? 'unknown'})`)));
     const lines = readline.createInterface({ input: child.stdout });
     lines.on('line', (line) => this.receive(line));

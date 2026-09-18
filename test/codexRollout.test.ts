@@ -41,4 +41,10 @@ describe('Codex rollout parsing', () => {
     expect(blocks.map((block) => block.kind)).toEqual(['user', 'tool', 'assistant']);
     expect(blocks[1]).toMatchObject({ kind: 'tool', state: 'done', result: { text: 'ok' } });
   });
+
+  it('keeps block ids stable when a bounded tail drops older records', () => {
+    const old = line('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Old' }] }, '2026-09-17T11:00:00Z');
+    const current = line('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Current' }] });
+    expect(rolloutBlocks([old, current])[1].id).toBe(rolloutBlocks([current])[0].id);
+  });
 });

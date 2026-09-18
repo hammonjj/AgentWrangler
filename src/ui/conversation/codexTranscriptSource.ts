@@ -10,7 +10,7 @@ export class CodexTranscriptSource implements ConversationSource {
   private appendEmitter = new Emitter<ConvBlock[]>();
   private patchEmitter = new Emitter<BlockPatch>();
   private subscription?: Disposable;
-  private count = 0;
+  private blocks: ConvBlock[] = [];
   private pumping = false;
 
   constructor(private session: AgentSession, provider: AgentProvider) {
@@ -24,7 +24,7 @@ export class CodexTranscriptSource implements ConversationSource {
 
   async init(): Promise<ConversationInit> {
     const read = await this.read();
-    this.count = read.blocks.length;
+    this.blocks = read.blocks;
     return read;
   }
 
@@ -43,9 +43,15 @@ export class CodexTranscriptSource implements ConversationSource {
     this.pumping = true;
     try {
       const read = await this.read();
-      if (read.blocks.length < this.count) this.count = 0;
-      const added = read.blocks.slice(this.count);
-      this.count = read.blocks.length;
+      const previous = new Map(this.blocks.map((block) => [block.id, block]));
+      for (const after of read.blocks) {
+        const before = previous.get(after.id);
+        if (before && JSON.stringify(before) !== JSON.stringify(after)) {
+          this.patchEmitter.fire({ id: after.id, block: after });
+        }
+      }
+      const added = read.blocks.filter((block) => !previous.has(block.id));
+      this.blocks = read.blocks;
       if (added.length > 0) this.appendEmitter.fire(added);
     } finally {
       this.pumping = false;

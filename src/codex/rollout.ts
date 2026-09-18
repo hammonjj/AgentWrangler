@@ -168,10 +168,20 @@ function preview(value: unknown): string {
   }
 }
 
+function stableId(kind: string, timestamp: string | undefined, identity: string): string {
+  // Rollout reads use a moving bounded tail. IDs based on array positions would
+  // change as old records fall off that tail, so hash record identity instead.
+  let hash = 2166136261;
+  for (const char of `${kind}\u0000${timestamp ?? ''}\u0000${identity}`) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `cx:${kind}:${(hash >>> 0).toString(36)}`;
+}
+
 export function rolloutBlocks(lines: string[]): ConvBlock[] {
   const blocks: ConvBlock[] = [];
   const tools = new Map<string, number>();
-  let sequence = 0;
   for (const line of lines) {
     const obj = parseLine(line);
     if (!obj) continue;
@@ -180,16 +190,16 @@ export function rolloutBlocks(lines: string[]): ConvBlock[] {
     if (obj.type === 'response_item' && payload?.type === 'message') {
       const text = textContent(payload.content);
       if (!text) continue;
-      if (payload.role === 'user') blocks.push({ kind: 'user', id: `cx:${sequence++}`, ts, text: capText(text) });
-      if (payload.role === 'assistant') blocks.push({ kind: 'assistant', id: `cx:${sequence++}`, ts, text: capText(text) });
+      if (payload.role === 'user') blocks.push({ kind: 'user', id: stableId('user', ts, text), ts, text: capText(text) });
+      if (payload.role === 'assistant') blocks.push({ kind: 'assistant', id: stableId('assistant', ts, text), ts, text: capText(text) });
       continue;
     }
     if (obj.type === 'response_item' && (payload?.type === 'function_call' || payload?.type === 'custom_tool_call')) {
-      const toolUseId = String(payload.call_id ?? payload.id ?? `tool-${sequence}`);
+      const toolUseId = String(payload.call_id ?? payload.id ?? `tool-${blocks.length}`);
       const name = String(payload.name ?? payload.tool_name ?? 'tool');
       const input = payload.arguments ?? payload.input;
       tools.set(toolUseId, blocks.length);
-      blocks.push({ kind: 'tool', id: `cx:${sequence++}`, ts, toolUseId, name, inputPreview: preview(input), input, state: 'running' });
+      blocks.push({ kind: 'tool', id: stableId('tool', ts, toolUseId), ts, toolUseId, name, inputPreview: preview(input), input, state: 'running' });
       continue;
     }
     if (obj.type === 'response_item' && (payload?.type === 'function_call_output' || payload?.type === 'custom_tool_call_output')) {
@@ -204,7 +214,8 @@ export function rolloutBlocks(lines: string[]): ConvBlock[] {
       continue;
     }
     if (obj.type === 'event_msg' && payload?.type === 'task_complete' && payload.error?.message) {
-      blocks.push({ kind: 'note', id: `cx:${sequence++}`, ts, tone: 'error', text: capText(String(payload.error.message)) });
+      const text = String(payload.error.message);
+      blocks.push({ kind: 'note', id: stableId('note', ts, text), ts, tone: 'error', text: capText(text) });
     }
   }
   return blocks;

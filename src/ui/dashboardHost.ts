@@ -77,6 +77,7 @@ export class DashboardHost {
     private health: HookHealthSource,
     private locator: SessionLocator,
     private usage: UsageSource,
+    private codexUsage: UsageSource,
     private columns: ColumnPrefsService,
     private runners: RunnerOwnership,
     private projects: ProjectSource,
@@ -106,6 +107,7 @@ export class DashboardHost {
       // changes nothing about any session still has to reach the banner.
       this.health.onDidChangeHookHealth(() => this.pushSnapshot()),
       this.usage.onDidChange(() => this.pushSnapshot()),
+      this.codexUsage.onDidChange(() => this.pushSnapshot()),
       // Columns are shared across dashboards: a drag in the editor tab reaches
       // the docked one, and neither is the owner of the layout.
       this.columns.onDidChange(() => this.pushSnapshot()),
@@ -174,6 +176,7 @@ export class DashboardHost {
       nowMs: Date.now(),
       hooks: this.health.hookHealth,
       usage: this.usage.enabled ? this.usage.usage : undefined,
+      codexUsage: this.codexUsage.enabled ? this.codexUsage.usage : undefined,
       columns: this.columns.value,
       projects: this.projects.value.length > 0 ? this.projects.value : undefined,
     };
@@ -186,6 +189,7 @@ export class DashboardHost {
         this.pushSnapshot();
         // A dashboard just opened wants today's numbers, not last minute's.
         void this.usage.refresh();
+        void this.codexUsage.refresh();
         // And a launcher with no folders in it is not a launcher.
         void this.refreshProjects();
         break;
@@ -218,6 +222,7 @@ export class DashboardHost {
       case 'refresh':
         this.actions.refreshAll();
         void this.usage.refresh({ force: true });
+        void this.codexUsage.refresh({ force: true });
         break;
       case 'installHooks':
         this.actions.installHooks();
