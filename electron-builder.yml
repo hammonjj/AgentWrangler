@@ -1,0 +1,56 @@
+# How the desktop app is packaged.
+#
+# In its own file rather than a `build` key in `package.json`, because that file
+# is the VSCode extension manifest and already carries a `contributes` block, an
+# `engines.vscode` and fifteen command declarations. Two products' metadata in
+# one document is how they start getting edited into each other.
+#
+# `extraMetadata.main` is the important line. Electron reads `main` from
+# `package.json` exactly as VSCode does, and there it points at the extension
+# host bundle — the app would load the extension and die on its first `require
+# ('vscode')`. This overrides it inside the packaged copy only; the dev scripts
+# sidestep the same problem by passing the entry on the command line.
+
+appId: com.hammonjj.agentwrangler
+productName: Agent Wrangler
+copyright: Copyright © 2026 James Hammond
+
+extraMetadata:
+  main: dist/electron/main.js
+
+directories:
+  output: release
+  buildResources: build
+
+# Only what the app actually runs. Everything is bundled by esbuild — the one
+# external is `electron` itself, which comes from the runtime — so `node_modules`
+# is deliberately absent rather than shipped and unused. Listing `files` at all
+# is what excludes it.
+files:
+  - dist/electron/**
+  - dist/webview/**
+  - build/icon.png
+
+asar: true
+
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+  darkModeSupport: true
+  # A local build for one machine, not something distributed: ad-hoc signed
+  # (`-` is codesign's ad-hoc identity), unnotarized. Not `identity: null` —
+  # that means "skip signing", which leaves the bundle carrying the Electron
+  # binary's own linker signature and nothing sealing the contents, and
+  # `codesign --verify` rejects it: "code has no resources but signature
+  # indicates they must be present". It launches anyway today; what it cannot
+  # do is hold a microphone permission, because TCC keys those on a signature.
+  identity: "-"
+  hardenedRuntime: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  target:
+    - dir
+  extendInfo:
+    # The app watches ~/.claude and spawns `claude` and `codex`; it reads no
+    # documents and handles no URLs, so it declares nothing else.
+    LSUIElement: false

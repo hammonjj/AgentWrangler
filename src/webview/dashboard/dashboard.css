@@ -56,6 +56,10 @@ body {
    control that creates work stays reachable however long the list gets.
    `position: relative` is for .projmenu, which hangs off it. */
 #bar {
+  /* How wide the folder-and-New pair is allowed to get. Shared with the popup
+     below it so the two cannot drift apart. Generous for a project name and
+     nowhere near enough to stretch across a full-screen window. */
+  --aw-launch-w: 18rem;
   position: relative;
   z-index: 3;
   flex: 0 0 auto;
@@ -73,8 +77,24 @@ body {
    instead of shoving the New button out of a 300px dock — a flex item's
    default `min-width: auto` is its content width. The label is the folder's
    basename for the same reason; the full path is on the title. */
+/* Pick where, then go: one control in two pieces, so they sit closer to each
+   other than to anything else. `margin-right: auto` is what holds the bar's two
+   halves apart — the folder button used to do it by growing, which meant the
+   wider the window the more absurd the dropdown looked. Shrinking is still
+   allowed (`flex: 0 1 auto`, `min-width: 0`): at 300px the pair gives up space
+   before the controls do. */
+#bar .launch {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: var(--aw-launch-w);
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 #bar .projbtn {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -103,12 +123,15 @@ body {
 }
 
 /* Anchored to #bar, which is already positioned, so no measured offset has to
-   be written into a style attribute — the CSP drops those. */
+   be written into a style attribute — the CSP drops those. Capped to the same
+   width as the button that opens it, and still shrinking with the bar below
+   that: `right` is what gives way when all three are set. */
 .projmenu {
   position: absolute;
   top: 100%;
   left: 6px;
   right: 6px;
+  max-width: var(--aw-launch-w);
   z-index: 1;
   max-height: 50vh;
   overflow-y: auto;

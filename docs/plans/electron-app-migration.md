@@ -125,6 +125,14 @@ are testable without a window:
 `SettingSpec.hosts` is how that is said, and the test asserts the list of hidden ones is
 exactly that.
 
+**The launcher bar.** The folder dropdown was `flex: 1 1 auto`, so it grew to fill whatever
+was left — which in an editor pane is a sensible amount and in a full-screen window is one
+dropdown stretched across two thousand pixels with every other control crushed against the
+right edge. The folder button and *+ New* are wrapped in a `.launch` group now, capped at
+`--aw-launch-w` (18rem, shared with the popup so the two cannot drift), and the bar's two
+halves are held apart by that group's `margin-right: auto` rather than by one control growing.
+It still shrinks first: at 300px the pair gives up space before the controls do.
+
 ### Phase 3 — the dialogs
 
 The message boxes and the folder picker are done — `dialog.showMessageBox` and
@@ -140,17 +148,32 @@ Also here: `openInTab`. In VSCode it gives a conversation an editor tab of its o
 would be a second window, which is a product decision rather than a port. It currently shows
 the session in the one window and says so.
 
-### Phase 4 — packaging
+### Phase 4 — packaging — **done for local use**
 
-`electron-builder`, `build/icon.icns`, a double-clickable `.app`. Then the hazards listed in
-`docs/codex-and-electron.md` § "Packaging hazards": binaries and hook helpers outside ASAR,
-hook helpers in stable user data, a versioned preference migration, and re-testing the Claude
-SDK's ESM/CJS bundle under Electron.
+`npm run app:install` builds, packages and puts `Agent Wrangler.app` in `/Applications`.
+Config is `electron-builder.yml`, kept out of `package.json` because that file is already the
+VSCode manifest and two products' metadata in one document is how they get edited into each
+other.
 
-One thing to settle first: `package.json`'s `main` is `./dist/extension.js`, which is what
-VSCode loads, and Electron reads the same field. The dev scripts sidestep it by passing the
-entry explicitly (`electron dist/electron/main.js`); a packaged app needs its own
-`package.json` in the app directory rather than this one.
+- **`extraMetadata.main`** is the line that matters. Electron reads `main` from `package.json`
+  exactly as VSCode does, and there it points at the extension host bundle — the packaged app
+  would load the extension and die on its first `require('vscode')`. This overrides it in the
+  packaged copy only.
+- **`identity: "-"`, not `identity: null`.** `null` means "skip signing", which leaves the
+  bundle carrying the Electron binary's own linker signature and nothing sealing the contents;
+  `codesign --verify` rejects that outright. It launches anyway today, but what an unsealed
+  bundle cannot do is hold a microphone permission, because TCC keys those on a signature —
+  so dictation would have broken. `-` is ad-hoc, which verifies.
+- **No `node_modules`.** Everything is bundled by esbuild and `electron` comes from the
+  runtime, so listing `files` at all is what keeps 300MB of modules out of a 297MB app.
+- **The hook helpers were already safe.** `docs/codex-and-electron.md` flags them as an ASAR
+  hazard, but `hookLogDir()` is `~/.claude/agentwrangler` — outside the bundle already, and
+  the installed hook command is an absolute path into it. Nothing to move.
+
+Still open here: notarization and a Developer ID (this is ad-hoc, for one machine); a
+versioned preference migration; re-testing the Claude SDK bundle under a packaged app rather
+than a dev run. And the ad-hoc signature changes on every rebuild, so macOS will re-prompt for
+the microphone each time dictation is used after an install.
 
 ### Later, deliberately not now
 
@@ -180,11 +203,14 @@ entry explicitly (`electron dist/electron/main.js`); a packaged app needs its ow
 ```
 npm run electron          # build, then open the window
 npm run electron:nobuild  # open it against the current dist/
+npm run app:install       # build, package, and put it in /Applications
 ```
 
-Both `env -u ELECTRON_RUN_AS_NODE` first: VSCode sets that variable in its terminals and it
+The first two `env -u ELECTRON_RUN_AS_NODE` first: VSCode sets that variable in its terminals and it
 makes the Electron binary behave as plain Node, so without it the app launches with every
-Electron API `undefined` and dies on the first one.
+Electron API `undefined` and dies on the first one. It reaches `open -a` too, so launching the
+installed app *from a VSCode terminal* fails silently in the same way; from Finder or the Dock
+it is fine.
 
 State lives in `~/Library/Application Support/Agent Wrangler` — `settings.json` (what
 `agentWrangler.*` was, and holding only what has been deliberately changed), `state.json`
