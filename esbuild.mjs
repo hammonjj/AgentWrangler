@@ -39,7 +39,7 @@ const host = {
 /** Browser bundles, one per webview. entryNames '[dir]' collapses
  * src/webview/dashboard/main.ts -> dist/webview/dashboard.js (+ dashboard.css). */
 const web = {
-  entryPoints: ['src/webview/dashboard/main.ts', 'src/webview/conversation/main.ts'],
+  entryPoints: ['src/webview/dashboard/main.ts', 'src/webview/conversation/main.ts', 'src/webview/workbench/main.ts'],
   bundle: true,
   format: 'iife',
   platform: 'browser',

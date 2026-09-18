@@ -52,10 +52,17 @@ export type HostToDashboard =
  * the conversation a panel of its own that the reusable pane never swaps away
  * from. Both used to be called pinning, which is why the second is spelled out.
  *
- * `copyId`, `goTo` and `close` come from the row's right-click menu (see
+ * `copyId` and `close` come from the row's right-click menu (see
  * `shared/rowMenu.ts`). `close` ends the process running the session and is the
  * only one of these the user can lose work to, so the host confirms it first.
  */
+/**
+ * Which half of the workbench a message belongs to. The dashboard and the
+ * conversation share one webview, and their message unions overlap (`ready`,
+ * `openExternal`), so every message is addressed rather than sniffed.
+ */
+export type PaneName = 'dashboard' | 'conversation';
+
 export type DashboardAction =
   /** Keep this row in the Pinned section at the top of the table, whatever its status. */
   | 'pin'
@@ -71,7 +78,6 @@ export type DashboardAction =
   | 'resume'
   | 'archive'
   | 'copyId'
-  | 'goTo'
   | 'close'
   /** Stop this session's process (SIGSTOP) so it spends nothing. */
   | 'pause'
@@ -129,7 +135,15 @@ export type HostToConversation =
   | { type: 'patch'; id: string; block: Partial<ConvBlock> }
   | { type: 'session'; session: SessionDTO; caps: ConversationCapabilities }
   | { type: 'composer'; composer: ComposerState }
-  | { type: 'toolResult'; id: string; text: string }
+  /**
+   * The whole of a block the pane only got the start of — the answer to
+   * `requestBlockText`. Absent entirely when the host no longer holds it
+   * (evicted, or a reload since), which the pane says on the button rather
+   * than leaving it spinning.
+   */
+  | { type: 'blockText'; id: string; text?: string }
+  | { type: 'archive'; requestId: string; blocks: ConvBlock[]; more: boolean; query: string; error?: string }
+  | { type: 'subagent'; id: string; blocks: ConvBlock[]; more: boolean; error?: string }
   /**
    * Where dictation has got to. `text` arrives once, with `state: 'idle'`, and
    * is what the composer inserts; an empty string means nothing was said.
@@ -148,11 +162,13 @@ export type HostToConversation =
    * taken (unreadable, or an image past the size limit).
    */
   | { type: 'dropped'; mentions: string[]; images: ImageAttachment[]; notes: string[] }
+  | { type: 'sendResult'; requestId: string; error?: string; adopted?: boolean }
   | { type: 'error'; text: string };
 
 export type ConversationToHost =
   | { type: 'ready' }
-  | { type: 'send'; text: string; images?: ImageAttachment[] }
+  | { type: 'send'; text: string; images?: ImageAttachment[]; requestId?: string; sessionKey?: string }
+  | { type: 'cancelSend' }
   | { type: 'interrupt' }
   | { type: 'decide'; requestId: string; decision: 'allow' | 'always' | 'deny'; message?: string }
   | { type: 'answer'; requestId: string; answers: Record<string, string> }
@@ -161,12 +177,13 @@ export type ConversationToHost =
   | { type: 'setModel'; model?: string }
   | { type: 'adopt' }
   | { type: 'release' }
-  /** The demoted old behaviour: go to the panel, terminal or window that runs this session. */
-  | { type: 'goTo' }
   /** The pane's own button for "give this conversation a tab of its own". */
   | { type: 'openInTab' }
   | { type: 'resumeHere' }
-  | { type: 'requestToolResult'; id: string }
+  /** "Show the rest" on a block whose text was capped for the wire. */
+  | { type: 'requestBlockText'; id: string; toolUseId?: string }
+  | { type: 'archive'; requestId: string; before?: string; beforeTime?: string; query?: string }
+  | { type: 'subagent'; id: string; toolUseId: string; before?: string }
   /**
    * Open an edit's patch in VSCode's diff editor. The patch travels with the
    * message because the webview is what holds the rendered blocks — the host

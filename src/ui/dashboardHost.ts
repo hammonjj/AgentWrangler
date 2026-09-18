@@ -9,10 +9,9 @@ import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { HookHealth, ProjectDTO } from '../shared/model';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
-import { buildWebviewHtml } from './html';
-import { openTargetFor, type LocationKind, type RowClickBehavior } from './openTarget';
+import type { PaneChannel } from './paneChannel';
+import { openTargetFor } from './openTarget';
 import type { SessionLocator } from './sessionLocator';
-import { isInThisWorkspace } from './workspace';
 
 /**
  * Where the banner's facts come from — the Claude provider, in practice. Kept
@@ -41,6 +40,7 @@ export interface UsageSource {
 /** Just enough of `RunnerService` for the dashboard: "are we running this one?" */
 export interface RunnerOwnership {
   owns(sessionId: string | undefined): boolean;
+  wasRunning?(sessionId: string): boolean;
   onDidChange(listener: () => void): Disposable;
 }
 
@@ -69,13 +69,12 @@ export class DashboardHost {
   private subs: { dispose(): void }[] = [];
 
   constructor(
-    private webview: vscode.Webview,
-    extensionUri: vscode.Uri,
+    private webview: PaneChannel,
     private store: SessionStore,
     private archive: ArchiveService,
     private actions: SessionActions,
     private health: HookHealthSource,
-    private locator: SessionLocator,
+    _locator: SessionLocator,
     private usage: UsageSource,
     private codexUsage: UsageSource,
     private columns: ColumnPrefsService,
@@ -85,20 +84,6 @@ export class DashboardHost {
     private pause: PauseService,
     private pins: PinService,
   ) {
-    webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(extensionUri, 'dist'),
-        vscode.Uri.joinPath(extensionUri, 'media'),
-      ],
-    };
-    webview.html = buildWebviewHtml({
-      webview,
-      extensionUri,
-      bundleName: 'dashboard',
-      title: 'Agent Wrangler',
-    });
-
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
       this.store.onDidUpdate(() => this.pushSnapshot()),
@@ -151,21 +136,13 @@ export class DashboardHost {
       .map((s) => s.pid as number);
     // Both ask the OS about the same pids and neither depends on the other:
     // where each process lives, and which of them are stopped.
-    const [locations] = await Promise.all([this.locator.locateMany(livePids), this.pause.refresh(livePids)]);
+    await this.pause.refresh(livePids);
     if (seq !== this.snapshotSeq) return; // superseded while we waited
 
-    const behavior = vscode.workspace
-      .getConfiguration('agentWrangler')
-      .get<RowClickBehavior>('rowClickOpens', 'conversation');
     const sessions = raw.map((s) => {
       // Ask the runner first: its child processes are descendants of this
       // extension host, so the process table would call them panel sessions.
       const runnerOwned = this.runners.owns(s.sessionId);
-      const location: LocationKind = runnerOwned
-        ? 'runner'
-        : s.pid === undefined
-          ? 'unavailable'
-          : (locations.get(s.pid) ?? 'unavailable');
       return {
         ...s,
         archived: this.archive.isArchived(s.key),
@@ -173,7 +150,8 @@ export class DashboardHost {
         pinnedAt: this.pins.pinnedAt(s.key),
         paused: this.pause.isPaused(s.pid) || undefined,
         runnerOwned: runnerOwned || undefined,
-        openTarget: openTargetFor(s, location, isInThisWorkspace(s.cwd), behavior),
+        wasRunningHere: this.runners.wasRunning?.(s.sessionId) || undefined,
+        openTarget: openTargetFor(),
       };
     });
     const msg: HostToDashboard = {
@@ -215,7 +193,6 @@ export class DashboardHost {
           if (this.archive.isArchived(m.key)) this.pins.set(m.key, false);
         }
         else if (m.action === 'copyId') this.actions.copyId(m.key);
-        else if (m.action === 'goTo') this.actions.goTo(m.key);
         else if (m.action === 'close') this.actions.closeSession(m.key);
         else if (m.action === 'pause') this.actions.pauseSession(m.key, true);
         else if (m.action === 'unpause') this.actions.pauseSession(m.key, false);

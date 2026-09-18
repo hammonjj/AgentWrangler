@@ -20,6 +20,7 @@
  * arrives as partial JSON that is useless until it is whole.
  */
 import {
+  capBlock,
   capText,
   MAX_TOOL_RESULT_CHARS,
   type BlockPatch,
@@ -47,6 +48,11 @@ export interface RunnerBlocksState {
   toolBlocks: Map<string, string>;
   /** Model of the message in flight, stamped onto its assistant blocks. */
   model?: string;
+  /**
+   * Block id → the whole text, for blocks too long for the wire cap. What
+   * "Show the rest" is answered from; bounded by `rememberFullText`.
+   */
+  overflow: Map<string, string>;
 }
 
 export interface TurnEnd {
@@ -66,7 +72,7 @@ export interface RunnerReduction {
 }
 
 export function createRunnerState(): RunnerBlocksState {
-  return { counter: 0, slots: [], byIndex: new Map(), toolBlocks: new Map() };
+  return { counter: 0, slots: [], byIndex: new Map(), toolBlocks: new Map(), overflow: new Map() };
 }
 
 const EMPTY: RunnerReduction = { appends: [], patches: [] };
@@ -95,8 +101,9 @@ function resultText(content: unknown): string {
   return '';
 }
 
-function toolResultView(content: unknown, isError: boolean, tur: unknown): ToolResultView {
+function toolResultView(content: unknown, isError: boolean, tur: unknown, overflow: Map<string, string>, id: string): ToolResultView {
   const raw = resultText(content).trim();
+  capBlock(overflow, id, raw, MAX_TOOL_RESULT_CHARS);
   return {
     text: raw.length > MAX_TOOL_RESULT_CHARS ? raw.slice(0, MAX_TOOL_RESULT_CHARS) : raw,
     isError,
@@ -147,7 +154,10 @@ function reduceStreamEvent(state: RunnerBlocksState, event: any): RunnerReductio
         typeof delta.text === 'string' ? delta.text : typeof delta.thinking === 'string' ? delta.thinking : undefined;
       if (piece === undefined) return EMPTY; // input_json_delta and friends
       slot.text += piece;
-      return { appends: [], patches: [{ id: slot.id, block: { text: capText(slot.text) } }] };
+      // `more` on every delta, not only the ones that overflow: the reply that
+      // has just crossed the cap has to gain its button as it happens.
+      const capped = capBlock(state.overflow, slot.id, slot.text);
+      return { appends: [], patches: [{ id: slot.id, block: { text: capped.text, more: capped.more } }] };
     }
     case 'content_block_stop': {
       const slot = slotAt(state, event.index);
@@ -177,26 +187,30 @@ function reduceAssistant(state: RunnerBlocksState, msg: any): RunnerReduction {
 
     if (b.type === 'text' && typeof b.text === 'string') {
       if (!b.text.trim()) continue;
-      const slot = claimSlot(state, 'assistant');
+      const slot = msg.parent_tool_use_id ? undefined : claimSlot(state, 'assistant');
       if (slot) {
         slot.reconciled = true;
         slot.text = b.text;
-        patches.push({ id: slot.id, block: { text: capText(b.text), streaming: false, model } });
+        const capped = capBlock(state.overflow, slot.id, b.text);
+        patches.push({ id: slot.id, block: { text: capped.text, more: capped.more, streaming: false, model } });
       } else {
-        appends.push({ kind: 'assistant', id: nextId(state), ts: nowIso(), text: capText(b.text), model });
+        const id = nextId(state);
+        appends.push({ kind: 'assistant', id, ts: nowIso(), ...capBlock(state.overflow, id, b.text), model });
       }
       continue;
     }
 
     if (b.type === 'thinking' && typeof b.thinking === 'string') {
       if (!b.thinking.trim()) continue;
-      const slot = claimSlot(state, 'thinking');
+      const slot = msg.parent_tool_use_id ? undefined : claimSlot(state, 'thinking');
       if (slot) {
         slot.reconciled = true;
         slot.text = b.thinking;
-        patches.push({ id: slot.id, block: { text: capText(b.thinking), streaming: false } });
+        const capped = capBlock(state.overflow, slot.id, b.thinking);
+        patches.push({ id: slot.id, block: { text: capped.text, more: capped.more, streaming: false } });
       } else {
-        appends.push({ kind: 'thinking', id: nextId(state), ts: nowIso(), text: capText(b.thinking) });
+        const id = nextId(state);
+        appends.push({ kind: 'thinking', id, ts: nowIso(), ...capBlock(state.overflow, id, b.thinking) });
       }
       continue;
     }
@@ -236,7 +250,7 @@ function reduceUser(state: RunnerBlocksState, msg: any): RunnerReduction {
     const isError = b.is_error === true;
     patches.push({
       id: target,
-      block: { state: isError ? 'error' : 'done', result: toolResultView(b.content, isError, msg.tool_use_result) },
+      block: { state: isError ? 'error' : 'done', result: toolResultView(b.content, isError, msg.tool_use_result, state.overflow, target) },
     });
   }
   return { appends: [], patches };
@@ -254,10 +268,15 @@ export function reduceRunnerMessage(state: RunnerBlocksState, msg: any): RunnerR
 
   switch (msg.type) {
     case 'stream_event':
-      return reduceStreamEvent(state, msg.event);
+      // Subagent complete messages carry their parent id; their index space is not the main stream's.
+      return msg.parent_tool_use_id ? EMPTY : reduceStreamEvent(state, msg.event);
 
-    case 'assistant':
-      return reduceAssistant(state, msg);
+    case 'assistant': {
+      const reduced = reduceAssistant(state, msg);
+      if (typeof msg.parent_tool_use_id === 'string') for (const block of reduced.appends) block.parentToolUseId = msg.parent_tool_use_id;
+      if (msg.context_usage) reduced.composer = { contextTokens: msg.context_usage.total_tokens, contextWindow: msg.context_usage.raw_max_tokens };
+      return reduced;
+    }
 
     case 'user':
       return reduceUser(state, msg);
@@ -269,7 +288,7 @@ export function reduceRunnerMessage(state: RunnerBlocksState, msg: any): RunnerR
       return {
         appends: isError ? [noteBlock(state, 'error', text || `Turn ended: ${msg.subtype ?? 'error'}`)] : [],
         patches: [],
-        composer: { busy: queued > 0, queued },
+        composer: { busy: queued > 0, queued, ...(typeof msg.total_cost_usd === 'number' ? { costUsd: msg.total_cost_usd } : {}) },
         turnEnd: { isError, text, queued },
       };
     }

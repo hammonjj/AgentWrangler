@@ -92,13 +92,6 @@ export function rowMenuItems(s: SessionDTO): RowMenuItem[] {
       title: 'Open this conversation in a tab that row clicks never swap away',
     });
   }
-  if (s.status !== 'ended' && s.provider === 'claude') {
-    items.push({
-      action: 'goTo',
-      label: 'Go to where it runs',
-      title: 'Reveal the terminal, Claude Code panel or VSCode window running this session',
-    });
-  }
   if (s.paused) {
     items.push({
       action: 'unpause',

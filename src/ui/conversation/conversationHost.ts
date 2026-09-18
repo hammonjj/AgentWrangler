@@ -7,6 +7,8 @@
  * split the dashboard uses between `DashboardHost` and its two shells.
  */
 import * as fs from 'node:fs/promises';
+import { archivePage, archivedTool, subagentPath } from '../../claude/conversationArchive';
+import { transcriptPathFor } from '../../claude/transcriptHistory';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { RunnerService } from '../../claude/runner/runnerService';
@@ -18,28 +20,19 @@ import type { AgentProvider } from '../../core/provider';
 import type { SessionStore } from '../../core/sessionStore';
 import { imageMediaType, mentionForPath } from '../../shared/attachments';
 import type { ConversationCapabilities, ImageAttachment } from '../../shared/conversation';
-import { MAX_IMAGE_BYTES } from '../../shared/conversation';
+import { MAX_IMAGE_BYTES, rememberFullText } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
+import type { PaneChannel } from '../paneChannel';
 import { offerDictationSetup } from '../dictationSetup';
-import { buildWebviewHtml } from '../html';
-import { adoptActionFor, SECONDARY_LABEL, secondaryActionFor, type SecondaryAction } from '../openTarget';
+import { adoptActionFor } from '../openTarget';
 import type { SessionLocator } from '../sessionLocator';
-import { isInThisWorkspace } from '../workspace';
 import { DiffContentProvider } from './diffView';
 import { RunnerSource } from './runnerSource';
 import { CodexTranscriptSource } from './codexTranscriptSource';
 import type { ConversationSource } from './source';
 import { TranscriptSource } from './transcriptSource';
-
-/** Where the pane's secondary button sends you, for the webview's label. */
-const SECONDARY_TARGET: Record<SecondaryAction, NonNullable<ConversationCapabilities['goTo']>['target']> = {
-  'reveal-panel': 'panel',
-  'show-terminal': 'terminal',
-  'focus-window': 'window',
-  'resume-terminal': 'resume',
-};
 
 /**
  * Ceiling on one drop. A dragged selection is a handful of files; a number
@@ -67,35 +60,26 @@ export class ConversationHost {
   private pendingKey?: string;
   private session?: AgentSession;
   private ready = false;
+  private pendingSend?: AbortController;
+  private archiveText = new Map<string, string>();
+  private subagentFiles = new Map<string, string>();
   /** Only the newest capability computation may land; the locator read is async. */
   private capsSeq = 0;
 
   constructor(
-    private webview: vscode.Webview,
-    extensionUri: vscode.Uri,
+    private webview: PaneChannel,
     private store: SessionStore,
     private provider: ConversationProvider,
     private codexProvider: AgentProvider,
     private runners: RunnerService,
     private codexRunners: CodexRunnerService,
     private actions: SessionActions,
-    private locator: SessionLocator,
+    _locator: SessionLocator,
     private dictation: DictationService,
     private diffs: DiffContentProvider,
     private files: FileSuggestService,
     private onTitle: (title: string) => void,
   ) {
-    webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'dist')],
-    };
-    webview.html = buildWebviewHtml({
-      webview,
-      extensionUri,
-      bundleName: 'conversation',
-      title: 'Conversation',
-    });
-
     this.subs.push(
       webview.onDidReceiveMessage((m: ConversationToHost) => void this.onMessage(m)),
       this.store.onDidUpdate(() => this.onStoreUpdate()),
@@ -140,6 +124,7 @@ export class ConversationHost {
   }
 
   dispose(): void {
+    this.pendingSend?.abort();
     this.disposeSource();
     for (const s of this.subs) s.dispose();
     this.subs = [];
@@ -148,6 +133,9 @@ export class ConversationHost {
   // ---- internals ----
 
   private bind(binding: Binding, session: AgentSession): void {
+    if (this.session?.sessionId !== session.sessionId) this.pendingSend?.abort();
+    this.archiveText.clear();
+    this.subagentFiles.clear();
     this.binding = binding;
     this.session = session;
     this.onTitle(displayTitle(session));
@@ -183,6 +171,11 @@ export class ConversationHost {
           this.provider.decidePermission(id, behavior),
         );
     this.source = source;
+    if (runner) this.sourceSubs.push(runner.onReset(() => {
+      this.binding = { kind: 'runner', runner };
+      this.session = syntheticSession(runner, this.store);
+      if (this.ready) void this.sendInit();
+    }));
     this.sourceSubs.push(
       source.onAppend((blocks) => this.post({ type: 'append', blocks })),
       source.onPatch((patch) => this.post({ type: 'patch', id: patch.id, block: patch.block })),
@@ -267,26 +260,27 @@ export class ConversationHost {
   private async caps(session: AgentSession): Promise<ConversationCapabilities> {
     const source = this.source;
     const runner = source instanceof RunnerSource ? source.runner : undefined;
-    const canSend = source?.kind === 'runner' && source.send !== undefined;
-
-    // A runner session's process is a child of this extension host, so the
-    // locator would call it "a Claude Code panel in this window". It is not:
-    // this pane is the only place it exists.
-    const action = runner
-      ? undefined
-      : secondaryActionFor(session, (await this.locator.locate(session.pid)).kind, isInThisWorkspace(session.cwd));
+    const adoptOnSend = !runner && session.provider === 'claude' && !!session.cwd;
+    const canSend = (runner ? runner.canSend : source?.kind === 'runner' && source.send !== undefined) || adoptOnSend;
 
     const adopt = session.provider === 'claude' ? adoptActionFor(session, runner !== undefined) : undefined;
     return {
       canSend,
+      adoptOnSend,
+      sendHint: adoptOnSend ? (session.statusIsEstimated ? 'Send asks you to confirm taking over this session.' : ['busy', 'stuck', 'blocked'].includes(session.status) ? 'Send queues this message until the session is idle, then takes over here.' : 'Send resumes this session here and ends its previous process.') : undefined,
       canInterrupt: canSend && (source?.composer?.busy ?? false),
       canAdopt: adopt === 'adopt',
       canResumeHere: adopt === 'resume-here',
       canRelease: runner !== undefined,
-      goTo: action ? { label: SECONDARY_LABEL[action], target: SECONDARY_TARGET[action] } : undefined,
       estimated: runner === undefined && session.statusIsEstimated === true,
-      readOnlyReason: canSend ? undefined : readOnlyReason(session, runner, action),
+      readOnlyReason: canSend ? undefined : readOnlyReason(session, runner),
     };
+  }
+
+  private transcriptFile(): string | undefined {
+    const s = this.session;
+    if (s?.provider !== 'claude') return undefined;
+    return s?.transcriptPath ?? (s?.cwd && s.sessionId ? transcriptPathFor(s.sessionId, s.cwd) : undefined);
   }
 
   private async onMessage(m: ConversationToHost): Promise<void> {
@@ -297,9 +291,24 @@ export class ConversationHost {
         this.ready = true;
         await this.sendInit();
         return;
-      case 'send':
-        await source?.send?.(m.text, m.images);
+      case 'cancelSend':
+        this.pendingSend?.abort();
         return;
+      case 'send': {
+        if (m.sessionKey && m.sessionKey !== key) { this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Conversation changed; your draft was not sent.' }); return; }
+        if (this.pendingSend) { this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Another send is pending.' }); return; }
+        const controller = new AbortController();
+        this.pendingSend = controller;
+        try {
+          if (source?.send) await source.send(m.text, m.images);
+          else if (key) await this.actions.adoptAndSend(key, m.text, m.images, controller.signal);
+          else throw new Error('No conversation selected.');
+          this.post({ type: 'sendResult', requestId: m.requestId ?? '', adopted: source?.kind === 'transcript' });
+        } catch (error) {
+          this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: error instanceof Error ? error.message : String(error) });
+        } finally { this.pendingSend = undefined; }
+        return;
+      }
       case 'interrupt':
         await source?.interrupt?.();
         return;
@@ -327,9 +336,6 @@ export class ConversationHost {
       case 'release':
         if (key) this.actions.release(key);
         return;
-      case 'goTo':
-        if (key) this.actions.goTo(key);
-        return;
       case 'openInTab':
         if (key) this.actions.openInTab(key);
         return;
@@ -339,9 +345,43 @@ export class ConversationHost {
         // ended one has nothing to end. `adopt` decides which it is.
         if (key) this.actions.adopt(key);
         return;
-      case 'requestToolResult': {
-        const text = source?.fullToolResult?.(m.id);
-        if (text !== undefined) this.post({ type: 'toolResult', id: m.id, text });
+      case 'requestBlockText': {
+        // Always answered, even with nothing: the pane has a button waiting on
+        // this, and a silence would leave it saying "Loading…" for good.
+        let text = source?.fullBlockText?.(m.id) ?? this.archiveText.get(m.id);
+        const file = this.subagentFiles.get(m.id) ?? this.transcriptFile();
+        try { if (text === undefined && m.toolUseId && file) text = (await archivedTool(file, m.toolUseId)).text; } catch { /* unavailable */ }
+        if (this.source === source) this.post({ type: 'blockText', id: m.id, text });
+        return;
+      }
+      case 'archive': {
+        try {
+          const file = this.transcriptFile();
+          if (!file) throw new Error('No transcript is available yet.');
+          const page = await archivePage(file, m.before, m.query?.slice(0, 300), false, m.beforeTime);
+          if (this.source !== source) return;
+          for (const [id, text] of page.overflow) rememberFullText(this.archiveText, id, text);
+          this.post({ type: 'archive', requestId: m.requestId, blocks: page.blocks, more: page.more, query: m.query ?? '' });
+        } catch (e) {
+          if (this.source === source) this.post({ type: 'archive', requestId: m.requestId, blocks: [], more: false, query: m.query ?? '', error: String(e) });
+        }
+        return;
+      }
+      case 'subagent': {
+        try {
+          const file = this.transcriptFile();
+          if (!file) throw new Error('No transcript is available yet.');
+          const tool = await archivedTool(file, m.toolUseId);
+          if (!tool.agentId) throw new Error('Subagent transcript is not linked yet. Try again after its result arrives.');
+          const childFile = subagentPath(file, tool.agentId);
+          const page = await archivePage(childFile, m.before, '', true);
+          if (this.source !== source) return;
+          for (const block of page.blocks) this.subagentFiles.set(block.id, childFile);
+          for (const [id, text] of page.overflow) rememberFullText(this.archiveText, id, text);
+          this.post({ type: 'subagent', id: m.id, blocks: page.blocks, more: page.more });
+        } catch (e) {
+          if (this.source === source) this.post({ type: 'subagent', id: m.id, blocks: [], more: false, error: String(e) });
+        }
         return;
       }
       case 'dictate':
@@ -512,24 +552,10 @@ function syntheticSession(runner: RunnerSession, store: SessionStore): AgentSess
 function readOnlyReason(
   session: AgentSession,
   runner: RunnerSession | undefined,
-  action: SecondaryAction | undefined,
 ): string | undefined {
   if (runner) {
     return runner.lifecycle === 'error' ? 'This session stopped with an error.' : undefined;
   }
   if (session.status === 'ended') return undefined;
-  const where =
-    action === 'reveal-panel'
-      ? 'a Claude Code panel in this window'
-      : action === 'show-terminal'
-        ? 'a terminal in this window'
-        : action === 'focus-window'
-          ? 'another VSCode window'
-          : 'outside this VSCode window';
-  // Say why Take over is missing rather than leaving its absence a mystery.
-  const busy =
-    session.status === 'waiting' || session.status === 'done'
-      ? ''
-      : ' Taking it over here has to wait for the turn in flight to finish.';
-  return `This session runs in ${where}.${busy}`;
+  return 'This session is not currently available for typing here.';
 }

@@ -11,3 +11,4 @@ tsconfig.json
 .dev-reload
 **/*.map
 .worktrees/**
+scripts/**

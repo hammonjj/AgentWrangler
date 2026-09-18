@@ -1,13 +1,9 @@
+import type { ImageAttachment } from '../shared/conversation';
+
 /** Session actions shared by the dashboard webview, conversation panes, and palette commands. */
 export interface SessionActions {
   /** Row click: show this session in the conversation pane (see `OpenTarget`). */
   smartOpen(key: string): void;
-  /**
-   * The pane's way out: reveal the Claude Code panel, terminal or VSCode window
-   * that actually runs this session. This is the behaviour a row click used to
-   * have, kept as a deliberate action rather than an accident of clicking.
-   */
-  goTo(key: string): void;
   /**
    * Open a conversation panel of this session's own, which is never swapped
    * away. Called `pin` until pinning a dashboard *row* needed that name.
@@ -23,6 +19,7 @@ export interface SessionActions {
    * flight would be thrown away. An ended one has nothing to end first.
    */
   adopt(key: string): void;
+  adoptAndSend(key: string, text: string, images: ImageAttachment[] | undefined, signal: AbortSignal): Promise<void>;
   /**
    * The opposite: hand a session this window is running back to a terminal.
    * The conversation lives in the transcript, so nothing is lost either way.

@@ -53,6 +53,10 @@ export class RunnerRegistry {
     void this.memento.update(KEY, next.slice(0, MAX_RECORDS));
   }
 
+  wasRunning(sessionId: string, now = Date.now()): boolean {
+    return this.all().some((r) => r.sessionId === sessionId && now - r.lastShownAt <= RESUME_WINDOW_MS);
+  }
+
   forget(sessionId: string): void {
     void this.memento.update(
       KEY,

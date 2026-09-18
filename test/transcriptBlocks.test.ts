@@ -142,10 +142,35 @@ describe('reduceTranscriptLines', () => {
   });
 
   it('caps a very long block rather than sending megabytes to the webview', () => {
-    const { appends } = reduce([mkAssistant([mkText('x'.repeat(MAX_BLOCK_CHARS + 500))], 'end_turn')]);
-    const text = (appends[0] as { text: string }).text;
-    expect(text.length).toBeLessThan(MAX_BLOCK_CHARS + 40);
-    expect(text.endsWith('… [truncated]')).toBe(true);
+    const state = createTranscriptState();
+    const whole = 'x'.repeat(MAX_BLOCK_CHARS + 500);
+    const { appends } = reduceTranscriptLines(state, [mkAssistant([mkText(whole)], 'end_turn')]);
+    const block = appends[0] as { id: string; text: string; more?: number };
+
+    expect(block.text).toHaveLength(MAX_BLOCK_CHARS);
+    // No marker inside the text: the reader would not be able to tell it from
+    // something the model wrote, and markdown would render it as prose.
+    expect(block.text.endsWith('… [truncated]')).toBe(false);
+    expect(block.more).toBe(500);
+    // …and the rest is held for "Show the rest" rather than thrown away.
+    expect(state.overflow.get(block.id)).toBe(whole);
+  });
+
+  it('forgets the held-back text once a block no longer overflows', () => {
+    // A reply arrives long, then its own next line rewrites it short. Holding
+    // the old tail would let the pane fetch text that no longer follows.
+    const state = createTranscriptState();
+    const long = 'y'.repeat(MAX_BLOCK_CHARS + 10);
+    const { appends } = reduceTranscriptLines(state, [mkAssistant([mkText(long)], 'end_turn')]);
+    const id = (appends[0] as { id: string }).id;
+    expect(state.overflow.has(id)).toBe(true);
+
+    // The same message continuing: the reducer extends the open block, and this
+    // time the whole of it fits.
+    state.openAssistant = { id, msgId: 'msg_1', text: 'short again' };
+    const { patches } = reduceTranscriptLines(state, [mkAssistant([mkText('!')], 'end_turn', { msgId: 'msg_1' })]);
+    expect(patches[0]).toMatchObject({ id, block: { text: 'short again\n!', more: undefined } });
+    expect(state.overflow.has(id)).toBe(false);
   });
 
   it('survives a corrupt line mid-file', () => {

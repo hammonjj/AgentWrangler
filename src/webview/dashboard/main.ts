@@ -16,8 +16,8 @@ import {
   type ColumnPrefs,
 } from '../../shared/columns';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
-import { createWebviewBridge } from '../../shared/webviewBridge';
 import { modelLabel } from '../../shared/modelName';
+import { paneApi } from '../common/paneApi';
 import { canPauseSession, clampMenuPosition, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
 import {
   askLine,
@@ -60,13 +60,11 @@ interface WebviewState {
   provider?: 'all' | 'claude' | 'codex';
 }
 
-declare function acquireVsCodeApi(): {
-  postMessage(msg: unknown): void;
-  getState(): WebviewState | undefined;
-  setState(state: WebviewState): void;
-};
-const vscodeApi = createWebviewBridge<WebviewState>(acquireVsCodeApi);
-const post = (msg: DashboardToHost) => vscodeApi.postMessage(msg);
+// Shared with the conversation pane when both live in one webview: the VSCode
+// API may only be acquired once, and messages and saved state are namespaced so
+// the two cannot overwrite each other. See `common/paneApi.ts`.
+const vscodeApi = paneApi<WebviewState>('dashboard');
+const post = (msg: DashboardToHost) => vscodeApi.post(msg);
 
 const app = document.getElementById('app')!;
 let sessions: SessionDTO[] = [];
@@ -80,7 +78,15 @@ let codexUsage: UsageState | undefined;
 // The snapshot that comes back matches what we already drew.
 let columns: ColumnPrefs = {};
 let showCodexSubagents = false;
-let narrow = document.documentElement.clientWidth < NARROW_PX;
+/**
+ * Whether the table is narrow enough to fold its optional columns away.
+ *
+ * Measured on the table's own container, not on the window. Sharing a webview
+ * with the conversation pane means the table is only ever part of the width,
+ * and the divider between them moves — so the window can be 2000px wide while
+ * the table has 400px, and the window never resizes when the divider does.
+ */
+let narrow = app.clientWidth > 0 && app.clientWidth < NARROW_PX;
 /** Open column picker, or undefined. The number is where to pin it vertically. */
 let menuTop: number | undefined;
 /** Open row context menu: which row it belongs to, and where it was asked for. */
@@ -142,36 +148,33 @@ const LENGTH = /^\d+(\.\d+)?(px|%)$/;
  * blocked. So widths ride in `data-w` (and the menus' offsets in `data-top` /
  * `data-left`) and land here, after the HTML is in the document.
  */
-function paint(html: string): void {
-  app.innerHTML = html;
-  for (const el of app.querySelectorAll<HTMLElement>('[data-w]')) {
+function applyStyles(root: HTMLElement): void {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-w]')) {
     if (LENGTH.test(el.dataset.w!)) el.style.width = el.dataset.w!;
   }
-  for (const el of app.querySelectorAll<HTMLElement>('[data-top]')) {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-top]')) {
     if (LENGTH.test(el.dataset.top!)) el.style.top = el.dataset.top!;
   }
-  for (const el of app.querySelectorAll<HTMLElement>('[data-left]')) {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-left]')) {
     if (LENGTH.test(el.dataset.left!)) el.style.left = el.dataset.left!;
   }
+}
+
+function paint(html: string): void {
+  app.innerHTML = html;
+  applyStyles(app);
 }
 
 const ICON_COLUMNS =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1"/><path d="M6.4 2.8v10.4M10.4 2.8v10.4"/></svg>';
 
+function hereChip(s: SessionDTO): string {
+  return s.runnerOwned ? '<span class="chip here">here</span>' : '';
+}
+
 function clickHint(s: SessionDTO): string {
   if (s.runnerOwned) return 'Click to open the conversation — this window runs it, so you can type into it';
-  switch (s.openTarget) {
-    case 'panel':
-      return 'Click to open in the Claude Code panel';
-    case 'terminal':
-      return 'Click to show the terminal running this session';
-    case 'window':
-      return 'Click to jump to this session in its VSCode window';
-    case 'resume':
-      return 'Click to resume in a terminal';
-    default:
-      return 'Click to open the conversation here';
-  }
+  return s.wasRunningHere ? 'Click to resume a session this workspace ran recently' : 'Click to open the conversation here';
 }
 
 /**
@@ -216,12 +219,13 @@ function rowMenuHtml(): string {
  * column (`etaCell`), not here.
  */
 /**
- * Sessions this window runs itself are the ones that can be typed into, which
- * is the single most useful thing to know at a glance about a row.
+ * There was a `here` chip on every session this window runs. It went because it
+ * marked the rule rather than the exception: nearly everything runs in one
+ * window, so it appeared on nearly every row and told the reader nothing they
+ * did not already assume. "Not here" is the fact worth a chip, and that one is
+ * not worth inventing until a second window is actually in use — the row's
+ * click hint and its tooltip already say where a session will open.
  */
-function hereChip(s: SessionDTO): string {
-  return s.runnerOwned ? '<span class="chip here" title="Running in this window — you can type into it">here</span>' : '';
-}
 
 /**
  * A frozen session. Worth a chip of its own as well as the section, because the
@@ -530,7 +534,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${pausedChip(s)}${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${s.wasRunningHere ? '<span class="chip" title="This workspace ran this session recently. Open it and send to resume.">was here</span>' : ''}${providerChip}${pausedChip(s)}${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -647,6 +651,29 @@ function usageHtml(): string {
   return providerUsageHtml(usage, 'Claude', true) + providerUsageHtml(codexUsage, 'Codex', true);
 }
 
+/**
+ * The cards live OUTSIDE `#app`, like the launcher bar and for the same two
+ * reasons. `render()` replaces `#app` wholesale, and — the point of moving them
+ * here — `#app` is the element that scrolls: anything inside it slides away
+ * once the list is longer than the dock is tall. "How much week do I have left"
+ * is asked while looking at the busy rows at the bottom of the list, so the
+ * answer has to stay on screen with them.
+ */
+const usageEl = document.createElement('div');
+usageEl.id = 'usage';
+app.insertAdjacentElement('beforebegin', usageEl);
+
+/** The strip currently drawn, so a snapshot that changes nothing leaves the bars' transition alone. */
+let usagePainted = '';
+
+function renderUsage(): void {
+  const html = usageHtml();
+  if (html === usagePainted) return;
+  usagePainted = html;
+  usageEl.innerHTML = html;
+  applyStyles(usageEl); // the bars' widths ride in `data-w`; see paint()
+}
+
 // ---- column header, resize handles, picker ----
 
 /**
@@ -714,7 +741,9 @@ bar.innerHTML = `<button id="proj" class="projbtn" aria-haspopup="listbox" aria-
 <button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
 <div id="ctl" class="ctlgroup"><select id="provider" class="providerfilter" title="Filter sessions by provider"><option value="all">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select><button id="pauseall" class="ctlbtn"></button></div>
 <div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
-app.insertAdjacentElement('beforebegin', bar);
+// First in the body, above the usage strip, which is itself above the scrolling
+// `#app` — the three are a flex column, so only the last one moves.
+document.body.insertAdjacentElement('afterbegin', bar);
 
 const projBtn = bar.querySelector<HTMLButtonElement>('#proj')!;
 const projName = bar.querySelector<HTMLElement>('#projname')!;
@@ -871,11 +900,12 @@ function render(): void {
     return;
   }
 
+  renderUsage();
   const visibleSessions = providerFilter === 'all' ? sessions : sessions.filter((s) => s.provider === providerFilter);
   if (visibleSessions.length === 0) {
     menuTop = undefined; // no table, so no button to close the picker with
     rowMenu = undefined; // and no row for a menu to belong to
-    paint(`${usageHtml()}${bannerHtml()}<div class="empty">No ${providerFilter === 'all' ? 'agent' : capitalize(providerFilter)} sessions found.
+    paint(`${bannerHtml()}<div class="empty">No ${providerFilter === 'all' ? 'agent' : capitalize(providerFilter)} sessions found.
 <div class="hint">Sessions are discovered from <code>~/.claude</code> and <code>~/.codex</code>. Start an agent session anywhere and it will appear here.</div></div>`);
     return;
   }
@@ -892,7 +922,7 @@ function render(): void {
   // so widths live on the header cells and a column that is switched off simply
   // is not rendered.
   const span = cols().length + 3; // dot + agent + data columns + actions
-  let html = `${usageHtml()}${bannerHtml()}${menuHtml()}${rowMenuHtml()}<table>${headHtml()}`;
+  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<table>${headHtml()}`;
 
   for (const sec of SECTION_ORDER) {
     const rows = groups.get(sec);
@@ -916,8 +946,8 @@ function render(): void {
   paint(html);
 }
 
-window.addEventListener('message', (e: MessageEvent) => {
-  const m = e.data as HostToDashboard;
+vscodeApi.onMessage((body) => {
+  const m = body as HostToDashboard;
   if (m.type === 'projectPicked') {
     project = m.dir;
     // The scan that will contain it is still running, and a selection with no
@@ -1098,15 +1128,21 @@ window.addEventListener('keydown', (e) => {
 });
 
 // Only the fold threshold matters here: widths are absolute and do not care how
-// wide the dock is.
+// wide the dock is. A ResizeObserver rather than a window resize listener,
+// because dragging the divider between the panes changes this width without the
+// window changing size at all.
 let lastNarrow = narrow;
-window.addEventListener('resize', () => {
-  narrow = document.documentElement.clientWidth < NARROW_PX;
+const measure = () => {
+  const width = app.clientWidth;
+  if (width === 0) return; // hidden pane: keep the last real answer
+  narrow = width < NARROW_PX;
   if (narrow !== lastNarrow) {
     lastNarrow = narrow;
     render();
   }
-});
+};
+new ResizeObserver(measure).observe(app);
+window.addEventListener('resize', measure);
 
 app.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;

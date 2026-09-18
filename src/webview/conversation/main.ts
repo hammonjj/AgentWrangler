@@ -1,5 +1,4 @@
 import './conversation.css';
-import { createWebviewBridge } from '../../shared/webviewBridge';
 import { fileUriToPath, fileUrisToPaths } from '../../shared/attachments';
 import type {
   AskState,
@@ -15,14 +14,12 @@ import { decodedBytes, IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES } from '../../shared/c
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { displayTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
+import { paneApi } from '../common/paneApi';
 
-declare function acquireVsCodeApi(): {
-  postMessage(msg: unknown): void;
-  setState(state: unknown): void;
-  getState(): unknown;
-};
-const vscodeApi = createWebviewBridge<unknown>(acquireVsCodeApi);
-const post = (msg: ConversationToHost) => vscodeApi.postMessage(msg);
+// See `common/paneApi.ts`: one acquire, one message envelope and one state slot
+// per pane, so the dashboard can share this webview.
+const vscodeApi = paneApi<{ key: string }>('conversation');
+const post = (msg: ConversationToHost) => vscodeApi.post(msg);
 
 /** Rendered blocks kept in the DOM. Older ones are dropped with a notch. */
 const MAX_BLOCK_NODES = 400;
@@ -30,6 +27,16 @@ const MAX_BLOCK_NODES = 400;
 const STICK_PX = 56;
 /** Composer grows with the message up to this, then scrolls. */
 const MAX_COMPOSER_PX = 180;
+/**
+ * How much of an ask card has to be on screen for it to count as seen. An ask
+ * whose first line is the last pixel of the view has not been read, and the
+ * strip that points at it should stay up.
+ */
+const ASK_HEAD_PX = 44;
+/** Gap left above an ask card when the view is moved to it, so it does not sit flush. */
+const ASK_TOP_GAP_PX = 8;
+/** How often an expanded block re-asks for its full text while it is still streaming. */
+const REFETCH_MS = 500;
 
 /**
  * The modes worth offering. `bypassPermissions` is deliberately absent: it
@@ -42,7 +49,7 @@ const MODES: { value: PermissionModeName; label: string }[] = [
   { value: 'plan', label: 'Plan mode' },
 ];
 
-const app = document.getElementById('app')!;
+const app = document.getElementById('convApp')!;
 app.innerHTML = `
 <div id="hdr">
   <span id="pill" class="pill"></span>
@@ -53,21 +60,23 @@ app.innerHTML = `
   <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
 </div>
 <div id="banner" hidden></div>
-<div id="scroll"><div id="notch" hidden>earlier messages not shown</div><div id="blocks"></div></div>
+<form id="findbar"><input id="find" type="search" placeholder="Find in conversation" aria-label="Find in conversation"><button>Find</button><button type="button" id="clearfind">Clear</button></form>
+<div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div></div>
 <button id="jump" hidden></button>
+<button id="asknav" class="asknav" hidden></button>
 <div id="composer">
   <div id="composerRead">
     <span id="composerNote"></span>
     <button id="adopt" class="askbtn primary" hidden></button>
-    <button id="goTo" class="hdrbtn" hidden></button>
   </div>
   <div id="composerWrite" hidden>
     <div id="composerBar">
       <select id="mode" title="Permission mode"></select>
       <select id="model" title="Model" hidden></select>
-      <span id="queued" hidden></span>
+      <span id="queued" hidden></span><span id="sessionusage" title="Estimated cost since this runner started; context from the most recent /context report"></span>
       <span class="grow"></span>
     </div>
+    <div id="slashcommands" role="listbox" hidden></div>
     <div id="mentions" class="mentions" role="listbox" hidden></div>
     <div id="attachments" hidden></div>
     <div id="composerInput">
@@ -87,10 +96,10 @@ const scroller = document.getElementById('scroll')!;
 const notch = document.getElementById('notch')!;
 const blocksEl = document.getElementById('blocks')!;
 const jump = document.getElementById('jump')!;
+const askNav = document.getElementById('asknav') as HTMLButtonElement;
 const composerRead = document.getElementById('composerRead')!;
 const composerWrite = document.getElementById('composerWrite')!;
 const composerNote = document.getElementById('composerNote')!;
-const goToBtn = document.getElementById('goTo') as HTMLButtonElement;
 const adoptBtn = document.getElementById('adopt') as HTMLButtonElement;
 const pinBtn = document.getElementById('pin') as HTMLButtonElement;
 const releaseBtn = document.getElementById('release') as HTMLButtonElement;
@@ -108,6 +117,10 @@ const composerInput = document.getElementById('composerInput')!;
 const nodes = new Map<string, HTMLElement>();
 /** Latest state of each block, since a patch is partial. */
 const blockState = new Map<string, ConvBlock>();
+/** Blocks the reader asked to see in full; a later patch must not collapse them. */
+const expanded = new Set<string>();
+/** Ids with a re-fetch already scheduled, so a streaming block asks once a tick, not once a delta. */
+const refetching = new Set<string>();
 
 let stick = true;
 let newCount = 0;
@@ -130,6 +143,31 @@ function setText(el: HTMLElement, text: string): void {
 function renderMarkdown(el: HTMLElement, text: string): void {
   el.innerHTML = mdToHtml(text);
   decorateCodeBlocks(el);
+}
+
+/**
+ * The tail of a block that was too long for the wire, on request.
+ *
+ * The host caps what it sends so that opening a long conversation does not ship
+ * a megabyte of text nobody will read; this is how the reader gets the rest of
+ * the one block they *are* reading. It matters most on a plan: approving half a
+ * plan is approving something you have not seen.
+ */
+function appendShowMore(el: HTMLElement, id: string, more: number | undefined): void {
+  if (!more) return;
+  const btn = document.createElement('button');
+  btn.className = 'showmore';
+  btn.textContent = `Show the rest (${more.toLocaleString()} more characters)`;
+  btn.addEventListener('click', () => {
+    btn.disabled = true;
+    btn.textContent = 'Loading…';
+    // Remembered, so a patch that re-caps this block (a reply still streaming)
+    // asks for the rest again instead of collapsing under the reader.
+    expanded.add(id);
+    const block = searchBlocks.get(id) ?? blockState.get(id);
+    post({ type: 'requestBlockText', id, toolUseId: block?.kind === 'tool' ? block.toolUseId : undefined });
+  });
+  el.appendChild(btn);
 }
 
 function decorateCodeBlocks(root: HTMLElement): void {
@@ -193,6 +231,7 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       body.className = 'body';
       renderMarkdown(body, b.text);
       el.appendChild(body);
+      appendShowMore(el, b.id, b.more);
       if (b.imageCount) {
         const img = document.createElement('div');
         img.className = 'sub';
@@ -208,6 +247,7 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       body.className = 'body';
       renderMarkdown(body, b.text);
       el.appendChild(body);
+      appendShowMore(el, b.id, b.more);
       break;
     }
     case 'thinking': {
@@ -220,10 +260,12 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       body.className = 'body';
       renderMarkdown(body, b.text);
       d.append(s, body);
+      appendShowMore(d, b.id, b.more);
       el.appendChild(d);
       break;
     }
     case 'tool': {
+      const children = el.querySelector(':scope > .subagent-work');
       el.className = `blk tool st-${b.state}`;
       el.innerHTML = '';
       const d = document.createElement('details');
@@ -283,9 +325,17 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
           pre.className = b.result.isError ? 'tresult err' : 'tresult';
           setText(pre, b.result.text + (b.result.truncated ? '\n… output truncated' : ''));
           d.appendChild(pre);
+          if (b.result.truncated) appendShowMore(d, b.id, 1);
         }
       }
       el.appendChild(d);
+      if (children) el.appendChild(children);
+      if (activeProvider === 'claude' && (b.name === 'Agent' || b.name === 'Task')) {
+        const load = document.createElement('button');
+        load.textContent = 'Load subagent work';
+        load.addEventListener('click', () => post({ type: 'subagent', id: b.id, toolUseId: b.toolUseId }));
+        el.appendChild(load);
+      }
       break;
     }
     case 'permission': {
@@ -333,6 +383,7 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       body.className = 'body';
       renderMarkdown(body, b.plan);
       el.appendChild(body);
+      appendShowMore(el, b.id, b.more);
       el.appendChild(planActions(b.requestId, b.state));
       break;
     }
@@ -382,6 +433,7 @@ function permissionActions(requestId: string, state: AskState, alwaysAllowRule: 
       // up saying, including "too late".
       for (const other of Array.from(row.querySelectorAll('button'))) other.disabled = true;
       post({ type: 'decide', requestId, decision });
+      followAfterAnswer();
     });
     return b;
   };
@@ -481,6 +533,7 @@ function questionForm(
     if (Object.keys(collected).length === 0) return;
     submit.disabled = true;
     post({ type: 'answer', requestId, answers: collected });
+    followAfterAnswer();
   });
   row.appendChild(submit);
   wrap.appendChild(row);
@@ -506,6 +559,7 @@ function planActions(requestId: string, state: AskState): HTMLElement {
     approve.disabled = true;
     changes.disabled = true;
     post({ type: 'plan', requestId, decision: 'approve' });
+    followAfterAnswer();
   });
 
   const feedback = document.createElement('textarea');
@@ -527,6 +581,7 @@ function planActions(requestId: string, state: AskState): HTMLElement {
     approve.disabled = true;
     changes.disabled = true;
     post({ type: 'plan', requestId, decision: 'deny', feedback: feedback.value.trim() || undefined });
+    followAfterAnswer();
   });
 
   row.append(approve, changes);
@@ -551,6 +606,31 @@ function renderDiff(pre: HTMLElement, patch: string): void {
   }
 }
 
+function childContainer(parent: HTMLElement): HTMLElement {
+  let child = parent.querySelector(':scope > .subagent-work') as HTMLElement | null;
+  if (!child) { child = document.createElement('div'); child.className = 'subagent-work'; parent.appendChild(child); }
+  return child;
+}
+
+const searchNodes = new Map<string, HTMLElement>();
+const searchBlocks = new Map<string, ConvBlock>();
+const searchResults = document.getElementById('searchresults')!;
+const findInput = document.getElementById('find') as HTMLInputElement;
+let archiveRequest = '';
+function requestArchive(query = '', before?: string, beforeTime?: string): void {
+  archiveRequest = String(Date.now());
+  notch.textContent = 'Loading…';
+  post({ type: 'archive', requestId: archiveRequest, before, beforeTime, query });
+}
+notch.addEventListener('click', () => {
+  const first = [...blocksEl.children].map((el) => (el as HTMLElement).dataset.id).find((id) => id?.startsWith('t:'));
+  const firstNode = blocksEl.firstElementChild as HTMLElement | null;
+  const live = firstNode?.dataset.id ? blockState.get(firstNode.dataset.id) : undefined;
+  requestArchive('', first, !first && live && 'ts' in live ? live.ts : undefined);
+});
+document.getElementById('findbar')!.addEventListener('submit', (e) => { e.preventDefault(); if (findInput.value.trim()) requestArchive(findInput.value.trim()); });
+document.getElementById('clearfind')!.addEventListener('click', () => { archiveRequest = ''; searchResults.hidden = true; searchResults.replaceChildren(); searchNodes.clear(); searchBlocks.clear(); findInput.value = ''; });
+
 // ---- list maintenance ----
 
 function appendBlocks(blocks: ConvBlock[]): void {
@@ -564,9 +644,12 @@ function appendBlocks(blocks: ConvBlock[]): void {
     const node = buildNode(b);
     nodes.set(b.id, node);
     blockState.set(b.id, b);
-    blocksEl.appendChild(node);
+    const parent = b.parentToolUseId ? [...blockState.values()].find((x) => x.kind === 'tool' && x.toolUseId === b.parentToolUseId) : undefined;
+    const parentNode = parent ? nodes.get(parent.id) : undefined;
+    if (parentNode) childContainer(parentNode).appendChild(node);
+    else blocksEl.appendChild(node);
   }
-  while (blocksEl.children.length > MAX_BLOCK_NODES) {
+  while (stick && blocksEl.children.length > MAX_BLOCK_NODES) {
     const first = blocksEl.firstElementChild as HTMLElement | null;
     if (!first) break;
     blocksEl.removeChild(first);
@@ -576,28 +659,158 @@ function appendBlocks(blocks: ConvBlock[]): void {
     }
     notch.hidden = false;
   }
-  if (stick) scrollToBottom();
-  else {
+  // An arriving ask is the one block the bottom of the view is the wrong place
+  // to land on: a plan or a multi-part question is usually taller than the
+  // pane, so scrolling to the end of the conversation means scrolling past the
+  // question to its buttons, and the thing being asked is off-screen above.
+  const ask = blocks.find((b) => isAsk(b) && b.state === 'pending');
+  const askNode = ask ? nodes.get(ask.id) : undefined;
+  if (stick) {
+    if (askNode) showAsk(askNode);
+    else scrollToBottom();
+  } else {
     newCount += blocks.length;
     jump.textContent = `↓ ${newCount} new`;
     jump.hidden = false;
   }
+  updateAskNav();
 }
 
-function patchBlock(id: string, partial: Partial<ConvBlock>): void {
+/**
+ * Apply a patch to one block. `follow` is what keeps a pane that is stuck to
+ * the bottom stuck; an expansion the reader asked for passes false, because
+ * being thrown to the end of the conversation is the opposite of what clicking
+ * "Show the rest" was for.
+ */
+function patchBlock(id: string, partial: Partial<ConvBlock>, follow = true): void {
   const node = nodes.get(id);
   const prev = blockState.get(id);
   if (!node || !prev) return;
   const next = { ...prev, ...partial } as ConvBlock;
   blockState.set(id, next);
   fillNode(node, next);
-  if (stick) scrollToBottom();
+  // A block being read in full that has since grown (a reply still streaming)
+  // asks again rather than snapping back to its first 6,000 characters.
+  if (expanded.has(id) && 'more' in next && next.more) scheduleRefetch(id);
+  if (follow && stick) scrollToBottom();
+  updateAskNav();
+}
+
+function scheduleRefetch(id: string): void {
+  if (refetching.has(id)) return;
+  refetching.add(id);
+  setTimeout(() => {
+    refetching.delete(id);
+    if (expanded.has(id) && nodes.has(id)) post({ type: 'requestBlockText', id });
+  }, REFETCH_MS);
 }
 
 function scrollToBottom(): void {
   scroller.scrollTop = scroller.scrollHeight;
   newCount = 0;
   jump.hidden = true;
+}
+
+/** Whether the view is at the end of the conversation, which is what makes it follow new blocks. */
+function recomputeStick(): void {
+  stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_PX;
+  if (stick) {
+    newCount = 0;
+    jump.hidden = true;
+  }
+}
+
+// ---- the ask you are being kept waiting by ----
+
+/** The three blocks that stop the agent until they are answered. */
+type AskBlock = Extract<ConvBlock, { kind: 'permission' | 'question' | 'plan' }>;
+
+function isAsk(b: ConvBlock | undefined): b is AskBlock {
+  return b !== undefined && (b.kind === 'permission' || b.kind === 'question' || b.kind === 'plan');
+}
+
+/** What to call an ask in one line, in the reader's terms rather than the tool's. */
+function askLabel(b: AskBlock): string {
+  if (b.kind === 'plan') return 'Plan ready for approval';
+  if (b.kind === 'question') return b.questions[0]?.header || b.questions[0]?.question || 'Claude has a question';
+  return b.summary ?? `${b.toolName} needs permission`;
+}
+
+/**
+ * Unanswered asks, in conversation order. Read from the DOM rather than from
+ * `blockState`, because a long conversation drops its oldest nodes and an ask
+ * that is no longer rendered is one this strip cannot point at.
+ */
+function pendingAsks(): AskBlock[] {
+  const out: AskBlock[] = [];
+  for (const el of Array.from(blocksEl.children)) {
+    const b = blockState.get((el as HTMLElement).dataset.id ?? '');
+    if (isAsk(b) && b.state === 'pending') out.push(b);
+  }
+  return out;
+}
+
+/** Is enough of this card's head on screen to read what is being asked? */
+function headVisible(node: HTMLElement): boolean {
+  const r = node.getBoundingClientRect();
+  const s = scroller.getBoundingClientRect();
+  return r.top >= s.top - 2 && r.top <= s.bottom - ASK_HEAD_PX;
+}
+
+/** Put the *top* of an ask card at the top of the view — the question, not its buttons. */
+function showAsk(node: HTMLElement): void {
+  scroller.scrollTop += node.getBoundingClientRect().top - scroller.getBoundingClientRect().top - ASK_TOP_GAP_PX;
+  // Parking at an ask means leaving the end of the conversation, so following
+  // new blocks has to stop — otherwise the next one drags the view off the
+  // question again. Being answered turns it back on.
+  recomputeStick();
+  flash(node);
+  updateAskNav();
+}
+
+/** A one-second outline, so the eye finds the card the strip just moved to. */
+function flash(node: HTMLElement): void {
+  node.classList.remove('flash');
+  // Reading offsetWidth restarts the animation; without it a second click on
+  // the strip does nothing visible.
+  void node.offsetWidth;
+  node.classList.add('flash');
+  setTimeout(() => node.classList.remove('flash'), 1200);
+}
+
+/**
+ * The strip above the composer: what Claude is waiting on, whenever the card
+ * that says it is off screen. Hidden the moment the card's head is visible —
+ * it exists to end a hunt, not to be a second copy of the question.
+ */
+function updateAskNav(): void {
+  const asks = pendingAsks();
+  const target = asks.find((b) => {
+    const n = nodes.get(b.id);
+    return n !== undefined && !headVisible(n);
+  });
+  if (!target) {
+    askNav.hidden = true;
+    askNav.removeAttribute('data-id');
+    return;
+  }
+  const node = nodes.get(target.id)!;
+  const above = node.getBoundingClientRect().top < scroller.getBoundingClientRect().top;
+  const others = asks.length - 1;
+  askNav.textContent = `${above ? '↑' : '↓'} ${askLabel(target)}${others > 0 ? ` · ${others} more waiting` : ''}`;
+  askNav.title = 'Show what Claude is waiting on';
+  askNav.dataset.id = target.id;
+  askNav.hidden = false;
+}
+
+/**
+ * An ask was just answered, so the conversation is about to carry on: follow it
+ * again. Without this a pane parked on the question stays there while the work
+ * it unblocked scrolls past underneath.
+ */
+function followAfterAnswer(): void {
+  stick = true;
+  updateAskNav();
 }
 
 // ---- header / composer ----
@@ -609,6 +822,10 @@ function setStatus(status: SessionStatus, estimated: boolean): void {
 }
 
 function setMeta(session: SessionDTO): void {
+  activeProvider = session.provider;
+  document.getElementById('findbar')!.hidden = activeProvider !== 'claude';
+  (notch as HTMLButtonElement).disabled = activeProvider !== 'claude';
+  notch.textContent = activeProvider === 'claude' ? 'Load earlier messages' : 'Earlier messages not shown';
   ttl.textContent = displayTitle(session);
   meta.textContent = [session.projectName, session.gitBranch !== 'HEAD' ? session.gitBranch : undefined, session.name]
     .filter(Boolean)
@@ -617,8 +834,6 @@ function setMeta(session: SessionDTO): void {
 
 function setCaps(next: ConversationCapabilities): void {
   caps = next;
-  goToBtn.hidden = !next.goTo;
-  if (next.goTo) goToBtn.textContent = next.goTo.label;
   releaseBtn.hidden = !next.canRelease;
 
   // Taking over is the way a read-only conversation becomes a typeable one, so
@@ -634,13 +849,17 @@ function setCaps(next: ConversationCapabilities): void {
   }
 
   composerWrite.hidden = !next.canSend;
+  modeSel.disabled = !!next.adoptOnSend;
+  modelSel.disabled = !!next.adoptOnSend;
   composerRead.hidden = next.canSend;
   // Empty rather than hidden: the note keeps its flex space, so Resume here
   // stays where the Send button sits instead of jumping to the left edge.
   // Cleared on the way in, so a reason from a read-only state cannot survive
   // into a typeable one — the row is hidden then, but a stale sentence waiting
   // in the DOM for the next hiccup is not worth the byte it saves.
-  composerNote.textContent = next.canSend ? '' : (next.readOnlyReason ?? '');
+  composerNote.textContent = next.sendHint ?? (next.canSend ? '' : (next.readOnlyReason ?? ''));
+  composerRead.hidden = next.canSend && !next.adoptOnSend;
+  msgEl.placeholder = next.sendHint ?? (activeProvider === 'codex' ? 'Message Codex…' : 'Message Claude…');
 }
 
 /** The list currently rendered, so options are rebuilt only when it changes. */
@@ -700,7 +919,7 @@ let busy = false;
 function setBusy(next: boolean): void {
   if (busy === next) return;
   busy = next;
-  sendBtn.textContent = next ? 'Stop' : 'Send';
+  sendBtn.textContent = pendingSend ? 'Cancel queued send' : next ? 'Stop' : 'Send';
   sendBtn.title = next ? 'Interrupt what Claude is doing (Enter still queues a message)' : 'Send this message';
   sendBtn.classList.toggle('stop', next);
 }
@@ -717,7 +936,10 @@ function clearComposer(): void {
   queuedEl.hidden = true;
 }
 
+let slashCommands: string[] = [];
 function setComposer(c: ComposerState): void {
+  slashCommands = activeProvider === 'claude' ? [...new Set(['compact', 'clear', 'context', ...c.slashCommands])] : [];
+  document.getElementById('sessionusage')!.textContent = [c.costUsd === undefined ? '' : `~$${c.costUsd.toFixed(3)} this run`, c.contextTokens === undefined ? '' : `Context ${c.contextTokens.toLocaleString()} / ${c.contextWindow?.toLocaleString() ?? '?'} (last report)`].filter(Boolean).join(' · ');
   if (c.permissionMode) modeSel.value = c.permissionMode;
   setModels(c.models);
   selectModel(c.model);
@@ -1030,20 +1252,21 @@ function insertMentions(mentions: string[]): void {
   msgEl.focus();
 }
 
+let activeSession = '';
+let activeProvider = 'claude';
+const drafts = new Map<string, { text: string; images: ImageAttachment[] }>();
+let pendingSend: { id: string; text: string; session: string } | undefined;
 function sendMessage(): void {
+  if (pendingSend) { post({ type: 'cancelSend' }); return; }
   const text = msgEl.value.trim();
   // An image on its own is a real message; only both being empty is a no-op.
   if (!text && attachments.length === 0) return;
-  post({ type: 'send', text, images: attachments.length > 0 ? attachments : undefined });
-  // The host will say so too, a moment later; doing it here means the button
-  // answers the click that sent the message rather than the round trip.
-  setBusy(true);
-  msgEl.value = '';
-  attachments = [];
-  renderAttachments();
-  autoGrow();
-  stick = true;
-  scrollToBottom();
+  const requestId = String(Date.now());
+  pendingSend = { id: requestId, text: msgEl.value, session: activeSession };
+  post({ type: 'send', requestId, sessionKey: activeSession, text, images: attachments.length > 0 ? attachments : undefined });
+  sendBtn.textContent = 'Cancel queued send';
+  msgEl.readOnly = true;
+  return;
 }
 
 // ---- dictation ----
@@ -1114,22 +1337,24 @@ micBtn.addEventListener('click', () => {
 // ---- events ----
 
 scroller.addEventListener('scroll', () => {
-  const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < STICK_PX;
-  if (nearBottom) {
-    stick = true;
-    newCount = 0;
-    jump.hidden = true;
-  } else {
-    stick = false;
-  }
+  recomputeStick();
+  updateAskNav();
 });
+
+window.addEventListener('resize', updateAskNav);
 
 jump.addEventListener('click', () => {
   stick = true;
   scrollToBottom();
+  updateAskNav();
 });
 
-goToBtn.addEventListener('click', () => post({ type: 'goTo' }));
+askNav.addEventListener('click', () => {
+  const id = askNav.dataset.id;
+  const node = id ? nodes.get(id) : undefined;
+  if (node) showAsk(node);
+});
+
 pinBtn.addEventListener('click', () => post({ type: 'openInTab' }));
 releaseBtn.addEventListener('click', () => post({ type: 'release' }));
 adoptBtn.addEventListener('click', () => {
@@ -1139,14 +1364,32 @@ adoptBtn.addEventListener('click', () => {
   post({ type: caps?.canAdopt ? 'adopt' : 'resumeHere' });
 });
 sendBtn.addEventListener('click', () => {
-  if (busy) post({ type: 'interrupt' });
+  if (pendingSend) post({ type: 'cancelSend' });
+  else if (busy) post({ type: 'interrupt' });
   else sendMessage();
 });
 modeSel.addEventListener('change', () => post({ type: 'setPermissionMode', mode: modeSel.value as PermissionModeName }));
 modelSel.addEventListener('change', () => post({ type: 'setModel', model: modelSel.value }));
 
-msgEl.addEventListener('input', autoGrow);
+const slashList = document.getElementById('slashcommands')!;
+msgEl.addEventListener('input', () => {
+  autoGrow();
+  slashList.replaceChildren();
+  const value = msgEl.value;
+  slashList.hidden = !/^\/[\w-]*$/.test(value);
+  if (slashList.hidden) return;
+  for (const command of slashCommands.filter((c) => c.startsWith(value.slice(1))).slice(0, 12)) {
+    const button = document.createElement('button');
+    button.textContent = '/' + command;
+    button.addEventListener('click', () => { msgEl.value = '/' + command + ' '; slashList.hidden = true; msgEl.focus(); });
+    slashList.appendChild(button);
+  }
+});
 msgEl.addEventListener('keydown', (e) => {
+  if (!slashList.hidden && (e.key === 'Tab' || e.key === 'ArrowDown')) {
+    e.preventDefault(); (slashList.querySelector('button') as HTMLButtonElement | null)?.focus(); return;
+  }
+  if (e.key === 'Escape') slashList.hidden = true;
   // The mention picker owns these keys while it is open, so Enter completes a
   // path instead of sending a half-typed message.
   if (mentionsOpen() && !e.isComposing) {
@@ -1183,12 +1426,83 @@ blocksEl.addEventListener('click', (e) => {
   else if (href.startsWith('/')) post({ type: 'openFile', path: href });
 });
 
-window.addEventListener('message', (e: MessageEvent) => {
-  const m = e.data as HostToConversation;
+vscodeApi.onMessage((body) => {
+  const m = body as HostToConversation;
   switch (m.type) {
+    case 'archive': {
+      if (m.requestId !== archiveRequest) break;
+      notch.textContent = 'Load earlier messages';
+      if (m.error) { note(m.error); break; }
+      if (m.query) {
+        searchResults.replaceChildren();
+        searchResults.hidden = false;
+        const label = document.createElement('p');
+        label.textContent = `${m.blocks.length} matching blocks${m.more ? ' (most recent 100)' : ''}`;
+        searchResults.appendChild(label);
+        searchNodes.clear(); searchBlocks.clear();
+        for (const b of m.blocks) { const node = buildNode(b); searchNodes.set(b.id, node); searchBlocks.set(b.id, b); searchResults.appendChild(node); }
+        scroller.scrollTop = 0;
+      } else {
+        const height = scroller.scrollHeight;
+        for (const b of [...m.blocks].reverse()) {
+          if (nodes.has(b.id)) continue;
+          const node = buildNode(b); nodes.set(b.id, node); blockState.set(b.id, b); blocksEl.prepend(node);
+        }
+        notch.hidden = !m.more;
+        scroller.scrollTop += scroller.scrollHeight - height;
+        stick = false;
+      }
+      break;
+    }
+    case 'subagent': {
+      const parent = nodes.get(m.id);
+      if (!parent) break;
+      if (m.error) { note(m.error); break; }
+      const container = childContainer(parent);
+      for (const b of [...m.blocks].reverse()) {
+        if (nodes.has(b.id)) continue;
+        const node = buildNode(b); nodes.set(b.id, node); blockState.set(b.id, b); container.prepend(node);
+      }
+      container.querySelector('.earlier-subagent')?.remove();
+      if (m.more) {
+        const btn = document.createElement('button'); btn.className = 'earlier-subagent'; btn.textContent = 'Earlier subagent work';
+        const block = blockState.get(m.id);
+        btn.addEventListener('click', () => { if (block?.kind === 'tool') post({ type: 'subagent', id: m.id, toolUseId: block.toolUseId, before: m.blocks[0]?.id }); });
+        container.prepend(btn);
+      }
+      break;
+    }
+    case 'sendResult':
+      if (pendingSend?.id !== m.requestId) break;
+      const sentSession = pendingSend.session;
+      pendingSend = undefined;
+      msgEl.readOnly = false;
+      if (sentSession !== activeSession) { if (!m.error) drafts.delete(sentSession); break; }
+      sendBtn.textContent = busy ? 'Stop' : 'Send';
+      if (m.error) note(m.error);
+      else {
+        msgEl.value = ''; attachments = []; renderAttachments(); autoGrow();
+        if (m.adopted) {
+          note('Session taken over here. Release hands it back to a terminal.');
+          const undo = document.createElement('button'); undo.textContent = 'Undo takeover';
+          undo.addEventListener('click', () => post({ type: 'release' }));
+          blocksEl.lastElementChild?.appendChild(undo);
+        }
+      }
+      break;
     case 'init':
+      if (activeSession !== m.session.key) {
+        if (activeSession) drafts.set(activeSession, { text: msgEl.value, images: [...attachments] });
+        if (pendingSend) post({ type: 'cancelSend' });
+        activeSession = m.session.key;
+        const draft = drafts.get(activeSession);
+        msgEl.value = draft?.text ?? ''; attachments = draft?.images ?? []; msgEl.readOnly = false;
+        renderAttachments(); autoGrow();
+      }
+      archiveRequest = ''; searchResults.hidden = true; searchResults.replaceChildren(); searchNodes.clear(); searchBlocks.clear();
       nodes.clear();
       blockState.clear();
+      expanded.clear();
       blocksEl.innerHTML = '';
       notch.hidden = !m.truncated;
       setMeta(m.session);
@@ -1199,7 +1513,11 @@ window.addEventListener('message', (e: MessageEvent) => {
       setBanner(m.caps);
       stick = true;
       appendBlocks(m.blocks);
-      scrollToBottom();
+      // Opening a pane on a session that is already waiting lands on what it is
+      // waiting for. `appendBlocks` has done that when there was an ask, so the
+      // fallback to the end of the conversation is only for when there was not.
+      if (pendingAsks().length === 0) scrollToBottom();
+      updateAskNav();
       // So a window reload brings this pane back on the same conversation.
       vscodeApi.setState({ key: m.session.key });
       break;
@@ -1218,10 +1536,32 @@ window.addEventListener('message', (e: MessageEvent) => {
     case 'composer':
       setComposer(m.composer);
       break;
-    case 'toolResult': {
-      const node = nodes.get(m.id);
-      const pre = node?.querySelector('.tresult');
-      if (pre) setText(pre as HTMLElement, m.text);
+    case 'blockText': {
+      const prev = searchBlocks.get(m.id) ?? blockState.get(m.id);
+      const node = searchNodes.get(m.id) ?? nodes.get(m.id);
+      if (!prev || !node) break;
+      if (m.text === undefined) {
+        // The host no longer holds it (evicted, or a reload since). Say so on
+        // the button: silently leaving the short text there would read as the
+        // whole thing.
+        expanded.delete(m.id);
+        const btn = node.querySelector('.showmore') as HTMLButtonElement | null;
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = 'The rest is no longer held — reopen the conversation to read it in full';
+        }
+        break;
+      }
+      // Expanding a block above the view would push everything below it down,
+      // so the block is held still instead: whatever the reader was looking at
+      // stays where it was.
+      const before = node.getBoundingClientRect().top;
+      if (searchNodes.has(m.id)) {
+        const next = (prev.kind === 'tool' ? { ...prev, result: { ...prev.result, text: m.text, truncated: false } } : prev.kind === 'plan' ? { ...prev, plan: m.text, more: undefined } : { ...prev, text: m.text, more: undefined }) as ConvBlock;
+        searchBlocks.set(m.id, next); fillNode(node, next); break;
+      }
+      patchBlock(m.id, (prev.kind === 'tool' ? { result: { ...prev.result, text: m.text, truncated: false } } : prev.kind === 'plan' ? { plan: m.text, more: undefined } : { text: m.text, more: undefined }) as Partial<ConvBlock>, false);
+      scroller.scrollTop += node.getBoundingClientRect().top - before;
       break;
     }
     case 'fileSuggestions':

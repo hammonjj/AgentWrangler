@@ -67,20 +67,8 @@ export interface TurnProgress {
   pace?: TurnPace;
 }
 
-/**
- * What a row click does.
- *
- * `conversation` — the Agent Wrangler conversation pane in this window. The
- * default for every session, because jumping the user between VSCode windows
- * to reach a conversation costs more attention than it is worth.
- *
- * The rest are the old "go to wherever it runs" behaviour, still reachable via
- * `agentWrangler.rowClickOpens` and always available as the pane's own
- * secondary action. `panel`: the Claude Code panel in this window. `terminal`:
- * show the integrated terminal running it. `window`: hand off to the VSCode
- * window that owns it. `resume`: a new terminal running `claude --resume`.
- */
-export type OpenTarget = 'conversation' | 'panel' | 'terminal' | 'window' | 'resume';
+/** A row always opens the local conversation pane. */
+export type OpenTarget = 'conversation';
 
 export interface SubagentSummary {
   working: number;
@@ -170,6 +158,8 @@ export interface AgentSession {
    * typed into rather than only read (host decorates).
    */
   runnerOwned?: boolean;
+  /** Recently interrupted in this workspace; resume from the conversation pane. */
+  wasRunningHere?: boolean;
   /**
    * True when `status` was inferred from the transcript rather than pushed by a
    * hook — i.e. a session started before hooks were installed. Rendered dimmed
