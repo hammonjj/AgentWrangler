@@ -1,6 +1,22 @@
 # Electron preparation handoff
 
-Status: paused at the user's request to conserve the 5-hour token budget, 2026-09-18. Work on branch `feat/electron-prep` in `.worktrees/electron-prep`; the primary checkout and its pre-existing dirty changes are preserved.
+Status: **implementation committed**, awaiting interactive acceptance and the live-use gate. Work on branch `feat/electron-prep` in `.worktrees/electron-prep`.
+
+## Current state (2026-09-18, after the Codex session paused)
+
+The Codex session that wrote this left everything in the working tree. That work is now committed and the branch has caught up with `main`:
+
+- `bdf1254` — the whole phases 1–4 implementation, plus the phase 4d changes carried from the primary checkout (James confirmed those are his and should land here).
+- `ed59067` — `git merge --no-ff main`, recording the ancestry the hand-applied Codex patch never had. Conflicts all resolved to this branch, since `main` still carries the pre-workbench shape phase 4 deletes (separate dashboard/conversation panels, the relay, "Go to where it runs"). Dropped from `main`'s side: a duplicate `SubagentSummary` declaration and two now-unused `createWebviewBridge` imports.
+
+Branch is zero behind `main`, working tree clean, typecheck + build + 53 files / 630 tests green.
+
+**The primary checkout's dirty phase-4d changes are now redundant** — they are in `bdf1254`. They are still sitting in `~/Documents/GitHub/AgentWrangler`; clearing them is James's call, not an agent's.
+
+Everything below is the original Codex session's account, kept for the reasoning.
+
+---
+
 
 ## Scope and source
 Implement the saved Claude plan "The pane replaces window jumping": recover interrupted sessions, adopt on send, fill conversation gaps, then remove automatic window-jumping. This is preparation, not an Electron port.
