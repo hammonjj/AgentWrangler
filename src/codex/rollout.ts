@@ -1,0 +1,241 @@
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { capText, type ConvBlock } from '../shared/conversation';
+import { needsReply } from '../core/needsReply';
+
+const HEAD_BYTES = 128 * 1024;
+const TAIL_BYTES = 512 * 1024;
+
+export interface CodexRolloutSummary {
+  sessionId: string;
+  path: string;
+  cwd?: string;
+  source?: string;
+  title?: string;
+  subtitle?: string;
+  model?: string;
+  gitBranch?: string;
+  startedAtMs?: number;
+  lastActivityAt: number;
+  turnStartedAtMs?: number;
+  turnComplete: boolean;
+  lastAssistantText?: string;
+  failed: boolean;
+}
+
+function textContent(content: unknown): string | undefined {
+  if (typeof content === 'string') return content.trim() || undefined;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter((part: any) => part && (part.type === 'input_text' || part.type === 'output_text' || part.type === 'text'))
+    .map((part: any) => part.text)
+    .filter((text): text is string => typeof text === 'string')
+    .join('\n')
+    .trim();
+  return text || undefined;
+}
+
+function parseLine(line: string): any | undefined {
+  try {
+    const value = JSON.parse(line);
+    return value && typeof value === 'object' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs: number): CodexRolloutSummary | undefined {
+  let sessionId: string | undefined;
+  let cwd: string | undefined;
+  let source: string | undefined;
+  let title: string | undefined;
+  let subtitle: string | undefined;
+  let model: string | undefined;
+  let gitBranch: string | undefined;
+  let startedAtMs: number | undefined;
+  let turnStartedAtMs: number | undefined;
+  let turnComplete = true;
+  let lastAssistantText: string | undefined;
+  let failed = false;
+
+  for (const line of lines) {
+    const obj = parseLine(line);
+    if (!obj) continue;
+    const ts = typeof obj.timestamp === 'string' ? Date.parse(obj.timestamp) : NaN;
+    const payload = obj.payload;
+    if (obj.type === 'session_meta' && payload) {
+      sessionId = typeof payload.id === 'string' ? payload.id : payload.session_id;
+      cwd = typeof payload.cwd === 'string' ? payload.cwd : cwd;
+      source = typeof payload.source === 'string' ? payload.source : payload.originator;
+      model = typeof payload.model === 'string' ? payload.model : model;
+      startedAtMs = Number.isFinite(ts) ? ts : startedAtMs;
+      const branch = payload.git?.branch ?? payload.git_branch;
+      gitBranch = typeof branch === 'string' ? branch : gitBranch;
+      continue;
+    }
+    if (obj.type === 'turn_context' && payload) {
+      cwd = typeof payload.cwd === 'string' ? payload.cwd : cwd;
+      model = typeof payload.model === 'string' ? payload.model : model;
+      continue;
+    }
+    if (obj.type === 'event_msg' && payload?.type === 'task_started') {
+      turnComplete = false;
+      failed = false;
+      turnStartedAtMs = typeof payload.started_at === 'number' ? payload.started_at * 1000 : Number.isFinite(ts) ? ts : undefined;
+      continue;
+    }
+    if (obj.type === 'event_msg' && payload?.type === 'task_complete') {
+      turnComplete = true;
+      failed = !!payload.error;
+      if (typeof payload.last_agent_message === 'string') lastAssistantText = payload.last_agent_message;
+      continue;
+    }
+    if (obj.type !== 'response_item' || !payload) continue;
+    if (payload.type === 'message') {
+      const text = textContent(payload.content);
+      if (!text) continue;
+      if (payload.role === 'user') {
+        subtitle = capText(text.replace(/\s+/g, ' '), 220);
+        title ??= subtitle;
+      } else if (payload.role === 'assistant') {
+        lastAssistantText = text;
+      }
+    }
+  }
+
+  if (!sessionId) {
+    const match = /([0-9a-f]{8}-[0-9a-f-]{27,})\.jsonl$/i.exec(filePath);
+    sessionId = match?.[1];
+  }
+  if (!sessionId) return undefined;
+  return {
+    sessionId,
+    path: filePath,
+    cwd,
+    source,
+    title,
+    subtitle,
+    model,
+    gitBranch,
+    startedAtMs,
+    lastActivityAt: mtimeMs,
+    turnStartedAtMs,
+    turnComplete,
+    lastAssistantText,
+    failed,
+  };
+}
+
+async function readSlice(filePath: string, start: number, length: number): Promise<string> {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    return buffer.subarray(0, bytesRead).toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function readRolloutSummary(filePath: string): Promise<CodexRolloutSummary | undefined> {
+  const stat = await fs.stat(filePath);
+  const headLength = Math.min(stat.size, HEAD_BYTES);
+  const tailStart = Math.max(headLength, stat.size - TAIL_BYTES);
+  const [head, tail] = await Promise.all([
+    readSlice(filePath, 0, headLength),
+    tailStart < stat.size ? readSlice(filePath, tailStart, stat.size - tailStart) : Promise.resolve(''),
+  ]);
+  const tailText = tailStart > headLength ? tail.slice(Math.max(0, tail.indexOf('\n') + 1)) : tail;
+  return summarizeRolloutLines(`${head}${tailText}`.split('\n'), filePath, stat.mtimeMs);
+}
+
+export function rolloutStatus(
+  summary: CodexRolloutSummary,
+  nowMs: number,
+  stuckThresholdMs: number,
+): 'busy' | 'stuck' | 'waiting' | 'done' {
+  if (!summary.turnComplete) return nowMs - summary.lastActivityAt >= stuckThresholdMs ? 'stuck' : 'busy';
+  if (summary.failed) return 'waiting';
+  return needsReply(summary.lastAssistantText) ? 'waiting' : 'done';
+}
+
+function preview(value: unknown): string {
+  if (typeof value === 'string') return capText(value.replace(/\s+/g, ' '), 300);
+  try {
+    return capText(JSON.stringify(value), 300);
+  } catch {
+    return '';
+  }
+}
+
+export function rolloutBlocks(lines: string[]): ConvBlock[] {
+  const blocks: ConvBlock[] = [];
+  const tools = new Map<string, number>();
+  let sequence = 0;
+  for (const line of lines) {
+    const obj = parseLine(line);
+    if (!obj) continue;
+    const payload = obj.payload;
+    const ts = typeof obj.timestamp === 'string' ? obj.timestamp : undefined;
+    if (obj.type === 'response_item' && payload?.type === 'message') {
+      const text = textContent(payload.content);
+      if (!text) continue;
+      if (payload.role === 'user') blocks.push({ kind: 'user', id: `cx:${sequence++}`, ts, text: capText(text) });
+      if (payload.role === 'assistant') blocks.push({ kind: 'assistant', id: `cx:${sequence++}`, ts, text: capText(text) });
+      continue;
+    }
+    if (obj.type === 'response_item' && (payload?.type === 'function_call' || payload?.type === 'custom_tool_call')) {
+      const toolUseId = String(payload.call_id ?? payload.id ?? `tool-${sequence}`);
+      const name = String(payload.name ?? payload.tool_name ?? 'tool');
+      const input = payload.arguments ?? payload.input;
+      tools.set(toolUseId, blocks.length);
+      blocks.push({ kind: 'tool', id: `cx:${sequence++}`, ts, toolUseId, name, inputPreview: preview(input), input, state: 'running' });
+      continue;
+    }
+    if (obj.type === 'response_item' && (payload?.type === 'function_call_output' || payload?.type === 'custom_tool_call_output')) {
+      const toolUseId = String(payload.call_id ?? payload.id ?? '');
+      const index = tools.get(toolUseId);
+      if (index === undefined) continue;
+      const block = blocks[index];
+      if (block.kind === 'tool') {
+        const text = typeof payload.output === 'string' ? payload.output : preview(payload.output);
+        blocks[index] = { ...block, state: 'done', result: { text: capText(text, 4000), isError: false, truncated: text.length > 4000 } };
+      }
+      continue;
+    }
+    if (obj.type === 'event_msg' && payload?.type === 'task_complete' && payload.error?.message) {
+      blocks.push({ kind: 'note', id: `cx:${sequence++}`, ts, tone: 'error', text: capText(String(payload.error.message)) });
+    }
+  }
+  return blocks;
+}
+
+export async function readRolloutBlocks(filePath: string, maxBytes: number = TAIL_BYTES): Promise<{ blocks: ConvBlock[]; truncated: boolean }> {
+  const stat = await fs.stat(filePath);
+  const start = Math.max(0, stat.size - maxBytes);
+  let text = await readSlice(filePath, start, stat.size - start);
+  if (start > 0) text = text.slice(Math.max(0, text.indexOf('\n') + 1));
+  return { blocks: rolloutBlocks(text.split('\n')), truncated: start > 0 };
+}
+
+export async function findRollouts(root: string, cutoffMs: number): Promise<string[]> {
+  const found: string[] = [];
+  async function walk(dir: string): Promise<void> {
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    await Promise.all(entries.map(async (entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return walk(full);
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) return;
+      try {
+        if ((await fs.stat(full)).mtimeMs >= cutoffMs) found.push(full);
+      } catch { /* disappeared during the scan */ }
+    }));
+  }
+  await walk(root);
+  return found;
+}

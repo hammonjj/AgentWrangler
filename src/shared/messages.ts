@@ -90,7 +90,7 @@ export type DashboardToHost =
   /** A column was dragged, hidden or shown — persist this layout for every dashboard. */
   | { type: 'setColumns'; prefs: ColumnPrefs }
   /** Start a Claude Code conversation in `cwd`, this window running it, and show the pane. */
-  | { type: 'newConversation'; cwd: string }
+  | { type: 'newConversation'; cwd: string; provider?: 'claude' | 'codex' }
   /** "Browse…" was chosen: open the folder dialog. A choice comes back as `projectPicked`. */
   | { type: 'browseProject' }
   /** The X on a dropdown row: stop offering this folder. Browsing back to it undoes this. */

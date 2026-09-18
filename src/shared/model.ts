@@ -85,6 +85,8 @@ export type OpenTarget = 'conversation' | 'panel' | 'terminal' | 'window' | 'res
 export interface AgentSession {
   /** Provider id, e.g. 'claude'. */
   provider: string;
+  /** Client that originated the session, e.g. vscode, cli, or desktop. */
+  client?: string;
   sessionId: string;
   /** Globally unique key: `${provider}:${sessionId}`. */
   key: string;

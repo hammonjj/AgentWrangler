@@ -15,6 +15,7 @@ import {
   type ColumnPrefs,
 } from '../../shared/columns';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
+import { createWebviewBridge } from '../../shared/webviewBridge';
 import { modelLabel } from '../../shared/modelName';
 import { canPauseSession, clampMenuPosition, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
 import {
@@ -54,6 +55,7 @@ interface WebviewState {
    * changing where the other starts its next conversation.
    */
   project?: string;
+  provider?: 'all' | 'claude' | 'codex';
 }
 
 declare function acquireVsCodeApi(): {
@@ -61,7 +63,7 @@ declare function acquireVsCodeApi(): {
   getState(): WebviewState | undefined;
   setState(state: WebviewState): void;
 };
-const vscodeApi = acquireVsCodeApi();
+const vscodeApi = createWebviewBridge<WebviewState>(acquireVsCodeApi);
 const post = (msg: DashboardToHost) => vscodeApi.postMessage(msg);
 
 const app = document.getElementById('app')!;
@@ -108,9 +110,10 @@ const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
+let providerFilter: 'all' | 'claude' | 'codex' = saved?.provider ?? 'all';
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project });
+  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, provider: providerFilter });
 }
 
 function esc(s: string): string {
@@ -493,6 +496,7 @@ function rowHtml(s: SessionDTO, span: number): string {
       : esc(s.title);
   const kindChip =
     s.kind && s.kind !== 'interactive' ? `<span class="chip kind">${esc(capitalize(s.kind))}</span>` : '';
+  const providerChip = `<span class="chip provider ${esc(s.provider)}" title="${esc(s.client ? `${capitalize(s.provider)} · ${s.client}` : capitalize(s.provider))}">${s.provider === 'codex' ? 'Codex' : 'Claude'}</span>`;
 
   // Anything without a column of its own right now — switched off, or folded
   // away by a narrow dock — rides on the row's second line instead, so hiding a
@@ -516,7 +520,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${pausedChip(s)}${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${pausedChip(s)}${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -531,7 +535,7 @@ function rowHtml(s: SessionDTO, span: number): string {
  * a guess), or installed while some live sessions still predate the install.
  */
 function bannerHtml(): string {
-  const estimatedLive = sessions.filter((s) => s.status !== 'ended' && s.statusIsEstimated && !s.archived).length;
+  const estimatedLive = sessions.filter((s) => s.provider === 'claude' && s.status !== 'ended' && s.statusIsEstimated && !s.archived).length;
   const b = hookBanner(hooks, estimatedLive);
   if (!b) return '';
   if (b.dismissible && bannerDismissed === hooks?.kind) return '';
@@ -680,7 +684,7 @@ bar.id = 'bar';
 // the pause button and is where anything fleet-wide belongs later.
 bar.innerHTML = `<button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
 <button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
-<div id="ctl" class="ctlgroup"><button id="pauseall" class="ctlbtn"></button></div>
+<div id="ctl" class="ctlgroup"><select id="provider" class="providerfilter" title="Filter sessions by provider"><option value="all">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select><button id="pauseall" class="ctlbtn"></button></div>
 <div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
 app.insertAdjacentElement('beforebegin', bar);
 
@@ -689,6 +693,13 @@ const projName = bar.querySelector<HTMLElement>('#projname')!;
 const projMenu = bar.querySelector<HTMLElement>('#projmenu')!;
 const newBtn = bar.querySelector<HTMLButtonElement>('#new')!;
 const pauseBtn = bar.querySelector<HTMLButtonElement>('#pauseall')!;
+const providerSelect = bar.querySelector<HTMLSelectElement>('#provider')!;
+providerSelect.value = providerFilter;
+providerSelect.addEventListener('change', () => {
+  providerFilter = providerSelect.value as typeof providerFilter;
+  saveState();
+  render();
+});
 
 let projects: ProjectDTO[] = [];
 let menuOpen = false;
@@ -704,6 +715,8 @@ function renderLauncher(): void {
   projName.textContent = cur ? (projects.find((p) => p.dir === cur)?.name ?? cur) : 'Choose a folder…';
   projBtn.title = cur ?? 'Choose a folder to start a conversation in';
   newBtn.disabled = cur === undefined;
+  const starts = providerFilter === 'codex' ? 'Codex' : 'Claude Code';
+  newBtn.title = `Start a ${starts} conversation in this folder, running in this window`;
   // An open menu is showing the list that just changed, so redraw it in place
   // rather than closing it out from under the pointer.
   if (menuOpen) renderMenu();
@@ -784,7 +797,7 @@ document.addEventListener(
 
 newBtn.addEventListener('click', () => {
   const cwd = currentProject();
-  if (cwd) post({ type: 'newConversation', cwd });
+  if (cwd) post({ type: 'newConversation', cwd, provider: providerFilter === 'codex' ? 'codex' : 'claude' });
 });
 
 // ---- fleet controls ----
@@ -830,16 +843,17 @@ function render(): void {
     return;
   }
 
-  if (sessions.length === 0) {
+  const visibleSessions = providerFilter === 'all' ? sessions : sessions.filter((s) => s.provider === providerFilter);
+  if (visibleSessions.length === 0) {
     menuTop = undefined; // no table, so no button to close the picker with
     rowMenu = undefined; // and no row for a menu to belong to
-    paint(`${usageHtml()}${bannerHtml()}<div class="empty">No agent sessions found.
-<div class="hint">Sessions are discovered from <code>~/.claude</code>. Start a Claude Code session anywhere and it will appear here.</div></div>`);
+    paint(`${usageHtml()}${bannerHtml()}<div class="empty">No ${providerFilter === 'all' ? 'agent' : capitalize(providerFilter)} sessions found.
+<div class="hint">Sessions are discovered from <code>~/.claude</code> and <code>~/.codex</code>. Start an agent session anywhere and it will appear here.</div></div>`);
     return;
   }
 
   const groups = new Map<SectionId, SessionDTO[]>();
-  for (const s of sessions) {
+  for (const s of visibleSessions) {
     const sec = sectionOf(s);
     const list = groups.get(sec);
     if (list) list.push(s);

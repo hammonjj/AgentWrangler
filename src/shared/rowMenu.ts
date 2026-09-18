@@ -32,6 +32,7 @@ export interface RowMenuItem {
  * since the runner holds the handle itself.
  */
 export function canCloseSession(s: SessionDTO): boolean {
+  if (s.provider !== 'claude') return false;
   if (s.status === 'ended') return false;
   return s.runnerOwned === true || s.pid !== undefined;
 }
@@ -91,7 +92,7 @@ export function rowMenuItems(s: SessionDTO): RowMenuItem[] {
       title: 'Open this conversation in a tab that row clicks never swap away',
     });
   }
-  if (s.status !== 'ended') {
+  if (s.status !== 'ended' && s.provider === 'claude') {
     items.push({
       action: 'goTo',
       label: 'Go to where it runs',

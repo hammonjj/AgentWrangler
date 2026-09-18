@@ -60,7 +60,7 @@ export interface ProjectSource {
 
 /** Starting a conversation is the extension's job, not the dashboard's; it only asks. */
 export interface ConversationLauncher {
-  newConversation(cwd: string): Promise<unknown>;
+  newConversation(cwd: string, provider?: 'claude' | 'codex'): Promise<unknown>;
   /** Run the folder dialog. `undefined` = cancelled, and the dropdown keeps what it had. */
   browseForProject(): Promise<string | undefined>;
 }
@@ -226,7 +226,7 @@ export class DashboardHost {
         this.columns.set(m.prefs);
         break;
       case 'newConversation':
-        void this.launcher.newConversation(m.cwd);
+        void this.launcher.newConversation(m.cwd, m.provider);
         break;
       case 'browseProject':
         void this.browseProject();

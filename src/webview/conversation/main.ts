@@ -1,4 +1,5 @@
 import './conversation.css';
+import { createWebviewBridge } from '../../shared/webviewBridge';
 import { fileUriToPath, fileUrisToPaths } from '../../shared/attachments';
 import type {
   AskState,
@@ -20,7 +21,7 @@ declare function acquireVsCodeApi(): {
   setState(state: unknown): void;
   getState(): unknown;
 };
-const vscodeApi = acquireVsCodeApi();
+const vscodeApi = createWebviewBridge<unknown>(acquireVsCodeApi);
 const post = (msg: ConversationToHost) => vscodeApi.postMessage(msg);
 
 /** Rendered blocks kept in the DOM. Older ones are dropped with a notch. */

@@ -34,6 +34,8 @@ function materialFingerprint(s: AgentSession): string {
     s.gitBranch ?? '',
     s.worktree ?? '',
     s.model ?? '',
+    s.provider,
+    s.client ?? '',
     s.pid ?? '',
     // Constant per conversation, but it arrives with the first transcript read
     // rather than with the row, so the change from absent to known has to be
