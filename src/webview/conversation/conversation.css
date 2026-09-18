@@ -24,7 +24,7 @@
 
 html,
 body,
-#app {
+#convApp {
   margin: 0;
   padding: 0;
   height: 100%;
@@ -33,7 +33,7 @@ body,
   color: var(--vscode-foreground);
 }
 
-#app {
+#convApp {
   display: flex;
   flex-direction: column;
 }

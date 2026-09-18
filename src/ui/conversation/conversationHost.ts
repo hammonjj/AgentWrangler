@@ -21,8 +21,8 @@ import { MAX_IMAGE_BYTES } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
+import type { PaneChannel } from '../paneChannel';
 import { offerDictationSetup } from '../dictationSetup';
-import { buildWebviewHtml } from '../html';
 import { adoptActionFor, SECONDARY_LABEL, secondaryActionFor, type SecondaryAction } from '../openTarget';
 import type { SessionLocator } from '../sessionLocator';
 import { isInThisWorkspace } from '../workspace';
@@ -69,8 +69,7 @@ export class ConversationHost {
   private capsSeq = 0;
 
   constructor(
-    private webview: vscode.Webview,
-    extensionUri: vscode.Uri,
+    private webview: PaneChannel,
     private store: SessionStore,
     private provider: ConversationProvider,
     private runners: RunnerService,
@@ -81,17 +80,6 @@ export class ConversationHost {
     private files: FileSuggestService,
     private onTitle: (title: string) => void,
   ) {
-    webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'dist')],
-    };
-    webview.html = buildWebviewHtml({
-      webview,
-      extensionUri,
-      bundleName: 'conversation',
-      title: 'Conversation',
-    });
-
     this.subs.push(
       webview.onDidReceiveMessage((m: ConversationToHost) => void this.onMessage(m)),
       this.store.onDidUpdate(() => this.onStoreUpdate()),

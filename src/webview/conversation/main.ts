@@ -14,14 +14,12 @@ import { decodedBytes, IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES } from '../../shared/c
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { displayTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
+import { paneApi } from '../common/paneApi';
 
-declare function acquireVsCodeApi(): {
-  postMessage(msg: unknown): void;
-  setState(state: unknown): void;
-  getState(): unknown;
-};
-const vscodeApi = acquireVsCodeApi();
-const post = (msg: ConversationToHost) => vscodeApi.postMessage(msg);
+// See `common/paneApi.ts`: one acquire, one message envelope and one state slot
+// per pane, so the dashboard can share this webview.
+const vscodeApi = paneApi<{ key: string }>('conversation');
+const post = (msg: ConversationToHost) => vscodeApi.post(msg);
 
 /** Rendered blocks kept in the DOM. Older ones are dropped with a notch. */
 const MAX_BLOCK_NODES = 400;
@@ -41,7 +39,7 @@ const MODES: { value: PermissionModeName; label: string }[] = [
   { value: 'plan', label: 'Plan mode' },
 ];
 
-const app = document.getElementById('app')!;
+const app = document.getElementById('convApp')!;
 app.innerHTML = `
 <div id="hdr">
   <span id="pill" class="pill"></span>
@@ -1182,8 +1180,8 @@ blocksEl.addEventListener('click', (e) => {
   else if (href.startsWith('/')) post({ type: 'openFile', path: href });
 });
 
-window.addEventListener('message', (e: MessageEvent) => {
-  const m = e.data as HostToConversation;
+vscodeApi.onMessage((body) => {
+  const m = body as HostToConversation;
   switch (m.type) {
     case 'init':
       nodes.clear();

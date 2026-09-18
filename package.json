@@ -14,31 +14,13 @@
   "main": "./dist/extension.js",
   "activationEvents": [
     "onStartupFinished",
-    "onWebviewPanel:agentWrangler.dashboardPanel"
+    "onWebviewPanel:agentWrangler.workbench"
   ],
   "contributes": {
-    "viewsContainers": {
-      "panel": [
-        {
-          "id": "agentWrangler",
-          "title": "Agent Wrangler",
-          "icon": "media/icon.svg"
-        }
-      ]
-    },
-    "views": {
-      "agentWrangler": [
-        {
-          "type": "webview",
-          "id": "agentWrangler.dashboard",
-          "name": "Agents"
-        }
-      ]
-    },
     "commands": [
       {
         "command": "agentWrangler.openDashboard",
-        "title": "Agent Wrangler: Open Dashboard"
+        "title": "Agent Wrangler: Open Workbench"
       },
       {
         "command": "agentWrangler.refresh",
@@ -47,36 +29,36 @@
       },
       {
         "command": "agentWrangler.newConversation",
-        "title": "Agent Wrangler: New Conversation…",
+        "title": "Agent Wrangler: New Conversation\u2026",
         "icon": "$(add)"
       },
       {
         "command": "agentWrangler.openConversation",
-        "title": "Agent Wrangler: Open Conversation…"
+        "title": "Agent Wrangler: Open Conversation\u2026"
       },
       {
         "command": "agentWrangler.pinConversation",
-        "title": "Agent Wrangler: Open Conversation in Its Own Tab…"
+        "title": "Agent Wrangler: Open Conversation in Its Own Tab\u2026"
       },
       {
         "command": "agentWrangler.pinToTop",
-        "title": "Agent Wrangler: Pin or Unpin a Session…"
+        "title": "Agent Wrangler: Pin or Unpin a Session\u2026"
       },
       {
         "command": "agentWrangler.renameConversation",
-        "title": "Agent Wrangler: Rename a Conversation…"
+        "title": "Agent Wrangler: Rename a Conversation\u2026"
       },
       {
         "command": "agentWrangler.goToSession",
-        "title": "Agent Wrangler: Go to Where a Session Runs…"
+        "title": "Agent Wrangler: Go to Where a Session Runs\u2026"
       },
       {
         "command": "agentWrangler.resumeInTerminal",
-        "title": "Agent Wrangler: Resume Session in Terminal…"
+        "title": "Agent Wrangler: Resume Session in Terminal\u2026"
       },
       {
         "command": "agentWrangler.copySessionId",
-        "title": "Agent Wrangler: Copy Session ID…"
+        "title": "Agent Wrangler: Copy Session ID\u2026"
       },
       {
         "command": "agentWrangler.pauseAll",
@@ -88,15 +70,15 @@
       },
       {
         "command": "agentWrangler.pauseSession",
-        "title": "Agent Wrangler: Pause or Resume an Agent…"
+        "title": "Agent Wrangler: Pause or Resume an Agent\u2026"
       },
       {
         "command": "agentWrangler.revealTranscript",
-        "title": "Agent Wrangler: Reveal Transcript in Finder…"
+        "title": "Agent Wrangler: Reveal Transcript in Finder\u2026"
       },
       {
         "command": "agentWrangler.installHooks",
-        "title": "Agent Wrangler: Install Status Hooks…"
+        "title": "Agent Wrangler: Install Status Hooks\u2026"
       },
       {
         "command": "agentWrangler.uninstallHooks",
@@ -104,27 +86,15 @@
       }
     ],
     "menus": {
-      "view/title": [
-        {
-          "command": "agentWrangler.newConversation",
-          "when": "view == agentWrangler.dashboard",
-          "group": "navigation@1"
-        },
-        {
-          "command": "agentWrangler.refresh",
-          "when": "view == agentWrangler.dashboard",
-          "group": "navigation@2"
-        }
-      ],
       "editor/title": [
         {
           "command": "agentWrangler.newConversation",
-          "when": "activeWebviewPanelViewType == agentWrangler.dashboardPanel",
+          "when": "activeWebviewPanelViewType == agentWrangler.workbench",
           "group": "navigation@1"
         },
         {
           "command": "agentWrangler.refresh",
-          "when": "activeWebviewPanelViewType == agentWrangler.dashboardPanel",
+          "when": "activeWebviewPanelViewType == agentWrangler.workbench",
           "group": "navigation@2"
         }
       ]
@@ -144,11 +114,6 @@
           ],
           "default": "conversation",
           "description": "What clicking a session row does. The conversation pane keeps you in one window; 'Go to where it runs' is still available from the pane and the command palette."
-        },
-        "agentWrangler.conversation.openBeside": {
-          "type": "boolean",
-          "default": true,
-          "description": "Open the conversation pane in an editor group beside the current one, so the dashboard stays visible. Turn off to open it in the active group."
         },
         "agentWrangler.runner.defaultPermissionMode": {
           "type": "string",
@@ -195,23 +160,10 @@
           "default": "",
           "description": "Path to ffmpeg, used to record the microphone. Empty searches PATH and the Homebrew prefixes."
         },
-        "agentWrangler.dashboardLocation": {
-          "type": "string",
-          "enum": [
-            "editor",
-            "panel"
-          ],
-          "enumDescriptions": [
-            "Open the dashboard as an editor tab, in the main editor area.",
-            "Open the dashboard in the bottom panel, next to Terminal."
-          ],
-          "default": "editor",
-          "description": "Where the dashboard opens. The other location stays available: the bottom panel view is always contributed, and the editor tab can be reopened from the command palette."
-        },
         "agentWrangler.openOnStartup": {
           "type": "boolean",
           "default": true,
-          "description": "Open the dashboard automatically when a window starts. A dashboard tab restored by VSCode is left as it came back."
+          "description": "Open the Agent Wrangler workbench automatically when a window starts. A tab restored by VSCode is left as it came back."
         },
         "agentWrangler.claudeBinaryPath": {
           "type": "string",
@@ -222,7 +174,7 @@
           "type": "number",
           "default": 600,
           "minimum": 10,
-          "description": "A busy session with no transcript writes or hook events for this long is shown as POSSIBLY STUCK. Keep it generous: the model is silent while thinking or writing a large file, routinely for 2–6 minutes."
+          "description": "A busy session with no transcript writes or hook events for this long is shown as POSSIBLY STUCK. Keep it generous: the model is silent while thinking or writing a large file, routinely for 2\u20136 minutes."
         },
         "agentWrangler.endedWindowHours": {
           "type": "number",

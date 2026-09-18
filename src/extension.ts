@@ -37,7 +37,6 @@ import type { PermissionModeName } from './shared/conversation';
 import { displayLabel, displayTitle, STATUS_LABEL, type AgentSession, type OpenTarget, type SessionStatus } from './shared/model';
 import type { SessionActions } from './ui/actions';
 import {
-  CONVERSATION_PANEL_TYPE,
   CONVERSATION_PINNED_TYPE,
   ConversationPanelManager,
   ConversationPanelSerializer,
@@ -45,8 +44,7 @@ import {
 import { FileSuggestService } from './core/fileSuggest';
 import { DiffContentProvider } from './ui/conversation/diffView';
 import type { ConversationLauncher } from './ui/dashboardHost';
-import { DASHBOARD_PANEL_TYPE, DashboardPanelManager, DashboardPanelSerializer } from './ui/dashboardPanel';
-import { DashboardViewProvider } from './ui/dashboardView';
+import { WORKBENCH_PANEL_TYPE, WorkbenchPanelManager, WorkbenchPanelSerializer } from './ui/workbenchPanel';
 import { watchForDevReload } from './ui/devReload';
 import { adoptActionFor, openTargetFor, type RowClickBehavior } from './ui/openTarget';
 import { CrossWindowRelay } from './ui/relay';
@@ -171,7 +169,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(runners);
 
-  const showInPane = (s: AgentSession) => conversations.show(s.key);
+  const showInPane = (s: AgentSession) => workbench.show(s.key);
 
   const fallbackOpen = (s: AgentSession) => {
     if (s.status === 'ended') resumeInTerminal(s, getConfig);
@@ -317,7 +315,7 @@ export function activate(context: vscode.ExtensionContext): void {
       permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
       model: model || undefined,
     });
-    conversations.showRunner(runner);
+    workbench.showRunner(runner);
     log(`adopted ${s.sessionId} into this window`);
   };
 
@@ -667,8 +665,8 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   });
 
-  // The conversation pane: one reusable panel that row clicks swap, plus a
-  // pinned panel per session the user wants to keep on screen.
+  // Pinned conversations only: a session given a tab of its own, which row
+  // clicks never swap away. The reusable pane lives in the workbench.
   // Serves the two sides of an edit's diff to VSCode's diff editor.
   const diffs = new DiffContentProvider();
   context.subscriptions.push(diffs);
@@ -690,12 +688,8 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     conversations,
     vscode.window.registerWebviewPanelSerializer(
-      CONVERSATION_PANEL_TYPE,
-      new ConversationPanelSerializer(conversations, false),
-    ),
-    vscode.window.registerWebviewPanelSerializer(
       CONVERSATION_PINNED_TYPE,
-      new ConversationPanelSerializer(conversations, true),
+      new ConversationPanelSerializer(conversations),
     ),
   );
 
@@ -720,54 +714,32 @@ export function activate(context: vscode.ExtensionContext): void {
     browseForProject: () => browseForProject(),
   };
 
-  // The dashboard has two homes: an editor tab (default) and the bottom panel.
-  // Both are always registered; the setting only decides where opening it goes.
-  const dashboardPanel = new DashboardPanelManager(
-    context.extensionUri,
+  // The workbench: the table and the conversation in one tab.
+  const workbench = new WorkbenchPanelManager({
+    extensionUri: context.extensionUri,
     store,
-    archive,
-    actions,
     provider,
+    runners,
+    actions,
     locator,
+    dictation,
+    diffs,
+    files: fileSuggest,
+    archive,
+    health: provider,
     usage,
     columns,
-    runners,
     projects,
     launcher,
     pause,
     pins,
-  );
+  });
   context.subscriptions.push(
-    dashboardPanel,
-    vscode.window.registerWebviewPanelSerializer(DASHBOARD_PANEL_TYPE, new DashboardPanelSerializer(dashboardPanel)),
-    vscode.window.registerWebviewViewProvider(
-      DashboardViewProvider.viewId,
-      new DashboardViewProvider(
-        context.extensionUri,
-        store,
-        archive,
-        actions,
-        provider,
-        locator,
-        usage,
-        columns,
-        runners,
-        projects,
-        launcher,
-        pause,
-        pins,
-      ),
-      { webviewOptions: { retainContextWhenHidden: true } },
-    ),
+    workbench,
+    vscode.window.registerWebviewPanelSerializer(WORKBENCH_PANEL_TYPE, new WorkbenchPanelSerializer(workbench)),
   );
 
-  const dashboardInEditor = () =>
-    vscode.workspace.getConfiguration('agentWrangler').get<string>('dashboardLocation', 'editor') !== 'panel';
-
-  const openDashboard = (opts?: { preserveFocus?: boolean }) => {
-    if (dashboardInEditor()) dashboardPanel.open(opts);
-    else void vscode.commands.executeCommand('agentWrangler.dashboard.focus');
-  };
+  const openDashboard = (opts?: { preserveFocus?: boolean }) => workbench.open(opts);
 
   createStatusBar(store, archive, pause, context);
 
@@ -862,7 +834,7 @@ export function activate(context: vscode.ExtensionContext): void {
       permissionMode: cfg.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
       model: model || undefined,
     });
-    conversations.showRunner(runner);
+    workbench.showRunner(runner);
     return runner;
   };
 
@@ -1008,7 +980,7 @@ export function activate(context: vscode.ExtensionContext): void {
     log(`resumed ${record.sessionId} after a reload`);
     // Beside the dashboard, without taking the cursor: a window that has just
     // come back should not start by moving your focus.
-    conversations.showRunner(runner, { preserveFocus: true });
+    workbench.showRunner(runner, { preserveFocus: true });
   };
 
   // After the store's first scan, so "is it running elsewhere?" has an answer.
@@ -1049,7 +1021,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // where and how it came back rather than adding a second one.
   if (vscode.workspace.getConfiguration('agentWrangler').get<boolean>('openOnStartup', true)) {
     setTimeout(() => {
-      if (dashboardInEditor() && dashboardPanel.isOpen) return;
+      if (workbench.isOpen) return;
       openDashboard();
     }, STARTUP_OPEN_DELAY_MS);
   }
