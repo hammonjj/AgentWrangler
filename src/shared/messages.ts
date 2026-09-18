@@ -27,8 +27,10 @@ export type HostToDashboard =
       nowMs: number;
       hooks?: HookHealth;
       usage?: UsageState;
+      codexUsage?: UsageState;
       /** Saved column layout. Absent only before the host has read storage once. */
       columns?: ColumnPrefs;
+      showCodexSubagents?: boolean;
       /**
        * Folders the launcher's dropdown offers, newest-used first. Absent until
        * the first scan resolves; an empty array means the scan genuinely found
@@ -89,8 +91,9 @@ export type DashboardToHost =
   | { type: 'installHooks' }
   /** A column was dragged, hidden or shown — persist this layout for every dashboard. */
   | { type: 'setColumns'; prefs: ColumnPrefs }
+  | { type: 'setShowCodexSubagents'; value: boolean }
   /** Start a Claude Code conversation in `cwd`, this window running it, and show the pane. */
-  | { type: 'newConversation'; cwd: string }
+  | { type: 'newConversation'; cwd: string; provider?: 'claude' | 'codex' }
   /** "Browse…" was chosen: open the folder dialog. A choice comes back as `projectPicked`. */
   | { type: 'browseProject' }
   /** The X on a dropdown row: stop offering this folder. Browsing back to it undoes this. */

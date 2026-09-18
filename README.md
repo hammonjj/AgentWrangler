@@ -2,7 +2,7 @@
 
 Local VSCode extension that monitors every AI agent session on this machine — who is **waiting on you**, who is busy, who looks stuck, and who is done — in one live dashboard.
 
-v1 supports **Claude Code** (all sessions across all VSCode windows and terminals). The data layer is provider-based so Codex can be added later.
+Agent Wrangler supports **Claude Code and Codex** sessions across local VSCode windows, terminals, and desktop clients. The dashboard can filter by provider, and conversations started from Agent Wrangler can run through either Claude's Agent SDK or Codex App Server.
 
 Status comes from Claude Code's own hooks when they're installed, so *Blocked on you* means a permission prompt is genuinely on screen — not a guess from a quiet transcript.
 
@@ -16,6 +16,8 @@ Then open this folder in VSCode and press **F5** (Run Agent Wrangler). A new Ext
 
 - **Agent Wrangler dashboard**, opened for you at startup as an editor tab in the main editor area: all sessions grouped *Blocked on you → Waiting → Possibly stuck → Done → Busy → Ended*. Set `agentWrangler.dashboardLocation` to `panel` to dock it in the bottom panel next to Terminal instead, or turn `agentWrangler.openOnStartup` off to open it yourself.
 - **Status bar bell**: `$(bell-dot) N waiting` when agents are blocked on you; click to open the dashboard.
+
+Codex discovery reads bounded tails from `~/.codex/sessions`; it does not modify Codex's state database. A Codex row carries its originating client when the rollout reports one. External Codex conversations are live, read-only transcript views. Set the dashboard provider filter to **Codex** before pressing **+ New** to start a fully interactive Codex thread through App Server, including streaming replies, interruption, and approval decisions.
 
 ## Install it for real (dogfooding)
 

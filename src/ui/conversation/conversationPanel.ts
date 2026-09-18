@@ -11,8 +11,10 @@ import * as vscode from 'vscode';
 import type { RunnerService } from '../../claude/runner/runnerService';
 import { displayTitle } from '../../shared/model';
 import type { RunnerSession } from '../../claude/runner/runnerSession';
+import type { CodexRunner, CodexRunnerService } from '../../codex/runner';
 import type { DictationService } from '../../core/dictation';
 import type { SessionStore } from '../../core/sessionStore';
+import type { AgentProvider } from '../../core/provider';
 import type { SessionActions } from '../actions';
 import type { SessionLocator } from '../sessionLocator';
 import type { FileSuggestService } from '../../core/fileSuggest';
@@ -40,7 +42,9 @@ export class ConversationPanelManager implements vscode.Disposable {
     private extensionUri: vscode.Uri,
     private store: SessionStore,
     private provider: ConversationProvider,
+    private codexProvider: AgentProvider,
     private runners: RunnerService,
+    private codexRunners: CodexRunnerService,
     private actions: SessionActions,
     private locator: SessionLocator,
     private dictation: DictationService,
@@ -71,6 +75,10 @@ export class ConversationPanelManager implements vscode.Disposable {
    */
   showRunner(runner: RunnerSession, opts?: { preserveFocus?: boolean }): void {
     this.ensureShared(opts?.preserveFocus ?? false).host.showRunner(runner);
+  }
+
+  showCodexRunner(runner: CodexRunner, opts?: { preserveFocus?: boolean }): void {
+    this.ensureShared(opts?.preserveFocus ?? false).host.showCodexRunner(runner);
   }
 
   private ensureShared(preserveFocus: boolean): Shell {
@@ -162,7 +170,9 @@ export class ConversationPanelManager implements vscode.Disposable {
       this.extensionUri,
       this.store,
       this.provider,
+      this.codexProvider,
       this.runners,
+      this.codexRunners,
       this.actions,
       this.locator,
       this.dictation,

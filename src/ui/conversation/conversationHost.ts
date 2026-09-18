@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { RunnerService } from '../../claude/runner/runnerService';
 import type { RunnerSession } from '../../claude/runner/runnerSession';
+import type { CodexRunner, CodexRunnerService } from '../../codex/runner';
 import { DictationSetupError, type DictationService } from '../../core/dictation';
 import type { FileSuggestService } from '../../core/fileSuggest';
 import type { AgentProvider } from '../../core/provider';
@@ -28,6 +29,7 @@ import type { SessionLocator } from '../sessionLocator';
 import { isInThisWorkspace } from '../workspace';
 import { DiffContentProvider } from './diffView';
 import { RunnerSource } from './runnerSource';
+import { CodexTranscriptSource } from './codexTranscriptSource';
 import type { ConversationSource } from './source';
 import { TranscriptSource } from './transcriptSource';
 
@@ -54,7 +56,7 @@ export interface ConversationProvider extends AgentProvider {
  * What the pane is showing: a session the store knows about, or a runner we
  * just started, whose id and store entry do not exist yet.
  */
-type Binding = { kind: 'store'; key: string } | { kind: 'runner'; runner: RunnerSession };
+type Binding = { kind: 'store'; key: string } | { kind: 'runner'; runner: RunnerSession } | { kind: 'codex-runner'; runner: CodexRunner };
 
 export class ConversationHost {
   private subs: { dispose(): void }[] = [];
@@ -73,7 +75,9 @@ export class ConversationHost {
     extensionUri: vscode.Uri,
     private store: SessionStore,
     private provider: ConversationProvider,
+    private codexProvider: AgentProvider,
     private runners: RunnerService,
+    private codexRunners: CodexRunnerService,
     private actions: SessionActions,
     private locator: SessionLocator,
     private dictation: DictationService,
@@ -98,6 +102,7 @@ export class ConversationHost {
       // A runner's id arriving, or its lifecycle changing, changes what the
       // pane can offer even when the store has not moved.
       this.runners.onDidChange(() => this.onStoreUpdate()),
+      this.codexRunners.onDidChange(() => this.onStoreUpdate()),
     );
   }
 
@@ -128,6 +133,10 @@ export class ConversationHost {
   showRunner(runner: RunnerSession): void {
     if (this.binding?.kind === 'runner' && this.binding.runner === runner) return;
     this.bind({ kind: 'runner', runner }, syntheticSession(runner, this.store));
+  }
+
+  showCodexRunner(runner: CodexRunner): void {
+    this.bind({ kind: 'codex-runner', runner }, runner.session);
   }
 
   dispose(): void {
@@ -162,9 +171,13 @@ export class ConversationHost {
 
   private swapSource(session: AgentSession): void {
     this.disposeSource();
-    const runner =
-      this.binding?.kind === 'runner' ? this.binding.runner : this.runners.get(session.sessionId);
-    const source: ConversationSource = runner
+    const runner = this.binding?.kind === 'runner' ? this.binding.runner : this.runners.get(session.sessionId);
+    const codexRunner = this.binding?.kind === 'codex-runner' ? this.binding.runner : this.codexRunners.get(session.sessionId);
+    const source: ConversationSource = codexRunner
+      ? codexRunner
+      : session.provider === 'codex'
+      ? new CodexTranscriptSource(session, this.codexProvider)
+      : runner
       ? new RunnerSource(runner)
       : new TranscriptSource(session, this.provider, (id, behavior) =>
           this.provider.decidePermission(id, behavior),
@@ -210,12 +223,14 @@ export class ConversationHost {
     let next: AgentSession | undefined;
     if (binding.kind === 'store') {
       next = this.store.get(binding.key);
-    } else {
+    } else if (binding.kind === 'runner') {
       // A runner's real store entry appears once it has an id and a transcript;
       // until then the synthetic one carries the pane.
       next =
         this.store.get(`claude:${(binding.runner.sessionId ?? '').toLowerCase()}`) ??
         syntheticSession(binding.runner, this.store);
+    } else {
+      next = this.store.get(binding.runner.session.key) ?? binding.runner.session;
     }
     if (!next) return; // aged out of the store; keep showing what we have
 
@@ -228,8 +243,8 @@ export class ConversationHost {
     // transcript it was reading becomes a live process we drive. Re-init so the
     // composer appears without the user having to reopen anything. (And the
     // reverse, when a session is released back to a terminal.)
-    const shouldBeRunner = this.runners.owns(next.sessionId);
-    const isRunner = this.source instanceof RunnerSource;
+    const shouldBeRunner = next.provider === 'codex' ? this.codexRunners.owns(next.sessionId) : this.runners.owns(next.sessionId);
+    const isRunner = this.source?.kind === 'runner';
     if (shouldBeRunner !== isRunner) {
       this.swapSource(next);
       if (titleChanged) this.onTitle(displayTitle(next));
@@ -252,7 +267,7 @@ export class ConversationHost {
   private async caps(session: AgentSession): Promise<ConversationCapabilities> {
     const source = this.source;
     const runner = source instanceof RunnerSource ? source.runner : undefined;
-    const canSend = runner !== undefined && runner.canSend;
+    const canSend = source?.kind === 'runner' && source.send !== undefined;
 
     // A runner session's process is a child of this extension host, so the
     // locator would call it "a Claude Code panel in this window". It is not:
@@ -261,10 +276,10 @@ export class ConversationHost {
       ? undefined
       : secondaryActionFor(session, (await this.locator.locate(session.pid)).kind, isInThisWorkspace(session.cwd));
 
-    const adopt = adoptActionFor(session, runner !== undefined);
+    const adopt = session.provider === 'claude' ? adoptActionFor(session, runner !== undefined) : undefined;
     return {
       canSend,
-      canInterrupt: canSend && (runner?.composer.busy ?? false),
+      canInterrupt: canSend && (source?.composer?.busy ?? false),
       canAdopt: adopt === 'adopt',
       canResumeHere: adopt === 'resume-here',
       canRelease: runner !== undefined,

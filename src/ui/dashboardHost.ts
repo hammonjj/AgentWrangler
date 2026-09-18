@@ -60,7 +60,7 @@ export interface ProjectSource {
 
 /** Starting a conversation is the extension's job, not the dashboard's; it only asks. */
 export interface ConversationLauncher {
-  newConversation(cwd: string): Promise<unknown>;
+  newConversation(cwd: string, provider?: 'claude' | 'codex'): Promise<unknown>;
   /** Run the folder dialog. `undefined` = cancelled, and the dropdown keeps what it had. */
   browseForProject(): Promise<string | undefined>;
 }
@@ -77,6 +77,7 @@ export class DashboardHost {
     private health: HookHealthSource,
     private locator: SessionLocator,
     private usage: UsageSource,
+    private codexUsage: UsageSource,
     private columns: ColumnPrefsService,
     private runners: RunnerOwnership,
     private projects: ProjectSource,
@@ -101,11 +102,18 @@ export class DashboardHost {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
       this.store.onDidUpdate(() => this.pushSnapshot()),
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration('agentWrangler.showCodexSubagents')) {
+          this.actions.refreshAll();
+          void this.pushSnapshot();
+        }
+      }),
       this.archive.onDidChange(() => this.pushSnapshot()),
       // The store only fires on material session changes, so an install that
       // changes nothing about any session still has to reach the banner.
       this.health.onDidChangeHookHealth(() => this.pushSnapshot()),
       this.usage.onDidChange(() => this.pushSnapshot()),
+      this.codexUsage.onDidChange(() => this.pushSnapshot()),
       // Columns are shared across dashboards: a drag in the editor tab reaches
       // the docked one, and neither is the owner of the layout.
       this.columns.onDidChange(() => this.pushSnapshot()),
@@ -174,7 +182,9 @@ export class DashboardHost {
       nowMs: Date.now(),
       hooks: this.health.hookHealth,
       usage: this.usage.enabled ? this.usage.usage : undefined,
+      codexUsage: this.codexUsage.enabled ? this.codexUsage.usage : undefined,
       columns: this.columns.value,
+      showCodexSubagents: vscode.workspace.getConfiguration('agentWrangler').get('showCodexSubagents', false),
       projects: this.projects.value.length > 0 ? this.projects.value : undefined,
     };
     void this.webview.postMessage(msg);
@@ -186,6 +196,7 @@ export class DashboardHost {
         this.pushSnapshot();
         // A dashboard just opened wants today's numbers, not last minute's.
         void this.usage.refresh();
+        void this.codexUsage.refresh();
         // And a launcher with no folders in it is not a launcher.
         void this.refreshProjects();
         break;
@@ -218,15 +229,26 @@ export class DashboardHost {
       case 'refresh':
         this.actions.refreshAll();
         void this.usage.refresh({ force: true });
+        void this.codexUsage.refresh({ force: true });
         break;
       case 'installHooks':
         this.actions.installHooks();
+        break;
+      case 'setShowCodexSubagents':
+        if (typeof m.value === 'boolean') {
+          void vscode.workspace.getConfiguration('agentWrangler')
+            .update('showCodexSubagents', m.value, vscode.ConfigurationTarget.Global)
+            .then(undefined, (error: unknown) => {
+              void vscode.window.showErrorMessage(`Could not change Codex session visibility: ${String(error)}`);
+              void this.pushSnapshot();
+            });
+        }
         break;
       case 'setColumns':
         this.columns.set(m.prefs);
         break;
       case 'newConversation':
-        void this.launcher.newConversation(m.cwd);
+        void this.launcher.newConversation(m.cwd, m.provider);
         break;
       case 'browseProject':
         void this.browseProject();

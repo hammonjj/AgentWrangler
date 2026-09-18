@@ -4,6 +4,10 @@ import * as fs from 'node:fs';
 import * as vscode from 'vscode';
 import { resolveClaudeBinary } from './claude/binary';
 import { ClaudeProvider } from './claude/claudeProvider';
+import { CodexProvider } from './codex/codexProvider';
+import { CodexAppServer } from './codex/appServer';
+import { codexUsageReader } from './codex/usage';
+import { CodexRunnerService } from './codex/runner';
 import { isPidAlive } from './claude/registry';
 import { endProcess } from './claude/runner/adopt';
 import { RunnerRegistry } from './claude/runner/runnerRegistry';
@@ -83,6 +87,8 @@ export function activate(context: vscode.ExtensionContext): void {
     const c = vscode.workspace.getConfiguration('agentWrangler');
     const cfg: WranglerConfig = {
       claudeBinaryPath: c.get('claudeBinaryPath', DEFAULT_CONFIG.claudeBinaryPath),
+      codexBinaryPath: c.get('codexBinaryPath', DEFAULT_CONFIG.codexBinaryPath),
+      showCodexSubagents: c.get('showCodexSubagents', DEFAULT_CONFIG.showCodexSubagents),
       stuckThresholdSeconds: c.get('stuckThresholdSeconds', DEFAULT_CONFIG.stuckThresholdSeconds),
       endedWindowHours: c.get('endedWindowHours', DEFAULT_CONFIG.endedWindowHours),
       maxEndedSessions: c.get('maxEndedSessions', DEFAULT_CONFIG.maxEndedSessions),
@@ -101,6 +107,10 @@ export function activate(context: vscode.ExtensionContext): void {
   // so the baseline is global state shared across windows.
   const turnStats = new TurnStats(context.globalState);
   const provider = new ClaudeProvider(getConfig, log, turnStats);
+  const codexProvider = new CodexProvider(getConfig, log);
+  const codexAppServer = new CodexAppServer(() => getConfig().codexBinaryPath, log);
+  const codexRunners = new CodexRunnerService(codexAppServer);
+  context.subscriptions.push(codexRunners);
   const archive = new ArchiveService(context.globalState);
   // Which agents are frozen. Nothing is persisted: the answer is the process
   // state itself, which every window reads the same way and which a reload
@@ -143,6 +153,14 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   context.subscriptions.push(usage);
   usage.start();
+  const codexUsage = new UsageService(
+    codexUsageReader(codexAppServer),
+    new FileUsageCache(vscode.Uri.joinPath(context.globalStorageUri, 'codex-usage.json').fsPath),
+    getConfig,
+    (message) => log(`codex ${message}`),
+  );
+  context.subscriptions.push(codexUsage);
+  codexUsage.start();
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       // autoPause.enabled belongs here too: it decides whether usage is read at
@@ -154,6 +172,7 @@ export function activate(context: vscode.ExtensionContext): void {
         e.affectsConfiguration('agentWrangler.autoPause.percent')
       ) {
         void usage.refresh();
+        void codexUsage.refresh();
       }
     }),
   );
@@ -170,6 +189,14 @@ export function activate(context: vscode.ExtensionContext): void {
     registry: runnerRegistry,
   });
   context.subscriptions.push(runners);
+  const runnerOwnership = {
+    owns: (id: string | undefined) => runners.owns(id) || codexRunners.owns(id),
+    onDidChange: (listener: () => void) => {
+      const claude = runners.onDidChange(listener);
+      const codex = codexRunners.onDidChange(listener);
+      return { dispose: () => { claude.dispose(); codex.dispose(); } };
+    },
+  };
 
   const showInPane = (s: AgentSession) => conversations.show(s.key);
 
@@ -680,7 +707,9 @@ export function activate(context: vscode.ExtensionContext): void {
     context.extensionUri,
     store,
     provider,
+    codexProvider,
     runners,
+    codexRunners,
     actions,
     locator,
     dictation,
@@ -716,7 +745,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // Defined as closures rather than direct references: `newConversation` is
   // declared further down, and only the calls happen after activation.
   const launcher: ConversationLauncher = {
-    newConversation: (cwd) => newConversation(cwd),
+    newConversation: (cwd, selectedProvider) => selectedProvider === 'codex' ? startCodexConversation(cwd) : newConversation(cwd),
     browseForProject: () => browseForProject(),
   };
 
@@ -730,8 +759,9 @@ export function activate(context: vscode.ExtensionContext): void {
     provider,
     locator,
     usage,
+    codexUsage,
     columns,
-    runners,
+    runnerOwnership,
     projects,
     launcher,
     pause,
@@ -750,8 +780,9 @@ export function activate(context: vscode.ExtensionContext): void {
         provider,
         locator,
         usage,
+        codexUsage,
         columns,
-        runners,
+        runnerOwnership,
         projects,
         launcher,
         pause,
@@ -866,6 +897,23 @@ export function activate(context: vscode.ExtensionContext): void {
     return runner;
   };
 
+  const startCodexConversation = async (cwd: string): Promise<void> => {
+    if (!fs.existsSync(cwd)) {
+      void vscode.window.showErrorMessage(`Agent Wrangler: ${cwd} no longer exists.`);
+      return;
+    }
+    projects.add(cwd);
+    try {
+      const cfg = vscode.workspace.getConfiguration('agentWrangler');
+      const model = cfg.get<string>('codexRunner.model', '').trim() || undefined;
+      const runner = await codexRunners.start(cwd, model);
+      conversations.showCodexRunner(runner);
+    } catch (error) {
+      log(`starting Codex conversation failed: ${String(error)}`);
+      void vscode.window.showErrorMessage(`Agent Wrangler: could not start Codex — ${(error as Error).message}`);
+    }
+  };
+
   /**
    * Start a session this window runs itself. The folder matters more than
    * usual here: it is the session's working directory, and unlike the Claude
@@ -966,6 +1014,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   void store.register(provider).catch((err) => log(`provider start failed: ${String(err)}`));
+  void store.register(codexProvider).catch((err) => log(`Codex provider start failed: ${String(err)}`));
   log('Agent Wrangler activated');
   watchForDevReload(context, log);
 

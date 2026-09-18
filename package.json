@@ -1,7 +1,7 @@
 {
   "name": "agent-wrangler",
   "displayName": "Agent Wrangler",
-  "description": "Monitor all your AI agent sessions (Claude Code, more later): who is busy, who is waiting on you, who is done. Click to view live or resume.",
+  "description": "Monitor Claude Code and Codex sessions: who is busy, waiting on you, or done. Open live conversations from one dashboard.",
   "publisher": "local",
   "version": "0.0.1",
   "private": true,
@@ -218,6 +218,21 @@
           "default": "claude",
           "description": "Binary used when resuming a session in a terminal (claude --resume <id>)."
         },
+        "agentWrangler.codexBinaryPath": {
+          "type": "string",
+          "default": "codex",
+          "description": "Codex CLI binary used for monitoring controls and conversations started from Agent Wrangler."
+        },
+        "agentWrangler.showCodexSubagents": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show internal and subagent Codex sessions as separate rows for debugging. Main conversations always summarize linked workers in the Subagents column."
+        },
+        "agentWrangler.codexRunner.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model for Codex conversations started from Agent Wrangler. Empty uses the Codex default."
+        },
         "agentWrangler.stuckThresholdSeconds": {
           "type": "number",
           "default": 600,
@@ -250,7 +265,7 @@
         "agentWrangler.showUsage": {
           "type": "boolean",
           "default": true,
-          "description": "Show plan-usage cards above the agent table: the 5-hour session and weekly limits, as in Claude Code's /usage. Read with the login token Claude Code stored on this machine."
+          "description": "Show provider-specific plan-usage cards above the agent table for Claude Code and Codex. Each provider is read through its own local authenticated client."
         },
         "agentWrangler.usagePollIntervalSeconds": {
           "type": "number",
