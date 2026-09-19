@@ -55,6 +55,7 @@ import { ColumnPrefsService } from '../core/columnPrefs';
 import { readConfig, type ConfigGetter } from '../core/config';
 import { DictationService } from '../core/dictation';
 import { HiddenProjectsService } from '../core/hiddenProjects';
+import { ModelCatalogService } from '../core/modelCatalog';
 import { MAX_NICKNAME_LENGTH, NicknameService } from '../core/nicknameService';
 import { PinService } from '../core/pinService';
 import { autoPauseDecision, maxUsagePercent } from '../core/autoPause';
@@ -113,6 +114,7 @@ export interface AgentWranglerApp {
   pins: PinService;
   nicknames: NicknameService;
   columns: ColumnPrefsService;
+  models: ModelCatalogService;
   pause: PauseService;
   usage: UsageSource;
   codexUsage: UsageSource;
@@ -240,12 +242,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // resolved per start so changing the setting does not need a restart.
   // Surface state, not global: two windows sharing one record would both
   // resume the same session, and two processes on one id corrupt its transcript.
+  // What the launcher's model dropdown offers: the list the last conversation
+  // reported, since the launcher has no running CLI of its own to ask.
+  const models = new ModelCatalogService(host.globalState);
   const runnerRegistry = new RunnerRegistry(host.workspaceState);
   const runners = new RunnerService({
     query: sdkQuery,
     binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath),
     log,
     registry: runnerRegistry,
+    rememberModels: (list) => models.remember(list),
   });
   host.subscribe(runners);
   const runnerOwnership: RunnerOwnership = {
@@ -956,6 +962,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     pins,
     nicknames,
     columns,
+    models,
     pause,
     usage,
     codexUsage,

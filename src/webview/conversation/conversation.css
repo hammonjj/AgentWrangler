@@ -126,11 +126,32 @@ body,
   padding: 10px 12px 16px;
 }
 
+/*
+ * "Load earlier messages".
+ *
+ * It had colour and padding but no box, so it fell back to the platform's own
+ * button — a pale slab that belongs to macOS rather than to this pane. Same
+ * secondary shape as the header's buttons, centred in the column the blocks
+ * are centred in.
+ */
 #notch {
-  text-align: center;
-  color: var(--vscode-descriptionForeground);
+  display: block;
+  margin: 2px auto 12px;
+  padding: 3px 12px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-descriptionForeground));
+  font-family: inherit;
   font-size: 0.82em;
-  padding: 4px 0 10px;
+  cursor: pointer;
+}
+#notch:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+#notch:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
 }
 
 .blk {
@@ -486,6 +507,13 @@ body,
   color: var(--vscode-descriptionForeground);
   font-size: 0.88em;
 }
+/* The note above the controls — "Send queues this message until the session is
+   idle…" — sat directly on top of the permission dropdown. Spaced only when it
+   is actually showing, so a read-only pane does not gain a stray gap under a
+   row that is the only thing there. */
+#composerRead:not([hidden]) + #composerWrite {
+  margin-top: 7px;
+}
 #composerNote {
   flex: 1 1 auto;
   min-width: 0;
@@ -701,6 +729,54 @@ body,
 /* The microphone is drawn in CSS rather than shipped as an icon font or an
    SVG file: it is a capsule, a stem and a base, and that is cheaper than
    another asset in the bundle and another URI past the CSP. */
+/*
+ * The paperclip. Same 28px target and hover as the mic it sits beside, drawn
+ * in CSS for the same reason nothing else here uses an icon font: there isn't
+ * one outside VSCode.
+ */
+.clipbtn {
+  flex: 0 0 auto;
+  position: relative;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+}
+.clipbtn:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+.clipbtn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+/* Two nested rounded rectangles with their left halves clipped away read as a
+   paperclip at this size; an accurate one does not survive 14 pixels. */
+.clipbtn::before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  left: 9px;
+  width: 10px;
+  height: 16px;
+  border: 1.5px solid currentColor;
+  border-radius: 5px;
+}
+.clipbtn::after {
+  content: '';
+  position: absolute;
+  top: 10px;
+  left: 12.5px;
+  width: 4px;
+  height: 9px;
+  border: 1.5px solid currentColor;
+  border-top: none;
+  border-radius: 0 0 2.5px 2.5px;
+}
+
 .micbtn {
   flex: 0 0 auto;
   position: relative;

@@ -56,10 +56,13 @@ body {
    control that creates work stays reachable however long the list gets.
    `position: relative` is for .projmenu, which hangs off it. */
 #bar {
-  /* How wide the folder-and-New pair is allowed to get. Shared with the popup
-     below it so the two cannot drift apart. Generous for a project name and
-     nowhere near enough to stretch across a full-screen window. */
-  --aw-launch-w: 18rem;
+  /* How wide the whole launch group may get — folder, New, model, effort.
+     Generous for four controls and nowhere near enough to stretch across a
+     full-screen window. */
+  --aw-launch-w: 34rem;
+  /* The folder button, and therefore the popup under it: those two must match
+     or the menu hangs off the side of the thing that opened it. */
+  --aw-proj-w: 18rem;
   position: relative;
   z-index: 3;
   flex: 0 0 auto;
@@ -96,6 +99,7 @@ body {
 #bar .projbtn {
   flex: 0 1 auto;
   min-width: 0;
+  max-width: var(--aw-proj-w);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -131,7 +135,7 @@ body {
   top: 100%;
   left: 6px;
   right: 6px;
-  max-width: var(--aw-launch-w);
+  max-width: var(--aw-proj-w);
   z-index: 1;
   max-height: 50vh;
   overflow-y: auto;
@@ -213,6 +217,23 @@ body {
 }
 .projmenu .pmbrowse:hover {
   background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
+}
+
+/* The two dropdowns beside "+ New": the model and effort the *next*
+   conversation starts on. Same box as the provider filter on the other side of
+   the bar, so the row reads as one set of controls. They shrink before the
+   folder button does, since a truncated model name still says which model. */
+#bar .launchsel {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 11rem;
+  height: 22px;
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+  border-radius: 3px;
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  font: inherit;
+  font-size: 0.86em;
 }
 
 #bar .newbtn {

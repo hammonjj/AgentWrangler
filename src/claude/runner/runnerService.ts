@@ -9,7 +9,7 @@
  * Ownership is therefore decided here, by session id, and never by pid.
  */
 import { Emitter, type Disposable } from '../../core/events';
-import type { PermissionModeName } from '../../shared/conversation';
+import type { ModelChoice, PermissionModeName } from '../../shared/conversation';
 import { loadResumeHistory, type ConversationHistory } from '../transcriptHistory';
 import type { RunnerRegistry } from './runnerRegistry';
 import { RunnerSession, type QueryFn, type RunnerStartOptions } from './runnerSession';
@@ -23,6 +23,12 @@ export interface RunnerServiceDeps {
   registry?: RunnerRegistry;
   /** Overridden only by tests; the default reads the session's transcript. */
   loadHistory?: (sessionId: string, cwd: string) => Promise<ConversationHistory>;
+  /**
+   * Told the model list each time a session reports one. The launcher has no
+   * running CLI to ask, so the last answer is kept for it — see
+   * `ModelCatalogService`.
+   */
+  rememberModels?: (models: ModelChoice[] | undefined) => void;
 }
 
 export class RunnerService implements Disposable {
@@ -50,6 +56,12 @@ export class RunnerService implements Disposable {
       if (session.sessionId) this.deps.registry?.remember(session.sessionId, session.cwd);
       this.changeEmitter.fire();
     });
+    // The model list arrives a moment after start, and is the only place it is
+    // ever published; the launcher needs it too. See `ModelCatalogService`.
+    if (this.deps.rememberModels) {
+      const remember = this.deps.rememberModels;
+      session.onComposer((composer) => remember(composer.models));
+    }
     session.start();
     this.deps.log(`runner started in ${opts.cwd}${opts.resume ? ` (resuming ${opts.resume})` : ''}`);
     this.changeEmitter.fire();

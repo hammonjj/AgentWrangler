@@ -4,6 +4,7 @@ import type { Disposable } from '../core/events';
 import type { PauseService } from '../core/pauseService';
 import type { PinService } from '../core/pinService';
 import type { SessionStore } from '../core/sessionStore';
+import type { ModelCatalogService } from '../core/modelCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { HookHealth, ProjectDTO } from '../shared/model';
@@ -83,11 +84,17 @@ export class DashboardHost {
     private pins: PinService,
     private settings: HostSettings,
     private dialogs: HostDialogs,
+    private models: ModelCatalogService,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
       this.store.onDidUpdate(() => this.pushSnapshot()),
+      // The launcher's two dropdowns are settings, so a change from anywhere —
+      // the Preferences window, VSCode's settings UI, the other dashboard —
+      // has to reach them or they show a default that is no longer the default.
+      this.models.onDidChange(() => void this.pushSnapshot()),
       this.settings.onDidChange((affects) => {
+        if (affects('runner.model') || affects('runner.effort')) void this.pushSnapshot();
         if (affects('showCodexSubagents')) {
           this.actions.refreshAll();
           void this.pushSnapshot();
@@ -119,6 +126,21 @@ export class DashboardHost {
   dispose(): void {
     for (const s of this.subs) s.dispose();
     this.subs = [];
+  }
+
+  /**
+   * Write one setting and say so if it fails. The snapshot is re-pushed on the
+   * way out either way: on success the settings change event brings the new
+   * value, and on failure the dropdown has to be put back to what is actually
+   * stored rather than left showing a choice that did not take.
+   */
+  private async writeSetting(key: string, value: string): Promise<void> {
+    try {
+      await this.settings.update(key, value);
+    } catch (error) {
+      this.dialogs.error(`Could not change ${key}: ${String(error)}`);
+      void this.pushSnapshot();
+    }
   }
 
   /** Snapshots are built asynchronously and can overlap; only the newest lands. */
@@ -163,6 +185,11 @@ export class DashboardHost {
       codexUsage: this.codexUsage.enabled ? this.codexUsage.usage : undefined,
       columns: this.columns.value,
       showCodexSubagents: this.settings.get('showCodexSubagents', false),
+      launcher: {
+        models: this.models.value,
+        model: this.settings.get<string>('runner.model', ''),
+        effort: this.settings.get<string>('runner.effort', ''),
+      },
       projects: this.projects.value.length > 0 ? this.projects.value : undefined,
     };
     void this.webview.postMessage(msg);
@@ -219,6 +246,12 @@ export class DashboardHost {
           });
         }
         break;
+      case 'setRunnerModel':
+        if (typeof m.model === 'string') void this.writeSetting('runner.model', m.model);
+        return;
+      case 'setRunnerEffort':
+        if (typeof m.effort === 'string') void this.writeSetting('runner.effort', m.effort);
+        return;
       case 'setColumns':
         this.columns.set(m.prefs);
         break;

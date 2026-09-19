@@ -94,6 +94,7 @@ export function activate(context: vscode.ExtensionContext): void {
     codexUsage: app.codexUsage,
     runnerOwnership: app.runnerOwnership,
     columns: app.columns,
+    models: app.models,
     projects: app.projects,
     launcher: app.launcher,
     pause: app.pause,

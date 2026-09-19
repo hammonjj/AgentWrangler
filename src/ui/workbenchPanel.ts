@@ -20,6 +20,7 @@ import type { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerSession } from '../claude/runner/runnerSession';
 import type { ArchiveService } from '../core/archive';
 import type { ColumnPrefsService } from '../core/columnPrefs';
+import type { ModelCatalogService } from '../core/modelCatalog';
 import type { DictationService } from '../core/dictation';
 import type { FileSuggestService } from '../core/fileSuggest';
 import type { PauseService } from '../core/pauseService';
@@ -65,6 +66,8 @@ export interface WorkbenchDeps {
   usage: UsageSource;
   codexUsage: UsageSource;
   columns: ColumnPrefsService;
+  /** The launcher's model dropdown. See `ModelCatalogService`. */
+  models: ModelCatalogService;
   projects: ProjectSource;
   launcher: ConversationLauncher;
   pause: PauseService;
@@ -186,6 +189,7 @@ export class WorkbenchPanelManager implements vscode.Disposable {
       this.deps.pins,
       this.deps.settings,
       this.deps.ui.dialogs,
+      this.deps.models,
     );
     this.conversation = new ConversationHost(
       paneChannel(panel.webview, 'conversation'),

@@ -1,3 +1,4 @@
+import type { ModelChoice } from '../../shared/conversation';
 import { subagentText } from '../../shared/subagents';
 import './dashboard.css';
 import {
@@ -748,7 +749,9 @@ bar.id = 'bar';
 // the only positioned ancestor, and moving it inside the group would anchor it
 // to a box that shrinks.
 bar.innerHTML = `<div class="launch"><button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
-<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button></div>
+<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
+<select id="launchmodel" class="launchsel" title="Model for the next conversation" hidden></select>
+<select id="launcheffort" class="launchsel" title="How hard Claude thinks, for the next conversation"></select></div>
 <div id="ctl" class="ctlgroup"><select id="provider" class="providerfilter" title="Filter sessions by provider"><option value="all">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select><button id="pauseall" class="ctlbtn"></button></div>
 <div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
 // First in the body, above the usage strip, which is itself above the scrolling
@@ -759,6 +762,67 @@ const projBtn = bar.querySelector<HTMLButtonElement>('#proj')!;
 const projName = bar.querySelector<HTMLElement>('#projname')!;
 const projMenu = bar.querySelector<HTMLElement>('#projmenu')!;
 const newBtn = bar.querySelector<HTMLButtonElement>('#new')!;
+const launchModel = bar.querySelector<HTMLSelectElement>('#launchmodel')!;
+const launchEffort = bar.querySelector<HTMLSelectElement>('#launcheffort')!;
+
+/**
+ * The two dropdowns beside "+ New": what the *next* conversation starts on.
+ *
+ * They are settings, not session state — there is no session yet — so a change
+ * writes `runner.model` / `runner.effort` and comes back on the next snapshot.
+ * The model list is whatever the last conversation reported (the launcher has
+ * no running CLI to ask), which is why "Default" is always offered: it means
+ * "whatever Claude Code picks", and it is the right answer when the list is
+ * empty or out of date.
+ *
+ * Effort levels follow the chosen model, the same rule the composer uses — a
+ * model that has none hides the dropdown rather than offering a level it would
+ * ignore. With no model chosen there is nothing to ask, so the setting's own
+ * range is offered instead.
+ */
+const EFFORT_FALLBACK = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function fillSelect(el: HTMLSelectElement, rows: { value: string; label: string }[], current: string): void {
+  const key = rows.map((r) => `${r.value}\u0000${r.label}`).join('\u0001');
+  if (el.dataset.key !== key) {
+    el.dataset.key = key;
+    el.textContent = '';
+    for (const row of rows) {
+      const opt = document.createElement('option');
+      opt.value = row.value;
+      opt.textContent = row.label;
+      el.appendChild(opt);
+    }
+  }
+  // A stored value the list no longer contains would silently select row zero
+  // and misreport what the next conversation will do.
+  el.value = rows.some((r) => r.value === current) ? current : '';
+}
+
+function renderLaunchDefaults(launcher: { models: ModelChoice[]; model: string; effort: string }): void {
+  const models = launcher.models;
+  fillSelect(
+    launchModel,
+    [{ value: '', label: 'Default model' }, ...models.map((m) => ({ value: m.value, label: m.label }))],
+    launcher.model,
+  );
+  // Shown even when the catalog is empty — which it is until the first
+  // conversation reports one. A control that appears out of nowhere later is
+  // worse than one that says "Default model" and means it.
+  launchModel.hidden = false;
+
+  const chosen = models.find((m) => m.value === launcher.model);
+  const levels = launcher.model === '' ? EFFORT_FALLBACK : chosen?.effortLevels ?? [];
+  fillSelect(
+    launchEffort,
+    [{ value: '', label: 'Default effort' }, ...levels.map((l) => ({ value: l, label: l }))],
+    launcher.effort,
+  );
+  launchEffort.hidden = levels.length === 0;
+}
+
+launchModel.addEventListener('change', () => post({ type: 'setRunnerModel', model: launchModel.value }));
+launchEffort.addEventListener('change', () => post({ type: 'setRunnerEffort', effort: launchEffort.value }));
 const pauseBtn = bar.querySelector<HTMLButtonElement>('#pauseall')!;
 const providerSelect = bar.querySelector<HTMLSelectElement>('#provider')!;
 providerSelect.value = providerFilter;
@@ -990,6 +1054,7 @@ vscodeApi.onMessage((body) => {
     // Our own drag already drew this; anything else is another dashboard's.
     if (m.columns) columns = m.columns;
     showCodexSubagents = m.showCodexSubagents === true;
+    if (m.launcher) renderLaunchDefaults(m.launcher);
     // The bar lives outside #app, so `render()` never touches it.
     renderControls();
     render();

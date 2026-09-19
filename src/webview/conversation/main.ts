@@ -74,7 +74,7 @@ app.innerHTML = `
       <select id="mode" title="Permission mode"></select>
       <select id="model" title="Model" hidden></select>
       <select id="effort" title="How hard Claude thinks before answering" hidden></select>
-      <span id="queued" hidden></span><span id="sessionusage" title="Estimated cost since this runner started; context from the most recent /context report"></span>
+      <span id="queued" hidden></span>
       <span class="grow"></span>
     </div>
     <div id="slashcommands" role="listbox" hidden></div>
@@ -82,6 +82,8 @@ app.innerHTML = `
     <div id="attachments" hidden></div>
     <div id="composerInput">
       <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
+      <input id="attachpick" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
+      <button id="attach" class="clipbtn" title="Attach an image" aria-label="Attach an image"></button>
       <button id="mic" class="micbtn" title="Dictate a message" aria-label="Dictate a message"></button>
       <button id="send" class="askbtn primary" title="Send this message">Send</button>
     </div>
@@ -112,6 +114,8 @@ const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const attachmentsEl = document.getElementById('attachments')!;
+const attachBtn = document.getElementById('attach') as HTMLButtonElement;
+const attachPick = document.getElementById('attachpick') as HTMLInputElement;
 const mentionsEl = document.getElementById('mentions')!;
 const composerInput = document.getElementById('composerInput')!;
 
@@ -992,7 +996,6 @@ function clearComposer(): void {
 let slashCommands: string[] = [];
 function setComposer(c: ComposerState): void {
   slashCommands = activeProvider === 'claude' ? [...new Set(['compact', 'clear', 'context', ...c.slashCommands])] : [];
-  document.getElementById('sessionusage')!.textContent = [c.costUsd === undefined ? '' : `~$${c.costUsd.toFixed(3)} this run`, c.contextTokens === undefined ? '' : `Context ${c.contextTokens.toLocaleString()} / ${c.contextWindow?.toLocaleString() ?? '?'} (last report)`].filter(Boolean).join(' · ');
   if (c.permissionMode) modeSel.value = c.permissionMode;
   setModels(c.models);
   selectModel(c.model);
@@ -1151,6 +1154,22 @@ function renderAttachments(): void {
     attachmentsEl.appendChild(chip);
   });
 }
+
+/**
+ * The paperclip. Images could already be pasted or dropped; neither helps when
+ * the thing you want is in a folder rather than on the clipboard.
+ *
+ * The real `<input type="file">` is hidden and clicked through, because a file
+ * input cannot be styled into anything that belongs next to the mic — and the
+ * value is cleared afterwards so picking the same file twice in a row still
+ * fires a `change`.
+ */
+attachBtn.addEventListener('click', () => attachPick.click());
+attachPick.addEventListener('change', () => {
+  for (const file of Array.from(attachPick.files ?? [])) addImageFile(file);
+  attachPick.value = '';
+  msgEl.focus();
+});
 
 /** Read one clipboard/dropped file into the shape the wire wants. */
 function addImageFile(file: File): void {

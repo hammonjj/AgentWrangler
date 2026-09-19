@@ -234,6 +234,7 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       app.pins,
       host.settings,
       host.dialogs,
+      app.models,
     );
     this.conversation = new ConversationHost(
       paneChannel(transport, 'conversation'),
