@@ -730,13 +730,19 @@ body,
    SVG file: it is a capsule, a stem and a base, and that is cheaper than
    another asset in the bundle and another URI past the CSP. */
 /*
- * The paperclip. Same 28px target and hover as the mic it sits beside, drawn
- * in CSS for the same reason nothing else here uses an icon font: there isn't
- * one outside VSCode.
+ * The paperclip and the mic.
+ *
+ * Inline SVG in the markup rather than shapes built from `::before`/`::after`,
+ * which is what these were: two nested rounded rectangles read as a "U" and a
+ * capsule over an arc read as a lollipop. An icon font is not an option — the
+ * only one available is VSCode's — and a `data:` background cannot take
+ * `currentColor`, so it would not follow the theme or the recording red.
  */
 .clipbtn {
   flex: 0 0 auto;
-  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -753,33 +759,12 @@ body,
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: -1px;
 }
-/* Two nested rounded rectangles with their left halves clipped away read as a
-   paperclip at this size; an accurate one does not survive 14 pixels. */
-.clipbtn::before {
-  content: '';
-  position: absolute;
-  top: 6px;
-  left: 9px;
-  width: 10px;
-  height: 16px;
-  border: 1.5px solid currentColor;
-  border-radius: 5px;
-}
-.clipbtn::after {
-  content: '';
-  position: absolute;
-  top: 10px;
-  left: 12.5px;
-  width: 4px;
-  height: 9px;
-  border: 1.5px solid currentColor;
-  border-top: none;
-  border-radius: 0 0 2.5px 2.5px;
-}
 
 .micbtn {
   flex: 0 0 auto;
-  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -798,33 +783,6 @@ body,
 }
 .micbtn:disabled {
   cursor: default;
-}
-
-/* Capsule. */
-.micbtn::before {
-  content: '';
-  position: absolute;
-  top: 6px;
-  left: 50%;
-  width: 7px;
-  height: 11px;
-  margin-left: -3.5px;
-  border-radius: 3.5px;
-  background: currentColor;
-}
-/* Cradle and stem, as a U with a line under it. */
-.micbtn::after {
-  content: '';
-  position: absolute;
-  top: 13px;
-  left: 50%;
-  width: 13px;
-  height: 7px;
-  margin-left: -6.5px;
-  border: 1.5px solid currentColor;
-  border-top: none;
-  border-radius: 0 0 7px 7px;
-  box-shadow: 0 5px 0 -5.75px currentColor;
 }
 
 /* Recording: red, and pulsing, because a microphone left open by accident is

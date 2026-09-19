@@ -749,9 +749,9 @@ bar.id = 'bar';
 // the only positioned ancestor, and moving it inside the group would anchor it
 // to a box that shrinks.
 bar.innerHTML = `<div class="launch"><button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
-<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
-<select id="launchmodel" class="launchsel" title="Model for the next conversation" hidden></select>
-<select id="launcheffort" class="launchsel" title="How hard Claude thinks, for the next conversation"></select></div>
+<select id="launchmodel" class="launchsel" title="Model for the next conversation"></select>
+<select id="launcheffort" class="launchsel" title="How hard Claude thinks, for the next conversation"></select>
+<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button></div>
 <div id="ctl" class="ctlgroup"><select id="provider" class="providerfilter" title="Filter sessions by provider"><option value="all">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select><button id="pauseall" class="ctlbtn"></button></div>
 <div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
 // First in the body, above the usage strip, which is itself above the scrolling
@@ -782,6 +782,18 @@ const launchEffort = bar.querySelector<HTMLSelectElement>('#launcheffort')!;
  */
 const EFFORT_FALLBACK = ['low', 'medium', 'high', 'xhigh', 'max'];
 
+/**
+ * What Claude Code falls back to when no effort is set.
+ *
+ * Named in the label rather than left as a bare "Default" so the row reads like
+ * the model's — "Default (Sonnet 4.5)" answers *which* model the default is,
+ * and this answers the same question. It is the level the Agent SDK documents
+ * as its default and the one the CLI's own 4.6 migration note quotes; it is not
+ * reported per-session by anything we can ask, so unlike the model's label this
+ * one is a constant and would need changing if that ever did.
+ */
+const EFFORT_DEFAULT = 'high';
+
 function fillSelect(el: HTMLSelectElement, rows: { value: string; label: string }[], current: string): void {
   const key = rows.map((r) => `${r.value}\u0000${r.label}`).join('\u0001');
   if (el.dataset.key !== key) {
@@ -801,21 +813,30 @@ function fillSelect(el: HTMLSelectElement, rows: { value: string; label: string 
 
 function renderLaunchDefaults(launcher: { models: ModelChoice[]; model: string; effort: string }): void {
   const models = launcher.models;
+  // The CLI's list has a default row of its own, already labelled with the
+  // model it resolves to. Its label is borrowed for the unset row and the row
+  // itself dropped, so there is one "Default (Sonnet 4.5)" rather than two
+  // entries that mean the same thing.
+  const cliDefault = models.find((m) => m.value === 'default');
+  const rest = models.filter((m) => m !== cliDefault);
   fillSelect(
     launchModel,
-    [{ value: '', label: 'Default model' }, ...models.map((m) => ({ value: m.value, label: m.label }))],
+    [
+      { value: '', label: cliDefault?.label ?? 'Default model' },
+      ...rest.map((m) => ({ value: m.value, label: m.label })),
+    ],
     launcher.model,
   );
   // Shown even when the catalog is empty — which it is until the first
   // conversation reports one. A control that appears out of nowhere later is
-  // worse than one that says "Default model" and means it.
+  // worse than one that says Default and means it.
   launchModel.hidden = false;
 
   const chosen = models.find((m) => m.value === launcher.model);
   const levels = launcher.model === '' ? EFFORT_FALLBACK : chosen?.effortLevels ?? [];
   fillSelect(
     launchEffort,
-    [{ value: '', label: 'Default effort' }, ...levels.map((l) => ({ value: l, label: l }))],
+    [{ value: '', label: `Default (${EFFORT_DEFAULT})` }, ...levels.map((l) => ({ value: l, label: l }))],
     launcher.effort,
   );
   launchEffort.hidden = levels.length === 0;

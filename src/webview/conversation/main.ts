@@ -83,8 +83,8 @@ app.innerHTML = `
     <div id="composerInput">
       <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
       <input id="attachpick" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
-      <button id="attach" class="clipbtn" title="Attach an image" aria-label="Attach an image"></button>
-      <button id="mic" class="micbtn" title="Dictate a message" aria-label="Dictate a message"></button>
+      <button id="attach" class="clipbtn" title="Attach an image" aria-label="Attach an image"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M10.5 4.6v6a2.5 2.5 0 0 1-5 0V3.7a1.5 1.5 0 0 1 3 0v6.6a.5.5 0 0 1-1 0V5.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button id="mic" class="micbtn" title="Dictate a message" aria-label="Dictate a message"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><rect x="6" y="1.8" width="4" height="7.4" rx="2" fill="currentColor"/><path d="M3.9 7.4a4.1 4.1 0 0 0 8.2 0" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><path d="M8 11.5v2.4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg></button>
       <button id="send" class="askbtn primary" title="Send this message">Send</button>
     </div>
   </div>
