@@ -75,8 +75,12 @@ export function serveBundles(distDir: string): void {
           // First, so a pane stylesheet can override anything it wants to.
           extraStylesheets: [`${ORIGIN}/theme.css`],
           // What tells the theme sheet it is in a window: the inset, the frame
-          // around the panes. See `vscodeTokens.css`.
-          bodyClass: 'aw-shell',
+          // around the panes. `aw-frameless` is the extra one the workbench
+          // gets on macOS, where it has no title bar and owns the strip the
+          // traffic lights float over — Preferences keeps an ordinary bar, so
+          // it must not claim that strip. See `vscodeTokens.css`.
+          bodyClass:
+            bundle === 'workbench' && process.platform === 'darwin' ? 'aw-shell aw-frameless' : 'aw-shell',
         }),
         { headers: { 'content-type': TYPES['.html'] } },
       );

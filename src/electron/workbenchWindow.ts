@@ -152,13 +152,15 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       show: false,
       backgroundColor: '#1f1f1f',
       icon: path.join(appRoot, 'build', 'icon.png'),
-      // An ordinary title bar, for now. `hiddenInset` would give the panes the
-      // whole window, which is what this wants eventually — but the dashboard's
-      // header starts at y=0 and its project filter lands underneath the
-      // traffic lights. Reclaiming those 28px means the panes knowing they are
-      // in an app, which is a change to their stylesheets and a decision about
-      // where the drag region goes; both belong with the rest of the chrome.
-      titleBarStyle: 'default',
+      // No title bar on macOS: it said "Agent Wrangler" over a window whose
+      // first pane already says which project and which session, and it cost
+      // the panes 28px to do it. The strip the traffic lights float over is
+      // handled by the shell — `aw-frameless` keeps the panes clear of it and
+      // the preload puts a drag handle under it. Elsewhere, an ordinary bar.
+      titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+      // Centred in the 30px the shell reserves, rather than the default 12,
+      // which assumes the taller bar `hiddenInset` is usually paired with.
+      trafficLightPosition: process.platform === 'darwin' ? { x: 13, y: 9 } : undefined,
       webPreferences: {
         preload: path.join(appRoot, 'dist', 'electron', 'preload.js'),
         // The renderer displays other people's transcripts. It gets the three

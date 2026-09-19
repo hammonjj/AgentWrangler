@@ -38,8 +38,24 @@ app.setName('Agent Wrangler');
 // Before `whenReady`: a scheme cannot be privileged once a renderer exists.
 registerBundleScheme();
 
-if (!app.requestSingleInstanceLock()) {
-  // The running copy gets a `second-instance` event and raises its window.
+/**
+ * Whether this process is the one. The running copy gets a `second-instance`
+ * event and raises its window, which is the right answer to a double-click.
+ *
+ * `app.quit()` is not enough on its own: it is asynchronous, so everything
+ * below would still run — a second `whenReady`, a second set of providers, a
+ * second process writing the same JSON files — for however long the quit takes.
+ * Hence the guard around the whole of startup rather than an early `return`,
+ * which a module cannot do.
+ *
+ * The line on stderr is for a terminal. Launched from the Dock the handoff is
+ * visible (a window comes forward); launched from a shell, a silent exit 0
+ * looks exactly like a crash, and it cost an afternoon once.
+ */
+const isPrimaryInstance = app.requestSingleInstanceLock();
+if (!isPrimaryInstance) {
+  // eslint-disable-next-line no-console
+  console.error('Agent Wrangler is already running; raising that window instead.');
   app.quit();
 }
 
@@ -61,6 +77,8 @@ function startLog(userDataDir: string): (message: string) => void {
 }
 
 void app.whenReady().then(() => {
+  if (!isPrimaryInstance) return; // see the lock above: quit() has not landed yet
+
   const userDataDir = app.getPath('userData');
   const log = startLog(userDataDir);
   log(`Agent Wrangler starting — Electron ${process.versions.electron}, userData ${userDataDir}`);

@@ -46,6 +46,35 @@ ipcRenderer.on(TO_WEBVIEW, (_event, message: unknown) => {
 });
 
 /**
+ * The strip you drag the window by.
+ *
+ * With `titleBarStyle: 'hiddenInset'` there is no title bar to grab, and a
+ * window you cannot move is worse than one with a wasted 28px. The shell
+ * stylesheet keeps the panes clear of it; this puts something under the traffic
+ * lights for the pointer to catch.
+ *
+ * Built here rather than in `renderWebviewHtml` because the document is shared
+ * with VSCode, where dragging a strip does nothing and a `-webkit-app-region`
+ * is meaningless. The class on `<body>` is what says which host this is, so the
+ * preload reads it rather than being told separately.
+ */
+function addDragStrip(): void {
+  if (!document.body.classList.contains('aw-frameless')) return;
+  if (document.getElementById('awDrag')) return;
+  const strip = document.createElement('div');
+  strip.id = 'awDrag';
+  // The traffic lights are drawn by the OS on top of this, and take their own
+  // clicks before it sees them.
+  document.body.appendChild(strip);
+}
+
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', addDragStrip, { once: true });
+} else {
+  addDragStrip();
+}
+
+/**
  * The transient one-liners `HostDialogs.flash` produces — "Copied session id
  * …", "that prompt has already been answered". VSCode has a status bar for
  * these; this window does not, so the shell grows one. Built here rather than

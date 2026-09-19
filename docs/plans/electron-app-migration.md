@@ -87,9 +87,12 @@ Three things the window needed that the tab did not:
 - **`ELECTRON_RUN_AS_NODE`.** VSCode sets it in its terminals, so `electron main.js` launched
   under plain Node and every Electron API was `undefined`. The dev scripts `env -u` it.
 
-Left for later on this phase: the title bar is an ordinary one. `hiddenInset` would give the
-panes the whole window, but the dashboard's header starts at y=0 and its project filter lands
-under the traffic lights; reclaiming those 28px means the panes knowing they are in an app.
+**The title bar — done.** `hiddenInset` on macOS, so the panes get the whole window. The
+reason it was parked is that the dashboard's header starts at y=0 and its project filter
+landed under the traffic lights; the shell now reserves a 30px strip above the panes
+(`body.aw-frameless`) and the preload puts a `-webkit-app-region: drag` handle in it, since a
+window with no title bar is also a window you cannot move. The class is set only for the
+workbench on macOS — Preferences keeps an ordinary bar, and VSCode never sees it.
 
 ### Phase 2a — the window's own chrome — **done**
 
@@ -132,6 +135,26 @@ right edge. The folder button and *+ New* are wrapped in a `.launch` group now, 
 `--aw-launch-w` (18rem, shared with the popup so the two cannot drift), and the bar's two
 halves are held apart by that group's `margin-right: auto` rather than by one control growing.
 It still shrinks first: at 300px the pair gives up space before the controls do.
+
+### Phase 2b — reasoning effort — **done**
+
+A third dropdown in the composer, beside the model, for how hard Claude thinks.
+
+The levels come from the CLI, not from a constant: `ModelInfo` carries `supportsEffort` and
+`supportedEffortLevels`, so the list is rebuilt when the model changes and the dropdown
+disappears for a model that has none — Haiku has none and `xhigh` is not everywhere, and
+offering a level the session would silently ignore is worse than offering none. The blank row
+is the CLI's own default, which is a real choice and not the same as any named level.
+
+Changing it on a **live** session goes through the CLI's `/effort <level>` command. The SDK's
+`Query` has `setModel` and `setPermissionMode` but **no `setEffort`** — `effort` is a
+`query()` start option and nothing moves it afterwards — so the command is the only
+mechanism, and it is gated on the CLI actually advertising it (an older one would read
+`/effort high` as a sentence and answer it). It lands in the transcript, which is right: a
+later reader should be able to see that the session got deeper partway through.
+
+`runner.effort` is the default for new conversations, declared once like every other setting
+and so appearing in both VSCode's settings UI and the app's Preferences window.
 
 ### Phase 3 — the dialogs
 
@@ -183,7 +206,19 @@ the microphone each time dictation is used after an install.
   integrated terminal. There is no `sendText`; this wants `node-pty` + xterm.js, or a
   shell-out to Terminal.app.
 - **One backend per login.** The app and the extension can both be running, and runner
-  ownership between them has no lease yet — the same gap the extension already has between
+  ownership between them has no lease yet — and on 2026-09-19 that bit for real: the app's
+  startup auto-resume picked up the session id of a conversation the *VSCode extension* was
+  actively running, and started a second process on its transcript. The existing guard asks
+  the store "is this running elsewhere?", but the store only sees sessions in the Claude Code
+  registry, and a session driven by another Agent Wrangler runner has no entry there, so it
+  looked dead.
+
+  Mitigated, not fixed: `resumeLastRunner` now also refuses when the session's transcript was
+  written in the last 90 seconds, which needs no lease to observe and would have caught this.
+  It only ever refuses — a model can think in silence for minutes, so a stale mtime proves
+  nothing — and two processes can still collide in that window. The lease is the real fix.
+
+  Runner ownership between them has no lease yet — the same gap the extension already has between
   two VSCode windows. Surviving app exit needs a daemon and is a later feature.
 - **The status bar.** `MarkdownString` tooltip and `ThemeColor` background have no analogue;
   a tray item is the nearest thing.

@@ -281,6 +281,34 @@ body.aw-shell {
   padding: 10px 12px 12px;
 }
 
+/* ---- no title bar ----
+   macOS only, and only the workbench: `hiddenInset` hides the bar and leaves
+   the traffic lights floating over the document, which buys the panes the 28px
+   a title saying "Agent Wrangler" was spending. The cost is that the top strip
+   is now the panes' space, and the dashboard's own header starts at y=0 — its
+   project filter landed underneath the lights the first time this was tried.
+   So the top inset grows to clear them and that strip becomes the drag handle.
+
+   Everything here is on `aw-frameless`, which the shell only sets for the
+   window it applies to: the Preferences window keeps an ordinary title bar, and
+   VSCode never sees either class. */
+
+body.aw-frameless {
+  padding-top: 30px;
+}
+
+#awDrag {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  z-index: 10;
+  /* The whole point. Everything below is content and must stay clickable, which
+     is why this is a strip and not a rule on `body`. */
+  -webkit-app-region: drag;
+}
+
 body.aw-shell #wb {
   height: 100%;
   border: 1px solid var(--vscode-panel-border);

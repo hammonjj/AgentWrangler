@@ -48,6 +48,7 @@ import {
 } from '../claude/hookInstall';
 import { hookLogDir } from '../claude/hookLog';
 import { ProjectsService } from '../claude/projects';
+import { transcriptPathFor } from '../claude/transcriptHistory';
 import { fetchUsage } from '../claude/usageFetch';
 import { ArchiveService } from '../core/archive';
 import { ColumnPrefsService } from '../core/columnPrefs';
@@ -74,6 +75,13 @@ import { resumeInTerminal } from '../ui/terminal';
 
 /** How long to let a session emit its first hook event before calling hooks broken. */
 const HOOK_HEALTH_GRACE_MS = 90_000;
+
+/**
+ * A transcript touched this recently is being driven by something. Used only to
+ * refuse an automatic resume — see `resumeLastRunner`. Deliberately short: this
+ * is "somebody is definitely there", not "nobody is".
+ */
+const RECENT_TRANSCRIPT_WRITE_MS = 90_000;
 
 /**
  * Icons for the session picker. VSCode renders `$(name)` as a codicon; a host
@@ -328,6 +336,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       cwd: s.cwd,
       resume: s.sessionId,
       permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
+      effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
       model: model || undefined,
     });
     surface?.showRunner(runner);
@@ -541,6 +550,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const runner = runners.start({
       cwd,
       permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
+      effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
       model: model || undefined,
     });
     surface?.showRunner(runner);
@@ -868,11 +878,31 @@ export function createApp(host: HostServices): AgentWranglerApp {
       log(`not resuming ${record.sessionId}: it is running elsewhere`);
       return;
     }
+    // The check above only sees sessions the Claude Code registry knows about,
+    // and a session driven by *another Agent Wrangler runner* — the extension
+    // in a VSCode window, or a second copy of the app — has no registry entry
+    // at all. To that check it looks dead, and resuming it puts two processes
+    // on one transcript, which is the one thing that corrupts a conversation.
+    //
+    // A transcript written to seconds ago is proof something is driving it, and
+    // it needs no lease to observe. The converse does not hold — a model can
+    // think in silence for minutes — so this only ever refuses, never confirms.
+    // The real fix is an ownership lease; see the plan.
+    try {
+      const writtenMsAgo = Date.now() - fs.statSync(transcriptPathFor(record.sessionId, record.cwd)).mtimeMs;
+      if (writtenMsAgo < RECENT_TRANSCRIPT_WRITE_MS) {
+        log(`not resuming ${record.sessionId}: its transcript was written ${Math.round(writtenMsAgo / 1000)}s ago`);
+        return;
+      }
+    } catch {
+      // No transcript yet, or unreadable. Nothing is writing it either.
+    }
     const model = host.settings.get<string>('runner.model', '').trim();
     const runner = runners.start({
       cwd: record.cwd,
       resume: record.sessionId,
       permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
+      effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
       model: model || undefined,
     });
     log(`resumed ${record.sessionId} after a restart`);
