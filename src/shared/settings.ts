@@ -65,6 +65,23 @@ export const SETTINGS: SettingSpec[] = [
       'Model for conversations started from Agent Wrangler (e.g. claude-opus-5). Empty means Claude Code\'s own default.',
   },
   {
+    key: 'runner.effort',
+    group: 'Conversations',
+    type: 'string',
+    enum: ["", "low", "medium", "high", "xhigh", "max"],
+    enumDescriptions: [
+      'Claude Code\u2019s own default.',
+      'Minimal thinking, fastest answers.',
+      'Moderate thinking.',
+      'Deep reasoning.',
+      'Deeper than high, where the model offers it.',
+      'As hard as the model can think. Select models only.',
+    ],
+    default: "",
+    description:
+      'How hard Claude thinks before answering, for conversations started from Agent Wrangler. Empty means Claude Code\u2019s own default. A model with no effort levels ignores it, and the conversation pane only offers the levels its own model advertises.',
+  },
+  {
     key: 'codexRunner.model',
     group: 'Conversations',
     type: 'string',

@@ -71,6 +71,13 @@ export interface RunnerStartOptions {
   resume?: string;
   permissionMode?: PermissionModeName;
   model?: string;
+  /**
+   * How hard to think: `low` | `medium` | `high` | `xhigh` | `max`, or absent
+   * for the CLI's own default. Start-time only — the SDK's `Query` has
+   * `setModel` and `setPermissionMode` but no `setEffort`, which is why
+   * changing it later goes through the CLI's `/effort` command instead.
+   */
+  effort?: string;
 }
 
 /**
@@ -140,6 +147,7 @@ export class RunnerSession {
   ) {
     this.cwd = opts.cwd;
     if (opts.permissionMode) this.composer.permissionMode = opts.permissionMode;
+    if (opts.effort) this.composer.effort = opts.effort;
     if (opts.model) this.composer.model = opts.model;
     if (opts.resume) {
       this.sessionId = opts.resume;
@@ -202,6 +210,11 @@ export class RunnerSession {
       resume: this.opts.resume,
       permissionMode: this.opts.permissionMode,
       model: this.opts.model,
+      // Cast because the option is a free string by the time it reaches here —
+      // it comes from a setting and from a dropdown built out of whatever the
+      // model advertised, neither of which the SDK's union can be narrowed
+      // from. An unknown level is the CLI's to reject, not ours to guess at.
+      effort: this.opts.effort ? (this.opts.effort as Options['effort']) : undefined,
       pathToClaudeCodeExecutable: this.deps.binary,
       canUseTool: this.canUseTool,
       includePartialMessages: true,
@@ -302,6 +315,33 @@ export class RunnerSession {
     }
   }
 
+  /**
+   * Change how hard this session thinks.
+   *
+   * There is no `Query.setEffort` — the SDK takes `effort` when the query is
+   * created and offers no way to move it afterwards — so this sends the CLI's
+   * own `/effort <level>` the way a person would type it. That is deliberate
+   * on two counts: the CLI owns the setting and will report what it did, and
+   * the change lands in the transcript, where a later reader can see that the
+   * session's depth changed partway through rather than wondering why its
+   * answers did.
+   *
+   * Only when the command is actually advertised. An older CLI would take
+   * `/effort high` as a sentence and answer it.
+   */
+  async setEffort(effort: string): Promise<void> {
+    const level = effort.trim();
+    if (level === this.composer.effort) return;
+    if (!this.composer.slashCommands.includes('effort')) {
+      this.deps.log('runner setEffort: this CLI does not offer /effort');
+      return;
+    }
+    // Recorded before the send so the dropdown does not spring back while the
+    // command is in flight; the CLI is the thing that can contradict it.
+    this.setComposer({ effort: level || undefined });
+    this.send(level ? `/effort ${level}` : '/effort');
+  }
+
   async setModel(model?: string): Promise<void> {
     try {
       await this.query?.setModel(model);
@@ -334,12 +374,21 @@ export class RunnerSession {
         .filter((m) => typeof m?.value === 'string' && m.value !== '')
         .map((m) => {
           const resolved = typeof m.resolvedModel === 'string' ? m.resolvedModel : undefined;
+          // The CLI says both whether a model has effort levels and which
+          // ones; Haiku has none and `xhigh` is not everywhere. Taking the list
+          // from the model rather than hardcoding one is what keeps the
+          // dropdown from offering a level the session would silently ignore.
+          const effortLevels =
+            m.supportsEffort === true && Array.isArray(m.supportedEffortLevels) && m.supportedEffortLevels.length > 0
+              ? [...m.supportedEffortLevels]
+              : undefined;
           return {
             value: m.value,
             // "Default (recommended)" becomes "Default (Sonnet 4.5)": which
             // model the default *is* is the question the row exists to answer.
             label: m.displayName ? modelChoiceLabel(m.displayName, resolved) : m.value,
             resolved,
+            effortLevels,
           };
         });
       if (choices.length > 0) {

@@ -175,6 +175,8 @@ export type ConversationToHost =
   | { type: 'plan'; requestId: string; decision: 'approve' | 'deny'; feedback?: string }
   | { type: 'setPermissionMode'; mode: PermissionModeName }
   | { type: 'setModel'; model?: string }
+  /** How hard to think. Empty string puts the CLI's own default back. */
+  | { type: 'setEffort'; effort: string }
   | { type: 'adopt' }
   | { type: 'release' }
   /** The pane's own button for "give this conversation a tab of its own". */

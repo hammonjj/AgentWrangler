@@ -267,6 +267,13 @@ export interface ModelChoice {
    * selected.
    */
   resolved?: string;
+  /**
+   * How hard this model can be asked to think, in the CLI's own order — the
+   * `supportedEffortLevels` it advertises. Absent when the model has no effort
+   * control at all, which is what hides the dropdown: the levels are a property
+   * of the model, not of the product, and Haiku has none.
+   */
+  effortLevels?: string[];
 }
 
 /** Live state of a session this extension drives. Absent for transcript-backed panes. */
@@ -275,6 +282,11 @@ export interface ComposerState {
   model?: string;
   /** Absent until the CLI answers; the dropdown stays hidden until then. */
   models?: ModelChoice[];
+  /**
+   * How hard this session is currently being asked to think. Absent means the
+   * CLI's own default, which is what an empty selection puts back.
+   */
+  effort?: string;
   slashCommands: string[];
   costUsd?: number;
   contextTokens?: number;

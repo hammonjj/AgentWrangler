@@ -352,6 +352,9 @@ export class ConversationHost {
       case 'setModel':
         await source?.setModel?.(m.model);
         return;
+      case 'setEffort':
+        await source?.setEffort?.(m.effort);
+        return;
       case 'release':
         if (key) this.actions.release(key);
         return;

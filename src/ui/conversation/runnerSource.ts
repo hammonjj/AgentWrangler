@@ -87,6 +87,10 @@ export class RunnerSource implements ConversationSource {
     await this.runner.setPermissionMode(mode);
   }
 
+  async setEffort(effort: string): Promise<void> {
+    await this.runner.setEffort(effort);
+  }
+
   async setModel(model?: string): Promise<void> {
     await this.runner.setModel(model);
   }

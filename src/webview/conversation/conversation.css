@@ -503,7 +503,8 @@ body,
   flex: 1 1 auto;
 }
 #mode,
-#model {
+#model,
+#effort {
   font-family: inherit;
   font-size: inherit;
   padding: 1px 4px;
@@ -513,9 +514,15 @@ body,
   color: var(--vscode-dropdown-foreground, inherit);
   /* The pane is used at ~300px, where two dropdowns at their natural width
      (as wide as "Auto-accept edits") would push Stop off the bar. Let them
-     shrink instead, but only once the row actually runs out of room. */
+     shrink instead, but only once the row actually runs out of room. Three of
+     them now, since effort sits beside the model it belongs to. */
   flex: 0 1 auto;
   min-width: 3.5em;
+}
+/* The narrowest of the three — its longest value is "medium" — so it gives up
+   the least when the bar is squeezed. */
+#effort {
+  min-width: 3em;
 }
 #queued {
   flex: 0 0 auto;

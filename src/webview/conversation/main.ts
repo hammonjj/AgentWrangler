@@ -73,6 +73,7 @@ app.innerHTML = `
     <div id="composerBar">
       <select id="mode" title="Permission mode"></select>
       <select id="model" title="Model" hidden></select>
+      <select id="effort" title="How hard Claude thinks before answering" hidden></select>
       <span id="queued" hidden></span><span id="sessionusage" title="Estimated cost since this runner started; context from the most recent /context report"></span>
       <span class="grow"></span>
     </div>
@@ -105,6 +106,7 @@ const pinBtn = document.getElementById('pin') as HTMLButtonElement;
 const releaseBtn = document.getElementById('release') as HTMLButtonElement;
 const modeSel = document.getElementById('mode') as HTMLSelectElement;
 const modelSel = document.getElementById('model') as HTMLSelectElement;
+const effortSel = document.getElementById('effort') as HTMLSelectElement;
 const queuedEl = document.getElementById('queued')!;
 const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
@@ -851,6 +853,7 @@ function setCaps(next: ConversationCapabilities): void {
   composerWrite.hidden = !next.canSend;
   modeSel.disabled = !!next.adoptOnSend;
   modelSel.disabled = !!next.adoptOnSend;
+  effortSel.disabled = !!next.adoptOnSend;
   composerRead.hidden = next.canSend;
   // Empty rather than hidden: the note keeps its flex space, so Resume here
   // stays where the Send button sits instead of jumping to the left edge.
@@ -881,6 +884,49 @@ function setModels(models: ModelChoice[] | undefined): void {
   // Nothing to choose between until the CLI has answered; an empty dropdown
   // would just look broken.
   modelSel.hidden = list.length === 0;
+}
+
+/**
+ * The effort levels belong to the *selected* model, not to the session: Haiku
+ * has none and `xhigh` is not everywhere, so the list is rebuilt whenever the
+ * model changes and the dropdown disappears entirely for a model that cannot
+ * be asked to think harder. Offering a level the session would ignore is worse
+ * than offering none.
+ *
+ * The blank first row is the CLI's own default, which is a real choice and not
+ * the same as any named level — it is what you get back by un-picking.
+ */
+let effortKey = '';
+
+function setEffortLevels(levels: string[] | undefined): void {
+  const list = levels ?? [];
+  const key = list.join('\u0001');
+  if (key === effortKey) return;
+  effortKey = key;
+  const previous = effortSel.value;
+  effortSel.textContent = '';
+  if (list.length > 0) {
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = 'Effort: default';
+    effortSel.appendChild(blank);
+  }
+  for (const level of list) {
+    const opt = document.createElement('option');
+    opt.value = level;
+    opt.textContent = level;
+    effortSel.appendChild(opt);
+  }
+  effortSel.hidden = list.length === 0;
+  // Keep the level across a model change when the new model also has it.
+  if (previous && list.includes(previous)) effortSel.value = previous;
+}
+
+/** What the session reports it is on, which the CLI may have changed itself. */
+function selectEffort(effort: string | undefined): void {
+  if (effortSel.hidden) return;
+  const wanted = effort ?? '';
+  if (Array.from(effortSel.options).some((o) => o.value === wanted)) effortSel.value = wanted;
 }
 
 /**
@@ -943,6 +989,9 @@ function setComposer(c: ComposerState): void {
   if (c.permissionMode) modeSel.value = c.permissionMode;
   setModels(c.models);
   selectModel(c.model);
+  // After `selectModel`, so the levels come from the row that is now showing.
+  setEffortLevels(c.models?.find((m) => m.value === modelSel.value)?.effortLevels);
+  selectEffort(c.effort);
   setBusy(c.busy);
   sendBtn.disabled = false; // sends queue behind a running turn, so never blocked
   queuedEl.hidden = c.queued === 0;
@@ -1370,6 +1419,7 @@ sendBtn.addEventListener('click', () => {
 });
 modeSel.addEventListener('change', () => post({ type: 'setPermissionMode', mode: modeSel.value as PermissionModeName }));
 modelSel.addEventListener('change', () => post({ type: 'setModel', model: modelSel.value }));
+effortSel.addEventListener('change', () => post({ type: 'setEffort', effort: effortSel.value }));
 
 const slashList = document.getElementById('slashcommands')!;
 msgEl.addEventListener('input', () => {
