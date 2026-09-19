@@ -13,10 +13,15 @@
  * brings your session back.
  */
 
-/** The slice of `vscode.Memento` this needs, so the runner never imports vscode. */
+/**
+ * The slice of `vscode.Memento` this needs, so the runner never imports vscode.
+ * `update` returns `unknown` rather than `Thenable<void>` because the host
+ * behind it may be a plain JSON file that writes synchronously; every caller
+ * here discards the result anyway.
+ */
 export interface MementoLike {
   get<T>(key: string, defaultValue: T): T;
-  update(key: string, value: unknown): Thenable<void> | void;
+  update(key: string, value: unknown): unknown;
 }
 
 export interface RunnerRecord {

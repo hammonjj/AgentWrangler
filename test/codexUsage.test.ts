@@ -15,6 +15,9 @@ describe('parseCodexRateLimits', () => {
 
     expect(parsed).toEqual({
       fetchedAtMs: 123,
+      // Settled, not unreported: Codex has no extra-usage counterpart, so there
+      // is never anything for the service to carry forward. See `spendKnown`.
+      spendKnown: true,
       windows: [
         { id: 'codex:primary', label: '5hr', percent: 21, resetsAtMs: 1_800_000_000_000, active: false },
         { id: 'codex:secondary', label: '1 week', percent: 48, resetsAtMs: 1_800_500_000_000, active: false },

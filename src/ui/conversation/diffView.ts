@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { splitUnifiedPatch } from '../../shared/diff';
+import type { DiffViewer } from './diffViewer';
 
 /**
  * Open an edit's diff in VSCode's own diff editor.
@@ -23,7 +24,7 @@ const SCHEME = 'agent-wrangler-diff';
  * that opened them goes away; a diff tab left open past that keeps rendering
  * the text VSCode already has.
  */
-export class DiffContentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable {
+export class DiffContentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable, DiffViewer {
   private contents = new Map<string, string>();
   private seq = 0;
   private sub: vscode.Disposable;

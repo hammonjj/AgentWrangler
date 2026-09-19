@@ -19,7 +19,7 @@ const MODELS: unknown = [
   { value: 'haiku', displayName: '', description: 'x' },
 ];
 
-function fakeQuery(models: unknown = MODELS) {
+function fakeQuery(models: unknown = MODELS, commands?: { name: string }[]) {
   let emit!: (msg: unknown) => void;
   let finish!: () => void;
   let fail!: (err: unknown) => void;
@@ -87,6 +87,9 @@ function fakeQuery(models: unknown = MODELS) {
         if (models instanceof Error) throw models;
         return models;
       },
+      // Left off entirely unless a test asks for it: an older CLI has no such
+      // method, and `loadCommands` swallowing that is the behaviour under test.
+      ...(commands ? { supportedCommands: async () => commands } : {}),
       close: () => {
         calls.close++;
         finish();
@@ -98,12 +101,16 @@ function fakeQuery(models: unknown = MODELS) {
   return { query, emit, finish, fail, calls };
 }
 
-function makeSession(cwd = '/Users/test/proj', models?: unknown) {
-  const fake = fakeQuery(models === undefined ? MODELS : models);
+function makeSession(
+  cwd = '/Users/test/proj',
+  models?: unknown,
+  extra?: { commands?: { name: string }[]; effort?: string },
+) {
+  const fake = fakeQuery(models === undefined ? MODELS : models, extra?.commands);
   const appended: ConvBlock[] = [];
   const patches: { id: string; block: Record<string, unknown> }[] = [];
   const session = new RunnerSession(
-    { cwd },
+    { cwd, effort: extra?.effort },
     { query: fake.query, binary: '/fake/claude', log: () => undefined },
   );
   session.onAppend((b) => appended.push(...b));
@@ -368,6 +375,90 @@ describe('RunnerSession', () => {
     fake.emit({ type: 'system', subtype: 'init', session_id: 'abc-123', permissionMode: 'default' });
     await settle();
     expect(fake.calls.supportedModels).toBe(1);
+  });
+
+  /**
+   * Effort is a property of the model, not of the product: Haiku has none and
+   * `xhigh` is not everywhere. Taking the list from what the CLI advertises is
+   * what stops the dropdown offering a level the session would ignore.
+   */
+  it('carries each model\u2019s own effort levels, and none for a model without them', async () => {
+    const { session } = makeSession('/Users/test/proj', [
+      { value: 'opus', displayName: 'Opus', description: 'x', supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high', 'xhigh'] },
+      { value: 'haiku', displayName: 'Haiku', description: 'x', supportsEffort: false },
+      { value: 'sonnet', displayName: 'Sonnet', description: 'x' },
+      // Says it supports effort but names no levels: nothing to put in a list.
+      { value: 'odd', displayName: 'Odd', description: 'x', supportsEffort: true, supportedEffortLevels: [] },
+    ]);
+    await settle();
+
+    expect(session.composer.models?.map((m) => [m.value, m.effortLevels])).toEqual([
+      ['opus', ['low', 'medium', 'high', 'xhigh']],
+      ['haiku', undefined],
+      ['sonnet', undefined],
+      ['odd', undefined],
+    ]);
+  });
+
+  it('starts the query at the effort it was given, and reports it to the composer', async () => {
+    const { session, fake } = makeSession('/Users/test/proj', undefined, { effort: 'xhigh' });
+    await settle();
+
+    expect(fake.calls.options.effort).toBe('xhigh');
+    expect(session.composer.effort).toBe('xhigh');
+  });
+
+  it('leaves effort unset when none was asked for, so the CLI keeps its own default', async () => {
+    const { session, fake } = makeSession();
+    await settle();
+
+    expect(fake.calls.options.effort).toBeUndefined();
+    expect(session.composer.effort).toBeUndefined();
+  });
+
+  /**
+   * The SDK has `setModel` and `setPermissionMode` but no `setEffort`, so the
+   * only way to move it on a live session is the CLI's own command. It lands in
+   * the transcript, which is right: a reader should be able to see that the
+   * session got deeper partway through.
+   */
+  it('changes a live session\u2019s effort through the CLI\u2019s own command', async () => {
+    const { session, appended } = makeSession('/Users/test/proj', undefined, { commands: [{ name: 'effort' }] });
+    await settle();
+
+    await session.setEffort('high');
+    expect(session.composer.effort).toBe('high');
+    expect(appended.some((b) => b.kind === 'user' && b.text === '/effort high')).toBe(true);
+  });
+
+  it('puts the default back with a bare command', async () => {
+    const { session, appended } = makeSession('/Users/test/proj', undefined, { commands: [{ name: 'effort' }] });
+    await settle();
+
+    await session.setEffort('');
+    expect(session.composer.effort).toBeUndefined();
+    expect(appended.some((b) => b.kind === 'user' && b.text === '/effort')).toBe(true);
+  });
+
+  /** An older CLI would read `/effort high` as a sentence and answer it. */
+  it('sends nothing when the CLI does not advertise the command', async () => {
+    const { session, appended } = makeSession();
+    await settle();
+
+    await session.setEffort('high');
+    expect(session.composer.effort).toBeUndefined();
+    expect(appended.some((b) => b.kind === 'user')).toBe(false);
+  });
+
+  it('does not re-send when the level has not changed', async () => {
+    const { session, appended } = makeSession('/Users/test/proj', undefined, {
+      commands: [{ name: 'effort' }],
+      effort: 'high',
+    });
+    await settle();
+
+    await session.setEffort('high');
+    expect(appended.some((b) => b.kind === 'user')).toBe(false);
   });
 
   it('keeps running when the CLI cannot list models, so the pane just hides the dropdown', async () => {

@@ -28,7 +28,9 @@ import type { SessionStore } from '../core/sessionStore';
 import type { SessionActions } from './actions';
 import type { ConversationProvider } from './conversation/conversationHost';
 import { ConversationHost } from './conversation/conversationHost';
-import type { DiffContentProvider } from './conversation/diffView';
+import type { DiffViewer } from './conversation/diffViewer';
+import type { ConversationHostUi } from './conversation/conversationHost';
+import type { HostSettings } from '../host/hostServices';
 import {
   DashboardHost,
   type ConversationLauncher,
@@ -36,7 +38,7 @@ import {
   type ProjectSource,
   type UsageSource,
 } from './dashboardHost';
-import { buildWebviewHtml } from './html';
+import { buildWebviewHtml } from './vscodeHtml';
 import { paneChannel } from './paneChannel';
 
 export const WORKBENCH_PANEL_TYPE = 'agentWrangler.workbench';
@@ -56,7 +58,7 @@ export interface WorkbenchDeps {
   runners: RunnerService;
   actions: SessionActions;
   dictation: DictationService;
-  diffs: DiffContentProvider;
+  diffs: DiffViewer | undefined;
   files: FileSuggestService;
   archive: ArchiveService;
   health: HookHealthSource;
@@ -67,6 +69,10 @@ export interface WorkbenchDeps {
   launcher: ConversationLauncher;
   pause: PauseService;
   pins: PinService;
+  /** The `agentWrangler.*` settings, for the dashboard's Codex-subagents toggle. */
+  settings: HostSettings;
+  /** Dialogs and the dictation-setup offer, for the conversation pane. */
+  ui: ConversationHostUi;
 }
 
 /** What the webview saves, so a reload comes back on the same conversation. */
@@ -178,6 +184,8 @@ export class WorkbenchPanelManager implements vscode.Disposable {
       this.deps.launcher,
       this.deps.pause,
       this.deps.pins,
+      this.deps.settings,
+      this.deps.ui.dialogs,
     );
     this.conversation = new ConversationHost(
       paneChannel(panel.webview, 'conversation'),
@@ -193,6 +201,7 @@ export class WorkbenchPanelManager implements vscode.Disposable {
       // The tab is the whole workbench, not one conversation, so its title does
       // not follow the session. The pane shows the name in its own header.
       () => undefined,
+      this.deps.ui,
     );
 
     panel.onDidDispose(() => {

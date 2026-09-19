@@ -503,7 +503,8 @@ body,
   flex: 1 1 auto;
 }
 #mode,
-#model {
+#model,
+#effort {
   font-family: inherit;
   font-size: inherit;
   padding: 1px 4px;
@@ -513,9 +514,15 @@ body,
   color: var(--vscode-dropdown-foreground, inherit);
   /* The pane is used at ~300px, where two dropdowns at their natural width
      (as wide as "Auto-accept edits") would push Stop off the bar. Let them
-     shrink instead, but only once the row actually runs out of room. */
+     shrink instead, but only once the row actually runs out of room. Three of
+     them now, since effort sits beside the model it belongs to. */
   flex: 0 1 auto;
   min-width: 3.5em;
+}
+/* The narrowest of the three — its longest value is "medium" — so it gives up
+   the least when the bar is squeezed. */
+#effort {
+  min-width: 3em;
 }
 #queued {
   flex: 0 0 auto;
@@ -840,8 +847,72 @@ body,
   }
 }
 
-#findbar { display:flex; gap:4px; padding:4px 8px; }
-#find { min-width:0; flex:1; }
+/*
+ * Find in conversation.
+ *
+ * It had layout and nothing else, so the input and its two buttons rendered as
+ * raw user-agent controls — square, pale, and nothing like the rest of the
+ * pane. Borrowed rather than invented: the field is `#msg`'s box and the
+ * buttons are `.hdrbtn`, which are the composer and the header it sits between.
+ */
+#findbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+}
+
+#find {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 0.9em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-input-border, var(--aw-rule));
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  /* `type="search"` draws a platform clear affordance on top of the one this
+     bar already has a button for, and on macOS it is a light circle that does
+     not belong on a dark field. */
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+#find::-webkit-search-cancel-button {
+  display: none;
+}
+
+#find::placeholder {
+  color: var(--vscode-descriptionForeground);
+}
+
+#find:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  border-color: var(--vscode-focusBorder);
+}
+
+#findbar button {
+  flex: 0 0 auto;
+  font-family: inherit;
+  font-size: 0.86em;
+  padding: 3px 10px;
+  border-radius: 3px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, inherit);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#findbar button:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+
+#findbar button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
 .subagent-work { margin-left:12px; border-left:2px solid var(--vscode-panel-border); padding-left:8px; }
 #searchresults { border-bottom:2px solid var(--vscode-panel-border); }
 #sessionusage { font-size:11px; }

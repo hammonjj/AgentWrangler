@@ -734,11 +734,21 @@ bar.id = 'bar';
 // nothing else. So the dropdown is a popup of real rows — the folder on the
 // left, the X that stops offering it on the right.
 // The bar has two halves with opposite jobs. On the left, starting work: the
-// folder and the button that spawns an agent in it. Pushed to the right, the
-// controls that act on everything already running — a group that begins with
-// the pause button and is where anything fleet-wide belongs later.
-bar.innerHTML = `<button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
-<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
+// folder and the button that spawns an agent in it, wrapped together because
+// they are one control in two pieces — pick where, then go. On the right, the
+// controls that act on everything already running, a group that begins with the
+// pause button and is where anything fleet-wide belongs later.
+//
+// The two halves are held apart by the left one's `margin-right: auto` rather
+// than by the folder button growing to fill the bar, which is what it used to
+// do: in a full-width window that stretched one dropdown across two thousand
+// pixels and crammed everything else against the right edge.
+//
+// `#projmenu` stays a direct child: it is positioned against `#bar`, which is
+// the only positioned ancestor, and moving it inside the group would anchor it
+// to a box that shrinks.
+bar.innerHTML = `<div class="launch"><button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
+<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button></div>
 <div id="ctl" class="ctlgroup"><select id="provider" class="providerfilter" title="Filter sessions by provider"><option value="all">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select><button id="pauseall" class="ctlbtn"></button></div>
 <div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
 // First in the body, above the usage strip, which is itself above the scrolling

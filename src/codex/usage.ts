@@ -58,7 +58,10 @@ export function parseCodexRateLimits(body: unknown, nowMs: number): UsageSnapsho
     toWindow(snapshot, 'primary', includeLimitName),
     toWindow(snapshot, 'secondary', includeLimitName),
   ]).filter((window): window is UsageWindow => !!window);
-  return windows.length > 0 ? { fetchedAtMs: nowMs, windows } : undefined;
+  // `spendKnown: true` with no spend: Codex rate limits have no extra-usage
+  // counterpart at all, so this is settled rather than unreported — there is
+  // nothing for the service to carry forward from a previous read.
+  return windows.length > 0 ? { fetchedAtMs: nowMs, windows, spendKnown: true } : undefined;
 }
 
 /** App Server-backed reader used by the normal cached/polled UsageService. */

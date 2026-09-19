@@ -1,7 +1,9 @@
 /**
- * Settings snapshot. The vscode-backed reader lives in extension.ts; core and
+ * Settings snapshot. The host-backed reader is `readConfig` below; core and
  * provider code only ever see this plain object via a getter function.
  */
+
+import type { HostSettings } from '../host/hostServices';
 
 export interface WranglerConfig {
   claudeBinaryPath: string;
@@ -54,3 +56,30 @@ export const DEFAULT_CONFIG: WranglerConfig = {
 };
 
 export type ConfigGetter = () => WranglerConfig;
+
+/**
+ * Read the snapshot out of whatever the host keeps settings in.
+ *
+ * Every field is listed, rather than iterated over `DEFAULT_CONFIG`, because
+ * two of the keys are nested (`autoPause.enabled`, `autoPause.percent`) and the
+ * property names do not match the setting names. Read fresh on every call: the
+ * poll interval and the stuck threshold are meant to take effect without a
+ * reload, so nothing may cache this.
+ */
+export function readConfig(settings: HostSettings): WranglerConfig {
+  const d = DEFAULT_CONFIG;
+  return {
+    claudeBinaryPath: settings.get('claudeBinaryPath', d.claudeBinaryPath),
+    codexBinaryPath: settings.get('codexBinaryPath', d.codexBinaryPath),
+    showCodexSubagents: settings.get('showCodexSubagents', d.showCodexSubagents),
+    stuckThresholdSeconds: settings.get('stuckThresholdSeconds', d.stuckThresholdSeconds),
+    endedWindowHours: settings.get('endedWindowHours', d.endedWindowHours),
+    maxEndedSessions: settings.get('maxEndedSessions', d.maxEndedSessions),
+    notifyOnWaiting: settings.get('notifyOnWaiting', d.notifyOnWaiting),
+    pollIntervalSeconds: settings.get('pollIntervalSeconds', d.pollIntervalSeconds),
+    showUsage: settings.get('showUsage', d.showUsage),
+    usagePollIntervalSeconds: settings.get('usagePollIntervalSeconds', d.usagePollIntervalSeconds),
+    autoPauseEnabled: settings.get('autoPause.enabled', d.autoPauseEnabled),
+    autoPausePercent: settings.get('autoPause.percent', d.autoPausePercent),
+  };
+}

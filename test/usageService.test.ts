@@ -7,6 +7,7 @@ import type { UsageSnapshot } from '../src/shared/usage';
 const snap = (pct: number, at: number): UsageSnapshot => ({
   fetchedAtMs: at,
   windows: [{ id: 'session', label: 'Session (5hr)', percent: pct, active: false }],
+  spendKnown: true,
 });
 
 const noJitter = { jitter: () => Promise.resolve() };
@@ -211,6 +212,74 @@ describe('UsageService', () => {
     await svc.refresh({ force: true });
     expect(read).toHaveBeenCalledTimes(2);
     svc.dispose();
+  });
+
+  /**
+   * The windows are always in the body; `spend` is not. A read that omits it
+   * used to replace the last snapshot wholesale and take the extra-usage card
+   * off the dashboard — which looks exactly like the credits being gone, and
+   * is not what the response said.
+   */
+  describe('extra usage across reads', () => {
+    const SPEND = { usedMinor: 326, limitMinor: 100000, exponent: 2, currency: 'USD', percent: 0 };
+
+    const readerOf = (...snapshots: UsageSnapshot[]) => {
+      let i = 0;
+      return vi.fn<UsageReader>(async () => ({ ok: true, snapshot: snapshots[Math.min(i++, snapshots.length - 1)] }));
+    };
+
+    it('keeps the last figure when a later read does not mention it', async () => {
+      const withSpend: UsageSnapshot = { ...snap(10, 1), spend: SPEND, spendKnown: true };
+      const silent: UsageSnapshot = { ...snap(11, 2), spendKnown: false };
+      const svc = new UsageService(readerOf(withSpend, silent), new MemoryUsageCache(), () => cfg, undefined, noJitter);
+
+      svc.start();
+      await flush();
+      expect(svc.usage.last?.spend).toEqual(SPEND);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(svc.usage.last?.windows[0].percent).toBe(11);
+      expect(svc.usage.last?.spend).toEqual(SPEND);
+      svc.dispose();
+    });
+
+    it('clears it when a later read says the account has none', async () => {
+      const withSpend: UsageSnapshot = { ...snap(10, 1), spend: SPEND, spendKnown: true };
+      const disabled: UsageSnapshot = { ...snap(11, 2), spendKnown: true };
+      const svc = new UsageService(readerOf(withSpend, disabled), new MemoryUsageCache(), () => cfg, undefined, noJitter);
+
+      svc.start();
+      await flush();
+      expect(svc.usage.last?.spend).toEqual(SPEND);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(svc.usage.last?.spend).toBeUndefined();
+      svc.dispose();
+    });
+
+    /** Carrying is only ever forward: nothing to carry means nothing appears. */
+    it('invents nothing when it has never seen a figure', async () => {
+      const silent: UsageSnapshot = { ...snap(10, 1), spendKnown: false };
+      const svc = new UsageService(readerOf(silent), new MemoryUsageCache(), () => cfg, undefined, noJitter);
+      svc.start();
+      await flush();
+      expect(svc.usage.last?.spend).toBeUndefined();
+      svc.dispose();
+    });
+
+    /** The cache is "the last good read", so the carried figure belongs in it. */
+    it('writes the carried figure to the cache', async () => {
+      const cache = new MemoryUsageCache();
+      const withSpend: UsageSnapshot = { ...snap(10, 1), spend: SPEND, spendKnown: true };
+      const silent: UsageSnapshot = { ...snap(11, 2), spendKnown: false };
+      const svc = new UsageService(readerOf(withSpend, silent), cache, () => cfg, undefined, noJitter);
+
+      svc.start();
+      await flush();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect((await cache.read())?.spend).toEqual(SPEND);
+      svc.dispose();
+    });
   });
 
   it('stops after dispose', async () => {

@@ -10,7 +10,7 @@ import * as fs from 'node:fs/promises';
 import { archivePage, archivedTool, subagentPath } from '../../claude/conversationArchive';
 import { transcriptPathFor } from '../../claude/transcriptHistory';
 import * as path from 'node:path';
-import * as vscode from 'vscode';
+import type { HostDialogs } from '../../host/hostServices';
 import type { RunnerService } from '../../claude/runner/runnerService';
 import type { RunnerSession } from '../../claude/runner/runnerSession';
 import type { CodexRunner, CodexRunnerService } from '../../codex/runner';
@@ -25,9 +25,8 @@ import type { ConversationToHost, HostToConversation } from '../../shared/messag
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
 import type { PaneChannel } from '../paneChannel';
-import { offerDictationSetup } from '../dictationSetup';
 import { adoptActionFor } from '../openTarget';
-import { DiffContentProvider } from './diffView';
+import type { DiffViewer } from './diffViewer';
 import { RunnerSource } from './runnerSource';
 import { CodexTranscriptSource } from './codexTranscriptSource';
 import type { ConversationSource } from './source';
@@ -38,6 +37,22 @@ import { TranscriptSource } from './transcriptSource';
  * beyond this is a folder's worth landing in the box by accident.
  */
 const MAX_DROPPED_PATHS = 20;
+
+/**
+ * The two things the pane needs from the host and cannot get from a service:
+ * somewhere to put a message, and what to do when dictation turns out not to be
+ * installed. Both differ per host — a VSCode notification with buttons, versus
+ * a native message box — and neither belongs in a session service.
+ */
+export interface ConversationHostUi {
+  dialogs: HostDialogs;
+  /**
+   * Dictation asked for a tool that is missing. The VSCode implementation
+   * offers the Homebrew command and the model download; a host with nowhere to
+   * run a command can simply report it.
+   */
+  offerDictationSetup(err: DictationSetupError): Promise<void>;
+}
 
 /** Provider surface the pane needs: transcript growth, and answering a permission prompt. */
 export interface ConversationProvider extends AgentProvider {
@@ -74,9 +89,15 @@ export class ConversationHost {
     private codexRunners: CodexRunnerService,
     private actions: SessionActions,
     private dictation: DictationService,
-    private diffs: DiffContentProvider,
+    /**
+     * Where "open this edit properly" goes. Optional because there is no
+     * honest diff editor outside VSCode yet; absent, the pane's own +/- block
+     * is the whole story and the button says so.
+     */
+    private diffs: DiffViewer | undefined,
     private files: FileSuggestService,
     private onTitle: (title: string) => void,
+    private ui: ConversationHostUi,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: ConversationToHost) => void this.onMessage(m)),
@@ -331,6 +352,9 @@ export class ConversationHost {
       case 'setModel':
         await source?.setModel?.(m.model);
         return;
+      case 'setEffort':
+        await source?.setEffort?.(m.effort);
+        return;
       case 'release':
         if (key) this.actions.release(key);
         return;
@@ -386,7 +410,10 @@ export class ConversationHost {
         await this.dictate(m.action);
         return;
       case 'openDiff':
-        await this.diffs.open(m.file, m.patch);
+        // No diff editor here means the card's own +/- block is all there is.
+        // Saying so is better than a button that swallows the click.
+        if (!this.diffs) this.ui.dialogs.flash('Agent Wrangler: opening a diff needs VSCode for now.', 4000);
+        else await this.diffs.open(m.file, m.patch);
         return;
       case 'fileSuggest': {
         const cwd = this.session?.cwd;
@@ -463,7 +490,7 @@ export class ConversationHost {
   }
 
   private tooLate(): void {
-    vscode.window.setStatusBarMessage('Agent Wrangler: that prompt has already been answered.', 4000);
+    this.ui.dialogs.flash('Agent Wrangler: that prompt has already been answered.', 4000);
   }
 
   /**
@@ -488,8 +515,8 @@ export class ConversationHost {
         );
       } catch (e) {
         this.post({ type: 'dictation', state: 'idle', message: 'Dictation is not set up.' });
-        if (e instanceof DictationSetupError) await offerDictationSetup(e);
-        else void vscode.window.showErrorMessage(`Agent Wrangler: dictation failed — ${(e as Error).message}`);
+        if (e instanceof DictationSetupError) await this.ui.offerDictationSetup(e);
+        else this.ui.dialogs.error(`Agent Wrangler: dictation failed — ${(e as Error).message}`);
       }
       return;
     }
@@ -500,7 +527,7 @@ export class ConversationHost {
       this.post({ type: 'dictation', state: 'idle', text });
     } catch (e) {
       this.post({ type: 'dictation', state: 'idle', message: 'Could not transcribe.' });
-      void vscode.window.showErrorMessage(`Agent Wrangler: dictation failed — ${(e as Error).message}`);
+      this.ui.dialogs.error(`Agent Wrangler: dictation failed — ${(e as Error).message}`);
     }
   }
 }

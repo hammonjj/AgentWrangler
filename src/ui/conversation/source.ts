@@ -46,6 +46,8 @@ export interface ConversationSource extends Disposable {
   interrupt?(): Promise<void>;
   setPermissionMode?(mode: PermissionModeName): Promise<void>;
   setModel?(model?: string): Promise<void>;
+  /** How hard to think. Only sources that drive a live CLI have one. */
+  setEffort?(effort: string): Promise<void>;
 
   /**
    * The whole text of a block the pane was only sent the start of, for the

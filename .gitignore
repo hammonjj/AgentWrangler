@@ -5,3 +5,4 @@ dist/
 .dev-auto-open
 .dev-reload
 .worktrees/
+release/
