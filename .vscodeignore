@@ -12,3 +12,15 @@ tsconfig.json
 **/*.map
 .worktrees/**
 scripts/**
+
+# The desktop app. `npm run app:package` leaves a ~490MB bundle in release/,
+# and the Electron main/preload and the windows only it opens are dead weight
+# in a .vsix — the extension host loads none of them. Left in, vsce also tries
+# to secret-scan the packaged app and dies on a directory.
+release/**
+build/**
+electron-builder.yml
+dist/electron/**
+dist/webview/palette.*
+dist/webview/preferences.*
+dist/webview/theme.*
