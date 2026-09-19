@@ -13,7 +13,7 @@ export function getNonce(): string {
  * same file off disk and uses `'self'`. Both differ only in those three
  * strings, so they are arguments rather than two copies of the document.
  */
-export type BundleName = 'dashboard' | 'conversation' | 'workbench' | 'preferences';
+export type BundleName = 'dashboard' | 'conversation' | 'workbench' | 'preferences' | 'palette';
 
 /**
  * The markup each bundle finds when it loads.
@@ -30,6 +30,7 @@ const BODY: Record<BundleName, string> = {
   dashboard: '<div id="app"></div>',
   conversation: '<div id="convApp"></div>',
   preferences: '<div id="prefsApp"></div>',
+  palette: '<div id="paletteApp"></div>',
   workbench:
     '<div id="wb">' +
     '<div id="wbTable"><div id="app"></div></div>' +

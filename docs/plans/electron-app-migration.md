@@ -156,20 +156,39 @@ later reader should be able to see that the session got deeper partway through.
 `runner.effort` is the default for new conversations, declared once like every other setting
 and so appearing in both VSCode's settings UI and the app's Preferences window.
 
-### Phase 3 — the dialogs
+### Phase 3 — the dialogs — **done, bar one product decision**
 
-The message boxes and the folder picker are done — `dialog.showMessageBox` and
-`showOpenDialog` — and the fifteen commands are an application menu. **What is left is the
-palette.** `HostDialogs.input` and `HostDialogs.pick` have no native Electron equivalent, so
-today they decline out loud ("…needs VSCode for now") and return `undefined`, which every
-caller already treats as cancelled. That costs three things in the app: renaming a
-conversation, the session picker behind every menu item that needs to ask *which*, and the
-folder list when *New Conversation* is invoked without one. A small renderer-side palette —
-a filtered list and a text field, in a child window — covers all three.
+The message boxes and the folder picker were already `dialog.showMessageBox` and
+`showOpenDialog`, and the fifteen commands an application menu. The palette is now there too:
+`src/webview/palette/` in a small frameless child window, driven by `src/electron/
+paletteWindow.ts`, and `HostDialogs.input` / `pick` go through it. Renaming a conversation,
+the session picker behind every menu item that asks *which*, and the folder list behind *New
+Conversation* all work in the app.
 
-Also here: `openInTab`. In VSCode it gives a conversation an editor tab of its own; here it
-would be a second window, which is a product decision rather than a port. It currently shows
-the session in the one window and says so.
+One window for both shapes, because they are the same interaction with a list that may be
+empty. Filtering is a subsequence match — `bsf` finds `BulkSource-frontend` — over the label,
+widening to the description and detail only when the caller asked for it. `$(bell)`-style
+codicons are stripped: the font exists only in VSCode, and the status they encode is already
+spelled out in the row's description.
+
+Three things that are not obvious and are worth keeping:
+
+- **A row is answered by index, never by value.** Every caller of `pick` reads fields off the
+  object it passed — a session `key`, a folder `dir`, the launcher's `browse` flag — and none
+  of them belong in a renderer. Labels go out, an index comes back, the host maps it.
+- **Validation round-trips.** `InputOptions.validateInput` is a function in the host's
+  process, so the window asks per keystroke (debounced) and refuses to submit while a
+  complaint is showing. The rule is applied once more on the answer, because that is where it
+  actually lives.
+- **Dismiss-on-blur is deferred a tick.** Two requests in a row — pick a session, then be
+  asked what to rename it to — hide the window and immediately re-show it, and the blur from
+  that hide lands *after* the second request is up. Taken at face value it cancelled the
+  question on screen, which made Rename silently do nothing. By the next tick the window has
+  focus again, which tells a real blur from that one.
+
+**Still open:** `openInTab`. In VSCode it gives a conversation an editor tab of its own; here
+it would be a second window, which is a product decision rather than a port. It currently
+shows the session in the one window and says so.
 
 ### Phase 4 — packaging — **done for local use**
 

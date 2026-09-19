@@ -87,6 +87,7 @@ const web = {
     'src/webview/conversation/main.ts',
     'src/webview/workbench/main.ts',
     'src/webview/preferences/main.ts',
+    'src/webview/palette/main.ts',
     'src/webview/theme/vscodeTokens.css',
   ],
   bundle: true,

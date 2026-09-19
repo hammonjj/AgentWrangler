@@ -58,7 +58,7 @@ export function serveBundles(distDir: string): void {
     const url = new URL(request.url);
     const name = decodeURIComponent(url.pathname).replace(/^\/+/, '');
 
-    const document = /^(dashboard|conversation|workbench|preferences)\.html$/.exec(name);
+    const document = /^(dashboard|conversation|workbench|preferences|palette)\.html$/.exec(name);
     if (document) {
       const bundle = document[1] as BundleName;
       return new Response(
@@ -79,8 +79,14 @@ export function serveBundles(distDir: string): void {
           // gets on macOS, where it has no title bar and owns the strip the
           // traffic lights float over — Preferences keeps an ordinary bar, so
           // it must not claim that strip. See `vscodeTokens.css`.
+          // The palette is frameless and pads itself, so it takes neither: the
+          // shell's inset would double up on its own.
           bodyClass:
-            bundle === 'workbench' && process.platform === 'darwin' ? 'aw-shell aw-frameless' : 'aw-shell',
+            bundle === 'palette'
+              ? undefined
+              : bundle === 'workbench' && process.platform === 'darwin'
+                ? 'aw-shell aw-frameless'
+                : 'aw-shell',
         }),
         { headers: { 'content-type': TYPES['.html'] } },
       );
