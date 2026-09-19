@@ -863,6 +863,13 @@ function setCaps(next: ConversationCapabilities): void {
   composerNote.textContent = next.sendHint ?? (next.canSend ? '' : (next.readOnlyReason ?? ''));
   composerRead.hidden = next.canSend && !next.adoptOnSend;
   msgEl.placeholder = next.sendHint ?? (activeProvider === 'codex' ? 'Message Codex…' : 'Message Claude…');
+  // The box is sized by `autoGrow`, which until now only ran on input — so
+  // between the composer appearing and the first keystroke it had whatever
+  // height `rows="1"` gave it, which is not the height this layout wants, and
+  // it sat clipped against the bottom of the pane. Measured here, once it is
+  // visible: a `scrollHeight` read on a hidden element is 0, which would set
+  // the height to zero and make it worse.
+  if (!composerWrite.hidden) autoGrow();
 }
 
 /** The list currently rendered, so options are rebuilt only when it changes. */

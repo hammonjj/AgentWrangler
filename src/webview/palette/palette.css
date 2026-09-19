@@ -1,0 +1,137 @@
+/*
+ * The palette window.
+ *
+ * Its own document, so it may size off the viewport — but everything is still
+ * scoped to `#paletteApp`, because this stylesheet and the shell's are loaded
+ * into the same document and a bare `input` rule here would be a rule about
+ * every window the shell serves.
+ *
+ * Borrowed, not invented: the field is the composer's `#msg` box and the rows
+ * are the dashboard's, so a list of sessions looks the same here as it does in
+ * the table behind it.
+ */
+
+[hidden] {
+  display: none !important;
+}
+
+#paletteApp {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 10px 12px 12px;
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+#paletteApp * {
+  box-sizing: border-box;
+}
+
+#paletteApp .pl-title {
+  margin-bottom: 2px;
+  font-weight: 600;
+}
+
+#paletteApp .pl-prompt {
+  margin: 0 0 7px;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.4;
+}
+
+#paletteApp .pl-field {
+  flex: 0 0 auto;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-dropdown-border));
+  border-radius: 4px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: inherit;
+}
+
+#paletteApp .pl-field::placeholder {
+  color: var(--vscode-descriptionForeground);
+}
+
+#paletteApp .pl-field:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  border-color: var(--vscode-focusBorder);
+}
+
+/* The one thing that must not be missable: it is why Enter is doing nothing. */
+#paletteApp .pl-error {
+  margin: 6px 0 0;
+  padding: 4px 8px;
+  border: 1px solid var(--vscode-inputValidation-errorBorder);
+  border-radius: 3px;
+  background: var(--vscode-inputValidation-errorBackground);
+  color: var(--vscode-foreground);
+}
+
+#paletteApp .pl-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 8px;
+  overflow-y: auto;
+}
+
+#paletteApp .pl-row {
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+#paletteApp .pl-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* Keyboard selection, which is the one the Enter key acts on — so it has to be
+   the stronger of the two marks, not merely a hover in a different colour. */
+#paletteApp .pl-row.on {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+#paletteApp .pl-rowtop {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+#paletteApp .pl-label {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#paletteApp .pl-desc,
+#paletteApp .pl-detail {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Inherits the selected row's colour, or it turns invisible on the blue. */
+#paletteApp .pl-row.on .pl-desc,
+#paletteApp .pl-row.on .pl-detail {
+  color: inherit;
+  opacity: 0.8;
+}
+
+#paletteApp .pl-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+#paletteApp .pl-empty {
+  margin: 10px 2px;
+  color: var(--vscode-descriptionForeground);
+}

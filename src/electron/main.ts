@@ -26,6 +26,7 @@ import { registerBundleScheme, serveBundles } from './bundleProtocol';
 import { createElectronHost } from './electronHost';
 import { installApplicationMenu } from './menu';
 import { JsonStore } from './jsonStore';
+import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
 import { WorkbenchWindow } from './workbenchWindow';
 
@@ -86,9 +87,17 @@ void app.whenReady().then(() => {
   serveBundles(path.join(APP_ROOT, 'dist'));
 
   let window: WorkbenchWindow | undefined;
+  // Built after the host, because it needs nothing from it — but the host needs
+  // *it*, for `pick` and `input`. The indirection is the same one `parentWindow`
+  // uses and for the same reason: a `let` the closures read when called.
+  let palette: PaletteWindow | undefined;
   const host = createElectronHost({
     userDataDir,
     log,
+    palette: {
+      pick: (items, options) => palette?.pick(items, options) ?? Promise.resolve(undefined),
+      input: (options) => palette?.input(options) ?? Promise.resolve(undefined),
+    },
     // Looked up rather than captured: the window can be closed and reopened
     // while the app keeps running, and a modal on a destroyed parent throws.
     // Also why this is a closure over a `let` — the host is built before the
@@ -138,6 +147,15 @@ void app.whenReady().then(() => {
   });
   wrangler.attachSurface(window);
 
+  // `showQuickPick` and `showInputBox`, which Electron has neither of: renaming
+  // a conversation, the session picker behind the menu items that ask *which*,
+  // and the folder list behind New Conversation all come through here.
+  palette = new PaletteWindow({
+    log,
+    appRoot: APP_ROOT,
+    parentWindow: () => window?.browserWindow,
+  });
+
   // ⌘, — the app's answer to VSCode's settings UI. It renders
   // `src/shared/settings.ts`, which is also what `package.json`'s
   // `contributes.configuration` is tested against, so both front ends offer
@@ -161,6 +179,7 @@ void app.whenReady().then(() => {
   app.on('before-quit', () => {
     log('Agent Wrangler quitting');
     preferences.dispose();
+    palette?.dispose();
     window?.dispose();
     wrangler.dispose();
     host.disposeAll();
