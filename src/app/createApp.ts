@@ -24,6 +24,7 @@
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'node:child_process';
+import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { waitForAdoptable } from '../core/adoptQueue';
@@ -66,6 +67,10 @@ import { TurnStats } from '../core/turnStats';
 import { FileUsageCache } from '../core/usageCache';
 import { UsageService } from '../core/usageService';
 import { FileSuggestService } from '../core/fileSuggest';
+import { FileAuditLog } from '../remote/audit';
+import { MirrorStore } from '../remote/mirrorStore';
+import { auditFile, mirrorFile } from '../remote/paths';
+import { RemoteControlService } from '../remote/service';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import type { PermissionModeName } from '../shared/conversation';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
@@ -122,6 +127,8 @@ export interface AgentWranglerApp {
   launcher: ConversationLauncher;
   dictation: DictationService;
   files: FileSuggestService;
+  /** Mirrors permission prompts to a remote surface. Inert until given a transport. */
+  remoteControl: RemoteControlService;
   actions: SessionActions;
   getConfig: ConfigGetter;
 
@@ -841,6 +848,32 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // Files offered after an `@` in the composer, per session folder.
   const files = new FileSuggestService();
 
+  /**
+   * Mirroring permission prompts to a remote surface.
+   *
+   * Constructed always, connected never — so far. It holds no transport until
+   * something hands it one, and with none it does nothing at all: no file is
+   * written, no message is posted, and `remote.enabled` does not exist as a
+   * setting yet. The transport and the leader lease that decides which process
+   * gets it arrive in later phases; this is here so the wiring is reviewed
+   * once, against a service whose whole behaviour is already covered by tests.
+   */
+  const remoteControl = new RemoteControlService(
+    store,
+    actions,
+    new MirrorStore(mirrorFile()),
+    () => ({
+      enabled: false,
+      guildId: '',
+      channelId: '',
+      authorizedUserIds: [],
+      homeDir: os.homedir(),
+    }),
+    new FileAuditLog(auditFile()),
+    (message) => log(`remote: ${message}`),
+  );
+  host.subscribe(remoteControl);
+
   // Opt-in "waiting on you" toasts, with a per-session cooldown.
   const lastToastAt = new Map<string, number>();
   host.subscribe(
@@ -1006,6 +1039,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     dictation,
     files,
     actions,
+    remoteControl,
     getConfig,
 
     attachSurface(next) {
