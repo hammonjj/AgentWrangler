@@ -57,6 +57,97 @@ Two repository facts drive the rewrite, neither of which the first version used:
 
 ---
 
+## 0.1 Verified facts
+
+Measured on this machine, 2026-09-21, against Claude Code 2.1.278 and Agent SDK 0.3.268. The
+spike scripts are throwaway (`/tmp/aw-spike/`), not committed.
+
+**A hook decision settles an SDK-driven ask, and it beats a pending `canUseTool`.** This was the
+open question that gated everything, and the answer is better than the plan assumed.
+
+Reproduction: an SDK `query` with `canUseTool` supplied — exactly what `RunnerSession` does, same
+binary, same option — prompted to `Write` a file (`Bash(echo …)` is useless for this: the
+machine's own `allow-readonly.py` PreToolUse hook auto-approves it, and then *neither*
+`canUseTool` nor `PermissionRequest` fires at all).
+
+1. **Both mechanisms fire.** `canUseTool` was called *and* the `PermissionRequest` hook ran,
+   dropping marker `requests/<claudePid>-<shellPid>` and logging `PermissionRequest` +
+   `AgentWranglerPermissionPending` to the pid log. The full event sequence for one gated Write:
+   `SessionStart · UserPromptSubmit · PreToolUse(Write) · PermissionRequest(Write) ·
+   AgentWranglerPermissionPending · PostToolUse(Write) · PostToolBatch · Stop · SessionEnd`.
+2. **The decision file wins the race.** With `canUseTool` deliberately hung for 30 s and then
+   answering *deny*, an `allow` written to `decisions/<id>.json` at t=4.3 s caused the tool to run
+   and the turn to finish at **t=5.9 s** — 28 seconds before the SDK callback answered at all. The
+   file was written with the content the prompt asked for. The SDK callback's eventual `deny` was
+   simply discarded.
+
+**What this changes.** The plan assumed the hook path covered only *external* sessions and that
+conversations Agent Wrangler runs itself would need cross-window RPC. They do not, for
+permissions: a runner-owned session raises a marker like any other, and any process on the
+machine can settle it with a file write. **One mechanism covers every Claude permission prompt on
+the machine**, which is what makes the leader design in §6 sufficient rather than a stopgap.
+§1.1, §6 and §13 are amended accordingly.
+
+`AskUserQuestion` and `ExitPlanMode` are still runner-only — they never reach
+`PermissionRequest` — so the questions/plans deferral stands unchanged.
+
+**A latent bug this exposes, which predates Remote Control.** For a runner-owned session,
+answering through the hook (today: the dashboard's Allow button; tomorrow: Discord) settles the
+*agent's* ask but leaves the SDK's `canUseTool` promise pending, so the conversation pane's card
+stays `pending` for a tool that has already run. Worth confirming and fixing separately —
+`RunnerSession` would need to settle its `pending` entry when the session leaves `blocked`.
+Filed here rather than fixed, because it is not Remote Control's to fix.
+
+**Also observed:** `permission_suggestions` for a gated `Write` is
+`[{type:'setMode', mode:'acceptEdits', destination:'session'}]`. `parsePermissionSuggestions`
+keeps only `addRules`/`addDirectories`, so `alwaysAllow` is correctly absent and such a prompt
+mirrors with two buttons, not three. The rule in §3.1 needs no special case.
+
+### The Discord half
+
+Run against a real bot in a private test guild, 2026-09-21. The whole round trip — post, press,
+acknowledge, edit — completed in **11.7 s**, from a laptop with no inbound port, no public URL, no
+tunnel and no hosted backend.
+
+| Claim | Verified |
+|---|---|
+| A bot with **no Interactions Endpoint URL** receives component presses over the gateway | Yes. `GET /applications/@me` reports `interactions_endpoint_url: null`, and the press arrived as a gateway dispatch. **Check this over the API, not by eye** — it is the single setting that silently breaks the whole design. |
+| `IDENTIFY` with **`intents: 0`** still receives them | Yes. `READY` at 3.3 s, `INTERACTION_CREATE` at 11.0 s. Interactions are not gated by intents, so the bot needs no privileged intent and reads no message content. |
+| The press is `type: 3` (MESSAGE_COMPONENT), `data.component_type: 2` | Yes. |
+| The actor is at **`member.user`** in a guild | Yes — `member.user.id` matched the configured allowlist id exactly. `user` (no member) is the DM shape; read `member?.user ?? user`. |
+| `guild_id` and `channel_id` ride on the interaction | Yes, both present and matching — so scope can be checked before any lookup. |
+| `message.id` identifies which card was pressed | Yes, matched the posted message. |
+| A **type-6** (DEFERRED_UPDATE_MESSAGE) ACK is accepted | Yes: `HTTP 204` in **158 ms**, comfortably inside the 3 s budget. |
+| The message can then be edited with the **bot token**, not the interaction token | Yes: `PATCH /channels/{id}/messages/{id}` → `HTTP 200`. This is the path that must be used, since a prompt can outlive the interaction token's 15 minutes. |
+| `components: []` removes the buttons | Yes, confirmed on the returned message. |
+
+Other facts worth keeping: `heartbeat_interval` was 41250 ms; `READY` supplies a
+`resume_gateway_url` distinct from the connect URL (`gateway-us-east1-d.discord.gg`), so a resume
+must use it; the interaction token is 214 chars; `GET /gateway/bot` reported 1000 session starts
+remaining, so reconnect churn during development is a non-issue.
+
+**A private channel needs the bot added explicitly.** The test channel denied `VIEW_CHANNEL`
+(`1024`) to `@everyone`, and the bot was in the guild but got `403 Missing Access` on the channel
+until it was granted View Channel / Send Messages / Embed Links there. A private channel is the
+right home for approvals, so *Test Remote Control* (§11) must check channel reachability
+specifically and say this — the guild check passes while the channel fails.
+
+### `ws` is not needed
+
+The plan assumed the extension host was Node 20, which has no global `WebSocket`. Measured here:
+
+- VSCode extension host: **Node 24.18.1** (Electron 42.10.0) — `WebSocket` is a function
+- The Electron app: **Node 24.21.0** — likewise
+
+So both front ends can use the built-in `WebSocket` and the transport needs **no new dependency**.
+The caveat is `engines.vscode: ^1.90.0`, which is a floor this repo never actually tested; VSCode
+1.90 shipped Electron 29 / Node 20 and would not have it. Since the extension is `private: true`
+and installed only from source, the honest fix is to raise that floor to a version that ships
+Node 22+ rather than carry `ws` for a configuration nobody runs. Decide at phase 4; either way
+`esbuild.mjs`'s `target: node20` should move up to match reality.
+
+---
+
 ## 1. Existing Agent Wrangler interaction architecture
 
 ### 1.1 Where actionable interactions originate
@@ -64,13 +155,18 @@ Two repository facts drive the rewrite, neither of which the first version used:
 | Origin | Mechanism | Identity | Answerable from |
 |---|---|---|---|
 | **Hook-backed Claude permission** | `permission-hook.sh` drops marker `requests/<ppid>-<pid>`, polls `decisions/<id>.json` for ~28 min (`src/claude/hookInstall.ts:67`) | `AgentSession.permissionRequestId` | **any process on the machine** — it is a file write into `~/.claude/agentwrangler/` |
-| Runner ask (permission / question / plan) | SDK `canUseTool` resolves a promise; `RunnerSession.pending: Map<requestId, PendingAsk>` (`src/claude/runner/runnerSession.ts:486`) | SDK `options.requestId` | only the process that owns the runner |
+| Runner ask — **permission** | SDK `canUseTool` *and*, as §0.1 establishes, the same hook marker as any other session | both; the marker is what matters | **any process on the machine** |
+| Runner ask — question / plan | SDK `canUseTool` only; `RunnerSession.pending: Map<requestId, PendingAsk>` (`src/claude/runner/runnerSession.ts:486`) | SDK `options.requestId` | only the process that owns the runner |
 | Codex approval / question | App Server JSON-RPC; `CodexRunner.pendingApprovals` (`src/codex/runner.ts:82`) | RPC id | only the process that owns the runner |
 
-**Only the first is remotely actionable today**, and the reason is the load-bearing one: it is the
-only interaction whose authoritative state lives on the shared filesystem rather than in one
-process's heap. That single fact is what lets v1 work with no cross-window RPC, and it is also
-what confines v1 to hook-backed permissions.
+**Every Claude *permission* prompt is remotely actionable** — external sessions and ones Agent
+Wrangler runs itself alike — because all of them raise a marker, and a marker is answered by a
+file write into a directory every process shares. That single fact is what lets v1 work with no
+cross-window RPC.
+
+What confines v1 is therefore not "hook-backed sessions" but **hook-backed *interactions***:
+questions and plan approvals never reach `PermissionRequest`, so they remain in-process and out of
+scope. Codex likewise has no marker.
 
 ### 1.2 The permission lifecycle
 
@@ -413,10 +509,15 @@ all. The decision is a file written into `~/.claude/agentwrangler/decisions/`, a
 `HookLog` has already read the same marker id from the same shared log. Any window can answer any
 hook-backed prompt today. Remote Control adds no cross-window RPC and needs none.
 
-**When runner/Codex asks are supported**, those live in one process's heap, so only the owning
-window can invoke them. `remoteAskFor` is the gate — it will need a "can this process act on it?"
-predicate, and the owning window will have to take the lease or hand the leader a small IPC. Keep
-`remoteAskFor` the single place that decides what is mirrorable; build none of the rest now.
+This holds for **runner-owned sessions too** (§0.1): a conversation Agent Wrangler started raises
+the same marker, and the leader settles it the same way, whichever window is running it. So
+`remoteAskFor` needs no "is this mine?" predicate in v1 and the leader needs no IPC.
+
+**When questions and plan approvals are supported**, that changes: those live in one process's
+heap with no marker, so only the owning window can invoke them. `remoteAskFor` is the gate — it
+will then need a "can this process act on it?" predicate, and the owning window will have to take
+the lease or be handed a small IPC. Keep `remoteAskFor` the single place that decides what is
+mirrorable; build none of the rest now.
 
 ---
 
@@ -528,11 +629,11 @@ September 2026. All of this stays below the transport boundary.
   in the phase-0b spike); keep `session_id` + `resume_gateway_url` from READY; op 7 and close
   4000-4009 → RESUME; op 9 → re-IDENTIFY after 1-5 s; backoff 1→60 s with ±20 % jitter, reset on
   READY. **Close 4004 is terminal** — bad token, surface once, never retry.
-- **Library:** write ~350 lines rather than take `discord.js`. Everything is bundled by esbuild into
-  one CJS file, and `discord.js` drags in a REST layer, a WS layer, `undici`, optional natives and a
-  cache for a feature that sends one message shape and reads one dispatch type. The one real
-  dependency is **`ws`** — Node 20 (the extension host; `esbuild.mjs` targets `node20`) has global
-  `fetch` but **no global `WebSocket`**. `ws` is pure JS and bundles cleanly.
+- **Library: none.** Write ~350 lines rather than take `discord.js`, which drags in a REST layer, a
+  WS layer, `undici`, optional natives and a cache for a feature that sends one message shape and
+  reads one dispatch type. And §0.1 removes the one dependency the plan did expect: both hosts run
+  Node 24 and have a global `WebSocket`, so `ws` is not needed either. The adapter is `fetch` plus
+  `WebSocket`, both built in.
 - **`custom_id` = `aw:<interactionId>:<choiceId>`**, ≤100 chars, strict parser, unknown → ephemeral
   reply. **No session id, no marker id, no path, no tool name** — it comes back client-supplied and
   must carry no authority.
@@ -665,11 +766,11 @@ ln -s ../AgentWrangler/node_modules ../AgentWrangler-remote/node_modules
 | # | Where | Content | Proves |
 |---|---|---|---|
 | **0a** | `main` | §7.1 stale guard + §7.2 unify the pane + §7.3 pid-qualified tmp, with tests | The local UI is more correct today; nothing about Discord |
-| **0b** | throwaway, uncommitted | Spike: does a bare `ws` gateway with `intents: 0` and no endpoint URL receive a button press? Exact payload shape (`member.user.id` vs `user.id`, `guild_id`, `channel_id`)? Does a type-6 ACK followed by a channel `PATCH` behave? **Does `PermissionRequest` still fire for an SDK session with `canUseTool`?** | Gate — nothing else starts until answered. Record the answers here under *Verified facts* |
+| **0b** | ~~throwaway~~ **done 2026-09-21** | Both halves answered; results in §0.1. The gate is open. | ✅ |
 | **1** | `feat/remote-control` | `src/shared/remote.ts` + `src/remote/redact.ts` + their tests | The whole mirrored-view model is pure and reviewable on tests alone |
 | **2** | ″ | `transport.ts` (interface), `mirrorStore.ts`, `audit.ts`, `service.ts`; `FakeTransport` tests; wired into `createApp` with **no transport constructed** | The core works, is testable without Discord, and is inert until a transport exists |
 | **3** | ″ | `leader.ts` + tests; the leader is what calls `service.setTransport(...)` | One publisher per machine; failover covered |
-| **4** | ″ | `discord/{ids,format,rest,gateway,transport}.ts` + fake-socket tests; add `ws` | The adapter, still unreachable by a user |
+| **4** | ″ | `discord/{ids,format,rest,gateway,transport}.ts` + fake-socket tests (no new dependency; see §0.1) | The adapter, still unreachable by a user |
 | **5** | ″ | `HostSecrets` on both hosts; four settings in `settings.ts` + `package.json`; `config.ts`; three commands in `extension.ts` and the Electron menu; README | First user-visible phase; first one needing `install-local` and a reload |
 | **6** | ″ | Hardening after a week of dogfooding: laptop-sleep reconnects, burst behaviour, a "enabled but not connected" chip | — |
 
@@ -717,7 +818,8 @@ completion and failure notifications · any new permission classification or pol
 | `pendingStore.ts` holding interaction state | **Simplified** to `mirrorStore.ts` holding identity, address and last press. |
 | Leader election | **Retained, narrowed** to the transport, publishing and receiving. |
 | `expectedRequestId` stale guard | **Retained and promoted.** Confirmed as a real bug affecting the *local* UI too (§7.1); lands on `main` first, and the conversation pane is unified onto the same action at the same time. |
-| Discord findings — gateway/endpoint exclusivity, 3 s ACK, 15-min token vs 28-min prompt, channel `PATCH` for edits, 4004 terminal, `ws` because Node 20 has no global `WebSocket`, no `discord.js` | **Retained verbatim.** All still correct, all load-bearing. |
+| Discord findings — gateway/endpoint exclusivity, 3 s ACK, 15-min token vs 28-min prompt, channel `PATCH` for edits, 4004 terminal, no `discord.js` | **Retained, and now measured** rather than read off the docs — see §0.1. |
+| `ws`, because Node 20 has no global `WebSocket` | **Dropped.** Both hosts run Node 24 and have one (§0.1). No new dependency. |
 | Security — keychain via a new `HostSecrets`, snowflake allowlist, guild/channel scope, opaque ids, redaction, audit log, fail-closed empty allowlist | **Retained**, minus the TTL row. |
 | Always-allow semantics — never invent "Allow for session"; label the real rule and destination; show it only when `alwaysAllow` exists | **Retained.** Now falls out of `remoteAskFor` mirroring `permissionRow`'s own condition. |
 | Multi-window facts, `materialFingerprint` coverage, `pendingRequestExists` as the liveness signal, `~/.cache/agent-wrangler/` | **Retained.** |
@@ -758,7 +860,7 @@ completion and failure notifications · any new permission classification or pol
     file.
 14. The README gains a *Remote control* section with the setup steps, the explicit "leave the
     Interactions Endpoint URL blank" instruction, the known simultaneous-answer race (§7.4), and an
-    honest statement of what v1 cannot do — questions, plans, and (pending phase 0b) conversations
-    Agent Wrangler runs itself.
+    honest statement of what v1 cannot do — questions and plan approvals. Permission prompts in
+    conversations Agent Wrangler runs itself **are** covered (§0.1).
 15. `npm run install-local` run from the worktree that owns the change, and James told which window
     needs a reload.
