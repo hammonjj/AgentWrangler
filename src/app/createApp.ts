@@ -27,7 +27,7 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { waitForAdoptable } from '../core/adoptQueue';
-import { sessionsDir } from '../claude/paths';
+import { globalConversationDir, sessionsDir } from '../claude/paths';
 import { resolveClaudeBinary } from '../claude/binary';
 import { ClaudeProvider } from '../claude/claudeProvider';
 import { CodexProvider } from '../codex/codexProvider';
@@ -68,7 +68,7 @@ import { UsageService } from '../core/usageService';
 import { FileSuggestService } from '../core/fileSuggest';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import type { PermissionModeName } from '../shared/conversation';
-import { displayLabel, displayTitle, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
+import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
 import type { SessionActions } from '../ui/actions';
 import type { ConversationLauncher, ProjectSource, RunnerOwnership, UsageSource } from '../ui/dashboardHost';
 import { adoptActionFor } from '../ui/openTarget';
@@ -543,15 +543,38 @@ export function createApp(host: HostServices): AgentWranglerApp {
     return dir;
   };
 
+  /**
+   * Turn what the launcher asked for into a folder to run in.
+   *
+   * The "Global" row is a sentinel, not a path: it means "no project". It
+   * resolves to a scratch folder that is created on demand, and — unlike every
+   * other folder — is deliberately *not* added to the project list, because it
+   * is not a project and offering it twice would say it was.
+   */
+  const resolveLaunchDir = (cwd: string): { dir: string; remember: boolean } | undefined => {
+    if (cwd !== GLOBAL_PROJECT_DIR) return { dir: cwd, remember: true };
+    const dir = globalConversationDir();
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (error) {
+      dialogs.error(`Agent Wrangler: could not create ${dir} — ${(error as Error).message}`);
+      return undefined;
+    }
+    return { dir, remember: false };
+  };
+
   /** Spawn and show. The only path that starts a runner, so the cwd check lives here. */
-  const startConversation = (cwd: string): RunnerSession | undefined => {
+  const startConversation = (requested: string): RunnerSession | undefined => {
+    const resolved = resolveLaunchDir(requested);
+    if (!resolved) return undefined;
+    const { dir: cwd, remember } = resolved;
     if (!fs.existsSync(cwd)) {
       dialogs.error(`Agent Wrangler: ${cwd} no longer exists.`);
       return undefined;
     }
     // Working in a folder is the strongest possible statement that it belongs
     // in the list, so it also undoes a removal — the same rule as browsing.
-    projects.add(cwd);
+    if (remember) projects.add(cwd);
     const model = host.settings.get<string>('runner.model', '').trim();
     const runner = runners.start({
       cwd,
@@ -563,12 +586,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
     return runner;
   };
 
-  const startCodexConversation = async (cwd: string): Promise<void> => {
+  const startCodexConversation = async (requested: string): Promise<void> => {
+    const resolved = resolveLaunchDir(requested);
+    if (!resolved) return;
+    const { dir: cwd, remember } = resolved;
     if (!fs.existsSync(cwd)) {
       dialogs.error(`Agent Wrangler: ${cwd} no longer exists.`);
       return;
     }
-    projects.add(cwd);
+    if (remember) projects.add(cwd);
     try {
       const model = host.settings.get<string>('codexRunner.model', '').trim() || undefined;
       const runner = await codexRunners.start(cwd, model);
@@ -594,9 +620,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
     // Newest first, the same order and the same list the dashboard dropdown shows.
     await projects.refresh();
-    const folders: { label: string; description?: string; dir?: string; browse?: boolean }[] = projects.value.map(
-      (p) => ({ label: p.name, description: p.dir, dir: p.dir }),
-    );
+    const folders: { label: string; description?: string; dir?: string; browse?: boolean }[] = [
+      { label: '$(globe) Global', description: 'No project — a scratch folder', dir: GLOBAL_PROJECT_DIR },
+      ...projects.value.map((p) => ({ label: p.name, description: p.dir, dir: p.dir })),
+    ];
     folders.push({ label: '$(folder-opened) Browse…', description: 'Pick another folder', browse: true });
 
     const picked = await dialogs.pick(folders, {

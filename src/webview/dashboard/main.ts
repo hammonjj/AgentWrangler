@@ -27,6 +27,7 @@ import {
   etaText,
   formatAge,
   formatDuration,
+  GLOBAL_PROJECT_DIR,
   hookBanner,
   SECTION_LABEL,
   SECTION_ORDER,
@@ -856,19 +857,31 @@ providerSelect.addEventListener('change', () => {
 let projects: ProjectDTO[] = [];
 let menuOpen = false;
 
-/** The folder New will use: the saved one while it still exists, else the most recent. */
-function currentProject(): string | undefined {
-  if (project && projects.some((p) => p.dir === project)) return project;
-  return projects[0]?.dir;
+/**
+ * The folder New will use: the saved one while it still exists, else Global.
+ *
+ * Global rather than "the most recent folder" because a launcher that defaults
+ * to a project starts work *in* that project by accident — the first click of
+ * the session has already picked a repo. Global belongs to nothing, so the
+ * wrong default costs nothing; picking a folder is an explicit act.
+ */
+function currentProject(): string {
+  if (project && (project === GLOBAL_PROJECT_DIR || projects.some((p) => p.dir === project))) return project;
+  return GLOBAL_PROJECT_DIR;
 }
+
+const GLOBAL_TITLE = 'No project — runs in a scratch folder of its own';
 
 function renderLauncher(): void {
   const cur = currentProject();
-  projName.textContent = cur ? (projects.find((p) => p.dir === cur)?.name ?? cur) : 'Choose a folder…';
-  projBtn.title = cur ?? 'Choose a folder to start a conversation in';
-  newBtn.disabled = cur === undefined;
+  const global = cur === GLOBAL_PROJECT_DIR;
+  projName.textContent = global ? 'Global' : (projects.find((p) => p.dir === cur)?.name ?? cur);
+  projBtn.title = global ? GLOBAL_TITLE : cur;
+  newBtn.disabled = false;
   const starts = providerFilter === 'codex' ? 'Codex' : 'Claude Code';
-  newBtn.title = `Start a ${starts} conversation in this folder, running in this window`;
+  newBtn.title = global
+    ? `Start a ${starts} conversation with no project, running in this window`
+    : `Start a ${starts} conversation in this folder, running in this window`;
   // An open menu is showing the list that just changed, so redraw it in place
   // rather than closing it out from under the pointer.
   if (menuOpen) renderMenu();
@@ -885,9 +898,15 @@ function renderMenu(): void {
     )
     .join('');
   const empty = projects.length === 0 ? '<div class="pmempty">No folders yet</div>' : '';
-  // Always present: with nothing in the list it is the only way in, and it is
-  // also the only way a removed folder comes back.
-  projMenu.innerHTML = `${empty}${rows}<button class="pmbrowse" data-browse="1">Browse…</button>`;
+  // First, and never removable: it is the default, and it is the one row that
+  // is always a valid answer even on a machine with no projects at all.
+  const globalRow = `<div class="pmrow${cur === GLOBAL_PROJECT_DIR ? ' on' : ''}">
+<button class="pmname" data-dir="${esc(GLOBAL_PROJECT_DIR)}" role="option" aria-selected="${cur === GLOBAL_PROJECT_DIR}" title="${esc(GLOBAL_TITLE)}">Global</button>
+<span class="pmx" aria-hidden="true"></span>
+</div>`;
+  // Browse is always present: with nothing in the list it is the only way in,
+  // and it is also the only way a removed folder comes back.
+  projMenu.innerHTML = `${globalRow}${empty}${rows}<button class="pmbrowse" data-browse="1">Browse…</button>`;
 }
 
 function openProjMenu(): void {
@@ -948,8 +967,7 @@ document.addEventListener(
 );
 
 newBtn.addEventListener('click', () => {
-  const cwd = currentProject();
-  if (cwd) post({ type: 'newConversation', cwd, provider: providerFilter === 'codex' ? 'codex' : 'claude' });
+  post({ type: 'newConversation', cwd: currentProject(), provider: providerFilter === 'codex' ? 'codex' : 'claude' });
 });
 
 // ---- fleet controls ----
