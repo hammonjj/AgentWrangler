@@ -242,6 +242,37 @@ the microphone each time dictation is used after an install.
 - **The status bar.** `MarkdownString` tooltip and `ThemeColor` background have no analogue;
   a tray item is the nearest thing.
 
+### Backlog: retire the VSCode extension
+
+**Decided 2026-09-21: James has stopped using the extension and only runs the app.** It is not
+being removed yet — the app still lacks a diff editor, terminal handoff and a status bar (all
+above) — but it is no longer a thing to keep working, and new features need not have a VSCode
+story. When the gaps above are closed, delete it rather than letting it rot into a second
+untested front end.
+
+What removal actually touches:
+
+- **Delete:** `src/extension.ts`, `src/host/vscode/**`, `src/ui/workbenchPanel.ts`,
+  `src/ui/conversation/conversationPanel.ts`, `src/ui/conversation/diffView.ts`,
+  `src/ui/statusBar.ts`, `src/ui/devReload.ts`, `src/ui/vscodeHtml.ts`.
+- **`package.json`:** `main`, `engines.vscode`, `activationEvents`, the whole `contributes`
+  block, `@types/vscode`, and the `package` / `install-local` / `install-local:reload` scripts.
+- **`esbuild.mjs`:** drop the `host` bundle and its `external: ['vscode']`.
+- **`src/shared/settings.ts`:** `hosts: ['vscode' | 'app']`, `settingsFor`, `vscodeProperty`
+  and `test/settingsSchema.test.ts` all exist only to keep two front ends in step. The
+  declaration itself stays — the Preferences window renders from it.
+- **`HostServices`:** `workspaceState` was per-window only because VSCode had many windows;
+  with one it collapses into `globalState`, and the `RunnerRegistry` comment explaining why
+  they differ goes with it. `HostShell.runInTerminal` loses its only implementation, so
+  *Release* and the dictation `brew install` helper must be solved or dropped.
+- **`README.md`** and `CLAUDE.md` both describe an extension first and an app second.
+
+What it would simplify elsewhere: the "N windows each run a whole `createApp`" problem largely
+goes away. Cross-window coordination — the shared usage cache, and the leader lease in
+`docs/plans/remote-agent-control.md` §6 — exists because several extension hosts contend. One
+app means one process, and both could be deleted or reduced to a guard against a second copy.
+Neither should be dropped *before* the extension is, since until then the contention is real.
+
 ## Rules for this branch
 
 - The extension must stay green at every commit. `npm run typecheck && npm test` before each.

@@ -493,6 +493,15 @@ is dropped on load.
 Every VSCode window runs a whole `createApp`; five windows are five `HookLog`s tailing the same
 files. Left alone that is five bots and five messages for one prompt.
 
+**This is a bet on the extension, and the extension is being retired.** As of 2026-09-21 the
+VSCode extension is no longer used and is slated for removal (see
+`electron-app-migration.md` → *Backlog: retire the VSCode extension*). One app is one process,
+so the contention this section solves mostly disappears with it — at which point the lease could
+shrink to a guard against a second copy of the app, or go entirely. Build it anyway: until the
+extension is actually gone the contention is real, and a dev `npm run electron` running beside
+the installed app reproduces it exactly. It is ~60 lines and it is the difference between one
+Discord message and five.
+
 **A leader lease, narrowed to the transport only.** `~/.cache/agent-wrangler/remote/leader.json`
 holds `{pid, acquiredAtMs, heartbeatAtMs}`. Acquire with `open(..., 'wx')`; on `EEXIST`, steal if
 the heartbeat is older than 30 s **or** the pid is dead (`isPidAlive`, `src/claude/registry.ts`).
