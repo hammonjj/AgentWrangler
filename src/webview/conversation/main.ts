@@ -1604,6 +1604,19 @@ vscodeApi.onMessage((body) => {
       patchBlock(m.id, m.block);
       break;
     case 'session':
+      // The same conversation can change key underneath the pane: a runner's
+      // session id starts out `pending` and Claude Code issues a fresh one on
+      // resume and after a compaction. Only a *switch* re-inits, so a `session`
+      // update is always this same conversation and the draft rides along —
+      // without this the composer kept sending the old key and the host
+      // answered "Conversation changed; your draft was not sent."
+      if (activeSession !== m.session.key) {
+        const draft = drafts.get(activeSession);
+        if (draft) { drafts.delete(activeSession); drafts.set(m.session.key, draft); }
+        if (pendingSend) pendingSend = { ...pendingSend, session: m.session.key };
+        activeSession = m.session.key;
+        vscodeApi.setState({ key: activeSession });
+      }
       setMeta(m.session);
       setStatus(m.session.status, m.caps.estimated);
       setCaps(m.caps);

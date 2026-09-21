@@ -73,6 +73,13 @@ export class ConversationHost {
   /** A key asked for before the store knew it; bound on the next update. */
   private pendingKey?: string;
   private session?: AgentSession;
+  /**
+   * Every key the current binding has been known by. One conversation can have
+   * several: a runner is `claude:pending` until it reports an id, and the CLI
+   * issues a new id on resume and after a compaction. A send carrying any of
+   * them is a send for this conversation.
+   */
+  private boundKeys = new Set<string>();
   private ready = false;
   private pendingSend?: AbortController;
   private archiveText = new Map<string, string>();
@@ -157,6 +164,7 @@ export class ConversationHost {
     this.subagentFiles.clear();
     this.binding = binding;
     this.session = session;
+    this.boundKeys = new Set([session.key]);
     this.onTitle(displayTitle(session));
     this.swapSource(session);
     const runner = this.source instanceof RunnerSource ? this.source.runner : undefined;
@@ -193,6 +201,7 @@ export class ConversationHost {
     if (runner) this.sourceSubs.push(runner.onReset(() => {
       this.binding = { kind: 'runner', runner };
       this.session = syntheticSession(runner, this.store);
+      this.boundKeys.add(this.session.key);
       if (this.ready) void this.sendInit();
     }));
     this.sourceSubs.push(
@@ -250,6 +259,7 @@ export class ConversationHost {
     // title, so comparing titles would leave the tab on the old name.
     const titleChanged = this.session === undefined || displayTitle(next) !== displayTitle(this.session);
     this.session = next;
+    this.boundKeys.add(next.key);
 
     // Adopting a session the pane is already showing swaps what feeds it: the
     // transcript it was reading becomes a live process we drive. Re-init so the
@@ -314,7 +324,13 @@ export class ConversationHost {
         this.pendingSend?.abort();
         return;
       case 'send': {
-        if (m.sessionKey && m.sessionKey !== key) { this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Conversation changed; your draft was not sent.' }); return; }
+        // The guard exists so a draft typed for one conversation is never
+        // delivered to another. It must not fire when the *same* conversation
+        // has merely changed key underneath the pane — a runner's id goes from
+        // `pending` to real, and Claude Code issues a new one on resume and
+        // after a compaction — so every key this binding has worn counts as
+        // this conversation. `bind` (a real switch) is what forgets them.
+        if (m.sessionKey && m.sessionKey !== key && !this.boundKeys.has(m.sessionKey)) { this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Conversation changed; your draft was not sent.' }); return; }
         if (this.pendingSend) { this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Another send is pending.' }); return; }
         const controller = new AbortController();
         this.pendingSend = controller;

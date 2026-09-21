@@ -238,6 +238,16 @@ export interface ProjectDTO {
   lastUsedAt?: number;
 }
 
+/**
+ * The launcher's "Global" row: a conversation that belongs to no project.
+ *
+ * It travels as a sentinel rather than a path because the webview has no
+ * business knowing where the home directory is (and `src/shared` may not ask
+ * Node). The extension host resolves it to a real scratch folder — see
+ * `globalConversationDir` — which is what Claude Code actually runs in.
+ */
+export const GLOBAL_PROJECT_DIR = '\u0000global';
+
 export const STATUS_RANK: Record<SessionStatus, number> = {
   blocked: 0,
   waiting: 1,

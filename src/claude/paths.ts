@@ -13,6 +13,21 @@ export function projectsDir(): string {
   return path.join(claudeHome(), 'projects');
 }
 
+/**
+ * Where a "Global" conversation runs: a scratch folder of our own, not the home
+ * directory and not a project.
+ *
+ * A session has to have *some* working directory — Claude Code writes its
+ * transcript under a slug of it, and a shell there is what tools get. Running
+ * one straight in `~` would put an agent's `ls` and its file writes in the
+ * middle of everything the user owns, and would file the transcript under a
+ * "project" that is the whole home directory. A dedicated empty folder gives
+ * the session a harmless place to stand, and makes the table read `Global`.
+ */
+export function globalConversationDir(): string {
+  return path.join(os.homedir(), '.agent-wrangler', 'Global');
+}
+
 const SESSION_JSONL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i;
 
 /** Top-level `<uuid>.jsonl` transcript names. Excludes sidecar dirs
