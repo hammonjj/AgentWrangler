@@ -98,7 +98,13 @@ export type DashboardAction =
 export type DashboardToHost =
   | { type: 'ready' }
   | { type: 'rowClick'; key: string }
-  | { type: 'action'; key: string; action: DashboardAction }
+  /**
+   * `requestId` is carried by the three permission actions only: it is the
+   * `permissionRequestId` the card was drawn from, so the host can refuse an
+   * answer meant for a prompt the session has since moved on from. Absent on
+   * every other action, and on a card drawn before this field existed.
+   */
+  | { type: 'action'; key: string; action: DashboardAction; requestId?: string }
   | { type: 'openExternal'; url: string }
   | { type: 'refresh' }
   /** Banner button: runs the same confirm-then-install flow as the palette command. */

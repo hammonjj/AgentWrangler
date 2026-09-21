@@ -245,10 +245,15 @@ export class ClaudeProvider implements AgentProvider {
 
   /**
    * Answer the permission prompt a session is blocked on. Resolves false when
-   * there is no prompt left to answer (see `HookLog.decide`).
+   * there is no prompt left to answer, or when `expectedRequestId` names a
+   * prompt the session has already moved on from (see `HookLog.decide`).
    */
-  async decidePermission(sessionId: string, behavior: PermissionBehavior): Promise<boolean> {
-    const sent = await this.hooks.decide(sessionId, behavior);
+  async decidePermission(
+    sessionId: string,
+    behavior: PermissionBehavior,
+    expectedRequestId?: string,
+  ): Promise<boolean> {
+    const sent = await this.hooks.decide(sessionId, behavior, expectedRequestId);
     if (sent) this.changeEmitter.fire();
     return sent;
   }

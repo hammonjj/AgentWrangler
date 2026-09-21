@@ -1,5 +1,17 @@
 import type { ImageAttachment } from '../shared/conversation';
 
+/**
+ * What answering a permission prompt did.
+ *
+ * `stale` and `gone` are deliberately separate: `stale` means the session has
+ * since moved on to a *different* prompt and this answer was for the previous
+ * one, `gone` means the prompt this answer was for is simply over (answered in
+ * Claude Code's own dialog, or the hook script gave up waiting). The first is
+ * worth telling the user about differently from the second, and only the first
+ * indicates a button that was on screen longer than it should have been.
+ */
+export type PermissionDecisionOutcome = 'applied' | 'stale' | 'gone' | 'unsupported';
+
 /** Session actions shared by the dashboard webview, conversation panes, and palette commands. */
 export interface SessionActions {
   /** Row click: show this session in the conversation pane (see `OpenTarget`). */
@@ -56,9 +68,22 @@ export interface SessionActions {
   /** Dashboard banner → the `agentWrangler.installHooks` command (modal confirm included). */
   installHooks(): void;
   /**
-   * Answer the permission prompt a blocked session is sitting on, from the
-   * dashboard. `always` allows and adds the rule, as Claude Code's own
-   * "don't ask again" does.
+   * Answer the permission prompt a blocked session is sitting on. `always`
+   * allows and adds the rule, as Claude Code's own "don't ask again" does.
+   *
+   * This is the one way a permission is answered from outside Claude Code —
+   * the dashboard row, the conversation pane's card, and anything else that
+   * grows a button for it all come through here, so the guard below is applied
+   * once rather than per surface.
+   *
+   * `expectedRequestId` is the prompt the caller rendered its button from
+   * (`AgentSession.permissionRequestId`). Pass it whenever you have it: a
+   * button can outlive the prompt it was drawn for, and without it the answer
+   * would land on whatever prompt the session has open *now*.
    */
-  decidePermission(key: string, behavior: 'allow' | 'deny' | 'always'): void;
+  decidePermission(
+    key: string,
+    behavior: 'allow' | 'deny' | 'always',
+    opts?: { expectedRequestId?: string },
+  ): Promise<PermissionDecisionOutcome>;
 }
