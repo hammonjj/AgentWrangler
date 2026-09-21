@@ -290,6 +290,54 @@ describe('HookLog', () => {
       expect(typeof written.hookSpecificOutput.decision.message).toBe('string');
     });
 
+    it('answers the prompt the caller named', async () => {
+      await openPrompt();
+      expect(await log.decide(SID_A, 'allow', REQ)).toBe(true);
+      const written = JSON.parse(await fsp.readFile(decisionFile(), 'utf8'));
+      expect(written.hookSpecificOutput.decision).toEqual({ behavior: 'allow' });
+    });
+
+    it('refuses an answer meant for a prompt the session has moved on from', async () => {
+      // The hazard this guards: a card is drawn for one prompt, that prompt is
+      // answered elsewhere, a second prompt opens, and the stale button is
+      // pressed. Without the check the click would allow the *replacement*.
+      await openPrompt();
+      const stale = REQ;
+
+      const second = '1234-1000';
+      await fsp.writeFile(path.join(dir, 'requests', second), '', 'utf8');
+      await append(
+        1234,
+        ev(SID_A, 'PermissionRequest', { tool_name: 'Bash', tool_input: { command: 'rm -rf build' } }) +
+          ev(SID_A, 'AgentWranglerPermissionPending', { request_id: second }),
+      );
+      await log.scanAll();
+      expect(log.get(SID_A)?.permissionRequestId).toBe(second);
+
+      expect(await log.decide(SID_A, 'allow', stale)).toBe(false);
+      await expect(fsp.stat(decisionFile())).rejects.toThrow(); // the old prompt
+      await expect(fsp.stat(path.join(dir, 'decisions', `${second}.json`))).rejects.toThrow(); // and the new one
+      expect(log.get(SID_A)?.permissionRequestId).toBe(second); // still answerable
+
+      // Naming the prompt that is actually open still works.
+      expect(await log.decide(SID_A, 'allow', second)).toBe(true);
+    });
+
+    it('still answers whatever is open when the caller names nothing', async () => {
+      // Callers that genuinely mean "the current prompt" keep the old behaviour.
+      await openPrompt();
+      expect(await log.decide(SID_A, 'allow')).toBe(true);
+    });
+
+    it('leaves no temp file behind, and names it per process', async () => {
+      // Two windows answering one prompt would otherwise interleave writes into
+      // a single temp path and both rename it, tearing the file the hook reads.
+      await openPrompt();
+      expect(await log.decide(SID_A, 'allow')).toBe(true);
+      const left = await fsp.readdir(path.join(dir, 'decisions'));
+      expect(left).toEqual([`${REQ}.json`]);
+    });
+
     it('refuses when there is nothing left to answer', async () => {
       await openPrompt();
       await fsp.unlink(marker()); // the script already exited
