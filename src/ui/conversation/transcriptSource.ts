@@ -27,9 +27,17 @@ export interface TranscriptFeed {
   onTranscriptAppended?(listener: (e: { sessionId: string; path: string }) => void): Disposable;
 }
 
-/** Answers a permission prompt through the hook. Resolves false when it is too late. */
+/**
+ * Answers one specific permission prompt, named by the `permissionRequestId`
+ * the card was built from. Resolves false when it is too late — the prompt was
+ * answered elsewhere, or the session has moved on to a different one.
+ *
+ * The request id rather than the session id, because a session is not a prompt:
+ * a card can outlive the ask it was drawn for, and the answer must not then be
+ * applied to whatever replaced it.
+ */
 export type DecidePermission = (
-  sessionId: string,
+  requestId: string,
   behavior: 'allow' | 'deny' | 'always',
 ) => Promise<boolean>;
 
@@ -97,7 +105,7 @@ export class TranscriptSource implements ConversationSource {
 
   async decide(requestId: string, decision: 'allow' | 'always' | 'deny'): Promise<boolean> {
     if (!this.ask || this.ask.requestId !== requestId || !this.ask.pending) return false;
-    const sent = await this.decidePermission(this.session.sessionId, decision);
+    const sent = await this.decidePermission(requestId, decision);
     if (!this.ask) return sent;
     this.ask.pending = false;
     this.patchEmitter.fire({

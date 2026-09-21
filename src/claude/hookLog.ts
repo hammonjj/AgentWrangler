@@ -134,21 +134,38 @@ export class HookLog implements Disposable {
    * script never reads a partial file). Returns false when there is nothing to
    * answer: no open prompt, or its script has already exited.
    *
+   * `expectedRequestId` is the prompt the caller believes it is answering, and
+   * it is what stops a decision landing on the wrong one. A button is rendered
+   * from a snapshot; by the time it is pressed the session may have answered
+   * that prompt and opened another, and without this check the click would
+   * allow the *replacement*. The id here is the authoritative one — it comes
+   * from the event stream, not from a snapshot — so this is the right place for
+   * the guard. Callers that genuinely mean "whatever is open" may omit it.
+   *
    * The state is not flipped to busy here. Claude Code races the hook against
    * its own dialog, so this decision may lose to an answer given there; the
    * events that follow (PreToolUse / PermissionDenied) say what actually
    * happened. Only the marker id is cleared, so the buttons go away at once.
    */
-  async decide(sessionId: string, behavior: PermissionBehavior): Promise<boolean> {
+  async decide(
+    sessionId: string,
+    behavior: PermissionBehavior,
+    expectedRequestId?: string,
+  ): Promise<boolean> {
     const st = this.states.get(sessionId.toLowerCase());
     const id = st?.permissionRequestId;
     if (!st || !id || !this.pendingRequestExists(id)) return false;
+    if (expectedRequestId !== undefined && id !== expectedRequestId) return false;
 
     const target = path.join(this.dir, 'decisions', `${id}.json`);
+    // Pid-qualified, exactly as FileUsageCache does it: two windows answering
+    // one prompt would otherwise interleave their writes into a single temp
+    // path and then both rename it, handing the hook script a torn file.
+    const tmp = `${target}.${process.pid}.tmp`;
     try {
       await fsp.mkdir(path.dirname(target), { recursive: true });
-      await fsp.writeFile(`${target}.tmp`, permissionDecisionJson(behavior, st.permissionSuggestions), 'utf8');
-      await fsp.rename(`${target}.tmp`, target);
+      await fsp.writeFile(tmp, permissionDecisionJson(behavior, st.permissionSuggestions), 'utf8');
+      await fsp.rename(tmp, target);
     } catch (err) {
       this.log(`permission decision write failed: ${String(err)}`);
       return false;

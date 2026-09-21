@@ -186,8 +186,14 @@ export class ConversationHost {
       ? new CodexTranscriptSource(session, this.codexProvider)
       : runner
       ? new RunnerSource(runner)
-      : new TranscriptSource(session, this.provider, (id, behavior) =>
-          this.provider.decidePermission(id, behavior),
+      : // Through the application action, not straight at the provider: the
+        // dashboard row, this card and the palette are three renderings of one
+        // interaction, and they should all answer it the same way and get the
+        // same stale-prompt guard.
+        new TranscriptSource(session, this.provider, (requestId, behavior) =>
+          this.actions
+            .decidePermission(session.key, behavior, { expectedRequestId: requestId })
+            .then((outcome) => outcome === 'applied'),
         );
     this.source = source;
     if (runner) this.sourceSubs.push(runner.onReset(() => {

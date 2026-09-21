@@ -224,7 +224,9 @@ export class DashboardHost {
         else if (m.action === 'pause') this.actions.pauseSession(m.key, true);
         else if (m.action === 'unpause') this.actions.pauseSession(m.key, false);
         else if (m.action === 'allow' || m.action === 'deny' || m.action === 'always') {
-          this.actions.decidePermission(m.key, m.action);
+          // The id the card was drawn from, so an answer cannot land on the
+          // prompt that replaced the one the button was offered for.
+          void this.actions.decidePermission(m.key, m.action, { expectedRequestId: m.requestId });
         }
         break;
       case 'openExternal':

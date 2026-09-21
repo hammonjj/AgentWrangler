@@ -312,7 +312,7 @@ function permissionRow(s: SessionDTO, span: number): string {
       // tool that only the session itself can answer (a question, a plan).
       '<div class="pnote">Answer this in the session.</div>';
 
-  return `<tr class="permrow${open ? ' open' : ''}${pending ? ' pending' : ''}" data-key="${esc(s.key)}">
+  return `<tr class="permrow${open ? ' open' : ''}${pending ? ' pending' : ''}" data-key="${esc(s.key)}" data-request="${esc(s.permissionRequestId ?? '')}">
   <td class="c-perm" colspan="${span}">
     <button class="ptoggle" data-perm="toggle" aria-expanded="${open}" title="${open ? 'Hide the details' : 'Show the command and the buttons'}"><span class="ptw" aria-hidden="true">${open ? '▾' : '▸'}</span>${header}</button>
     <div class="pslide"><div class="pinner">${detail}${buttons}</div></div>
@@ -1308,7 +1308,14 @@ app.addEventListener('click', (e) => {
     // re-renders the card from what actually happened.
     for (const b of Array.from(permRow.querySelectorAll<HTMLButtonElement>('button.pbtn'))) b.disabled = true;
     pbtn.textContent = pbtn.dataset.action === 'deny' ? 'Denying…' : 'Allowing…';
-    post({ type: 'action', key: permRow.dataset.key!, action: pbtn.dataset.action as DashboardAction });
+    post({
+      type: 'action',
+      key: permRow.dataset.key!,
+      action: pbtn.dataset.action as DashboardAction,
+      // Which prompt this card was drawn for. The card is re-rendered from each
+      // snapshot, so this is always the one the buttons currently mean.
+      requestId: permRow.dataset.request || undefined,
+    });
     e.stopPropagation();
     return;
   }

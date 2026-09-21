@@ -771,24 +771,32 @@ export function createApp(host: HostServices): AgentWranglerApp {
     installHooks() {
       void installHooks();
     },
-    decidePermission(key, behavior) {
+    async decidePermission(key, behavior, opts) {
       const s = store.get(key);
-      if (!s || s.provider !== 'claude') return;
-      void provider.decidePermission(s.sessionId, behavior).then((sent) => {
-        if (sent) {
-          log(`permission ${behavior} sent to ${s.name ?? s.sessionId}`);
-          if (behavior === 'always' && s.alwaysAllow) {
-            dialogs.flash(
-              `Agent Wrangler: allowed ${s.alwaysAllow.rules.join(', ')} in ${s.alwaysAllow.destination}.`,
-              5000,
-            );
-          }
-          return;
+      if (!s || s.provider !== 'claude') return 'unsupported';
+      const expected = opts?.expectedRequestId;
+      // Caught here only to say the right thing: this snapshot can be a poll
+      // behind, so `HookLog.decide` re-checks against the id it read off the
+      // event stream, which is the one that actually decides.
+      if (expected !== undefined && s.permissionRequestId !== expected) {
+        dialogs.flash(`Agent Wrangler: that prompt for ${displayLabel(s)} has already been answered.`, 4000);
+        return 'stale';
+      }
+      const sent = await provider.decidePermission(s.sessionId, behavior, expected);
+      if (sent) {
+        log(`permission ${behavior} sent to ${s.name ?? s.sessionId}`);
+        if (behavior === 'always' && s.alwaysAllow) {
+          dialogs.flash(
+            `Agent Wrangler: allowed ${s.alwaysAllow.rules.join(', ')} in ${s.alwaysAllow.destination}.`,
+            5000,
+          );
         }
-        // The prompt was answered in Claude Code first, or the hook gave up
-        // waiting; either way there is nothing left to decide from here.
-        dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
-      });
+        return 'applied';
+      }
+      // The prompt was answered in Claude Code first, or the hook gave up
+      // waiting; either way there is nothing left to decide from here.
+      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
+      return 'gone';
     },
   };
 
