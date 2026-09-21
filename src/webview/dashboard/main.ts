@@ -578,6 +578,25 @@ function resetsAtClock(ms: number): string {
   }
 }
 
+/** "8:20 AM" — the compact local clock time shown beside the five-hour countdown. */
+function resetsAtLocalTime(ms: number): string {
+  try {
+    return new Date(ms).toLocaleTimeString(undefined, {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  } catch {
+    return new Date(ms).toISOString();
+  }
+}
+
+function usageResetText(w: UsageWindow, nowMs: number): string {
+  const countdown = resetsInText(nowMs, w.resetsAtMs);
+  if (!countdown || w.resetsAtMs === undefined) return countdown;
+  const isFiveHourSession = w.id === 'session' || /(?:^|\s)5\s*hr(?:$|\s)/i.test(w.label);
+  return isFiveHourSession ? `${countdown} (${resetsAtLocalTime(w.resetsAtMs)})` : countdown;
+}
+
 function usageCardTitle(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' | 'Codex'): string {
   const lines = [`${w.label}: ${Math.round(w.percent)}% of the limit used.`];
   if (w.resetsAtMs !== undefined) {
@@ -593,7 +612,7 @@ function usageCardHtml(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' |
   const sev = usageSeverity(w.percent);
   const resets =
     w.resetsAtMs !== undefined
-      ? `<span class="ureset" data-resets-at="${w.resetsAtMs}">${esc(resetsInText(Date.now(), w.resetsAtMs))}</span>`
+      ? `<span class="ureset" data-resets-at="${w.resetsAtMs}"${w.id === 'session' || /(?:^|\s)5\s*hr(?:$|\s)/i.test(w.label) ? ' data-five-hour="true"' : ''}>${esc(usageResetText(w, Date.now()))}</span>`
       : '<span class="ureset"></span>';
   const label = prefix ? `${provider} · ${w.label}` : w.label;
   return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap, provider))}">
@@ -1373,7 +1392,9 @@ setInterval(() => {
     el.textContent = etaText(workingElapsedMs({ startedAtMs, blockedMs, toolCalls: 0 }, now), p50Ms, p90Ms);
   }
   for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-resets-at]'))) {
-    el.textContent = resetsInText(now, Number(el.dataset.resetsAt));
+    const resetsAtMs = Number(el.dataset.resetsAt);
+    const countdown = resetsInText(now, resetsAtMs);
+    el.textContent = el.dataset.fiveHour === 'true' ? `${countdown} (${resetsAtLocalTime(resetsAtMs)})` : countdown;
   }
 }, 10_000);
 
