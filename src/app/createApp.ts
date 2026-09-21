@@ -698,12 +698,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
     openInTab(key) {
       surface?.openInTab(key);
     },
-    togglePinned(key) {
-      pins.toggle(key);
-      // Wanting a row out of the way and at the top of the table at once is not
-      // a state worth being able to reach, so the two clear each other.
-      if (pins.isPinned(key)) archive.set(key, false);
-    },
     rename(key) {
       const s = store.get(key);
       if (!s) return;

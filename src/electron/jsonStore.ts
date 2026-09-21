@@ -8,7 +8,7 @@
  * replacement.
  *
  * Writes are synchronous and whole-file. The documents are a few kilobytes of
- * pins, nicknames and column widths written when a human clicks something, so
+ * sections, nicknames and column widths written when a human clicks something, so
  * the cost is nothing and the alternative — a debounced async write — can lose
  * the last change to a quit. Written to a sibling temp file and renamed, so a
  * crash mid-write leaves the previous document rather than half of the new one.

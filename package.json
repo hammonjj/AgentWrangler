@@ -41,10 +41,6 @@
         "title": "Agent Wrangler: Open Conversation in Its Own Tab…"
       },
       {
-        "command": "agentWrangler.pinToTop",
-        "title": "Agent Wrangler: Pin or Unpin a Session…"
-      },
-      {
         "command": "agentWrangler.renameConversation",
         "title": "Agent Wrangler: Rename a Conversation…"
       },

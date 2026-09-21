@@ -22,7 +22,6 @@ const actions = (s: SessionDTO) => rowMenuItems(s).map((i) => i.action);
 describe('rowMenuItems', () => {
   it('offers the full menu for a live session with a transcript and a pid', () => {
     expect(actions(session())).toEqual([
-      'pin',
       'rename',
       'openInTab',
       'pause',
@@ -38,30 +37,12 @@ describe('rowMenuItems', () => {
 
   it('drops Go-to and Close for an ended session, which has no process left', () => {
     const items = actions(session({ status: 'ended' }));
-    expect(items).toEqual(['pin', 'rename', 'openInTab', 'copyId', 'archive']);
+    expect(items).toEqual(['rename', 'openInTab', 'copyId', 'archive']);
   });
 
-  it('keeps Pin, Rename, Copy id and Archive on every row, so the menu is never empty', () => {
+  it('keeps Rename, Copy id and Archive on every row, so the menu is never empty', () => {
     const bare = session({ transcriptPath: undefined, status: 'ended', pid: undefined });
-    expect(actions(bare)).toEqual(['pin', 'rename', 'copyId', 'archive']);
-  });
-
-  /**
-   * Pinning a row and opening a conversation in its own tab are unrelated, and
-   * were both called "pin" until this feature needed the word. The menu must
-   * never present two items by that name again.
-   */
-  it('has exactly one item whose label starts with Pin', () => {
-    const labels = rowMenuItems(session()).map((i) => i.label);
-    expect(labels.filter((l) => /^(Pin|Unpin)\b/.test(l))).toHaveLength(1);
-  });
-
-  it('flips Pin to Unpin for a pinned row, and pins whatever the status is', () => {
-    const label = (s: SessionDTO) => rowMenuItems(s).find((i) => i.action === 'pin')!.label;
-    expect(label(session())).toBe('Pin to top');
-    expect(label(session({ pinned: true }))).toBe('Unpin');
-    // Unlike the tab item, pinning needs no transcript and no live process.
-    expect(actions(session({ status: 'ended', transcriptPath: undefined, pid: undefined }))).toContain('pin');
+    expect(actions(bare)).toEqual(['rename', 'copyId', 'archive']);
   });
 
   it('offers a rename on every row, and says so differently once one is set', () => {
@@ -115,7 +96,6 @@ describe('rowMenuItems', () => {
   // of the menu has to survive the swap.
   it('keeps the rest of the menu on a paused row', () => {
     expect(actions(session({ paused: true }))).toEqual([
-      'pin',
       'rename',
       'openInTab',
       'unpause',

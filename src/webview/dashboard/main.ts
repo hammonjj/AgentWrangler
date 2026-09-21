@@ -51,6 +51,7 @@ import {
 
 interface WebviewState {
   collapsed?: string[];
+  tableView?: 'status' | 'sections';
   /** Hook-health kind whose banner the user hid. A different kind brings the banner back. */
   bannerDismissed?: string;
   /**
@@ -73,6 +74,7 @@ let sessions: SessionDTO[] = [];
 let hooks: HookHealth | undefined;
 let usage: UsageState | undefined;
 let codexUsage: UsageState | undefined;
+let conversationSections = ['General'];
 
 // ---- columns ----
 // The layout is the host's (globalState, shared by every dashboard), but a drag
@@ -92,7 +94,7 @@ let narrow = app.clientWidth > 0 && app.clientWidth < NARROW_PX;
 /** Open column picker, or undefined. The number is where to pin it vertically. */
 let menuTop: number | undefined;
 /** Open row context menu: which row it belongs to, and where it was asked for. */
-let rowMenu: { key: string; x: number; y: number } | undefined;
+let rowMenu: { key: string; x: number; y: number; showSections?: boolean } | undefined;
 /** A drag owns the table until it ends: snapshots arriving mid-drag are deferred. */
 let dragging = false;
 let renderDeferred = false;
@@ -123,9 +125,10 @@ const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
 let providerFilter: 'all' | 'claude' | 'codex' = saved?.provider ?? 'all';
+let tableView: 'status' | 'sections' = saved?.tableView ?? 'status';
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, provider: providerFilter });
+  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, provider: providerFilter, tableView });
 }
 
 function esc(s: string): string {
@@ -195,11 +198,19 @@ function rowMenuHtml(): string {
   if (!s) return '';
 
   const items = rowMenuItems(s);
-  if (items.length === 0) return '';
-  const { left, top } = clampMenuPosition(rowMenu, rowMenuSize(items), {
+  const expanded = rowMenu.showSections === true;
+  const menuSize = expanded
+    ? { width: 240, height: 38 + conversationSections.length * 30 + 42 + items.length * 30 }
+    : rowMenuSize([...items, { action: 'rename', label: 'Add to…' }]);
+  const { left, top } = clampMenuPosition(rowMenu, menuSize, {
     width: document.documentElement.clientWidth,
     height: document.documentElement.clientHeight,
   });
+  const sectionRows = expanded
+    ? `<div class="rmsub" role="group" aria-label="Conversation sections">${conversationSections.map((section) =>
+        `<button class="rmrow rmsection${section === (s.conversationSection ?? 'General') ? ' current' : ''}" role="menuitemradio" aria-checked="${section === (s.conversationSection ?? 'General')}" data-section="${esc(section)}"><span>${section === (s.conversationSection ?? 'General') ? '✓' : ''}</span>${esc(section)}</button>`,
+      ).join('')}<button class="rmrow rmcreate" role="menuitem" data-create-section><span>＋</span>Create new section…</button></div>`
+    : '';
   const rows = items
     .map(
       (i) =>
@@ -208,7 +219,7 @@ function rowMenuHtml(): string {
         }>${esc(i.label)}</button>`,
     )
     .join('');
-  return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}">${rows}</div>`;
+  return `<div class="rowmenu${expanded ? ' sections-open' : ''}" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}"><button class="rmrow rmadd" role="menuitem" data-add-to>Add to…<span>›</span></button>${sectionRows}${rows}</div>`;
 }
 
 /**
@@ -1042,35 +1053,30 @@ function render(): void {
     return;
   }
 
-  const groups = new Map<SectionId, SessionDTO[]>();
-  for (const s of visibleSessions) {
-    const sec = sectionOf(s);
-    const list = groups.get(sec);
-    if (list) list.push(s);
-    else groups.set(sec, [s]);
-  }
-
   // No <colgroup>: `table-layout: fixed` takes its columns from the first row,
   // so widths live on the header cells and a column that is switched off simply
   // is not rendered.
   const span = cols().length + 3; // dot + agent + data columns + actions
-  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<table>${headHtml()}`;
+  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<div class="tabletabs" role="tablist" aria-label="Conversation grouping"><button role="tab" aria-selected="${tableView === 'status'}" data-table-view="status">Status</button><button role="tab" aria-selected="${tableView === 'sections'}" data-table-view="sections">Sections</button></div><table>${headHtml()}`;
 
-  for (const sec of SECTION_ORDER) {
-    const rows = groups.get(sec);
-    if (!rows || rows.length === 0) continue;
-    // Every other section answers "what moved", so it sorts by recency. Pinned
-    // answers "where did I put that", so it sorts by when each pin was made and
-    // holds still — a pinned row that jumped around whenever its agent wrote a
-    // line would take back the one thing pinning is for.
-    rows.sort(
-      sec === 'pinned'
-        ? (a, b) => (a.pinnedAt ?? 0) - (b.pinnedAt ?? 0)
-        : (a, b) => b.lastActivityAt - a.lastActivityAt,
-    );
-    const isCollapsed = collapsed.has(sec);
-    html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${sec}">
-<tr class="sec st-${sec}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(SECTION_LABEL[sec])}<span class="count">${rows.length}</span></td></tr>`;
+  const groups = new Map<string, SessionDTO[]>();
+  for (const s of visibleSessions) {
+    const group = tableView === 'status' ? sectionOf(s) : (s.conversationSection ?? 'General');
+    const list = groups.get(group);
+    if (list) list.push(s);
+    else groups.set(group, [s]);
+  }
+  const groupOrder = tableView === 'status' ? SECTION_ORDER : conversationSections;
+  for (const group of groupOrder) {
+    const rows = groups.get(group) ?? [];
+    if (tableView === 'status' && rows.length === 0) continue;
+    rows.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+    const collapseKey = tableView === 'status' ? group : `named:${group}`;
+    const isCollapsed = collapsed.has(collapseKey);
+    const label = tableView === 'status' ? SECTION_LABEL[group as SectionId] : group;
+    const styleClass = tableView === 'status' ? ` st-${group}` : ' named';
+    html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${esc(collapseKey)}">
+<tr class="sec${styleClass}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(label)}<span class="count">${rows.length}</span></td></tr>`;
     for (const s of rows) html += rowHtml(s, span);
     html += '</tbody>';
   }
@@ -1093,6 +1099,7 @@ vscodeApi.onMessage((body) => {
   }
   if (m.type === 'snapshot') {
     sessions = m.sessions;
+    conversationSections = m.conversationSections;
     if (m.projects) {
       projects = m.projects;
       renderLauncher();
@@ -1284,11 +1291,41 @@ app.addEventListener('click', (e) => {
   // whether that click picks an item or dismisses it. In particular a click on
   // a row must dismiss and stop there, rather than also opening that session.
   if (rowMenu) {
+    if (target.closest('[data-add-to]')) {
+      rowMenu.showSections = !rowMenu.showSections;
+      render();
+      e.stopPropagation();
+      return;
+    }
+    const section = target.closest<HTMLElement>('[data-section]');
+    if (section) {
+      const key = rowMenu.key;
+      const name = section.dataset.section!;
+      closeRowMenu();
+      post({ type: 'setConversationSection', key, section: name });
+      e.stopPropagation();
+      return;
+    }
+    if (target.closest('[data-create-section]')) {
+      const key = rowMenu.key;
+      closeRowMenu();
+      post({ type: 'createConversationSection', key });
+      e.stopPropagation();
+      return;
+    }
     const item = target.closest('[data-row-action]') as HTMLElement | null;
     const key = rowMenu.key;
     closeRowMenu();
     if (item) post({ type: 'action', key, action: item.dataset.rowAction as DashboardAction });
     e.stopPropagation();
+    return;
+  }
+
+  const viewTab = target.closest<HTMLElement>('[data-table-view]');
+  if (viewTab) {
+    tableView = viewTab.dataset.tableView as 'status' | 'sections';
+    saveState();
+    render();
     return;
   }
 

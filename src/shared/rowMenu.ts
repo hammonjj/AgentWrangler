@@ -51,7 +51,7 @@ export function canPauseSession(s: SessionDTO): boolean {
 }
 
 /**
- * The row menu, in order: what the row *is* (pin it to the top, rename it),
+ * The row menu, in order: what the row *is* (rename it),
  * where to look at it (its own tab, or wherever it runs), what to do to the
  * agent (pause it), what to take off it (its id), then the two that change its
  * place in the world — archive, and close.
@@ -62,23 +62,12 @@ export function canPauseSession(s: SessionDTO): boolean {
  * one, and the modal that follows is where the cost of interrupting it gets
  * spelled out.
  *
- * Note the two things that used to both be called pinning. Pinning a row keeps
- * it in the section at the top of the dashboard; opening it in its own tab is
- * about where the *conversation* is read. They are unrelated, and one menu
- * cannot have two items called Pin.
+ * Section assignment is rendered by the dashboard because its choices are
+ * dynamic; this helper supplies the state-dependent action rows below it.
  */
 export function rowMenuItems(s: SessionDTO): RowMenuItem[] {
   const items: RowMenuItem[] = [];
 
-  items.push(
-    s.pinned
-      ? { action: 'pin', label: 'Unpin', title: 'Put it back in the section its status belongs to' }
-      : {
-          action: 'pin',
-          label: 'Pin to top',
-          title: 'Keep this one in the Pinned section at the top, whatever it is doing',
-        },
-  );
   items.push({
     action: 'rename',
     label: s.nickname ? 'Rename…' : 'Give it a name…',

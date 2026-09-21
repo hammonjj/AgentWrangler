@@ -32,6 +32,8 @@ export type HostToDashboard =
       /** Saved column layout. Absent only before the host has read storage once. */
       columns?: ColumnPrefs;
       showCodexSubagents?: boolean;
+      /** Always starts with General, followed by user-created organizational sections. */
+      conversationSections: string[];
       /**
        * What the launcher's model and effort dropdowns show: the models the
        * last conversation reported, and the defaults a new one will start on.
@@ -56,10 +58,6 @@ export type HostToDashboard =
 /**
  * `allow` / `deny` / `always` answer the permission prompt a blocked row is
  * sitting on; `always` also adds the rule Claude Code's "don't ask again" would.
- * `pin` keeps a row in the section at the top of the table; `openInTab` gives
- * the conversation a panel of its own that the reusable pane never swaps away
- * from. Both used to be called pinning, which is why the second is spelled out.
- *
  * `copyId` and `close` come from the row's right-click menu (see
  * `shared/rowMenu.ts`). `close` ends the process running the session and is the
  * only one of these the user can lose work to, so the host confirms it first.
@@ -72,13 +70,7 @@ export type HostToDashboard =
 export type PaneName = 'dashboard' | 'conversation';
 
 export type DashboardAction =
-  /** Keep this row in the Pinned section at the top of the table, whatever its status. */
-  | 'pin'
-  /**
-   * Open the conversation in a tab of its own that row clicks never swap away.
-   * Was called `pin` until pinning a *row* needed the name; the two are
-   * unrelated, and one menu cannot have two items called Pin.
-   */
+  /** Open the conversation in a tab of its own that row clicks never swap away. */
   | 'openInTab'
   /** Ask for the user's own name for this conversation. */
   | 'rename'
@@ -105,6 +97,8 @@ export type DashboardToHost =
    * every other action, and on a card drawn before this field existed.
    */
   | { type: 'action'; key: string; action: DashboardAction; requestId?: string }
+  | { type: 'setConversationSection'; key: string; section: string }
+  | { type: 'createConversationSection'; key: string }
   | { type: 'openExternal'; url: string }
   | { type: 'refresh' }
   /** Banner button: runs the same confirm-then-install flow as the palette command. */

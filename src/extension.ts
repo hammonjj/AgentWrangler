@@ -143,7 +143,6 @@ export function activate(context: vscode.ExtensionContext): void {
       app.withSession((k) => app.actions.openInTab(k)),
     ),
     vscode.commands.registerCommand('agentWrangler.renameConversation', app.withSession((k) => app.actions.rename(k))),
-    vscode.commands.registerCommand('agentWrangler.pinToTop', app.withSession((k) => app.actions.togglePinned(k))),
     vscode.commands.registerCommand(
       'agentWrangler.resumeInTerminal',
       app.withSession((k) => app.actions.resume(k), (s) => s.status === 'ended'),

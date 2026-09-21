@@ -156,7 +156,7 @@ export interface HostServices {
   readonly appName: string;
   log(message: string): void;
   settings: HostSettings;
-  /** Preferences about sessions: archive, pins, nicknames, columns, turn stats. */
+  /** Preferences about sessions: archive, sections, nicknames, columns, turn stats. */
   globalState: HostStorage;
   /**
    * Preferences about *this* surface. In VSCode, per window — which is what

@@ -117,8 +117,7 @@ export class DashboardHost {
       // Pausing is machine-wide and its record is global state, so a pause from
       // any window has to reach every dashboard's rows and its bar button.
       this.pause.onDidChange(() => this.pushSnapshot()),
-      // Pinning moves a row between sections without changing anything the
-      // store tracks, so the push has to come from here.
+      // Section assignments do not change anything the session store tracks.
       this.pins.onDidChange(() => this.pushSnapshot()),
     );
   }
@@ -168,8 +167,8 @@ export class DashboardHost {
       return {
         ...s,
         archived: this.archive.isArchived(s.key),
-        pinned: this.pins.isPinned(s.key) || undefined,
-        pinnedAt: this.pins.pinnedAt(s.key),
+        conversationSection: this.pins.sectionFor(s.key),
+        sectionAssignedAt: this.pins.assignedAt(s.key),
         paused: this.pause.isPaused(s.pid) || undefined,
         runnerOwned: runnerOwned || undefined,
         wasRunningHere: this.runners.wasRunning?.(s.sessionId) || undefined,
@@ -185,6 +184,7 @@ export class DashboardHost {
       codexUsage: this.codexUsage.enabled ? this.codexUsage.usage : undefined,
       columns: this.columns.value,
       showCodexSubagents: this.settings.get('showCodexSubagents', false),
+      conversationSections: this.pins.names,
       launcher: {
         models: this.models.value,
         model: this.settings.get<string>('runner.model', ''),
@@ -208,16 +208,18 @@ export class DashboardHost {
       case 'rowClick':
         this.actions.smartOpen(m.key);
         break;
+      case 'setConversationSection':
+        this.pins.assign(m.key, m.section);
+        break;
+      case 'createConversationSection':
+        void this.createConversationSection(m.key);
+        break;
       case 'action':
         if (m.action === 'openInTab') this.actions.openInTab(m.key);
-        else if (m.action === 'pin') this.actions.togglePinned(m.key);
         else if (m.action === 'rename') this.actions.rename(m.key);
         else if (m.action === 'resume') this.actions.resume(m.key);
         else if (m.action === 'archive') {
           this.archive.toggle(m.key);
-          // The mirror of what pinning does to archiving: the two are opposite
-          // instructions and cannot both be in force.
-          if (this.archive.isArchived(m.key)) this.pins.set(m.key, false);
         }
         else if (m.action === 'copyId') this.actions.copyId(m.key);
         else if (m.action === 'close') this.actions.closeSession(m.key);
@@ -275,6 +277,27 @@ export class DashboardHost {
         this.actions.pauseAll(m.pause);
         break;
     }
+  }
+
+  private async createConversationSection(key: string): Promise<void> {
+    const value = await this.dialogs.input({
+      title: 'Create conversation section',
+      prompt: 'Name the new section. This conversation will be added to it.',
+      placeHolder: 'Section name',
+      validateInput: (input) => {
+        const name = input.trim();
+        if (!name) return 'Enter a section name.';
+        if (name.length > 50) return 'Keep it to 50 characters or fewer.';
+        if (this.pins.names.some((section) => section.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+          return 'A section with that name already exists.';
+        }
+        return undefined;
+      },
+    });
+    if (value === undefined) return;
+    const name = value.trim();
+    if (!this.pins.create(name)) return;
+    this.pins.assign(key, name);
   }
 
   /** Re-scan, then push only if the scan actually changed the list. */

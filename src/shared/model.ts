@@ -131,13 +131,10 @@ export interface AgentSession {
   prLink?: PrLink;
   /** User shoved this session out of the way (host decorates from ArchiveService). */
   archived?: boolean;
-  /**
-   * User wants this one kept in front of them, in the section at the top (host
-   * decorates from PinService). Mutually exclusive with `archived`.
-   */
-  pinned?: boolean;
-  /** ms epoch the pin was made — the Pinned section sorts by it, so pins hold still. */
-  pinnedAt?: number;
+  /** User-defined organizational section; absent means the always-present General section. */
+  conversationSection?: string;
+  /** When this conversation was assigned to its section. */
+  sectionAssignedAt?: number;
   /**
    * A name the user gave this conversation, shown instead of `title` (host
    * decorates from NicknameService). The original title is never overwritten,
@@ -285,20 +282,16 @@ export function compareSessions(a: AgentSession, b: AgentSession): number {
   return b.lastActivityAt - a.lastActivityAt;
 }
 
-/** Dashboard sections: Pinned first, then the six statuses, Paused, and Archived last. */
-export type SectionId = SessionStatus | 'pinned' | 'paused' | 'archived';
+/** Dashboard status sections. Named conversation sections are a separate view. */
+export type SectionId = SessionStatus | 'paused' | 'archived';
 
 /**
- * The two sections the user puts things in bracket the ones the agents put
- * themselves in: Pinned at the top, Archived at the bottom, status in between.
- *
  * Paused sits above Ended, not below it: a paused agent is still a live process
  * with a conversation you are coming back to, and the two things you might do
  * about it — resume it, or decide you are done with it — are both worth seeing
  * before a list of sessions that are already over.
  */
 export const SECTION_ORDER: SectionId[] = [
-  'pinned',
   'blocked',
   'waiting',
   'stuck',
@@ -311,20 +304,12 @@ export const SECTION_ORDER: SectionId[] = [
 
 export const SECTION_LABEL: Record<SectionId, string> = {
   ...STATUS_LABEL,
-  pinned: 'Pinned',
   paused: 'Paused',
   archived: 'Archived',
 };
 
 /**
  * Which section a row belongs to, most explicit instruction first.
- *
- * Pinned wins over everything, including Blocked: "keep this in front of me" is
- * a standing instruction from the user, where every status is something the
- * agent did. Nothing is lost by it — a pinned blocked row keeps its status dot,
- * its permission card and its place in the status-bar bell, so the only thing
- * pinning changes is where it sits. (Pinned and archived are mutually exclusive
- * at the point of action; the order here only settles a stale pair.)
  *
  * Paused beats the underlying status because a frozen session's status stopped
  * moving with it — a paused `busy` row left in Busy would sit there looking
@@ -333,7 +318,6 @@ export const SECTION_LABEL: Record<SectionId, string> = {
  * stopped on purpose.
  */
 export function sectionOf(s: AgentSession): SectionId {
-  if (s.pinned) return 'pinned';
   if (s.archived) return 'archived';
   return s.paused ? 'paused' : s.status;
 }

@@ -10,7 +10,7 @@ const STORAGE_KEY = 'agentWrangler.archivedKeys';
 
 /**
  * Persisted set of archived session keys. Archived sessions render in a
- * pinned-last "Archived" section and are excluded from the status bar count
+ * always-last "Archived" status section and are excluded from the status bar count
  * and waiting toasts.
  */
 export class ArchiveService {
