@@ -119,6 +119,13 @@
           "default": "",
           "description": "Model for conversations started from Agent Wrangler (e.g. claude-opus-5). Empty means Claude Code's own default."
         },
+        "agentWrangler.runner.provider": {
+          "type": "string",
+          "enum": ["anthropic", "openai"],
+          "enumDescriptions": ["Start the next conversation with Claude Code.", "Start the next conversation with Codex."],
+          "default": "anthropic",
+          "description": "Provider selected for the next conversation started from Agent Wrangler."
+        },
         "agentWrangler.runner.effort": {
           "type": "string",
           "enum": [
@@ -184,6 +191,13 @@
           "type": "string",
           "default": "",
           "description": "Model for Codex conversations started from Agent Wrangler. Empty uses the Codex default."
+        },
+        "agentWrangler.codexRunner.effort": {
+          "type": "string",
+          "enum": ["", "low", "medium", "high", "xhigh"],
+          "enumDescriptions": ["Use the selected Codex model's default.", "Minimal reasoning, fastest answers.", "Moderate reasoning.", "Deep reasoning.", "The deepest reasoning available."],
+          "default": "",
+          "description": "Reasoning effort for Codex conversations started from Agent Wrangler. Empty uses the model default."
         },
         "agentWrangler.stuckThresholdSeconds": {
           "type": "number",

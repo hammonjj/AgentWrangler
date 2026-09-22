@@ -88,7 +88,7 @@ body {
      or the menu hangs off the side of the thing that opened it. */
   --aw-proj-w: 18rem;
   position: relative;
-  z-index: 3;
+  z-index: 8;
   flex: 0 0 auto;
   box-sizing: border-box;
   height: var(--aw-bar-h);
@@ -160,7 +160,7 @@ body {
   left: 6px;
   right: 6px;
   max-width: var(--aw-proj-w);
-  z-index: 1;
+  z-index: 9;
   max-height: 50vh;
   overflow-y: auto;
   margin-top: 2px;
@@ -947,9 +947,9 @@ button.colcfg svg {
    scrolls underneath. Pinned to the y of the click that opened it. */
 .colmenu {
   position: fixed;
-  right: 10px;
   z-index: 10;
-  min-width: 150px;
+  width: 220px;
+  max-width: calc(100vw - 8px);
   padding: 4px;
   border-radius: 5px;
   background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
@@ -1188,23 +1188,20 @@ button.colcfg svg {
    because every rule below hangs off .usage inside it rather than off this. */
 #usage {
   flex: 0 0 auto;
-}
-
-.usage {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: stretch;
-  /* Cards grow equally to their cap and the group sits centred rather than
-     hugging the left edge in a wide tab. */
-  justify-content: center;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
   gap: 8px;
   padding: 8px 10px 9px;
   border-bottom: 1px solid var(--vscode-panel-border, transparent);
 }
+#usage:empty {
+  display: none;
+}
+.usage {
+  display: contents;
+}
 .ucard {
-  flex: 1 1 150px;
-  min-width: 150px;
-  max-width: 260px;
+  min-width: 0;
   padding: 6px 10px 7px;
   border-radius: 5px;
   background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
@@ -1280,7 +1277,7 @@ button.colcfg svg {
 }
 
 .unote {
-  flex: 1 1 auto;
+  grid-column: 1 / -1;
   align-self: center;
   font-size: 0.9em;
   color: var(--vscode-descriptionForeground);
@@ -1288,14 +1285,9 @@ button.colcfg svg {
 .usage.err .unote {
   color: var(--aw-blocked);
 }
-#app.narrow .usage {
+body:has(#app.narrow) #usage {
   padding: 6px 5px 7px;
   gap: 5px;
-}
-#app.narrow .ucard {
-  flex-basis: 120px;
-  min-width: 120px;
-  padding: 4px 8px 5px;
 }
 
 /* ---- hook status banner ---- */

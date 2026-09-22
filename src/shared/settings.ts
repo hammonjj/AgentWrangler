@@ -57,6 +57,15 @@ export const SETTINGS: SettingSpec[] = [
       'Permission mode for conversations started from Agent Wrangler. Changeable per session from the pane.',
   },
   {
+    key: 'runner.provider',
+    group: 'Conversations',
+    type: 'string',
+    enum: ['anthropic', 'openai'],
+    enumDescriptions: ['Start the next conversation with Claude Code.', 'Start the next conversation with Codex.'],
+    default: 'anthropic',
+    description: 'Provider selected for the next conversation started from Agent Wrangler.',
+  },
+  {
     key: 'runner.model',
     group: 'Conversations',
     type: 'string',
@@ -88,6 +97,21 @@ export const SETTINGS: SettingSpec[] = [
     default: "",
     description:
       'Model for Codex conversations started from Agent Wrangler. Empty uses the Codex default.',
+  },
+  {
+    key: 'codexRunner.effort',
+    group: 'Conversations',
+    type: 'string',
+    enum: ['', 'low', 'medium', 'high', 'xhigh'],
+    enumDescriptions: [
+      'Use the selected Codex model\'s default.',
+      'Minimal reasoning, fastest answers.',
+      'Moderate reasoning.',
+      'Deep reasoning.',
+      'The deepest reasoning available.',
+    ],
+    default: '',
+    description: 'Reasoning effort for Codex conversations started from Agent Wrangler. Empty uses the model default.',
   },
   {
     key: 'runner.confirmTakeoverOnSend',

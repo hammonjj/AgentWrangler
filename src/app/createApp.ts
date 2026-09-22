@@ -172,7 +172,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const provider = new ClaudeProvider(getConfig, log, turnStats);
   const codexProvider = new CodexProvider(getConfig, log);
   const codexAppServer = new CodexAppServer(() => getConfig().codexBinaryPath, log);
-  const codexRunners = new CodexRunnerService(codexAppServer);
+  const models = new ModelCatalogService(host.globalState);
+  const codexRunners = new CodexRunnerService(codexAppServer, (list) => models.remember('openai', list));
   host.subscribe(codexRunners);
   const archive = new ArchiveService(host.globalState);
   // Which agents are frozen. Nothing is persisted: the answer is the process
@@ -244,14 +245,13 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // resume the same session, and two processes on one id corrupt its transcript.
   // What the launcher's model dropdown offers: the list the last conversation
   // reported, since the launcher has no running CLI of its own to ask.
-  const models = new ModelCatalogService(host.globalState);
   const runnerRegistry = new RunnerRegistry(host.workspaceState);
   const runners = new RunnerService({
     query: sdkQuery,
     binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath),
     log,
     registry: runnerRegistry,
-    rememberModels: (list) => models.remember(list),
+    rememberModels: (list) => models.remember('anthropic', list),
   });
   host.subscribe(runners);
   const runnerOwnership: RunnerOwnership = {
@@ -597,7 +597,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     if (remember) projects.add(cwd);
     try {
       const model = host.settings.get<string>('codexRunner.model', '').trim() || undefined;
-      const runner = await codexRunners.start(cwd, model);
+      const effort = host.settings.get<string>('codexRunner.effort', '').trim() || undefined;
+      const runner = await codexRunners.start(cwd, model, effort);
       surface?.showCodexRunner(runner);
     } catch (error) {
       log(`starting Codex conversation failed: ${String(error)}`);

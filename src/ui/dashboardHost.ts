@@ -94,7 +94,10 @@ export class DashboardHost {
       // has to reach them or they show a default that is no longer the default.
       this.models.onDidChange(() => void this.pushSnapshot()),
       this.settings.onDidChange((affects) => {
-        if (affects('runner.model') || affects('runner.effort')) void this.pushSnapshot();
+        if (
+          affects('runner.model') || affects('runner.effort') || affects('runner.provider') ||
+          affects('codexRunner.model') || affects('codexRunner.effort')
+        ) void this.pushSnapshot();
         if (affects('showCodexSubagents')) {
           this.actions.refreshAll();
           void this.pushSnapshot();
@@ -187,8 +190,15 @@ export class DashboardHost {
       conversationSections: this.pins.names,
       launcher: {
         models: this.models.value,
-        model: this.settings.get<string>('runner.model', ''),
-        effort: this.settings.get<string>('runner.effort', ''),
+        provider: this.settings.get<'anthropic' | 'openai'>('runner.provider', 'anthropic'),
+        anthropic: {
+          model: this.settings.get<string>('runner.model', ''),
+          effort: this.settings.get<string>('runner.effort', ''),
+        },
+        openai: {
+          model: this.settings.get<string>('codexRunner.model', ''),
+          effort: this.settings.get<string>('codexRunner.effort', ''),
+        },
       },
       projects: this.projects.value.length > 0 ? this.projects.value : undefined,
     };
@@ -251,10 +261,15 @@ export class DashboardHost {
         }
         break;
       case 'setRunnerModel':
-        if (typeof m.model === 'string') void this.writeSetting('runner.model', m.model);
+        if (typeof m.model === 'string') {
+          void this.writeSetting('runner.provider', m.provider);
+          void this.writeSetting(m.provider === 'openai' ? 'codexRunner.model' : 'runner.model', m.model);
+        }
         return;
       case 'setRunnerEffort':
-        if (typeof m.effort === 'string') void this.writeSetting('runner.effort', m.effort);
+        if (typeof m.effort === 'string') {
+          void this.writeSetting(m.provider === 'openai' ? 'codexRunner.effort' : 'runner.effort', m.effort);
+        }
         return;
       case 'setColumns':
         this.columns.set(m.prefs);

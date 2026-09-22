@@ -39,9 +39,11 @@ export class ModelCatalogService {
    * to answer, or one that has not answered yet, must not erase a good list
    * from the last conversation.
    */
-  remember(models: ModelChoice[] | undefined): void {
-    const next = sane(models);
-    if (next.length === 0 || same(next, this.models)) return;
+  remember(provider: 'anthropic' | 'openai', models: ModelChoice[] | undefined): void {
+    const incoming = sane(models).map((model) => ({ ...model, provider }));
+    if (incoming.length === 0) return;
+    const next = [...this.models.filter((model) => (model.provider ?? 'anthropic') !== provider), ...incoming];
+    if (same(next, this.models)) return;
     this.models = next;
     void this.storage.update(STORAGE_KEY, next);
     this.emitter.fire();
@@ -59,6 +61,7 @@ function sane(raw: unknown): ModelChoice[] {
       {
         value: m.value,
         label: m.label,
+        provider: m.provider === 'openai' ? 'openai' : 'anthropic',
         resolved: typeof m.resolved === 'string' ? m.resolved : undefined,
         effortLevels: Array.isArray(m.effortLevels)
           ? m.effortLevels.filter((l): l is string => typeof l === 'string')
@@ -70,6 +73,6 @@ function sane(raw: unknown): ModelChoice[] {
 
 function same(a: ModelChoice[], b: ModelChoice[]): boolean {
   if (a.length !== b.length) return false;
-  return a.every((m, i) => m.value === b[i].value && m.label === b[i].label && m.resolved === b[i].resolved &&
+  return a.every((m, i) => m.value === b[i].value && m.label === b[i].label && m.provider === b[i].provider && m.resolved === b[i].resolved &&
     (m.effortLevels ?? []).join() === (b[i].effortLevels ?? []).join());
 }

@@ -258,6 +258,8 @@ export interface ConversationCapabilities {
  * this account can use.
  */
 export interface ModelChoice {
+  /** Which runner advertises this model. Older saved catalogs default to Anthropic. */
+  provider?: 'anthropic' | 'openai';
   /** What `setModel` is called with — usually an alias like `sonnet`. */
   value: string;
   label: string;

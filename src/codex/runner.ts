@@ -212,23 +212,35 @@ export class CodexRunner implements ConversationSource {
 export class CodexRunnerService implements Disposable {
   private runners = new Map<string, CodexRunner>();
   private change = new Emitter<void>();
-  constructor(private server: CodexAppServer) {}
+  constructor(
+    private server: CodexAppServer,
+    private rememberModels?: (models: ComposerState['models']) => void,
+  ) {}
   onDidChange = (listener: () => void): Disposable => this.change.event(listener);
   owns(id: string | undefined): boolean { return !!id && this.runners.has(id.toLowerCase()); }
   get(id: string | undefined): CodexRunner | undefined { return id ? this.runners.get(id.toLowerCase()) : undefined; }
-  async start(cwd: string, model?: string): Promise<CodexRunner> {
-    const result = await this.server.request<any>('thread/start', { cwd, ...(model ? { model } : {}) });
+  async start(cwd: string, model?: string, effort?: string): Promise<CodexRunner> {
+    const result = await this.server.request<any>('thread/start', {
+      cwd,
+      ...(model ? { model } : {}),
+      ...(effort ? { config: { model_reasoning_effort: effort } } : {}),
+    });
     const threadId = result?.thread?.id;
     if (typeof threadId !== 'string') throw new Error('Codex App Server returned no thread id');
     const runner = new CodexRunner(this.server, threadId, cwd, result?.model ?? model);
     this.runners.set(threadId.toLowerCase(), runner);
     this.change.fire();
     void this.server.request<any>('model/list', { includeHidden: false }).then((list) => {
-      runner.setModels((list?.data ?? []).map((entry: any) => ({
+      const models = (list?.data ?? []).map((entry: any) => ({
         value: String(entry.model ?? entry.id),
         label: String(entry.displayName ?? entry.model ?? entry.id),
         resolved: String(entry.model ?? entry.id),
-      })));
+        effortLevels: Array.isArray(entry.supportedReasoningEfforts)
+          ? entry.supportedReasoningEfforts.map((level: any) => String(level.reasoningEffort ?? level.effort ?? level))
+          : undefined,
+      }));
+      runner.setModels(models);
+      this.rememberModels?.(models);
     }).catch(() => undefined);
     return runner;
   }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Emitter } from '../src/core/events';
-import { CodexRunner } from '../src/codex/runner';
+import { CodexRunner, CodexRunnerService } from '../src/codex/runner';
 
 class FakeServer {
   notifications = new Emitter<any>();
@@ -11,13 +11,27 @@ class FakeServer {
   onRequest = this.requests.event;
   async request(method: string, params: any): Promise<any> {
     this.calls.push({ method, params });
+    if (method === 'thread/start') return { thread: { id: 'thread-1' } };
+    if (method === 'model/list') return { data: [] };
     if (method === 'turn/start') return { turn: { id: 'turn-1' } };
     return {};
   }
   respond(id: string | number, result: unknown): void { this.responses.push({ id, result }); }
+  dispose(): void {}
 }
 
 describe('CodexRunner', () => {
+  it('starts a thread with the selected model and provider-specific effort', async () => {
+    const server = new FakeServer();
+    const service = new CodexRunnerService(server as any);
+    await service.start('/Users/test/proj', 'gpt-test', 'high');
+    expect(server.calls[0]).toEqual({
+      method: 'thread/start',
+      params: { cwd: '/Users/test/proj', model: 'gpt-test', config: { model_reasoning_effort: 'high' } },
+    });
+    service.dispose();
+  });
+
   it('submits turns and reduces streamed assistant messages', async () => {
     const server = new FakeServer();
     const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj', 'gpt-test');
