@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { needsReply } from '../src/core/needsReply';
+import { finishedTurnStatus, needsReply } from '../src/core/needsReply';
 
 describe('needsReply', () => {
   it('treats a closing question as needing an answer', () => {
@@ -13,6 +13,9 @@ describe('needsReply', () => {
     expect(needsReply('Both are one-line changes. Let me know which you prefer.')).toBe(true);
     expect(needsReply('Two options are on the table.\n\nYour call.')).toBe(true);
     expect(needsReply('I have not pushed anything. Want me to open the PR')).toBe(true);
+    expect(needsReply('Choose option A or B.')).toBe(true);
+    expect(needsReply('Please provide the deployment region.')).toBe(true);
+    expect(needsReply('I need your approval before I can continue.')).toBe(true);
   });
 
   it('treats a plain report as done', () => {
@@ -30,6 +33,7 @@ describe('needsReply', () => {
     ].join('\n');
     expect(needsReply(report)).toBe(false);
     expect(needsReply('All three fixes are implemented and committed on main as 88fa26c. I did not push.')).toBe(false);
+    expect(needsReply('Implemented Select all behavior and confirmed the control works.')).toBe(false);
   });
 
   it('ignores question marks that are not asking the reader anything', () => {
@@ -52,5 +56,18 @@ describe('needsReply', () => {
     expect(needsReply(undefined)).toBe(true);
     expect(needsReply('')).toBe(true);
     expect(needsReply('```\nonly code\n```')).toBe(true);
+  });
+});
+
+describe('finishedTurnStatus', () => {
+  it.each([
+    ['Implemented and pushed. All tests pass.', 'completed', 'done'],
+    ['Implemented. Should I push it?', 'completed', 'waiting'],
+    ['Choose option A or B.', 'completed', 'waiting'],
+    [undefined, 'completed', 'waiting'],
+    ['Partial output before the error.', 'failed', 'waiting'],
+    ['Stopped at your request.', 'interrupted', 'waiting'],
+  ] as const)('classifies %s / %s as %s', (text, outcome, expected) => {
+    expect(finishedTurnStatus(text, outcome)).toBe(expected);
   });
 });

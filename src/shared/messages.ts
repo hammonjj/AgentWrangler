@@ -32,13 +32,20 @@ export type HostToDashboard =
       /** Saved column layout. Absent only before the host has read storage once. */
       columns?: ColumnPrefs;
       showCodexSubagents?: boolean;
+      /** Always starts with General, followed by user-created organizational sections. */
+      conversationSections: string[];
       /**
        * What the launcher's model and effort dropdowns show: the models the
        * last conversation reported, and the defaults a new one will start on.
        * `model`/`effort` are empty when the setting is unset, which means
        * "whatever Claude Code picks".
        */
-      launcher?: { models: ModelChoice[]; model: string; effort: string };
+      launcher?: {
+        models: ModelChoice[];
+        provider: 'anthropic' | 'openai';
+        anthropic: { model: string; effort: string };
+        openai: { model: string; effort: string };
+      };
       /**
        * Folders the launcher's dropdown offers, newest-used first. Absent until
        * the first scan resolves; an empty array means the scan genuinely found
@@ -56,10 +63,6 @@ export type HostToDashboard =
 /**
  * `allow` / `deny` / `always` answer the permission prompt a blocked row is
  * sitting on; `always` also adds the rule Claude Code's "don't ask again" would.
- * `pin` keeps a row in the section at the top of the table; `openInTab` gives
- * the conversation a panel of its own that the reusable pane never swaps away
- * from. Both used to be called pinning, which is why the second is spelled out.
- *
  * `copyId` and `close` come from the row's right-click menu (see
  * `shared/rowMenu.ts`). `close` ends the process running the session and is the
  * only one of these the user can lose work to, so the host confirms it first.
@@ -72,13 +75,7 @@ export type HostToDashboard =
 export type PaneName = 'dashboard' | 'conversation';
 
 export type DashboardAction =
-  /** Keep this row in the Pinned section at the top of the table, whatever its status. */
-  | 'pin'
-  /**
-   * Open the conversation in a tab of its own that row clicks never swap away.
-   * Was called `pin` until pinning a *row* needed the name; the two are
-   * unrelated, and one menu cannot have two items called Pin.
-   */
+  /** Open the conversation in a tab of its own that row clicks never swap away. */
   | 'openInTab'
   /** Ask for the user's own name for this conversation. */
   | 'rename'
@@ -105,6 +102,8 @@ export type DashboardToHost =
    * every other action, and on a card drawn before this field existed.
    */
   | { type: 'action'; key: string; action: DashboardAction; requestId?: string }
+  | { type: 'setConversationSection'; key: string; section: string }
+  | { type: 'createConversationSection'; key: string }
   | { type: 'openExternal'; url: string }
   | { type: 'refresh' }
   /** Banner button: runs the same confirm-then-install flow as the palette command. */
@@ -115,8 +114,8 @@ export type DashboardToHost =
   /** Start a Claude Code conversation in `cwd`, this window running it, and show the pane. */
   | { type: 'newConversation'; cwd: string; provider?: 'claude' | 'codex' }
   /** The launcher's dropdowns: the default a *new* conversation starts on. */
-  | { type: 'setRunnerModel'; model: string }
-  | { type: 'setRunnerEffort'; effort: string }
+  | { type: 'setRunnerModel'; provider: 'anthropic' | 'openai'; model: string }
+  | { type: 'setRunnerEffort'; provider: 'anthropic' | 'openai'; effort: string }
   /** "Browse…" was chosen: open the folder dialog. A choice comes back as `projectPicked`. */
   | { type: 'browseProject' }
   /** The X on a dropdown row: stop offering this folder. Browsing back to it undoes this. */
@@ -199,6 +198,8 @@ export type ConversationToHost =
   /** The pane's own button for "give this conversation a tab of its own". */
   | { type: 'openInTab' }
   | { type: 'resumeHere' }
+  /** Install Claude status hooks from the transcript warning. */
+  | { type: 'installHooks' }
   /** "Show the rest" on a block whose text was capped for the wire. */
   | { type: 'requestBlockText'; id: string; toolUseId?: string }
   | { type: 'archive'; requestId: string; before?: string; beforeTime?: string; query?: string }

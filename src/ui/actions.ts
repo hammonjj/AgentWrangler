@@ -21,8 +21,6 @@ export interface SessionActions {
    * away. Called `pin` until pinning a dashboard *row* needed that name.
    */
   openInTab(key: string): void;
-  /** Keep this row in the Pinned section at the top of the dashboard, or stop. */
-  togglePinned(key: string): void;
   /** Ask the user what to call this conversation; blank clears back to its own title. */
   rename(key: string): void;
   /**

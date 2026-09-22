@@ -33,6 +33,7 @@ import { resolveClaudeBinary } from '../claude/binary';
 import { ClaudeProvider } from '../claude/claudeProvider';
 import { CodexProvider } from '../codex/codexProvider';
 import { CodexAppServer } from '../codex/appServer';
+import { readRolloutBlocks } from '../codex/rollout';
 import { codexUsageReader } from '../codex/usage';
 import { CodexRunnerService } from '../codex/runner';
 import { isPidAlive, readRegistry } from '../claude/registry';
@@ -185,8 +186,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const provider = new ClaudeProvider(getConfig, log, turnStats);
   const codexProvider = new CodexProvider(getConfig, log);
   const codexAppServer = new CodexAppServer(() => getConfig().codexBinaryPath, log);
-  const codexRunners = new CodexRunnerService(codexAppServer);
+  const models = new ModelCatalogService(host.globalState);
+  const codexRunners = new CodexRunnerService(codexAppServer, (list) => models.remember('openai', list));
   host.subscribe(codexRunners);
+  store.useLiveSessions((session) => session.provider === 'codex' ? codexRunners.get(session.sessionId)?.session : undefined);
+  host.subscribe(codexRunners.onDidChange(() => void store.refresh()));
   const archive = new ArchiveService(host.globalState);
   // Which agents are frozen. Nothing is persisted: the answer is the process
   // state itself, which every window reads the same way and which a reload
@@ -257,14 +261,13 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // resume the same session, and two processes on one id corrupt its transcript.
   // What the launcher's model dropdown offers: the list the last conversation
   // reported, since the launcher has no running CLI of its own to ask.
-  const models = new ModelCatalogService(host.globalState);
   const runnerRegistry = new RunnerRegistry(host.workspaceState);
   const runners = new RunnerService({
     query: sdkQuery,
     binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath),
     log,
     registry: runnerRegistry,
-    rememberModels: (list) => models.remember(list),
+    rememberModels: (list) => models.remember('anthropic', list),
   });
   host.subscribe(runners);
   const runnerOwnership: RunnerOwnership = {
@@ -610,7 +613,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     if (remember) projects.add(cwd);
     try {
       const model = host.settings.get<string>('codexRunner.model', '').trim() || undefined;
-      const runner = await codexRunners.start(cwd, model);
+      const effort = host.settings.get<string>('codexRunner.effort', '').trim() || undefined;
+      const runner = await codexRunners.start(cwd, model, effort);
       surface?.showCodexRunner(runner);
     } catch (error) {
       log(`starting Codex conversation failed: ${String(error)}`);
@@ -752,6 +756,48 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   const adopting = new Set<string>();
+  const adoptCodexSession = async (session: AgentSession): Promise<void> => {
+    if (!session.cwd) throw new Error('Agent Wrangler: this Codex conversation has no working folder to resume.');
+    if (session.status !== 'waiting' && session.status !== 'done') {
+      throw new Error('Agent Wrangler: wait for the current Codex turn to finish before taking over here.');
+    }
+    const existing = codexRunners.get(session.sessionId);
+    if (existing) {
+      surface?.showCodexRunner(existing);
+      return;
+    }
+    const history = session.transcriptPath
+      ? await readRolloutBlocks(session.transcriptPath).catch(() => ({ blocks: [], truncated: false }))
+      : { blocks: [], truncated: false };
+    let runner: Awaited<ReturnType<CodexRunnerService['resume']>>;
+    for (;;) {
+      try {
+        runner = await codexRunners.resume(session.sessionId, session.cwd, history.blocks, session.model);
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/already has (?:an active|a live local) writer/i.test(message)) throw error;
+        const choice = await dialogs.warn(
+          'This Codex conversation is still open in VS Code.',
+          {
+            modal: true,
+            detail:
+              'Codex allows only one app to write to a conversation at a time. Close this chat in VS Code, then retry. ' +
+              'Or fork it to continue here immediately with the same history under a new conversation ID.',
+          },
+          'Retry',
+          'Fork here',
+        );
+        if (choice === 'Retry') continue;
+        if (choice !== 'Fork here') return;
+        runner = await codexRunners.fork(session.sessionId, session.cwd, history.blocks, session.model);
+        log(`forked active Codex conversation ${session.sessionId} as ${runner.threadId}`);
+        break;
+      }
+    }
+    surface?.showCodexRunner(runner);
+    log(`controlling Codex conversation ${runner.threadId} here`);
+  };
   const actions: SessionActions = {
     async adoptAndSend(key, text, images, signal) {
       if (adopting.has(key)) throw new Error('A takeover is already pending for this session.');
@@ -777,12 +823,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
     openInTab(key) {
       surface?.openInTab(key);
     },
-    togglePinned(key) {
-      pins.toggle(key);
-      // Wanting a row out of the way and at the top of the table at once is not
-      // a state worth being able to reach, so the two clear each other.
-      if (pins.isPinned(key)) archive.set(key, false);
-    },
     rename(key) {
       const s = store.get(key);
       if (!s) return;
@@ -806,10 +846,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (!s) return;
       if (adopting.has(key)) return;
       adopting.add(key);
-      void adoptSession(s).catch((e) => dialogs.error(String(e))).finally(() => adopting.delete(key));
+      const adoption = s.provider === 'codex' ? adoptCodexSession(s) : adoptSession(s).then(() => undefined);
+      void adoption.catch((e) => dialogs.error(String(e))).finally(() => adopting.delete(key));
     },
     release(key) {
       const s = store.get(key);
+      if (s?.provider === 'codex') {
+        if (!codexRunners.owns(s.sessionId)) return;
+        codexRunners.release(s.sessionId);
+        log(`released Codex conversation ${s.sessionId}`);
+        return;
+      }
       const runner = runners.get(s?.sessionId);
       if (!s || !runner) return;
       if (!host.shell.runInTerminal) {

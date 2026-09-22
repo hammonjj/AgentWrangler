@@ -1,4 +1,4 @@
-import { needsReply } from '../core/needsReply';
+import { finishedTurnStatus } from '../core/needsReply';
 import type { SessionStatus } from '../shared/model';
 import type { LastMeaningful } from './transcriptTail';
 
@@ -80,7 +80,7 @@ export function blockClearedByClaude(blockedSinceMs: number | undefined, live: L
 
 /** A finished turn is `waiting` if its reply asks for something, else `done`. */
 export function turnOver(replyText: string | undefined): SessionStatus {
-  return needsReply(replyText) ? 'waiting' : 'done';
+  return finishedTurnStatus(replyText);
 }
 
 function busyOrStuck(i: StatusInput): SessionStatus {

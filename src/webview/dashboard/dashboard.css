@@ -49,6 +49,30 @@ body {
   overflow: auto;
 }
 
+.tabletabs {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  gap: 2px;
+  padding: 4px 6px 0;
+  background: var(--vscode-panel-background, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+.tabletabs button {
+  padding: 4px 10px 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font: inherit;
+  cursor: pointer;
+}
+.tabletabs button[aria-selected='true'] {
+  color: var(--vscode-foreground);
+  border-bottom-color: var(--vscode-focusBorder, #007fd4);
+}
+
 /* ---- launcher ---- */
 
 /* One row: the folder to start in, and the button that starts it. Outside the
@@ -64,7 +88,7 @@ body {
      or the menu hangs off the side of the thing that opened it. */
   --aw-proj-w: 18rem;
   position: relative;
-  z-index: 3;
+  z-index: 8;
   flex: 0 0 auto;
   box-sizing: border-box;
   height: var(--aw-bar-h);
@@ -136,7 +160,7 @@ body {
   left: 6px;
   right: 6px;
   max-width: var(--aw-proj-w);
-  z-index: 1;
+  z-index: 9;
   max-height: 50vh;
   overflow-y: auto;
   margin-top: 2px;
@@ -419,7 +443,7 @@ body.resizing {
   position: sticky;
   /* The top of #app, which is the element that scrolls: the launcher bar and
      the usage strip are outside it and never move, so no offset is needed. */
-  top: 0;
+  top: 31px;
   z-index: 2;
   text-align: left;
   padding: 5px 8px 4px;
@@ -475,10 +499,7 @@ tr.sec.st-done td {
 tr.sec.st-paused td {
   color: var(--aw-paused);
 }
-/* The one section the user filled themselves, so it takes the accent colour
-   rather than a status colour — none of those would be true of a section whose
-   rows can be in any state at all. */
-tr.sec.st-pinned td {
+tr.sec.named td {
   color: var(--vscode-textLink-foreground, #569cd6);
 }
 tr.sec .twist {
@@ -926,9 +947,9 @@ button.colcfg svg {
    scrolls underneath. Pinned to the y of the click that opened it. */
 .colmenu {
   position: fixed;
-  right: 10px;
   z-index: 10;
-  min-width: 150px;
+  width: 220px;
+  max-width: calc(100vw - 8px);
   padding: 4px;
   border-radius: 5px;
   background: var(--vscode-menu-background, var(--vscode-editorWidget-background, #252526));
@@ -1026,6 +1047,11 @@ button.colcfg svg {
   border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
   box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
 }
+.rowmenu.sections-open {
+  width: 240px;
+  max-height: calc(100vh - 8px);
+  overflow-y: auto;
+}
 .rowmenu .rmrow {
   display: block;
   width: 100%;
@@ -1041,6 +1067,32 @@ button.colcfg svg {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.rowmenu .rmadd,
+.rowmenu .rmsection,
+.rowmenu .rmcreate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rowmenu .rmadd { justify-content: space-between; }
+.rowmenu .rmsection span,
+.rowmenu .rmcreate span {
+  width: 16px;
+  flex: 0 0 16px;
+  text-align: center;
+}
+.rowmenu .rmsub {
+  margin: 3px 0;
+  padding: 3px 0;
+  border-top: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
+  border-bottom: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
+}
+.rowmenu .rmsection.current { font-weight: 600; }
+.rowmenu .rmcreate {
+  margin-top: 3px;
+  padding-top: 6px;
+  border-top: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
 }
 .rowmenu .rmrow:hover {
   background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));
@@ -1136,23 +1188,20 @@ button.colcfg svg {
    because every rule below hangs off .usage inside it rather than off this. */
 #usage {
   flex: 0 0 auto;
-}
-
-.usage {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: stretch;
-  /* Cards grow equally to their cap and the group sits centred rather than
-     hugging the left edge in a wide tab. */
-  justify-content: center;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
   gap: 8px;
   padding: 8px 10px 9px;
   border-bottom: 1px solid var(--vscode-panel-border, transparent);
 }
+#usage:empty {
+  display: none;
+}
+.usage {
+  display: contents;
+}
 .ucard {
-  flex: 1 1 150px;
-  min-width: 150px;
-  max-width: 260px;
+  min-width: 0;
   padding: 6px 10px 7px;
   border-radius: 5px;
   background: var(--vscode-editorWidget-background, rgba(128, 128, 128, 0.08));
@@ -1228,7 +1277,7 @@ button.colcfg svg {
 }
 
 .unote {
-  flex: 1 1 auto;
+  grid-column: 1 / -1;
   align-self: center;
   font-size: 0.9em;
   color: var(--vscode-descriptionForeground);
@@ -1236,14 +1285,9 @@ button.colcfg svg {
 .usage.err .unote {
   color: var(--aw-blocked);
 }
-#app.narrow .usage {
+body:has(#app.narrow) #usage {
   padding: 6px 5px 7px;
   gap: 5px;
-}
-#app.narrow .ucard {
-  flex-basis: 120px;
-  min-width: 120px;
-  padding: 4px 8px 5px;
 }
 
 /* ---- hook status banner ---- */

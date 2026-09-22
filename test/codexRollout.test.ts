@@ -42,6 +42,40 @@ describe('Codex rollout parsing', () => {
     expect(blocks[1]).toMatchObject({ kind: 'tool', state: 'done', result: { text: 'ok' } });
   });
 
+  it('formats Codex commentary as work and hides internal final-answer metadata', () => {
+    const blocks = rolloutBlocks([
+      line('response_item', { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'Checking tests.' }] }),
+      line('response_item', { type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: 'Done.\n<oai-mem-citation>private</oai-mem-citation>' }] }),
+    ]);
+    expect(blocks).toMatchObject([
+      { kind: 'thinking', text: 'Checking tests.' },
+      { kind: 'assistant', text: 'Done.' },
+    ]);
+  });
+
+  it('uses the explicit user event when the response-item prompt is outside a bounded read', () => {
+    const summary = summarizeRolloutLines([
+      line('session_meta', { id: '019abc00-0000-7000-8000-000000000003' }),
+      line('event_msg', { type: 'user_message', message: 'Make the transcript readable' }),
+    ], '/Users/test/rollout.jsonl', 100)!;
+    expect(summary.title).toBe('Make the transcript readable');
+  });
+
+  it('turns Codex patch events into an edited-files summary instead of raw tool JSON', () => {
+    const blocks = rolloutBlocks([
+      line('response_item', { type: 'custom_tool_call', call_id: 'edit-1', name: 'exec', input: 'apply patch' }),
+      line('event_msg', { type: 'patch_apply_end', call_id: 'edit-1', success: true, changes: {
+        '/repo/src/a.ts': { type: 'update', unified_diff: '@@ -1 +1 @@\n-old\n+new' },
+        '/repo/src/b.ts': { type: 'update', unified_diff: '@@ -1 +1 @@\n-x\n+y' },
+      } }),
+      line('response_item', { type: 'custom_tool_call_output', call_id: 'edit-1', output: '[{"type":"input_text","text":"Success"}]' }),
+    ]);
+    expect(blocks[0]).toMatchObject({
+      kind: 'tool', name: 'Edited 2 files', inputPreview: 'a.ts, b.ts', state: 'done',
+      result: { diffs: [{ file: '/repo/src/a.ts' }, { file: '/repo/src/b.ts' }] },
+    });
+  });
+
   it('keeps block ids stable when a bounded tail drops older records', () => {
     const old = line('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Old' }] }, '2026-09-17T11:00:00Z');
     const current = line('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Current' }] });

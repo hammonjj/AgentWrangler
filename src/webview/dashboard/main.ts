@@ -51,6 +51,7 @@ import {
 
 interface WebviewState {
   collapsed?: string[];
+  tableView?: 'status' | 'sections';
   /** Hook-health kind whose banner the user hid. A different kind brings the banner back. */
   bannerDismissed?: string;
   /**
@@ -73,6 +74,7 @@ let sessions: SessionDTO[] = [];
 let hooks: HookHealth | undefined;
 let usage: UsageState | undefined;
 let codexUsage: UsageState | undefined;
+let conversationSections = ['General'];
 
 // ---- columns ----
 // The layout is the host's (globalState, shared by every dashboard), but a drag
@@ -90,9 +92,9 @@ let showCodexSubagents = false;
  */
 let narrow = app.clientWidth > 0 && app.clientWidth < NARROW_PX;
 /** Open column picker, or undefined. The number is where to pin it vertically. */
-let menuTop: number | undefined;
+let menuPosition: { top: number; left: number } | undefined;
 /** Open row context menu: which row it belongs to, and where it was asked for. */
-let rowMenu: { key: string; x: number; y: number } | undefined;
+let rowMenu: { key: string; x: number; y: number; showSections?: boolean } | undefined;
 /** A drag owns the table until it ends: snapshots arriving mid-drag are deferred. */
 let dragging = false;
 let renderDeferred = false;
@@ -123,9 +125,10 @@ const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
 let providerFilter: 'all' | 'claude' | 'codex' = saved?.provider ?? 'all';
+let tableView: 'status' | 'sections' = saved?.tableView ?? 'status';
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, provider: providerFilter });
+  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, provider: providerFilter, tableView });
 }
 
 function esc(s: string): string {
@@ -170,10 +173,6 @@ function paint(html: string): void {
 const ICON_COLUMNS =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1"/><path d="M6.4 2.8v10.4M10.4 2.8v10.4"/></svg>';
 
-function hereChip(s: SessionDTO): string {
-  return s.runnerOwned ? '<span class="chip here">here</span>' : '';
-}
-
 function clickHint(s: SessionDTO): string {
   if (s.runnerOwned) return 'Click to open the conversation — this window runs it, so you can type into it';
   return s.wasRunningHere ? 'Click to resume a session this workspace ran recently' : 'Click to open the conversation here';
@@ -195,11 +194,19 @@ function rowMenuHtml(): string {
   if (!s) return '';
 
   const items = rowMenuItems(s);
-  if (items.length === 0) return '';
-  const { left, top } = clampMenuPosition(rowMenu, rowMenuSize(items), {
+  const expanded = rowMenu.showSections === true;
+  const menuSize = expanded
+    ? { width: 240, height: 38 + conversationSections.length * 30 + 42 + items.length * 30 }
+    : rowMenuSize([...items, { action: 'rename', label: 'Add to…' }]);
+  const { left, top } = clampMenuPosition(rowMenu, menuSize, {
     width: document.documentElement.clientWidth,
     height: document.documentElement.clientHeight,
   });
+  const sectionRows = expanded
+    ? `<div class="rmsub" role="group" aria-label="Conversation sections">${conversationSections.map((section) =>
+        `<button class="rmrow rmsection${section === (s.conversationSection ?? 'General') ? ' current' : ''}" role="menuitemradio" aria-checked="${section === (s.conversationSection ?? 'General')}" data-section="${esc(section)}"><span>${section === (s.conversationSection ?? 'General') ? '✓' : ''}</span>${esc(section)}</button>`,
+      ).join('')}<button class="rmrow rmcreate" role="menuitem" data-create-section><span>＋</span>Create new section…</button></div>`
+    : '';
   const rows = items
     .map(
       (i) =>
@@ -208,7 +215,7 @@ function rowMenuHtml(): string {
         }>${esc(i.label)}</button>`,
     )
     .join('');
-  return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}">${rows}</div>`;
+  return `<div class="rowmenu${expanded ? ' sections-open' : ''}" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}"><button class="rmrow rmadd" role="menuitem" data-add-to>Add to…<span>›</span></button>${sectionRows}${rows}</div>`;
 }
 
 /**
@@ -536,7 +543,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${s.wasRunningHere ? '<span class="chip" title="This workspace ran this session recently. Open it and send to resume.">was here</span>' : ''}${providerChip}${pausedChip(s)}${hereChip(s)}${kindChip}${statusChip(s)}</span></div>
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${pausedChip(s)}${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -578,6 +585,25 @@ function resetsAtClock(ms: number): string {
   }
 }
 
+/** "8:20 AM" — the compact local clock time shown beside the five-hour countdown. */
+function resetsAtLocalTime(ms: number): string {
+  try {
+    return new Date(ms).toLocaleTimeString(undefined, {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  } catch {
+    return new Date(ms).toISOString();
+  }
+}
+
+function usageResetText(w: UsageWindow, nowMs: number): string {
+  const countdown = resetsInText(nowMs, w.resetsAtMs);
+  if (!countdown || w.resetsAtMs === undefined) return countdown;
+  const isFiveHourSession = w.id === 'session' || /(?:^|\s)5\s*hr(?:$|\s)/i.test(w.label);
+  return isFiveHourSession ? `${countdown} (${resetsAtLocalTime(w.resetsAtMs)})` : countdown;
+}
+
 function usageCardTitle(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' | 'Codex'): string {
   const lines = [`${w.label}: ${Math.round(w.percent)}% of the limit used.`];
   if (w.resetsAtMs !== undefined) {
@@ -593,7 +619,7 @@ function usageCardHtml(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' |
   const sev = usageSeverity(w.percent);
   const resets =
     w.resetsAtMs !== undefined
-      ? `<span class="ureset" data-resets-at="${w.resetsAtMs}">${esc(resetsInText(Date.now(), w.resetsAtMs))}</span>`
+      ? `<span class="ureset" data-resets-at="${w.resetsAtMs}"${w.id === 'session' || /(?:^|\s)5\s*hr(?:$|\s)/i.test(w.label) ? ' data-five-hour="true"' : ''}>${esc(usageResetText(w, Date.now()))}</span>`
       : '<span class="ureset"></span>';
   const label = prefix ? `${provider} · ${w.label}` : w.label;
   return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap, provider))}">
@@ -706,14 +732,14 @@ function headHtml(): string {
  * asked for, whatever the dashboard is scrolled to.
  */
 function menuHtml(): string {
-  if (menuTop === undefined) return '';
+  if (!menuPosition) return '';
   const rows = COLUMNS.map((c) => {
     const hidden = isHidden(columns, c.id);
     const folded = !hidden && narrow && c.foldsWhenNarrow;
     const note = folded ? '<span class="cmnote">too narrow</span>' : '';
     return `<label class="cmrow"><input type="checkbox" data-col="${c.id}"${hidden ? '' : ' checked'}>${esc(c.label)}${note}</label>`;
   }).join('');
-  return `<div class="colmenu" data-top="${menuTop}px" role="menu">
+  return `<div class="colmenu" data-top="${menuPosition.top}px" data-left="${menuPosition.left}px" role="menu">
   <div class="cmhead">Columns</div>
   ${rows}
   <button class="cmreset" data-cols="reset">Reset widths</button>
@@ -781,7 +807,10 @@ const launchEffort = bar.querySelector<HTMLSelectElement>('#launcheffort')!;
  * ignore. With no model chosen there is nothing to ask, so the setting's own
  * range is offered instead.
  */
-const EFFORT_FALLBACK = ['low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_FALLBACK: Record<LaunchProvider, string[]> = {
+  anthropic: ['low', 'medium', 'high', 'xhigh', 'max'],
+  openai: ['low', 'medium', 'high', 'xhigh'],
+};
 
 /**
  * What Claude Code falls back to when no effort is set.
@@ -793,7 +822,7 @@ const EFFORT_FALLBACK = ['low', 'medium', 'high', 'xhigh', 'max'];
  * reported per-session by anything we can ask, so unlike the model's label this
  * one is a constant and would need changing if that ever did.
  */
-const EFFORT_DEFAULT = 'high';
+const EFFORT_DEFAULT: Record<LaunchProvider, string> = { anthropic: 'high', openai: 'medium' };
 
 function fillSelect(el: HTMLSelectElement, rows: { value: string; label: string }[], current: string): void {
   const key = rows.map((r) => `${r.value}\u0000${r.label}`).join('\u0001');
@@ -812,39 +841,71 @@ function fillSelect(el: HTMLSelectElement, rows: { value: string; label: string 
   el.value = rows.some((r) => r.value === current) ? current : '';
 }
 
-function renderLaunchDefaults(launcher: { models: ModelChoice[]; model: string; effort: string }): void {
+type LaunchProvider = 'anthropic' | 'openai';
+type LauncherState = {
+  models: ModelChoice[];
+  provider: LaunchProvider;
+  anthropic: { model: string; effort: string };
+  openai: { model: string; effort: string };
+};
+let launchProvider: LaunchProvider = 'anthropic';
+
+function modelValue(provider: LaunchProvider, model: string): string {
+  return `${provider}:${model}`;
+}
+
+function renderLaunchDefaults(launcher: LauncherState): void {
+  launchProvider = launcher.provider;
   const models = launcher.models;
   // The CLI's list has a default row of its own, already labelled with the
   // model it resolves to. Its label is borrowed for the unset row and the row
   // itself dropped, so there is one "Default (Sonnet 4.5)" rather than two
   // entries that mean the same thing.
-  const cliDefault = models.find((m) => m.value === 'default');
-  const rest = models.filter((m) => m !== cliDefault);
-  fillSelect(
-    launchModel,
-    [
-      { value: '', label: cliDefault?.label ?? 'Default model' },
-      ...rest.map((m) => ({ value: m.value, label: m.label })),
-    ],
-    launcher.model,
-  );
+  const key = JSON.stringify(models.map((m) => [m.provider, m.value, m.label]));
+  if (launchModel.dataset.key !== key) {
+    launchModel.dataset.key = key;
+    launchModel.textContent = '';
+    for (const provider of ['openai', 'anthropic'] as const) {
+      const group = document.createElement('optgroup');
+      group.label = provider === 'openai' ? 'OpenAI' : 'Anthropic';
+      const providerModels = models.filter((m) => (m.provider ?? 'anthropic') === provider);
+      const advertisedDefault = providerModels.find((m) => m.value === 'default');
+      const choices = [
+        { value: '', label: advertisedDefault?.label ?? 'Default model' },
+        ...providerModels.filter((m) => m !== advertisedDefault).map((m) => ({ value: m.value, label: m.label })),
+      ];
+      for (const choice of choices) {
+        const option = document.createElement('option');
+        option.value = modelValue(provider, choice.value);
+        option.textContent = choice.label;
+        group.appendChild(option);
+      }
+      launchModel.appendChild(group);
+    }
+  }
+  const selected = launcher[launchProvider];
+  launchModel.value = modelValue(launchProvider, selected.model);
   // Shown even when the catalog is empty — which it is until the first
   // conversation reports one. A control that appears out of nowhere later is
   // worse than one that says Default and means it.
   launchModel.hidden = false;
 
-  const chosen = models.find((m) => m.value === launcher.model);
-  const levels = launcher.model === '' ? EFFORT_FALLBACK : chosen?.effortLevels ?? [];
+  const chosen = models.find((m) => (m.provider ?? 'anthropic') === launchProvider && m.value === selected.model);
+  const levels = selected.model === '' ? EFFORT_FALLBACK[launchProvider] : chosen?.effortLevels ?? [];
   fillSelect(
     launchEffort,
-    [{ value: '', label: `Default (${EFFORT_DEFAULT})` }, ...levels.map((l) => ({ value: l, label: l }))],
-    launcher.effort,
+    [{ value: '', label: `Default (${capitalize(EFFORT_DEFAULT[launchProvider])})` }, ...levels.map((l) => ({ value: l, label: capitalize(l) }))],
+    selected.effort,
   );
   launchEffort.hidden = levels.length === 0;
 }
 
-launchModel.addEventListener('change', () => post({ type: 'setRunnerModel', model: launchModel.value }));
-launchEffort.addEventListener('change', () => post({ type: 'setRunnerEffort', effort: launchEffort.value }));
+launchModel.addEventListener('change', () => {
+  const split = launchModel.value.indexOf(':');
+  launchProvider = launchModel.value.slice(0, split) as LaunchProvider;
+  post({ type: 'setRunnerModel', provider: launchProvider, model: launchModel.value.slice(split + 1) });
+});
+launchEffort.addEventListener('change', () => post({ type: 'setRunnerEffort', provider: launchProvider, effort: launchEffort.value }));
 const pauseBtn = bar.querySelector<HTMLButtonElement>('#pauseall')!;
 const providerSelect = bar.querySelector<HTMLSelectElement>('#provider')!;
 providerSelect.value = providerFilter;
@@ -878,7 +939,7 @@ function renderLauncher(): void {
   projName.textContent = global ? 'Global' : (projects.find((p) => p.dir === cur)?.name ?? cur);
   projBtn.title = global ? GLOBAL_TITLE : cur;
   newBtn.disabled = false;
-  const starts = providerFilter === 'codex' ? 'Codex' : 'Claude Code';
+  const starts = launchProvider === 'openai' ? 'Codex' : 'Claude Code';
   newBtn.title = global
     ? `Start a ${starts} conversation with no project, running in this window`
     : `Start a ${starts} conversation in this folder, running in this window`;
@@ -967,7 +1028,7 @@ document.addEventListener(
 );
 
 newBtn.addEventListener('click', () => {
-  post({ type: 'newConversation', cwd: currentProject(), provider: providerFilter === 'codex' ? 'codex' : 'claude' });
+  post({ type: 'newConversation', cwd: currentProject(), provider: launchProvider === 'openai' ? 'codex' : 'claude' });
 });
 
 // ---- fleet controls ----
@@ -1016,42 +1077,37 @@ function render(): void {
   renderUsage();
   const visibleSessions = providerFilter === 'all' ? sessions : sessions.filter((s) => s.provider === providerFilter);
   if (visibleSessions.length === 0) {
-    menuTop = undefined; // no table, so no button to close the picker with
+    menuPosition = undefined; // no table, so no button to close the picker with
     rowMenu = undefined; // and no row for a menu to belong to
     paint(`${bannerHtml()}<div class="empty">No ${providerFilter === 'all' ? 'agent' : capitalize(providerFilter)} sessions found.
 <div class="hint">Sessions are discovered from <code>~/.claude</code> and <code>~/.codex</code>. Start an agent session anywhere and it will appear here.</div></div>`);
     return;
   }
 
-  const groups = new Map<SectionId, SessionDTO[]>();
-  for (const s of visibleSessions) {
-    const sec = sectionOf(s);
-    const list = groups.get(sec);
-    if (list) list.push(s);
-    else groups.set(sec, [s]);
-  }
-
   // No <colgroup>: `table-layout: fixed` takes its columns from the first row,
   // so widths live on the header cells and a column that is switched off simply
   // is not rendered.
   const span = cols().length + 3; // dot + agent + data columns + actions
-  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<table>${headHtml()}`;
+  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<div class="tabletabs" role="tablist" aria-label="Conversation grouping"><button role="tab" aria-selected="${tableView === 'status'}" data-table-view="status">Status</button><button role="tab" aria-selected="${tableView === 'sections'}" data-table-view="sections">Sections</button></div><table>${headHtml()}`;
 
-  for (const sec of SECTION_ORDER) {
-    const rows = groups.get(sec);
-    if (!rows || rows.length === 0) continue;
-    // Every other section answers "what moved", so it sorts by recency. Pinned
-    // answers "where did I put that", so it sorts by when each pin was made and
-    // holds still — a pinned row that jumped around whenever its agent wrote a
-    // line would take back the one thing pinning is for.
-    rows.sort(
-      sec === 'pinned'
-        ? (a, b) => (a.pinnedAt ?? 0) - (b.pinnedAt ?? 0)
-        : (a, b) => b.lastActivityAt - a.lastActivityAt,
-    );
-    const isCollapsed = collapsed.has(sec);
-    html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${sec}">
-<tr class="sec st-${sec}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(SECTION_LABEL[sec])}<span class="count">${rows.length}</span></td></tr>`;
+  const groups = new Map<string, SessionDTO[]>();
+  for (const s of visibleSessions) {
+    const group = tableView === 'status' ? sectionOf(s) : (s.conversationSection ?? 'General');
+    const list = groups.get(group);
+    if (list) list.push(s);
+    else groups.set(group, [s]);
+  }
+  const groupOrder = tableView === 'status' ? SECTION_ORDER : conversationSections;
+  for (const group of groupOrder) {
+    const rows = groups.get(group) ?? [];
+    if (tableView === 'status' && rows.length === 0) continue;
+    rows.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+    const collapseKey = tableView === 'status' ? group : `named:${group}`;
+    const isCollapsed = collapsed.has(collapseKey);
+    const label = tableView === 'status' ? SECTION_LABEL[group as SectionId] : group;
+    const styleClass = tableView === 'status' ? ` st-${group}` : ' named';
+    html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${esc(collapseKey)}">
+<tr class="sec${styleClass}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(label)}<span class="count">${rows.length}</span></td></tr>`;
     for (const s of rows) html += rowHtml(s, span);
     html += '</tbody>';
   }
@@ -1074,6 +1130,7 @@ vscodeApi.onMessage((body) => {
   }
   if (m.type === 'snapshot') {
     sessions = m.sessions;
+    conversationSections = m.conversationSections;
     if (m.projects) {
       projects = m.projects;
       renderLauncher();
@@ -1093,7 +1150,10 @@ vscodeApi.onMessage((body) => {
     // Our own drag already drew this; anything else is another dashboard's.
     if (m.columns) columns = m.columns;
     showCodexSubagents = m.showCodexSubagents === true;
-    if (m.launcher) renderLaunchDefaults(m.launcher);
+    if (m.launcher) {
+      renderLaunchDefaults(m.launcher);
+      renderLauncher();
+    }
     // The bar lives outside #app, so `render()` never touches it.
     renderControls();
     render();
@@ -1176,15 +1236,20 @@ app.addEventListener('pointerdown', (e) => {
 
 // ---- column picker ----
 
-function openMenu(atY: number): void {
-  menuTop = Math.max(4, Math.round(atY));
+function openMenu(button: HTMLElement): void {
+  const rect = button.getBoundingClientRect();
+  const menuWidth = 230;
+  menuPosition = {
+    top: Math.max(4, Math.round(rect.bottom + 4)),
+    left: Math.max(4, Math.round(Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 4))),
+  };
   rowMenu = undefined; // one menu at a time, in both directions
   render();
 }
 
 function closeMenu(): void {
-  if (menuTop === undefined) return;
-  menuTop = undefined;
+  if (!menuPosition) return;
+  menuPosition = undefined;
   render();
 }
 
@@ -1192,7 +1257,7 @@ function closeMenu(): void {
 
 /** One menu at a time: opening this one closes the column picker and the launcher's. */
 function openRowMenu(key: string, x: number, y: number): void {
-  menuTop = undefined;
+  menuPosition = undefined;
   closeProjMenu();
   rowMenu = { key, x, y };
   render();
@@ -1218,7 +1283,8 @@ app.addEventListener('contextmenu', (e) => {
   // Right-click the header for the column menu, where a table's column menu lives.
   if (target.closest('thead')) {
     e.preventDefault();
-    openMenu((e as MouseEvent).clientY);
+    const button = app.querySelector<HTMLElement>('[data-cols="menu"]');
+    if (button) openMenu(button);
     return;
   }
   // A permission card is a decision surface. Right-clicking it must not offer
@@ -1265,6 +1331,28 @@ app.addEventListener('click', (e) => {
   // whether that click picks an item or dismisses it. In particular a click on
   // a row must dismiss and stop there, rather than also opening that session.
   if (rowMenu) {
+    if (target.closest('[data-add-to]')) {
+      rowMenu.showSections = !rowMenu.showSections;
+      render();
+      e.stopPropagation();
+      return;
+    }
+    const section = target.closest<HTMLElement>('[data-section]');
+    if (section) {
+      const key = rowMenu.key;
+      const name = section.dataset.section!;
+      closeRowMenu();
+      post({ type: 'setConversationSection', key, section: name });
+      e.stopPropagation();
+      return;
+    }
+    if (target.closest('[data-create-section]')) {
+      const key = rowMenu.key;
+      closeRowMenu();
+      post({ type: 'createConversationSection', key });
+      e.stopPropagation();
+      return;
+    }
     const item = target.closest('[data-row-action]') as HTMLElement | null;
     const key = rowMenu.key;
     closeRowMenu();
@@ -1273,9 +1361,17 @@ app.addEventListener('click', (e) => {
     return;
   }
 
+  const viewTab = target.closest<HTMLElement>('[data-table-view]');
+  if (viewTab) {
+    tableView = viewTab.dataset.tableView as 'status' | 'sections';
+    saveState();
+    render();
+    return;
+  }
+
   const colBtn = target.closest('[data-cols]') as HTMLElement | null;
   if (colBtn?.dataset.cols === 'menu') {
-    if (menuTop === undefined) openMenu(colBtn.getBoundingClientRect().bottom + 4);
+    if (!menuPosition) openMenu(colBtn);
     else closeMenu();
     return;
   }
@@ -1285,7 +1381,7 @@ app.addEventListener('click', (e) => {
     return;
   }
   // Any click outside the open menu dismisses it, and does nothing else.
-  if (menuTop !== undefined && !target.closest('.colmenu')) {
+  if (menuPosition && !target.closest('.colmenu')) {
     closeMenu();
     return;
   }
@@ -1373,7 +1469,9 @@ setInterval(() => {
     el.textContent = etaText(workingElapsedMs({ startedAtMs, blockedMs, toolCalls: 0 }, now), p50Ms, p90Ms);
   }
   for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-resets-at]'))) {
-    el.textContent = resetsInText(now, Number(el.dataset.resetsAt));
+    const resetsAtMs = Number(el.dataset.resetsAt);
+    const countdown = resetsInText(now, resetsAtMs);
+    el.textContent = el.dataset.fiveHour === 'true' ? `${countdown} (${resetsAtLocalTime(resetsAtMs)})` : countdown;
   }
 }, 10_000);
 

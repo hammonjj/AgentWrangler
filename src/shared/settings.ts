@@ -26,7 +26,7 @@ export interface SettingSpec {
   group: string;
   type: SettingType;
   default: string | boolean | number;
-  /** The same prose VSCode shows. Kept identical so the test can compare them. */
+  /** The sentence under the control in Preferences. */
   description: string;
   enum?: string[];
   enumDescriptions?: string[];
@@ -51,6 +51,16 @@ export const SETTINGS: SettingSpec[] = [
     ],
     description:
       'Permission mode for conversations started from Agent Wrangler. Changeable per session from the pane.',
+  },
+  {
+    key: 'runner.provider',
+    label: 'Provider for the next conversation',
+    group: 'Conversations',
+    type: 'string',
+    enum: ['anthropic', 'openai'],
+    enumDescriptions: ['Start the next conversation with Claude Code.', 'Start the next conversation with Codex.'],
+    default: 'anthropic',
+    description: 'Provider selected for the next conversation started from Agent Wrangler.',
   },
   {
     key: 'runner.model',
@@ -87,6 +97,22 @@ export const SETTINGS: SettingSpec[] = [
     default: "",
     description:
       'Model for Codex conversations started from Agent Wrangler. Empty uses the Codex default.',
+  },
+  {
+    key: 'codexRunner.effort',
+    label: 'Codex reasoning effort',
+    group: 'Conversations',
+    type: 'string',
+    enum: ['', 'low', 'medium', 'high', 'xhigh'],
+    enumDescriptions: [
+      'Use the selected Codex model\'s default.',
+      'Minimal reasoning, fastest answers.',
+      'Moderate reasoning.',
+      'Deep reasoning.',
+      'The deepest reasoning available.',
+    ],
+    default: '',
+    description: 'Reasoning effort for Codex conversations started from Agent Wrangler. Empty uses the model default.',
   },
   {
     key: 'runner.confirmTakeoverOnSend',

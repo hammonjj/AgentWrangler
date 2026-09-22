@@ -47,25 +47,6 @@ describe('sectionOf', () => {
     expect(SECTION_ORDER.indexOf('archived')).toBe(SECTION_ORDER.length - 1);
   });
 
-  // The two sections the user fills bracket the ones the agents fill.
-  it('puts Pinned first, ahead of even Blocked', () => {
-    expect(SECTION_ORDER[0]).toBe('pinned');
-  });
-
-  it.each(['blocked', 'busy', 'ended'] as const)('files a pinned %s session under Pinned', (status) => {
-    expect(sectionOf(session({ status, pinned: true }))).toBe('pinned');
-  });
-
-  /**
-   * Pinning is the stronger of the two instructions, and the pair should not be
-   * reachable anyway — the actions clear each other. This only settles a stale
-   * combination read back from storage.
-   */
-  it('lets Pinned win over Archived and over Paused', () => {
-    expect(sectionOf(session({ pinned: true, archived: true }))).toBe('pinned');
-    expect(sectionOf(session({ pinned: true, paused: true }))).toBe('pinned');
-  });
-
   it('gives every section a label, so none can render blank', () => {
     for (const id of SECTION_ORDER) expect(SECTION_LABEL[id]).toBeTruthy();
   });

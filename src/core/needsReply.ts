@@ -17,7 +17,11 @@
  * tail of the message only, where a closing ask sits.
  */
 const ASK_PHRASES =
-  /\b(let me know|which (one|option|approach|do you|would you)|would you (like|prefer|rather)|do you want|should i\b|shall i\b|want me to|your call|up to you|please (confirm|choose|pick|decide|advise)|awaiting your|waiting (for|on) (you|your)|before i (proceed|continue|go ahead)|tell me (which|whether|if)|say (which|the word)|reply (with|"|“))/i;
+  /\b(let me know|which (one|option|approach|do you|would you)|would you (like|prefer|rather)|do you want|should i\b|shall i\b|want me to|your call|up to you|awaiting your|waiting (for|on) (you|your)|before i (proceed|continue|go ahead)|tell me (which|whether|if)|say (which|the word)|reply (with|"|“))/i;
+
+/** Imperative requests, only where a sentence/line begins so reports about a "select control" remain Done. */
+const REQUEST_LINE =
+  /(?:^|[.!?]\s+|\n)\s*[*_`>"'\-]*(?:(?:please\s+)?(?:choose|pick|select|provide|enter|send|share|confirm|decide|advise)|i need (?:you|your))\b/im;
 
 /** A line that ends in a question mark, allowing trailing markdown/quote characters. */
 const QUESTION_LINE = /\?[\s*_`)"'”’\]]*$/m;
@@ -50,5 +54,14 @@ export function needsReply(text: string | undefined): boolean {
     .filter((p) => p.length > 0);
   const tail = paragraphs.slice(-2).join('\n');
 
-  return QUESTION_LINE.test(tail) || ASK_PHRASES.test(tail);
+  return QUESTION_LINE.test(tail) || ASK_PHRASES.test(tail) || REQUEST_LINE.test(tail);
+}
+
+/** Provider-neutral result of an idle turn: failures need review; completed reports may simply be done. */
+export function finishedTurnStatus(
+  text: string | undefined,
+  outcome: 'completed' | 'failed' | 'interrupted' = 'completed',
+): 'waiting' | 'done' {
+  if (outcome !== 'completed') return 'waiting';
+  return needsReply(text) ? 'waiting' : 'done';
 }

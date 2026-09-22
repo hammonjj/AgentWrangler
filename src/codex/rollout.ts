@@ -1,9 +1,9 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { capText, type ConvBlock } from '../shared/conversation';
-import { needsReply } from '../core/needsReply';
+import { finishedTurnStatus } from '../core/needsReply';
 
-const HEAD_BYTES = 128 * 1024;
+const HEAD_BYTES = 512 * 1024;
 const TAIL_BYTES = 512 * 1024;
 
 export interface CodexRolloutSummary {
@@ -44,6 +44,13 @@ function promptText(text: string | undefined): string | undefined {
   const stripped = text.replace(/<(recommended_plugins|environment_context)>[\s\S]*?<\/\1>/g, '').trim();
   if (!stripped || /^# AGENTS\.md instructions for /i.test(stripped)) return undefined;
   return stripped;
+}
+
+/** Codex app-only metadata appended after the visible final answer. */
+export function visibleAssistantText(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const visible = text.replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/gi, '').trim();
+  return visible || undefined;
 }
 
 function parseLine(line: string): any | undefined {
@@ -111,7 +118,15 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
     if (obj.type === 'event_msg' && payload?.type === 'task_complete') {
       turnComplete = true;
       failed = !!payload.error;
-      if (typeof payload.last_agent_message === 'string') lastAssistantText = payload.last_agent_message;
+      if (typeof payload.last_agent_message === 'string') lastAssistantText = visibleAssistantText(payload.last_agent_message);
+      continue;
+    }
+    if (obj.type === 'event_msg' && payload?.type === 'user_message') {
+      const text = promptText(typeof payload.message === 'string' ? payload.message : undefined);
+      if (text) {
+        subtitle = capText(text.replace(/\s+/g, ' '), 220);
+        title ??= subtitle;
+      }
       continue;
     }
     if (obj.type !== 'response_item' || !payload) continue;
@@ -122,8 +137,8 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
       if (payload.role === 'user') {
         subtitle = capText(text.replace(/\s+/g, ' '), 220);
         title ??= subtitle;
-      } else if (payload.role === 'assistant') {
-        lastAssistantText = text;
+      } else if (payload.role === 'assistant' && payload.phase !== 'commentary') {
+        lastAssistantText = visibleAssistantText(text);
       }
     }
   }
@@ -183,8 +198,7 @@ export function rolloutStatus(
   stuckThresholdMs: number,
 ): 'busy' | 'stuck' | 'waiting' | 'done' {
   if (!summary.turnComplete) return nowMs - summary.lastActivityAt >= stuckThresholdMs ? 'stuck' : 'busy';
-  if (summary.failed) return 'waiting';
-  return needsReply(summary.lastAssistantText) ? 'waiting' : 'done';
+  return finishedTurnStatus(summary.lastAssistantText, summary.failed ? 'failed' : 'completed');
 }
 
 function preview(value: unknown): string {
@@ -194,6 +208,25 @@ function preview(value: unknown): string {
   } catch {
     return '';
   }
+}
+
+function toolOutputText(value: unknown): string {
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value); } catch { return value; }
+  }
+  if (Array.isArray(parsed)) {
+    const text = parsed.map((part: any) => part?.text).filter((part): part is string => typeof part === 'string').join('\n');
+    if (text) return text;
+  }
+  if (parsed && typeof parsed === 'object') {
+    const content = (parsed as any).content;
+    if (Array.isArray(content)) {
+      const text = content.map((part: any) => part?.text).filter((part): part is string => typeof part === 'string').join('\n');
+      if (text) return text;
+    }
+  }
+  return preview(parsed);
 }
 
 function stableId(kind: string, timestamp: string | undefined, identity: string): string {
@@ -210,16 +243,21 @@ function stableId(kind: string, timestamp: string | undefined, identity: string)
 export function rolloutBlocks(lines: string[]): ConvBlock[] {
   const blocks: ConvBlock[] = [];
   const tools = new Map<string, number>();
+  const patchTools = new Set<string>();
   for (const line of lines) {
     const obj = parseLine(line);
     if (!obj) continue;
     const payload = obj.payload;
     const ts = typeof obj.timestamp === 'string' ? obj.timestamp : undefined;
     if (obj.type === 'response_item' && payload?.type === 'message') {
-      const text = textContent(payload.content);
+      const rawText = textContent(payload.content);
+      const text = payload.role === 'user' ? promptText(rawText) : visibleAssistantText(rawText);
       if (!text) continue;
       if (payload.role === 'user') blocks.push({ kind: 'user', id: stableId('user', ts, text), ts, text: capText(text) });
-      if (payload.role === 'assistant') blocks.push({ kind: 'assistant', id: stableId('assistant', ts, text), ts, text: capText(text) });
+      if (payload.role === 'assistant') {
+        const kind = payload.phase === 'commentary' ? 'thinking' : 'assistant';
+        blocks.push({ kind, id: stableId(kind, ts, text), ts, text: capText(text) });
+      }
       continue;
     }
     if (obj.type === 'response_item' && (payload?.type === 'function_call' || payload?.type === 'custom_tool_call')) {
@@ -236,9 +274,36 @@ export function rolloutBlocks(lines: string[]): ConvBlock[] {
       if (index === undefined) continue;
       const block = blocks[index];
       if (block.kind === 'tool') {
-        const text = typeof payload.output === 'string' ? payload.output : preview(payload.output);
+        if (patchTools.has(toolUseId)) continue;
+        const text = toolOutputText(payload.output);
         blocks[index] = { ...block, state: 'done', result: { text: capText(text, 4000), isError: false, truncated: text.length > 4000 } };
       }
+      continue;
+    }
+    if (obj.type === 'event_msg' && payload?.type === 'patch_apply_end') {
+      const toolUseId = String(payload.call_id ?? '');
+      const index = tools.get(toolUseId);
+      if (index === undefined) continue;
+      const block = blocks[index];
+      if (block?.kind !== 'tool') continue;
+      const changes = payload.changes && typeof payload.changes === 'object' ? Object.entries(payload.changes) : [];
+      const diffs = changes.flatMap(([file, change]: [string, any]) =>
+        typeof change?.unified_diff === 'string' ? [{ file, patch: change.unified_diff }] : []);
+      const names = changes.map(([file]) => path.basename(file));
+      patchTools.add(toolUseId);
+      blocks[index] = {
+        ...block,
+        name: `Edited ${changes.length} file${changes.length === 1 ? '' : 's'}`,
+        inputPreview: names.join(', '),
+        input: undefined,
+        state: payload.success === false ? 'error' : 'done',
+        result: {
+          text: payload.stderr ? String(payload.stderr) : '',
+          isError: payload.success === false,
+          truncated: false,
+          diffs,
+        },
+      };
       continue;
     }
     if (obj.type === 'event_msg' && payload?.type === 'task_complete' && payload.error?.message) {

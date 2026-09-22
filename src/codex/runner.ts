@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import { Emitter, type Disposable } from '../core/events';
+import { finishedTurnStatus } from '../core/needsReply';
 import { capText, type BlockPatch, type ComposerState, type ConvBlock, type ImageAttachment } from '../shared/conversation';
 import type { AgentSession } from '../shared/model';
 import type { ConversationInit, ConversationSource } from '../ui/conversation/source';
@@ -24,21 +25,41 @@ export class CodexRunner implements ConversationSource {
   private itemBlocks = new Map<string, string>();
   private streamingId?: string;
   private streamingText = '';
+  private streamingKind: 'assistant' | 'thinking' = 'assistant';
+  private turnAssistantText = '';
+  private turnOutcome: 'completed' | 'failed' | 'interrupted' = 'completed';
+  private idleStatus: 'waiting' | 'done';
+  private lastActivityAt = Date.now();
   private seq = 0;
 
   private currentModel?: string;
 
-  constructor(readonly server: CodexAppServer, readonly threadId: string, readonly cwd: string, model?: string) {
+  constructor(
+    readonly server: CodexAppServer,
+    readonly threadId: string,
+    readonly cwd: string,
+    model?: string,
+    initialBlocks: ConvBlock[] = [],
+    private stateChanged: () => void = () => undefined,
+  ) {
+    this.blocks = [...initialBlocks];
+    const lastAssistant = [...initialBlocks].reverse().find((block) => block.kind === 'assistant');
+    this.idleStatus = lastAssistant?.kind === 'assistant' ? finishedTurnStatus(lastAssistant.text) : 'waiting';
     this.currentModel = model;
     this.composer.model = model;
     this.subs.push(server.onNotification((event) => this.onNotification(event)), server.onRequest((event) => this.onRequest(event)));
   }
 
   get session(): AgentSession {
+    const blockedReason = this.pendingQuestions.size > 0 ? 'Question' : this.pendingApprovals.size > 0 ? 'Approval' : undefined;
     return {
       provider: 'codex', sessionId: this.threadId, key: `codex:${this.threadId.toLowerCase()}`,
       title: path.basename(this.cwd) || 'New Codex conversation', cwd: this.cwd, projectName: path.basename(this.cwd),
-      model: this.currentModel, status: this.composer.busy ? 'busy' : 'waiting', lastActivityAt: Date.now(), startedAt: this.startedAt,
+      model: this.currentModel,
+      status: blockedReason ? 'blocked' : this.composer.busy ? 'busy' : this.idleStatus,
+      blockedReason,
+      lastActivityAt: this.lastActivityAt,
+      startedAt: this.startedAt,
       runnerOwned: true,
     };
   }
@@ -55,6 +76,8 @@ export class CodexRunner implements ConversationSource {
     if (text.trim()) content.push({ type: 'text', text: text.trim(), text_elements: [] });
     for (const image of images) content.push({ type: 'image', url: `data:${image.mediaType};base64,${image.data}` });
     this.add({ kind: 'user', id: this.id(), text: text.trim(), imageCount: images.length || undefined });
+    this.turnAssistantText = '';
+    this.turnOutcome = 'completed';
     const result = await this.server.request<any>('turn/start', { threadId: this.threadId, input: content, ...(this.currentModel ? { model: this.currentModel } : {}) });
     this.activeTurnId = result?.turn?.id;
     this.setBusy(true);
@@ -85,6 +108,7 @@ export class CodexRunner implements ConversationSource {
     this.pendingApprovals.delete(requestId);
     this.server.respond(rpcId, { decision: decision === 'deny' ? 'decline' : 'accept' });
     this.patch.fire({ id: requestId, block: { state: decision === 'deny' ? 'denied' : 'allowed' } });
+    this.touch();
     return true;
   }
 
@@ -96,6 +120,7 @@ export class CodexRunner implements ConversationSource {
       answers: Object.fromEntries(Object.entries(answers).map(([id, answer]) => [id, { answers: [answer] }])),
     });
     this.patch.fire({ id: requestId, block: { state: 'allowed', answers } });
+    this.touch();
     return true;
   }
 
@@ -105,12 +130,23 @@ export class CodexRunner implements ConversationSource {
     if (event.method === 'turn/started') {
       this.activeTurnId = params.turn?.id;
       this.setBusy(true);
+      this.turnAssistantText = '';
+      this.turnOutcome = 'completed';
       return;
     }
     if (event.method === 'turn/completed') {
+      const outcome = params.turn?.error || params.turn?.status === 'failed'
+        ? 'failed'
+        : params.turn?.status === 'interrupted' || params.turn?.status === 'cancelled'
+          ? 'interrupted'
+          : 'completed';
+      this.turnOutcome = outcome;
+      this.idleStatus = finishedTurnStatus(this.turnAssistantText || undefined, outcome);
       this.activeTurnId = undefined;
       this.streamingId = undefined;
       this.streamingText = '';
+      this.pendingApprovals.clear();
+      this.pendingQuestions.clear();
       this.setBusy(false);
       if (params.turn?.error?.message) this.add({ kind: 'note', id: this.id(), tone: 'error', text: capText(params.turn.error.message) });
       return;
@@ -120,9 +156,13 @@ export class CodexRunner implements ConversationSource {
       if (!this.streamingId) {
         this.streamingId = this.id();
         this.streamingText = '';
-        this.add({ kind: 'assistant', id: this.streamingId, text: '', streaming: true, model: this.currentModel });
+        this.streamingKind = params.phase === 'commentary' ? 'thinking' : 'assistant';
+        this.add(this.streamingKind === 'thinking'
+          ? { kind: 'thinking', id: this.streamingId, text: '', streaming: true }
+          : { kind: 'assistant', id: this.streamingId, text: '', streaming: true, model: this.currentModel });
       }
       this.streamingText += delta;
+      if (this.streamingKind === 'assistant') this.turnAssistantText += delta;
       this.patch.fire({ id: this.streamingId, block: { text: capText(this.streamingText), streaming: true } });
       return;
     }
@@ -136,10 +176,17 @@ export class CodexRunner implements ConversationSource {
       this.add(tool);
       return;
     }
-    if (event.method === 'item/completed' && params.item?.type === 'agentMessage' && this.streamingId) {
-      this.patch.fire({ id: this.streamingId, block: { text: capText(params.item.text ?? this.streamingText), streaming: false } });
+    if (event.method === 'item/completed' && params.item?.type === 'agentMessage') {
+      const text = String(params.item.text ?? this.streamingText);
+      this.turnAssistantText = text;
+      if (this.streamingId) this.patch.fire({ id: this.streamingId, block: { text: capText(text), streaming: false } });
       this.streamingId = undefined;
       this.streamingText = '';
+      this.streamingKind = 'assistant';
+      if (!this.composer.busy) {
+        this.idleStatus = finishedTurnStatus(text || undefined, this.turnOutcome);
+        this.touch();
+      }
       return;
     }
     if (event.method === 'item/completed') {
@@ -170,6 +217,7 @@ export class CodexRunner implements ConversationSource {
           options: (question.options ?? []).map((option: any) => ({ label: String(option.label ?? ''), description: String(option.description ?? '') })),
         })),
       });
+      this.touch();
       return;
     }
     if (!/requestApproval$/.test(event.method)) return;
@@ -183,6 +231,7 @@ export class CodexRunner implements ConversationSource {
       body: Array.isArray(command) ? command.join(' ') : typeof command === 'string' ? command : undefined,
       isCommand: !!command, state: 'pending',
     });
+    this.touch();
   }
 
   private id(): string { return `cr:${this.seq++}`; }
@@ -199,10 +248,20 @@ export class CodexRunner implements ConversationSource {
     }
     return undefined;
   }
-  private add(block: ConvBlock): void { this.blocks.push(block); this.append.fire([block]); }
+  private add(block: ConvBlock): void {
+    this.blocks.push(block);
+    this.lastActivityAt = Date.now();
+    this.append.fire([block]);
+  }
+  private touch(): void {
+    this.lastActivityAt = Date.now();
+    this.stateChanged();
+  }
   private setBusy(busy: boolean): void {
     this.composer.busy = busy;
+    this.lastActivityAt = Date.now();
     this.composerEvents.fire({ ...this.composer });
+    this.stateChanged();
   }
   /** A pane releases only its listeners; the service owns runner lifetime. */
   dispose(): void {}
@@ -212,25 +271,75 @@ export class CodexRunner implements ConversationSource {
 export class CodexRunnerService implements Disposable {
   private runners = new Map<string, CodexRunner>();
   private change = new Emitter<void>();
-  constructor(private server: CodexAppServer) {}
+  constructor(
+    private server: CodexAppServer,
+    private rememberModels?: (models: ComposerState['models']) => void,
+  ) {}
   onDidChange = (listener: () => void): Disposable => this.change.event(listener);
   owns(id: string | undefined): boolean { return !!id && this.runners.has(id.toLowerCase()); }
   get(id: string | undefined): CodexRunner | undefined { return id ? this.runners.get(id.toLowerCase()) : undefined; }
-  async start(cwd: string, model?: string): Promise<CodexRunner> {
-    const result = await this.server.request<any>('thread/start', { cwd, ...(model ? { model } : {}) });
+  async start(cwd: string, model?: string, effort?: string): Promise<CodexRunner> {
+    const result = await this.server.request<any>('thread/start', {
+      cwd,
+      ...(model ? { model } : {}),
+      ...(effort ? { config: { model_reasoning_effort: effort } } : {}),
+    });
     const threadId = result?.thread?.id;
     if (typeof threadId !== 'string') throw new Error('Codex App Server returned no thread id');
-    const runner = new CodexRunner(this.server, threadId, cwd, result?.model ?? model);
+    const runner = new CodexRunner(this.server, threadId, cwd, result?.model ?? model, [], () => this.change.fire());
     this.runners.set(threadId.toLowerCase(), runner);
     this.change.fire();
+    this.loadModels(runner);
+    return runner;
+  }
+  async resume(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string): Promise<CodexRunner> {
+    const key = threadId.toLowerCase();
+    const existing = this.runners.get(key);
+    if (existing) return existing;
+    const result = await this.server.request<any>('thread/resume', { threadId });
+    const resumedId = result?.thread?.id ?? threadId;
+    const runner = new CodexRunner(
+      this.server, resumedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(),
+    );
+    this.runners.set(resumedId.toLowerCase(), runner);
+    this.change.fire();
+    this.loadModels(runner);
+    return runner;
+  }
+  async fork(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string): Promise<CodexRunner> {
+    const result = await this.server.request<any>('thread/fork', { threadId });
+    const forkedId = result?.thread?.id;
+    if (typeof forkedId !== 'string') throw new Error('Codex App Server returned no forked thread id');
+    const runner = new CodexRunner(
+      this.server, forkedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(),
+    );
+    this.runners.set(forkedId.toLowerCase(), runner);
+    this.change.fire();
+    this.loadModels(runner);
+    return runner;
+  }
+  release(threadId: string): void {
+    const key = threadId.toLowerCase();
+    const runner = this.runners.get(key);
+    if (!runner) return;
+    this.runners.delete(key);
+    runner.shutdown();
+    void this.server.request('thread/unsubscribe', { threadId }).catch(() => undefined);
+    this.change.fire();
+  }
+  private loadModels(runner: CodexRunner): void {
     void this.server.request<any>('model/list', { includeHidden: false }).then((list) => {
-      runner.setModels((list?.data ?? []).map((entry: any) => ({
+      const models = (list?.data ?? []).map((entry: any) => ({
         value: String(entry.model ?? entry.id),
         label: String(entry.displayName ?? entry.model ?? entry.id),
         resolved: String(entry.model ?? entry.id),
-      })));
+        effortLevels: Array.isArray(entry.supportedReasoningEfforts)
+          ? entry.supportedReasoningEfforts.map((level: any) => String(level.reasoningEffort ?? level.effort ?? level))
+          : undefined,
+      }));
+      runner.setModels(models);
+      this.rememberModels?.(models);
     }).catch(() => undefined);
-    return runner;
   }
   dispose(): void { for (const runner of this.runners.values()) runner.shutdown(); this.runners.clear(); this.server.dispose(); this.change.dispose(); }
 }
