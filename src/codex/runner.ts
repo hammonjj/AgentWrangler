@@ -24,6 +24,7 @@ export class CodexRunner implements ConversationSource {
   private itemBlocks = new Map<string, string>();
   private streamingId?: string;
   private streamingText = '';
+  private streamingKind: 'assistant' | 'thinking' = 'assistant';
   private seq = 0;
 
   private currentModel?: string;
@@ -120,7 +121,10 @@ export class CodexRunner implements ConversationSource {
       if (!this.streamingId) {
         this.streamingId = this.id();
         this.streamingText = '';
-        this.add({ kind: 'assistant', id: this.streamingId, text: '', streaming: true, model: this.currentModel });
+        this.streamingKind = params.phase === 'commentary' ? 'thinking' : 'assistant';
+        this.add(this.streamingKind === 'thinking'
+          ? { kind: 'thinking', id: this.streamingId, text: '', streaming: true }
+          : { kind: 'assistant', id: this.streamingId, text: '', streaming: true, model: this.currentModel });
       }
       this.streamingText += delta;
       this.patch.fire({ id: this.streamingId, block: { text: capText(this.streamingText), streaming: true } });
@@ -140,6 +144,7 @@ export class CodexRunner implements ConversationSource {
       this.patch.fire({ id: this.streamingId, block: { text: capText(params.item.text ?? this.streamingText), streaming: false } });
       this.streamingId = undefined;
       this.streamingText = '';
+      this.streamingKind = 'assistant';
       return;
     }
     if (event.method === 'item/completed') {

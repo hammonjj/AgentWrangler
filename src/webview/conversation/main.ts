@@ -260,6 +260,7 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       el.className = 'blk thinking';
       el.innerHTML = '';
       const d = document.createElement('details');
+      d.open = true;
       const s = document.createElement('summary');
       setText(s, b.streaming ? 'Thinking…' : 'Thinking');
       const body = document.createElement('div');
@@ -304,8 +305,8 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
         d.appendChild(pre);
       }
       if (b.result) {
-        if (b.result.diff) {
-          const { file: filePath, patch } = b.result.diff;
+        const diffs = b.result.diffs ?? (b.result.diff ? [b.result.diff] : []);
+        for (const { file: filePath, patch } of diffs) {
           const file = document.createElement('div');
           file.className = 'sub difftop';
           const name = document.createElement('span');
@@ -623,6 +624,44 @@ const searchBlocks = new Map<string, ConvBlock>();
 const searchResults = document.getElementById('searchresults')!;
 const findInput = document.getElementById('find') as HTMLInputElement;
 let archiveRequest = '';
+
+type WorkGroup = { details: HTMLDetailsElement; summary: HTMLElement; body: HTMLElement; startedAt?: number };
+let currentWork: WorkGroup | undefined;
+
+function blockTime(block: ConvBlock): number | undefined {
+  if (!('ts' in block) || !block.ts) return undefined;
+  const value = Date.parse(block.ts);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function durationText(ms: number): string {
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${seconds % 60}s`;
+}
+
+function beginWork(block: ConvBlock): WorkGroup {
+  const details = document.createElement('details');
+  details.className = 'worklog';
+  details.open = true;
+  const summary = document.createElement('summary');
+  summary.textContent = 'Working…';
+  const body = document.createElement('div');
+  body.className = 'workbody';
+  details.append(summary, body);
+  blocksEl.appendChild(details);
+  return { details, summary, body, startedAt: blockTime(block) ?? Date.now() };
+}
+
+function finishWork(block?: ConvBlock): void {
+  if (!currentWork) return;
+  const end = block ? blockTime(block) : undefined;
+  const elapsed = end && currentWork.startedAt ? end - currentWork.startedAt : undefined;
+  currentWork.summary.textContent = elapsed && elapsed > 0 ? `Worked for ${durationText(elapsed)}` : 'Work details';
+  currentWork.details.open = false;
+  currentWork = undefined;
+}
 function requestArchive(query = '', before?: string, beforeTime?: string): void {
   archiveRequest = String(Date.now());
   notch.textContent = 'Loading…';
@@ -653,15 +692,20 @@ function appendBlocks(blocks: ConvBlock[]): void {
     const parent = b.parentToolUseId ? [...blockState.values()].find((x) => x.kind === 'tool' && x.toolUseId === b.parentToolUseId) : undefined;
     const parentNode = parent ? nodes.get(parent.id) : undefined;
     if (parentNode) childContainer(parentNode).appendChild(node);
-    else blocksEl.appendChild(node);
+    else if (b.kind === 'thinking' || b.kind === 'tool') {
+      currentWork ??= beginWork(b);
+      currentWork.body.appendChild(node);
+    } else {
+      if (b.kind === 'assistant' || b.kind === 'user') finishWork(b);
+      blocksEl.appendChild(node);
+    }
   }
   while (stick && blocksEl.children.length > MAX_BLOCK_NODES) {
     const first = blocksEl.firstElementChild as HTMLElement | null;
     if (!first) break;
     blocksEl.removeChild(first);
-    if (first.dataset.id) {
-      nodes.delete(first.dataset.id);
-      blockState.delete(first.dataset.id);
+    for (const item of [first, ...Array.from(first.querySelectorAll<HTMLElement>('[data-id]'))]) {
+      if (item.dataset.id) { nodes.delete(item.dataset.id); blockState.delete(item.dataset.id); }
     }
     notch.hidden = false;
   }
@@ -1580,6 +1624,7 @@ vscodeApi.onMessage((body) => {
       blockState.clear();
       expanded.clear();
       blocksEl.innerHTML = '';
+      currentWork = undefined;
       notch.hidden = !m.truncated;
       setMeta(m.session);
       setStatus(m.session.status, m.caps.estimated);

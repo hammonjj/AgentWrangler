@@ -6,7 +6,7 @@ import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import { worktreeFor } from '../core/worktree';
 import type { AgentSession } from '../shared/model';
 import { summarizeSubagents, visibleCodexSummaries } from './subagents';
-import { codexSessionsDir } from './paths';
+import { codexSessionIndex, codexSessionsDir } from './paths';
 import { findRollouts, readRolloutSummary, rolloutStatus, type CodexRolloutSummary } from './rollout';
 
 const RESCAN_MS = 5_000;
@@ -22,6 +22,7 @@ export class CodexProvider implements AgentProvider {
   private timer?: NodeJS.Timeout;
   private started = false;
   private disposed = false;
+  private threadNames = new Map<string, string>();
 
   constructor(private getConfig: ConfigGetter, private log: (message: string) => void = () => undefined) {}
 
@@ -40,6 +41,7 @@ export class CodexProvider implements AgentProvider {
     const cfg = this.getConfig();
     const cutoff = Date.now() - cfg.endedWindowHours * 3_600_000;
     const files = await findRollouts(codexSessionsDir(), cutoff);
+    this.threadNames = await readThreadNames(codexSessionIndex());
     const livePaths = new Set(files);
     for (const [file, id] of this.paths) {
       if (!livePaths.has(file)) {
@@ -83,7 +85,7 @@ export class CodexProvider implements AgentProvider {
           subagents: subagents.get(summary.sessionId.toLowerCase()),
           sessionId: summary.sessionId,
           key: `${this.id}:${summary.sessionId.toLowerCase()}`,
-          title: summary.title ?? summary.subtitle ?? summary.sessionId.slice(0, 8),
+          title: this.threadNames.get(summary.sessionId.toLowerCase()) ?? summary.title ?? summary.subtitle ?? summary.sessionId.slice(0, 8),
           subtitle: summary.subtitle,
           cwd,
           projectName: cwd ? path.basename(cwd) : undefined,
@@ -144,4 +146,20 @@ export class CodexProvider implements AgentProvider {
     this.change.dispose();
     this.append.dispose();
   }
+}
+
+export async function readThreadNames(file: string): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  try {
+    const text = await fs.promises.readFile(file, 'utf8');
+    for (const line of text.split('\n')) {
+      try {
+        const value = JSON.parse(line);
+        if (typeof value.id === 'string' && typeof value.thread_name === 'string' && value.thread_name.trim()) {
+          names.set(value.id.toLowerCase(), value.thread_name.trim());
+        }
+      } catch { /* one partial index line does not invalidate the rest */ }
+    }
+  } catch { /* the index is optional on older Codex builds */ }
+  return names;
 }

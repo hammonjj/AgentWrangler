@@ -8,3 +8,7 @@ export function codexHome(): string {
 export function codexSessionsDir(): string {
   return path.join(codexHome(), 'sessions');
 }
+
+export function codexSessionIndex(): string {
+  return path.join(codexHome(), 'session_index.jsonl');
+}

@@ -36,6 +36,8 @@ export interface ToolResultView {
   truncated: boolean;
   /** Edits and writes carry a unified patch, which reads far better than the raw result text. */
   diff?: { file: string; patch: string };
+  /** Codex patch batches may edit several files in one tool call. */
+  diffs?: { file: string; patch: string }[];
 }
 
 export interface QuestionOptionView {
