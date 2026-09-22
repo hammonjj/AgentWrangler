@@ -103,6 +103,73 @@ including streaming replies, interruption, and approval decisions.
   - **Close session** ends the process running a session and stops there — it hands it to nobody, unlike *Take over* and *Release*. That is safe for the same reason those are: a Claude Code conversation *is* its transcript, so closing one parks it rather than destroying it. The row moves to *Ended* and the conversation resumes from where it stopped. Unlike *Take over* it is offered **while a turn is in flight**, because the session most worth closing is the one that has wedged; the confirm says so plainly when that is the case. A session this window runs is stopped gracefully; anything else gets SIGTERM, then SIGKILL if it has not gone in five seconds, and an error rather than a silent failure if it refuses both. Ended sessions and live ones with no known pid do not get the item at all — there would be nothing to signal.
 - The menu carries the same actions (dashboard, refresh, new conversation, open conversation, open a conversation in its own tab, pin or unpin a session, rename a conversation, go to where a session runs, resume, copy id, reveal transcript, pause all agents, resume all paused agents, pause or resume one agent, install/remove status hooks).
 
+## Remote control (experimental)
+
+Answer a permission prompt from your phone. Off by default, and under
+**Preferences → Experimental** because it is the only thing here that reaches
+outside the machine.
+
+Agent Wrangler stays in charge throughout. Discord shows the same choices the
+dashboard row shows, and pressing one runs the same action — the agent never
+learns Discord exists, and nothing can be approved remotely that the local UI is
+not already offering.
+
+**Setting it up.** At [discord.com/developers](https://discord.com/developers/applications):
+
+1. **New Application** → **Bot** → **Reset Token**, and copy it.
+2. **Leave the Interactions Endpoint URL empty.** This is the one that matters.
+   Filling it in tells Discord to deliver button presses to that URL over HTTPS
+   instead of down the connection the bot opens itself — which is exactly what
+   would require a public address, and the feature is built to avoid.
+3. **OAuth2 → URL Generator** → scope `bot`, permissions *View Channel*,
+   *Send Messages*, *Embed Links*. Open the URL and add it to your server.
+4. If the channel is private — a good idea — add the bot to **that channel**
+   explicitly. Being in the server is not enough, and the failure looks like the
+   bot simply ignoring you.
+5. **Connect Discord…** from the app menu, and paste the token. It is checked
+   against Discord before it is saved, so a typo fails there rather than later
+   as a connection error. It goes to the **system keychain**, never to
+   `settings.json`.
+6. In **Preferences → Experimental**, fill in the server ID, the channel ID and
+   the Discord user IDs allowed to answer. Turn Developer Mode on in Discord
+   (User Settings → Advanced) to copy IDs. An empty allowlist means **nobody**,
+   and nothing is published at all.
+
+**What you get.** When an agent hits a permission prompt, one message appears
+naming the agent, repository, branch, worktree and tool, with the command in a
+code block and Claude's own reason. It carries **Allow once**, **Deny**, and
+**Always allow ‹rule›** when — and only when — Agent Wrangler itself is offering
+that (the prompt has to have suggested a rule). Press one and the agent
+continues; the message is edited to say who answered and when, and the buttons
+are removed.
+
+Answer at the machine instead and the message closes itself, saying it was
+answered in Agent Wrangler. It does not claim which way: there is no
+`PermissionGranted` hook, so after the fact that genuinely cannot be known, and
+a guess would be worse than the blank.
+
+**What it does not do yet.** Questions (`AskUserQuestion`) and plan approvals are
+not mirrored — they never reach the `PermissionRequest` hook, so they are only
+answerable in the app. There is no Slack transport, no chat, and no way to start
+or stop an agent remotely.
+
+**Security.** The token is in the keychain, encrypted by the OS, in its own file
+at mode 0600 — never in settings, never logged, and stripped from error
+messages. Presses are accepted only from the configured server and channel, only
+from a listed user ID (never a username: those can be changed and reused), and
+only for a prompt Agent Wrangler still has open — a press on a card whose prompt
+has since been answered cannot land on whatever replaced it. Commands are
+redacted before they are sent: assignments to secret-looking names, vendor
+tokens, bearer headers, PEM blocks and `--password`-style flags are masked, and
+your home directory is folded to `~`. Every publish, press, refusal and
+resolution is appended to `~/.cache/agent-wrangler/remote/audit.log`, which
+records IDs and tool names but not command text — the channel already has that.
+
+**One known race.** If you answer at the machine and in Discord within the same
+half-second, whichever decision file lands last wins. This is the same race
+Claude Code's own dialog already has with Agent Wrangler's buttons, and it is
+documented rather than arbitrated.
+
 ## How status is detected
 
 Two sources, in priority order. Hooks are ground truth; the transcript is a fallback.

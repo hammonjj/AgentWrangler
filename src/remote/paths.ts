@@ -23,6 +23,13 @@ export function mirrorFile(): string {
   return path.join(remoteHome(), 'mirrors.json');
 }
 
+/**
+ * The one credential this feature stores, named once so it cannot be spelled
+ * two ways. It is a keychain key, not a path, but it belongs with them: this is
+ * the file that answers "where does remote control keep things".
+ */
+export const DISCORD_BOT_TOKEN_KEY = 'remote.discord.botToken';
+
 /** Who approved what, from where. See `audit.ts`. */
 export function auditFile(): string {
   return path.join(remoteHome(), 'audit.log');

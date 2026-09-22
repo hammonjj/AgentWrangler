@@ -68,9 +68,11 @@ import { FileUsageCache } from '../core/usageCache';
 import { UsageService } from '../core/usageService';
 import { FileSuggestService } from '../core/fileSuggest';
 import { FileAuditLog } from '../remote/audit';
+import { DiscordTransport } from '../remote/discord/transport';
 import { MirrorStore } from '../remote/mirrorStore';
-import { auditFile, mirrorFile } from '../remote/paths';
+import { auditFile, DISCORD_BOT_TOKEN_KEY, mirrorFile } from '../remote/paths';
 import { RemoteControlService } from '../remote/service';
+import type { RemoteTransport } from '../remote/transport';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import type { PermissionModeName } from '../shared/conversation';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
@@ -149,6 +151,10 @@ export interface AgentWranglerApp {
   pauseAll(wanted: boolean): void;
   installHooks(): Promise<void>;
   uninstallHooks(): Promise<void>;
+  /** Experimental: store a Discord bot token and open the connection. */
+  connectDiscord(): Promise<void>;
+  /** Forget the token and close the connection. */
+  disconnectDiscord(): Promise<void>;
   /** The session picker, for commands invoked without one. */
   pickSession(filter?: (s: AgentSession) => boolean): Promise<AgentSession | undefined>;
   /** Wrap a key-taking action so it asks which session when given nothing. */
@@ -649,6 +655,72 @@ export function createApp(host: HostServices): AgentWranglerApp {
     browseForProject: () => browseForProject(),
   };
 
+  /**
+   * Store a bot token and connect.
+   *
+   * The token is checked against Discord before it is saved — a typo otherwise
+   * fails much later, as a gateway close code, which reads like a bug rather
+   * than a mistyped credential.
+   */
+  const connectDiscord = async (): Promise<void> => {
+    if (!host.secrets.available) {
+      dialogs.error('Agent Wrangler: this system cannot store secrets securely, so the token was not saved.');
+      return;
+    }
+    const token = await dialogs.input({
+      title: 'Connect Discord',
+      prompt: 'Bot token, from the Bot tab of your Discord application. Stored in the system keychain, never in settings.',
+      password: true,
+    });
+    if (token === undefined) return;
+    if (token.trim() === '') {
+      dialogs.error('Agent Wrangler: no token was entered.');
+      return;
+    }
+
+    let who: { username?: string };
+    try {
+      const res = await fetch('https://discord.com/api/v10/users/@me', {
+        headers: { Authorization: `Bot ${token.trim()}` },
+      });
+      if (!res.ok) {
+        dialogs.error(`Agent Wrangler: Discord rejected that token (HTTP ${res.status}).`);
+        return;
+      }
+      who = (await res.json()) as { username?: string };
+    } catch (err) {
+      dialogs.error(`Agent Wrangler: could not reach Discord — ${String(err)}`);
+      return;
+    }
+
+    await host.secrets.store(DISCORD_BOT_TOKEN_KEY, token.trim());
+    log(`remote: stored a bot token for ${who.username ?? 'the bot'}`);
+    // A stored token changes nothing a settings listener would see, so the
+    // reconnect has to be asked for here.
+    await disconnectTransport();
+    await syncRemoteTransport();
+
+    const cfg = getConfig();
+    const missing = [
+      cfg.remoteGuildId ? '' : 'a server ID',
+      cfg.remoteChannelId ? '' : 'a channel ID',
+      cfg.remoteAuthorizedUserIds.length > 0 ? '' : 'at least one authorised user',
+      cfg.remoteEnabled ? '' : 'the Experimental setting switched on',
+    ].filter(Boolean);
+    void dialogs.info(
+      missing.length === 0
+        ? `Agent Wrangler: connected to Discord as ${who.username ?? 'the bot'}.`
+        : `Agent Wrangler: token saved for ${who.username ?? 'the bot'}. Still needed in Preferences → Experimental: ${missing.join(', ')}.`,
+    );
+  };
+
+  const disconnectDiscord = async (): Promise<void> => {
+    await host.secrets.delete(DISCORD_BOT_TOKEN_KEY);
+    await disconnectTransport();
+    log('remote: token removed and disconnected');
+    void dialogs.info('Agent Wrangler: the Discord bot token has been removed and the connection closed.');
+  };
+
   const installHooks = async (): Promise<void> => {
     const dir = hookLogDir();
     const choice = await dialogs.warn(
@@ -858,21 +930,93 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * gets it arrive in later phases; this is here so the wiring is reviewed
    * once, against a service whose whole behaviour is already covered by tests.
    */
+  const remoteConfig = () => {
+    const cfg = getConfig();
+    return {
+      enabled: cfg.remoteEnabled,
+      guildId: cfg.remoteGuildId,
+      channelId: cfg.remoteChannelId,
+      authorizedUserIds: cfg.remoteAuthorizedUserIds,
+      homeDir: os.homedir(),
+    };
+  };
   const remoteControl = new RemoteControlService(
     store,
     actions,
     new MirrorStore(mirrorFile()),
-    () => ({
-      enabled: false,
-      guildId: '',
-      channelId: '',
-      authorizedUserIds: [],
-      homeDir: os.homedir(),
-    }),
+    remoteConfig,
     new FileAuditLog(auditFile()),
     (message) => log(`remote: ${message}`),
   );
   host.subscribe(remoteControl);
+
+  /**
+   * Connect the transport, or take it away — whichever the settings now say.
+   *
+   * The token is read on every connect rather than held: it can be replaced or
+   * revoked while the app runs, and a cached copy would keep a dead credential
+   * alive until a restart. Nothing is constructed at all until the setting is
+   * on and a token exists, so the default configuration opens no socket and
+   * touches no file.
+   */
+  let transport: RemoteTransport | undefined;
+  let syncing: Promise<void> = Promise.resolve();
+
+  const disconnectTransport = async (): Promise<void> => {
+    if (!transport) return;
+    remoteControl.setTransport(undefined);
+    const going = transport;
+    transport = undefined;
+    await going.disconnect();
+    going.dispose();
+  };
+
+  const syncRemoteTransport = (): Promise<void> => {
+    syncing = syncing.then(async () => {
+      const cfg = remoteConfig();
+      const token = cfg.enabled ? await host.secrets.get(DISCORD_BOT_TOKEN_KEY) : undefined;
+      const wanted = cfg.enabled && !!token && !!cfg.guildId && !!cfg.channelId;
+
+      if (!wanted) {
+        if (transport) log('remote: disconnecting');
+        await disconnectTransport();
+        return;
+      }
+      if (transport) return; // already connected, and the token is read per connect
+
+      const next = new DiscordTransport({
+        config: () => ({ guildId: cfg.guildId, channelId: cfg.channelId }),
+        restDeps: { token: () => token!, log: (m) => log(`remote: ${m}`) },
+        // No `gatewayUrl`: the transport asks `GET /gateway/bot` through its
+        // own REST client, which already has the token and the rate limiter.
+        gatewayDeps: { token: () => token!, log: (m) => log(`remote: ${m}`) },
+        log: (m) => log(`remote: ${m}`),
+      });
+      transport = next;
+      remoteControl.setTransport(next);
+      try {
+        await next.connect();
+        log('remote: connecting to Discord');
+      } catch (err) {
+        log(`remote: could not connect — ${String(err)}`);
+      }
+    });
+    return syncing;
+  };
+
+  host.subscribe({ dispose: () => void disconnectTransport() });
+  host.subscribe(
+    host.settings.onDidChange((affects) => {
+      if (
+        affects('remote.enabled') ||
+        affects('remote.discord.guildId') ||
+        affects('remote.discord.channelId') ||
+        affects('remote.discord.authorizedUserIds')
+      ) {
+        void syncRemoteTransport();
+      }
+    }),
+  );
 
   // Opt-in "waiting on you" toasts, with a per-session cooldown.
   const lastToastAt = new Map<string, number>();
@@ -1058,6 +1202,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     },
     installHooks,
     uninstallHooks,
+    connectDiscord,
+    disconnectDiscord,
     pickSession,
     withSession,
 
@@ -1068,6 +1214,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
       void store.register(codexProvider).catch((err) => log(`Codex provider start failed: ${String(err)}`));
       log('Agent Wrangler started');
       void checkHookHealth();
+      // Off by default, so this normally reads the setting and stops.
+      void syncRemoteTransport();
       // After the store's first scan, so "is it running elsewhere?" has an answer.
       setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), 2000);
     },

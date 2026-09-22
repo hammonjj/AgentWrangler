@@ -71,6 +71,8 @@ export interface InputOptions {
   prompt?: string;
   value?: string;
   placeHolder?: string;
+  /** Mask what is typed. For credentials, which must not be left on screen. */
+  password?: boolean;
   /** Returns a complaint to show, or undefined while the value is acceptable. */
   validateInput?(value: string): string | undefined;
 }
@@ -151,6 +153,20 @@ export interface WorkbenchSurface {
   openInTab(key: string): void;
 }
 
+/**
+ * Somewhere to put a credential that is not a setting.
+ *
+ * Deliberately tiny and string-shaped: this feature needs one bot token, and an
+ * interface that could hold a credential store would invite one.
+ */
+export interface HostSecrets {
+  /** False when the OS declines to encrypt; nothing should be stored then. */
+  readonly available: boolean;
+  get(key: string): Promise<string | undefined>;
+  store(key: string, value: string): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
 export interface HostServices {
   /** The name shown in dialogs and window titles. Always 'Agent Wrangler' today. */
   readonly appName: string;
@@ -170,6 +186,16 @@ export interface HostServices {
   dialogs: HostDialogs;
   shell: HostShell;
   clipboard: { writeText(text: string): Promise<void> };
+  /**
+   * Credentials, kept out of the settings file.
+   *
+   * Settings are plain JSON a user may open, copy, or paste into an issue; a
+   * bot token in there is a token in a screenshot. This goes to the OS instead,
+   * and a host that cannot encrypt must say so rather than quietly writing
+   * plaintext — hence `available`, which the caller checks before offering to
+   * store anything.
+   */
+  secrets: HostSecrets;
   /**
    * Folders the launcher should offer beyond Claude Code's own history. A
    * workspace in VSCode; empty in an app that is machine-wide by design.

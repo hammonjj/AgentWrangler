@@ -27,12 +27,16 @@ export function installApplicationMenu(
           submenu: [
             { role: 'about' },
             { type: 'separator' },
-            // ⌘, where macOS puts it. VSCode's settings UI has no counterpart
-            // here, so this window renders `src/shared/settings.ts` instead.
+            // ⌘, where macOS puts it. This window renders `src/shared/settings.ts`.
             { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: openPreferences },
             { type: 'separator' },
             { label: 'Install Status Hooks…', click: () => void wrangler.installHooks() },
             { label: 'Remove Status Hooks', click: () => void wrangler.uninstallHooks() },
+            { type: 'separator' },
+            // Experimental. The token goes to the keychain, so it cannot be a
+            // setting and needs somewhere of its own to be typed.
+            { label: 'Connect Discord…', click: () => void wrangler.connectDiscord() },
+            { label: 'Disconnect Discord', click: () => void wrangler.disconnectDiscord() },
             { type: 'separator' },
             { role: 'services' },
             { type: 'separator' },
@@ -64,6 +68,9 @@ export function installApplicationMenu(
               { type: 'separator' },
               { label: 'Install Status Hooks…', click: () => void wrangler.installHooks() },
               { label: 'Remove Status Hooks', click: () => void wrangler.uninstallHooks() },
+              { type: 'separator' },
+              { label: 'Connect Discord…', click: () => void wrangler.connectDiscord() },
+              { label: 'Disconnect Discord', click: () => void wrangler.disconnectDiscord() },
               { type: 'separator' },
               { role: 'quit' },
             ] as MenuItemConstructorOptions[])),

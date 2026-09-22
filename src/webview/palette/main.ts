@@ -134,6 +134,8 @@ function show(next: PaletteRequest): void {
   promptEl.textContent = isPick ? '' : next.prompt ?? '';
   promptEl.hidden = promptEl.textContent === '';
   field.value = isPick ? '' : next.value ?? '';
+  // A credential must not be left legible on screen; a pick is never one.
+  field.type = !isPick && next.password ? 'password' : 'text';
   field.placeholder = (isPick ? next.placeholder : next.placeholder) ?? '';
   listEl.hidden = !isPick;
   emptyEl.hidden = true;
