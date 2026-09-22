@@ -176,6 +176,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const models = new ModelCatalogService(host.globalState);
   const codexRunners = new CodexRunnerService(codexAppServer, (list) => models.remember('openai', list));
   host.subscribe(codexRunners);
+  store.useLiveSessions((session) => session.provider === 'codex' ? codexRunners.get(session.sessionId)?.session : undefined);
+  host.subscribe(codexRunners.onDidChange(() => void store.refresh()));
   const archive = new ArchiveService(host.globalState);
   // Which agents are frozen. Nothing is persisted: the answer is the process
   // state itself, which every window reads the same way and which a reload

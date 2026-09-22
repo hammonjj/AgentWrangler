@@ -83,6 +83,7 @@ export class SessionStore implements Disposable {
    * not others.
    */
   private nicknameFor: (key: string) => string | undefined = () => undefined;
+  private liveSessionFor: (session: AgentSession) => AgentSession | undefined = () => undefined;
 
   readonly onDidUpdate = (listener: Listener<StoreUpdate>): Disposable => this.emitter.event(listener);
 
@@ -92,6 +93,11 @@ export class SessionStore implements Disposable {
    */
   useNicknames(lookup: (key: string) => string | undefined): void {
     this.nicknameFor = lookup;
+  }
+
+  /** Overlay exact in-process runner state on provider discovery for every consumer, not only the dashboard. */
+  useLiveSessions(lookup: (session: AgentSession) => AgentSession | undefined): void {
+    this.liveSessionFor = lookup;
   }
 
   /**
@@ -104,8 +110,19 @@ export class SessionStore implements Disposable {
   }
 
   private decorate(s: AgentSession): AgentSession {
+    const live = this.liveSessionFor(s);
+    const current = live
+      ? {
+          ...s,
+          status: live.status,
+          lastActivityAt: live.lastActivityAt,
+          blockedReason: live.blockedReason,
+          blockedAsk: live.blockedAsk,
+          permissionRequestId: live.permissionRequestId,
+        }
+      : s;
     const nickname = this.nicknameFor(s.key);
-    return nickname === undefined ? s : { ...s, nickname };
+    return nickname === undefined ? current : { ...current, nickname };
   }
 
   /**

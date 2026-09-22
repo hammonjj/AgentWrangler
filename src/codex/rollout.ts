@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { capText, type ConvBlock } from '../shared/conversation';
-import { needsReply } from '../core/needsReply';
+import { finishedTurnStatus } from '../core/needsReply';
 
 const HEAD_BYTES = 512 * 1024;
 const TAIL_BYTES = 512 * 1024;
@@ -198,8 +198,7 @@ export function rolloutStatus(
   stuckThresholdMs: number,
 ): 'busy' | 'stuck' | 'waiting' | 'done' {
   if (!summary.turnComplete) return nowMs - summary.lastActivityAt >= stuckThresholdMs ? 'stuck' : 'busy';
-  if (summary.failed) return 'waiting';
-  return needsReply(summary.lastAssistantText) ? 'waiting' : 'done';
+  return finishedTurnStatus(summary.lastAssistantText, summary.failed ? 'failed' : 'completed');
 }
 
 function preview(value: unknown): string {

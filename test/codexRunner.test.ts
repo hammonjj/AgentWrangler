@@ -44,6 +44,7 @@ describe('CodexRunner', () => {
     expect(server.calls[0]).toEqual({ method: 'thread/resume', params: { threadId: 'thread-existing' } });
     expect((await runner.init()).blocks).toEqual(history);
     expect(runner.composer.model).toBe('gpt-resumed');
+    expect(runner.session.status).toBe('done');
     expect(service.owns('THREAD-EXISTING')).toBe(true);
 
     service.release('thread-existing');
@@ -84,6 +85,43 @@ describe('CodexRunner', () => {
     expect(appended.map((block) => block.kind)).toEqual(['user', 'assistant']);
     expect(patched.at(-1)?.block.text).toBe('Hi there');
     expect(runner.composer.busy).toBe(false);
+    expect(runner.session.status).toBe('done');
+  });
+
+  it('uses the final assistant message to distinguish Waiting from Done', async () => {
+    const server = new FakeServer();
+    const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj');
+
+    await runner.send('finish it');
+    server.notifications.fire({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', delta: 'Finished. Which option do you prefer?' } });
+    server.notifications.fire({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { status: 'completed' } } });
+    expect(runner.session.status).toBe('waiting');
+
+    await runner.send('option one');
+    server.notifications.fire({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', delta: 'Implemented option one. All tests pass.' } });
+    server.notifications.fire({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { status: 'completed' } } });
+    expect(runner.session.status).toBe('done');
+  });
+
+  it.each(['failed', 'interrupted', 'cancelled'])('keeps a %s turn waiting for review', async (status) => {
+    const server = new FakeServer();
+    const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj');
+    await runner.send('do it');
+    server.notifications.fire({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', delta: 'Partial result.' } });
+    server.notifications.fire({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { status } } });
+    expect(runner.session.status).toBe('waiting');
+  });
+
+  it('corrects the idle status when the final message lands after turn completion', async () => {
+    const server = new FakeServer();
+    const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj');
+    await runner.send('do it');
+    server.notifications.fire({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { status: 'completed' } } });
+    expect(runner.session.status).toBe('waiting'); // no final text yet: safe default
+    server.notifications.fire({
+      method: 'item/completed', params: { threadId: 'thread-1', item: { type: 'agentMessage', text: 'Implemented. All tests pass.' } },
+    });
+    expect(runner.session.status).toBe('done');
   });
 
   it('surfaces and answers server approval requests for its own thread', async () => {
@@ -97,7 +135,24 @@ describe('CodexRunner', () => {
       params: { threadId: 'thread-1', command: 'npm test', reason: 'Run tests' },
     });
     expect(appended[0]).toMatchObject({ kind: 'permission', body: 'npm test', state: 'pending' });
+    expect(runner.session).toMatchObject({ status: 'blocked', blockedReason: 'Approval' });
     expect(await runner.decide(appended[0].requestId, 'allow')).toBe(true);
     expect(server.responses).toEqual([{ id: 9, result: { decision: 'accept' } }]);
+    expect(runner.session.status).toBe('waiting');
+  });
+
+  it('marks a server question Blocked until it is answered', async () => {
+    const server = new FakeServer();
+    const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj');
+    const appended: any[] = [];
+    runner.onAppend((blocks) => appended.push(...blocks));
+    server.requests.fire({
+      id: 10,
+      method: 'item/tool/requestUserInput',
+      params: { threadId: 'thread-1', questions: [{ id: 'choice', header: 'Choice', question: 'Pick one', options: [] }] },
+    });
+    expect(runner.session).toMatchObject({ status: 'blocked', blockedReason: 'Question' });
+    expect(await runner.answer(appended[0].requestId, { choice: 'One' })).toBe(true);
+    expect(runner.session.status).toBe('waiting');
   });
 });

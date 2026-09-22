@@ -83,4 +83,22 @@ describe('Codex subagent discovery', () => {
     expect(updates[0]).toMatchObject({ upserted: [{ status: 'busy', subagents: { done: 1 } }], becameWaiting: [] });
     store.dispose();
   });
+
+  it('uses an owned runner as the exact live status for every store consumer', async () => {
+    const discovered: AgentSession = {
+      provider: 'codex', sessionId: 'root', key: 'codex:root', title: 'Test', status: 'busy', lastActivityAt: 100,
+    };
+    let live: AgentSession | undefined;
+    const store = new SessionStore();
+    store.useLiveSessions(() => live);
+    await store.register({ id: 'codex', displayName: 'Codex', start: async () => {}, refresh: async () => {},
+      scan: async () => [discovered], onDidChange: () => ({ dispose() {} }), dispose() {} });
+    const updates: any[] = [];
+    store.onDidUpdate((update) => updates.push(update));
+    live = { ...discovered, status: 'done', lastActivityAt: 200, runnerOwned: true };
+    await store.refresh();
+    expect(store.get('codex:root')).toMatchObject({ status: 'done', lastActivityAt: 200 });
+    expect(updates.at(-1)?.becameWaiting).toMatchObject([{ status: 'done' }]);
+    store.dispose();
+  });
 });
