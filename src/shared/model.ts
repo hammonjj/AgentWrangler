@@ -171,6 +171,11 @@ export interface AgentSession {
    * `tool_input`, so absent without hooks.
    */
   blockedAsk?: PermissionAsk;
+  /** Full choice data for a runner-owned question, so the dashboard can answer it in place. */
+  pendingQuestion?: {
+    requestId: string;
+    questions: import('./conversation').QuestionView[];
+  };
   /**
    * For `blocked`: set while our PermissionRequest hook is still waiting for a
    * decision file, i.e. while Allow/Deny from the dashboard can still land.

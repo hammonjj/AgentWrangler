@@ -118,6 +118,13 @@ export class RunnerSession {
   private query?: Query;
   private blockState: RunnerBlocksState = createRunnerState();
   private pending = new Map<string, PendingAsk>();
+
+  /** The question currently waiting on this runner, if any. */
+  get pendingQuestion(): Extract<ConvBlock, { kind: 'question' }> | undefined {
+    return [...this.blocks].reverse().find(
+      (block): block is Extract<ConvBlock, { kind: 'question' }> => block.kind === 'question' && block.state === 'pending',
+    );
+  }
   private truncated = false;
   /** What was said before this process took the conversation over. */
   private historyPromise?: Promise<ConversationHistory>;

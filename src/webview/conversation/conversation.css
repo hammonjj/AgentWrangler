@@ -617,10 +617,37 @@ body,
   color: var(--aw-busy);
 }
 
+/*
+ * One box, not three things in a row.
+ *
+ * The composer used to be a flex *row* — textarea, paperclip, mic, Send — which
+ * gave a 28px icon, another 28px icon and a text button all sitting on the
+ * baseline of a box that grows as you type. At 300px wide the three of them ate
+ * half the row; at full width they floated off to the right of a very long
+ * field. Every chat composer worth copying solves this the same way: one framed
+ * surface, the text on top, a toolbar strip along the bottom with the small
+ * actions left and the commit action right.
+ *
+ * So the frame moves off `#msg` and onto `#composerInput`, the textarea goes
+ * transparent and borderless inside it, and the focus ring is drawn on the box —
+ * which is what makes the whole thing read as a single control.
+ */
 #composerInput {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 5px 6px 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-input-border, var(--aw-rule));
+  background: var(--vscode-input-background);
+}
+/* The box carries the focus ring, because the thing being focused is the box as
+   far as the eye is concerned. `:focus-within` rather than `:focus` so clicking
+   the mic does not make the frame look like it lost the caret. */
+#composerInput:focus-within {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+  border-color: var(--vscode-focusBorder);
 }
 #msg {
   flex: 1 1 auto;
@@ -630,15 +657,38 @@ body,
   font-family: inherit;
   font-size: inherit;
   line-height: 1.4;
-  padding: 5px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--vscode-input-border, var(--aw-rule));
-  background: var(--vscode-input-background);
+  padding: 2px 2px 0;
+  border: none;
+  background: transparent;
   color: var(--vscode-input-foreground);
 }
 #msg:focus {
-  outline: 1px solid var(--vscode-focusBorder);
-  border-color: var(--vscode-focusBorder);
+  outline: none;
+}
+
+/* The toolbar strip. `min-height` matches the 24px icon buttons so the row does
+   not change height when Send becomes Stop (a wider word, same box) or when the
+   mic is swapped for its pulsing self. */
+#composerActions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 24px;
+}
+#composerActions .grow {
+  flex: 1 1 auto;
+}
+/* Send sits on the strip rather than beside the field, so it gets a little more
+   presence than the icons next to it — it is the only thing here that commits. */
+#composerActions .askbtn {
+  flex: 0 0 auto;
+  padding: 2px 12px;
+  border-radius: 4px;
+}
+/* Chips go inside the frame, above the text, where the thing they will be sent
+   with is. Outside it they read as leftovers from the previous message. */
+#composerInput > #attachments {
+  margin-bottom: 0;
 }
 
 /* Dragging files anywhere over the pane lights up the box they will land in —
@@ -647,10 +697,7 @@ body,
    not fight the focus ring. */
 #composerInput.dropping {
   outline: 1px dashed var(--vscode-focusBorder);
-  outline-offset: 3px;
-  border-radius: 4px;
-}
-#composerInput.dropping #msg {
+  outline-offset: 2px;
   background: var(--vscode-list-dropBackground, var(--vscode-input-background));
 }
 
@@ -799,8 +846,8 @@ body,
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 4px;
@@ -821,8 +868,8 @@ body,
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 4px;
@@ -1004,5 +1051,36 @@ body,
   outline-offset: -1px;
 }
 .subagent-work { margin-left:12px; border-left:2px solid var(--vscode-panel-border); padding-left:8px; }
+
+/* The two subagent buttons are footnotes on an Agent tool call — "there is more
+   of this conversation one round trip away" — not something the conversation is
+   waiting on, so they take the same quiet outline as "Show the rest" instead of
+   the browser's default slab, which is a macOS control sitting in a pane that
+   has none. */
+.subagent-load,
+.earlier-subagent {
+  display: block;
+  margin: 6px 0 0;
+  padding: 2px 8px;
+  border: 1px solid var(--aw-rule);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vscode-textLink-foreground);
+  font-family: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+.subagent-load:hover,
+.earlier-subagent:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.2));
+}
+.subagent-load:focus-visible,
+.earlier-subagent:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+/* This one is prepended above the work it loads, so its gap goes below it. */
+.earlier-subagent { margin: 0 0 6px; }
+
 #searchresults { border-bottom:2px solid var(--vscode-panel-border); }
 #sessionusage { font-size:11px; }

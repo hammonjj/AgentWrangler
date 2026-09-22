@@ -74,6 +74,7 @@ import { MirrorStore } from '../remote/mirrorStore';
 import { auditFile, DISCORD_BOT_TOKEN_KEY, mirrorFile } from '../remote/paths';
 import { RemoteControlService } from '../remote/service';
 import type { RemoteTransport } from '../remote/transport';
+import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import type { PermissionModeName } from '../shared/conversation';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
@@ -277,6 +278,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const runnerOwnership: RunnerOwnership = {
     owns: (id: string | undefined) => runners.owns(id) || codexRunners.owns(id),
     wasRunning: (id: string) => runners.wasRunning(id),
+    pendingQuestion: (id: string | undefined) => {
+      const question = runners.get(id)?.pendingQuestion ?? codexRunners.get(id)?.pendingQuestion;
+      return question ? { requestId: question.requestId, questions: question.questions } : undefined;
+    },
+    answer: async (id: string | undefined, requestId: string, answers: Record<string, string>) => {
+      const runner = runners.get(id) ?? codexRunners.get(id);
+      return runner ? runner.answer(requestId, answers) : false;
+    },
     onDidChange: (listener: () => void) => {
       const claude = runners.onDidChange(listener);
       const codex = codexRunners.onDidChange(listener);
@@ -376,9 +385,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * This is not `adopt` without the resume, and not `release` either: both of
    * those hand the session on to something else, and this deliberately hands it
    * to nobody. What makes that safe to offer is the same fact they rest on — a
-   * Claude Code conversation *is* its transcript — so closing a session is
-   * parking it, not destroying it. The row moves to Ended and `claude --resume`
-   * picks it up where it stopped.
+   * conversation *is* its transcript, whichever provider wrote it — so closing a
+   * session is parking it, not destroying it. The row moves to Ended and
+   * `claude --resume` (or Take over, for Codex) picks it up where it stopped.
+   *
+   * Three shapes of "the process running it", in the order they are tried: a
+   * Claude runner this window owns, a Codex thread this window owns (there is no
+   * pid to signal — one app-server serves every thread, so closing one means
+   * releasing it), and anything else, which is a pid on the process table.
    *
    * A turn in flight is the one thing that does not survive, and unlike `adopt`
    * that does not withdraw the offer: the session most worth closing is the one
@@ -387,7 +401,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
    */
   const confirmAndCloseSession = async (s: AgentSession): Promise<void> => {
     const label = displayLabel(s);
-    if (!runners.owns(s.sessionId) && s.pid === undefined) {
+    const ours = runners.owns(s.sessionId) || codexRunners.owns(s.sessionId);
+    if (!ours && s.pid === undefined) {
       void dialogs.warn(
         `Agent Wrangler: no process is known for ${label}, so there is nothing to close.`,
         {},
@@ -396,10 +411,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }
 
     const working = s.status === 'busy' || s.status === 'stuck' || s.status === 'blocked';
+    const elsewhere =
+      s.provider === 'codex'
+        ? 'The process running it ends. Its terminal or editor will show it as ended.'
+        : 'The process running it ends. Its terminal or Claude Code panel will show it as ended.';
     const detail = [
-      runners.owns(s.sessionId)
-        ? 'This window stops running the session.'
-        : 'The process running it ends. Its terminal or Claude Code panel will show it as ended.',
+      ours ? 'This window stops running the session.' : elsewhere,
       working ? 'It is working right now, and that turn is thrown away.' : '',
       'The conversation is kept — it lives in the transcript — so you can resume it later.',
     ]
@@ -412,7 +429,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // It may have finished, or ended on its own, while the dialog was up.
     const now = store.get(s.key) ?? s;
     const runner = runners.get(now.sessionId);
-    if (runner) {
+    if (codexRunners.owns(now.sessionId)) {
+      codexRunners.release(now.sessionId);
+      log(`closed ${now.sessionId}: released the Codex thread this window was running`);
+    } else if (runner) {
       await runners.end(runner);
       log(`closed ${now.sessionId}: ended the runner in this window`);
     } else if (now.pid !== undefined) {
@@ -478,6 +498,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * screen, not about what is spending, and a forgotten agent grinding through
    * a plan in a folder you stopped looking at is precisely what this is for.
    */
+  /**
+   * How a notice reaches Discord from up here.
+   *
+   * A hole rather than a direct call, because `remoteControl` is constructed
+   * several hundred lines below and the first usage reading can land before
+   * then — auto-pause firing during startup would otherwise hit the temporal
+   * dead zone and take the window down. Undefined simply means nothing is
+   * listening yet, which is the correct behaviour for a notice anyway.
+   */
+  let announceRemote: ((notice: RemoteNotice) => void) | undefined;
+
   const setPausedAll = (wanted: boolean, why?: string): boolean => {
     let acted = false;
     if (wanted) {
@@ -498,6 +529,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
       void dialogs.info(
         `Agent Wrangler: paused ${r.ok} agent${r.ok === 1 ? '' : 's'}${trouble}${why ? ` — ${why}` : ''}.`,
       );
+      // Only when something did it for you. A pause you pressed yourself needs
+      // no notification: you are sitting in front of the machine that did it.
+      // The point of this one is the opposite case — the cap trips while you are
+      // out, and every agent stops until somebody comes back and resumes them.
+      if (why && acted) {
+        announceRemote?.({
+          title: `⏸️ Agents paused — ${why}`,
+          body: [
+            `Paused ${r.ok} agent${r.ok === 1 ? '' : 's'} on ${os.hostname()}${trouble}.`,
+            'Nothing will run until they are resumed from Agent Wrangler.',
+          ].join('\n'),
+          tone: 'warn',
+        });
+      }
     } else {
       const r = pause.resumeAll();
       acted = r.ok > 0;
@@ -1095,6 +1140,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     (message) => log(`remote: ${message}`),
   );
   host.subscribe(remoteControl);
+  announceRemote = (notice) => void remoteControl.notify(notice);
 
   /**
    * Connect the transport, or take it away — whichever the settings now say.
@@ -1184,6 +1230,37 @@ export function createApp(host: HostServices): AgentWranglerApp {
           if (choice === 'Open') actions.smartOpen(s.key);
           else if (choice === 'Dashboard') surface?.open();
         });
+      }
+    }),
+  );
+
+  /**
+   * "That one is done", to Discord.
+   *
+   * Rides the same `becameWaiting` edge the toasts do rather than watching
+   * status itself: the store already owns the working→finished transition, and
+   * a second opinion about when an agent finished is a second thing that can be
+   * wrong. The edge fires once per finish, so this does not repeat while a
+   * session sits there done.
+   *
+   * The cooldown is for the flapping case only — an agent that finishes, is
+   * given more work and finishes again inside half a minute is one event worth
+   * reporting, not two.
+   */
+  const lastDoneNoticeAt = new Map<string, number>();
+  host.subscribe(
+    store.onDidUpdate((u) => {
+      if (u.becameWaiting.length === 0) return;
+      const cfg = getConfig();
+      if (!cfg.remoteEnabled || !cfg.remoteNotifyOnDone) return;
+      const now = Date.now();
+      for (const s of u.becameWaiting) {
+        if (archive.isArchived(s.key)) continue; // archived sessions stay quiet
+        const notice = doneNoticeFor(s);
+        if (!notice) continue; // blocked: the permission card is already saying so
+        if (now - (lastDoneNoticeAt.get(s.key) ?? 0) < 30_000) continue;
+        lastDoneNoticeAt.set(s.key, now);
+        announceRemote?.(notice);
       }
     }),
   );

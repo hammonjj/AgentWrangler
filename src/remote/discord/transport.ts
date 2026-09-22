@@ -8,14 +8,14 @@
  * reply privately to whoever pressed.
  */
 import { Emitter, type Disposable } from '../../core/events';
-import type { RemoteAsk } from '../../shared/remote';
+import type { RemoteAsk, RemoteNotice } from '../../shared/remote';
 import type {
   RemoteClose,
   RemoteInvocation,
   RemoteMessageRef,
   RemoteTransport,
 } from '../transport';
-import { askPayload, closedPayload } from './format';
+import { askPayload, closedPayload, noticePayload } from './format';
 import { DiscordGateway, type GatewayDeps } from './gateway';
 import { decodeCustomId } from './ids';
 import { DiscordHttpError, DiscordRest, PRIORITY, type DiscordRestDeps } from './rest';
@@ -119,6 +119,17 @@ export class DiscordTransport implements RemoteTransport {
       { priority: PRIORITY.publish },
     );
     return { channelId, messageId: message.id };
+  }
+
+  /**
+   * A one-way announcement. Lowest priority of anything that posts: a card with
+   * a live button always matters more than news about something already done.
+   */
+  async notify(notice: RemoteNotice): Promise<void> {
+    const { channelId } = this.deps.config();
+    await this.rest.request('POST', `/channels/${channelId}/messages`, noticePayload(notice), {
+      priority: PRIORITY.reply,
+    });
   }
 
   async update(ref: RemoteMessageRef, interactionId: string, ask: RemoteAsk): Promise<void> {

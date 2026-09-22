@@ -75,6 +75,8 @@ let hooks: HookHealth | undefined;
 let usage: UsageState | undefined;
 let codexUsage: UsageState | undefined;
 let conversationSections = ['General'];
+type QuestionDraft = { step: number; selected: Record<number, string[]>; other: Record<number, string> };
+const questionDrafts = new Map<string, QuestionDraft>();
 
 // ---- columns ----
 // The layout is the host's (globalState, shared by every dashboard), but a drag
@@ -166,8 +168,24 @@ function applyStyles(root: HTMLElement): void {
 }
 
 function paint(html: string): void {
+  // The only text field inside #app is the stepper's "Other…" box, and a
+  // snapshot arrives every couple of seconds — without this, typing an answer
+  // loses the caret (and the focus ring) mid-word.
+  const typing = document.activeElement;
+  const focused =
+    typing instanceof HTMLInputElement && typing.classList.contains('qother')
+      ? { draft: typing.closest<HTMLElement>('.qstep')?.dataset.draft, at: typing.selectionStart }
+      : undefined;
   app.innerHTML = html;
   applyStyles(app);
+  if (focused?.draft) {
+    const restored = app.querySelector<HTMLInputElement>(`.qstep[data-draft="${CSS.escape(focused.draft)}"] .qother`);
+    if (restored) {
+      restored.focus();
+      const at = focused.at ?? restored.value.length;
+      restored.setSelectionRange(at, at);
+    }
+  }
 }
 
 const ICON_COLUMNS =
@@ -286,15 +304,16 @@ function statusChip(s: SessionDTO): string {
  * whichever is answered first wins.
  */
 function permissionRow(s: SessionDTO, span: number): string {
-  if (s.status !== 'blocked' || (!s.blockedAsk && !s.permissionRequestId)) return '';
+  if (s.status !== 'blocked' || (!s.blockedAsk && !s.permissionRequestId && !s.pendingQuestion)) return '';
 
   const ask = s.blockedAsk;
-  const pending = s.permissionRequestId !== undefined;
+  const question = s.pendingQuestion;
+  const pending = question !== undefined || s.permissionRequestId !== undefined;
   const open = permExpanded(s.key, pending);
 
   // The header is the summary when Claude gave one, else the ask itself on one
   // line; the body below repeats it in full, unflattened.
-  const headline = ask?.summary ?? askLine(ask);
+  const headline = question?.questions[0]?.question ?? ask?.summary ?? askLine(ask);
   const header = headline
     ? `<span class="phead">${esc(headline)}</span>`
     : `<span class="phead dim">${esc(capitalize(s.blockedReason ?? 'permission'))} — open the session for details</span>`;
@@ -310,7 +329,8 @@ function permissionRow(s: SessionDTO, span: number): string {
           `Allow this and stop asking: adds ${s.alwaysAllow.rules.join(', ')} to ${s.alwaysAllow.destination}, exactly as Claude Code's own "don't ask again" would.`,
         )}">Always allow</button>`
       : '';
-  const buttons = pending
+  const questionBody = question ? questionStepper(s.key, question.requestId, question.questions) : undefined;
+  const buttons = questionBody ?? (pending
     ? `<div class="pbtns">
       <button class="pbtn allow" data-action="allow" title="Allow this once, as if you had clicked Allow in Claude Code">Allow</button>
       ${always}
@@ -318,14 +338,53 @@ function permissionRow(s: SessionDTO, span: number): string {
     </div>`
     : // No buttons: either this was answered in Claude Code already, or it is a
       // tool that only the session itself can answer (a question, a plan).
-      '<div class="pnote">Answer this in the session.</div>';
+      '<div class="pnote">Answer this in the session.</div>');
 
-  return `<tr class="permrow${open ? ' open' : ''}${pending ? ' pending' : ''}" data-key="${esc(s.key)}" data-request="${esc(s.permissionRequestId ?? '')}">
+  return `<tr class="permrow${open ? ' open' : ''}${pending ? ' pending' : ''}" data-key="${esc(s.key)}" data-request="${esc(question?.requestId ?? s.permissionRequestId ?? '')}">
   <td class="c-perm" colspan="${span}">
     <button class="ptoggle" data-perm="toggle" aria-expanded="${open}" title="${open ? 'Hide the details' : 'Show the command and the buttons'}"><span class="ptw" aria-hidden="true">${open ? '▾' : '▸'}</span>${header}</button>
     <div class="pslide"><div class="pinner">${detail}${buttons}</div></div>
   </td>
 </tr>`;
+}
+
+/**
+ * Copy what is on screen for the current question back into its draft. Called
+ * on every keystroke and tick, not just on Next: `paint()` replaces `#app`
+ * wholesale and a snapshot lands every couple of seconds, so a choice that
+ * lives only in the DOM is gone before the user reaches the last question.
+ */
+function saveQuestionDraft(stepper: HTMLElement): QuestionDraft | undefined {
+  const draft = questionDrafts.get(stepper.dataset.draft ?? '');
+  if (!draft) return undefined;
+  const step = Number(stepper.dataset.step);
+  draft.selected[step] = Array.from(stepper.querySelectorAll<HTMLInputElement>('input[data-qchoice]:checked')).map(
+    (input) => input.value,
+  );
+  draft.other[step] = stepper.querySelector<HTMLInputElement>('.qother')?.value.trim() ?? '';
+  return draft;
+}
+
+function questionStepper(key: string, requestId: string, questions: import('../../shared/conversation').QuestionView[]): string {
+  if (questions.length === 0) return '<div class="pnote">Open the session to answer this question.</div>';
+  const draftKey = `${key}\n${requestId}`;
+  const draft = questionDrafts.get(draftKey) ?? { step: 0, selected: {}, other: {} };
+  draft.step = Math.min(draft.step, questions.length - 1);
+  questionDrafts.set(draftKey, draft);
+  const q = questions[draft.step];
+  const selected = draft.selected[draft.step] ?? [];
+  const type = q.multiSelect ? 'checkbox' : 'radio';
+  const inputName = `dashq:${requestId}:${draft.step}`;
+  const options = q.options.map((option) => `<label class="qchoice" title="${esc(option.description)}">
+    <input type="${type}" name="${esc(inputName)}" data-qchoice value="${esc(option.label)}"${selected.includes(option.label) ? ' checked' : ''}>
+    <span><strong>${esc(option.label)}</strong>${option.description ? `<small>${esc(option.description)}</small>` : ''}</span>
+  </label>`).join('');
+  return `<div class="qstep" data-draft="${esc(draftKey)}" data-step="${draft.step}" data-multi="${q.multiSelect === true}">
+    <div class="qprogress">Question ${draft.step + 1} of ${questions.length}${q.header ? ` · ${esc(q.header)}` : ''}</div>
+    <div class="qprompt">${esc(q.question)}</div>
+    <div class="qchoices">${options}<input class="qother" value="${esc(draft.other[draft.step] ?? '')}" placeholder="Other…" aria-label="Other answer"></div>
+    <div class="qnav">${draft.step > 0 ? '<button class="pbtn" data-qnav="back">Back</button>' : ''}<span></span><button class="pbtn allow" data-qnav="${draft.step + 1 === questions.length ? 'answer' : 'next'}">${draft.step + 1 === questions.length ? 'Answer' : 'Next'}</button></div>
+  </div>`;
 }
 
 /**
@@ -1389,6 +1448,7 @@ app.addEventListener('click', (e) => {
   const bannerBtn = target.closest('button[data-banner]') as HTMLElement | null;
   const ptoggle = target.closest('button.ptoggle') as HTMLElement | null;
   const pbtn = target.closest('button.pbtn') as HTMLButtonElement | null;
+  const qnav = target.closest<HTMLButtonElement>('button[data-qnav]');
   const permRow = target.closest('tr.permrow') as HTMLElement | null;
   const pr = target.closest('.pr') as HTMLElement | null;
   const row = target.closest('tr.row') as HTMLElement | null;
@@ -1414,6 +1474,37 @@ app.addEventListener('click', (e) => {
     ptoggle.title = open ? 'Hide the details' : 'Show the command and the buttons';
     const twisty = ptoggle.querySelector('.ptw');
     if (twisty) twisty.textContent = open ? '▾' : '▸';
+    e.stopPropagation();
+    return;
+  }
+  if (qnav && permRow) {
+    const stepper = qnav.closest<HTMLElement>('.qstep')!;
+    const draft = saveQuestionDraft(stepper);
+    if (!draft) return;
+    const step = Number(stepper.dataset.step);
+    const picked = draft.selected[step] ?? [];
+    const other = draft.other[step] ?? '';
+    if (qnav.dataset.qnav === 'back') draft.step--;
+    else if (qnav.dataset.qnav === 'next') {
+      if (picked.length === 0 && !other) return;
+      draft.step++;
+    } else {
+      if (picked.length === 0 && !other) return;
+      const session = sessions.find((item) => item.key === permRow.dataset.key);
+      const questions = session?.pendingQuestion?.questions ?? [];
+      const answers = Object.fromEntries(questions.map((question, index) => {
+        const values = [...(draft.selected[index] ?? [])];
+        if (draft.other[index]) values.push(draft.other[index]);
+        return [question.question, values.join(', ')];
+      }));
+      qnav.disabled = true;
+      qnav.textContent = 'Answering…';
+      post({ type: 'answerQuestion', key: permRow.dataset.key!, requestId: permRow.dataset.request!, answers });
+      questionDrafts.delete(stepper.dataset.draft!);
+      e.stopPropagation();
+      return;
+    }
+    render();
     e.stopPropagation();
     return;
   }
@@ -1476,6 +1567,13 @@ setInterval(() => {
 }, 10_000);
 
 post({ type: 'ready' });
+
+// Every keystroke and every tick of a radio in the question stepper, so the
+// next snapshot re-renders the card with the answer still in it.
+app.addEventListener('input', (event) => {
+  const stepper = (event.target as HTMLElement | null)?.closest?.<HTMLElement>('.qstep');
+  if (stepper) saveQuestionDraft(stepper);
+});
 
 // Kept in the column menu so diagnostic visibility is beside the worker summary.
 app.addEventListener('change', (event) => {

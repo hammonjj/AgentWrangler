@@ -26,6 +26,8 @@ export interface WranglerConfig {
   remoteChannelId: string;
   /** Comma-separated in the setting; split and trimmed here. */
   remoteAuthorizedUserIds: string[];
+  /** Also post a buttonless message when an agent finishes. */
+  remoteNotifyOnDone: boolean;
 }
 
 export const DEFAULT_CONFIG: WranglerConfig = {
@@ -64,6 +66,10 @@ export const DEFAULT_CONFIG: WranglerConfig = {
   remoteGuildId: '',
   remoteChannelId: '',
   remoteAuthorizedUserIds: [],
+  // On, but only reachable once `remoteEnabled` is: someone who has connected a
+  // channel to hear about their agents wants to hear the one thing that is not
+  // a question.
+  remoteNotifyOnDone: true,
 };
 
 /** `123, 456` → `['123','456']`, dropping blanks so a trailing comma is harmless. */
@@ -104,5 +110,6 @@ export function readConfig(settings: HostSettings): WranglerConfig {
     remoteGuildId: settings.get('remote.discord.guildId', d.remoteGuildId),
     remoteChannelId: settings.get('remote.discord.channelId', d.remoteChannelId),
     remoteAuthorizedUserIds: parseIdList(settings.get('remote.discord.authorizedUserIds', '')),
+    remoteNotifyOnDone: settings.get('remote.notifyOnDone', d.remoteNotifyOnDone),
   };
 }

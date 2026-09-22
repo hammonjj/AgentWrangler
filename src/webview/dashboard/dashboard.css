@@ -823,6 +823,30 @@ button.pbtn:disabled {
   opacity: 0.55;
 }
 
+.qprogress {
+  margin-bottom: 3px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+.qprompt { margin-bottom: 6px; }
+.qchoices { display: grid; gap: 4px; }
+.qchoice { display: flex; gap: 7px; align-items: flex-start; cursor: pointer; }
+.qchoice input { margin-top: 2px; }
+.qchoice span { display: grid; }
+.qchoice small { margin-top: 1px; color: var(--vscode-descriptionForeground); }
+.qother {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 2px;
+  padding: 4px 7px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 3px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font: inherit;
+}
+.qnav { display: grid; grid-template-columns: auto 1fr auto; gap: 5px; margin-top: 8px; }
+
 /* No margins: every chip sits in `.c-agent .chips`, which spaces them with a
    gap. A margin here would add to that one and double the first chip's gap
    from the title. */

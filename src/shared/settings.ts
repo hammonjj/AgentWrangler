@@ -342,6 +342,16 @@ export const SETTINGS: SettingSpec[] = [
     description:
       'Comma-separated Discord user IDs allowed to answer prompts. IDs rather than usernames: a username can be changed and reused, and this is the only thing between someone in the channel and a permission decision. Empty means nobody, and nothing is published at all.',
   },
+  {
+    key: 'remote.notifyOnDone',
+    dependsOn: 'remote.enabled',
+    label: 'Say when an agent finishes',
+    group: 'Experimental',
+    type: 'boolean',
+    default: true,
+    description:
+      'Post a message when an agent finishes its task, alongside the permission prompts. It has no buttons — nothing is waiting on you — and names the agent, repository and branch, never anything it said. Auto-pause is announced the same way and is not covered by this switch: everything stopping is not optional news.',
+  },
 ];
 
 /** Group headings in declaration order, with no duplicates. */

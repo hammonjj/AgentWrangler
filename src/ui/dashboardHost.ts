@@ -8,6 +8,7 @@ import type { ModelCatalogService } from '../core/modelCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { HookHealth, ProjectDTO } from '../shared/model';
+import type { QuestionView } from '../shared/conversation';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
 import type { PaneChannel } from './paneChannel';
@@ -40,6 +41,8 @@ export interface UsageSource {
 export interface RunnerOwnership {
   owns(sessionId: string | undefined): boolean;
   wasRunning?(sessionId: string): boolean;
+  pendingQuestion?(sessionId: string | undefined): { requestId: string; questions: QuestionView[] } | undefined;
+  answer?(sessionId: string | undefined, requestId: string, answers: Record<string, string>): Promise<boolean>;
   onDidChange(listener: () => void): Disposable;
 }
 
@@ -166,6 +169,7 @@ export class DashboardHost {
       // Ask the runner first: its child processes are descendants of this
       // extension host, so the process table would call them panel sessions.
       const runnerOwned = this.runners.owns(s.sessionId);
+      const pendingQuestion = this.runners.pendingQuestion?.(s.sessionId);
       return {
         ...s,
         archived: this.archive.isArchived(s.key),
@@ -173,6 +177,7 @@ export class DashboardHost {
         sectionAssignedAt: this.pins.assignedAt(s.key),
         paused: this.pause.isPaused(s.pid) || undefined,
         runnerOwned: runnerOwned || undefined,
+        pendingQuestion,
         wasRunningHere: this.runners.wasRunning?.(s.sessionId) || undefined,
         openTarget: openTargetFor(),
       };
@@ -240,6 +245,9 @@ export class DashboardHost {
           void this.actions.decidePermission(m.key, m.action, { expectedRequestId: m.requestId });
         }
         break;
+      case 'answerQuestion':
+        void this.answerQuestion(m.key, m.requestId, m.answers);
+        break;
       case 'openExternal':
         this.actions.openExternal(m.url);
         break;
@@ -291,6 +299,14 @@ export class DashboardHost {
         this.actions.pauseAll(m.pause);
         break;
     }
+  }
+
+  private async answerQuestion(key: string, requestId: string, answers: Record<string, string>): Promise<void> {
+    const session = this.store.get(key);
+    if (!session || !this.runners.answer) return;
+    const answered = await this.runners.answer(session.sessionId, requestId, answers);
+    if (!answered) this.dialogs.flash('Agent Wrangler: that question has already been answered.', 4000);
+    this.pushSnapshot();
   }
 
   private async createConversationSection(key: string): Promise<void> {

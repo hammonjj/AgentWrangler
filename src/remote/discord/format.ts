@@ -10,7 +10,7 @@
  * preview line; the command is a code block, because it is the thing being
  * agreed to; everything else is a field.
  */
-import type { RemoteAsk } from '../../shared/remote';
+import type { RemoteAsk, RemoteNotice } from '../../shared/remote';
 import type { RemoteClose } from '../transport';
 import { encodeCustomId } from './ids';
 
@@ -27,6 +27,8 @@ const LIMIT = {
 } as const;
 
 const COLOUR = {
+  warn: 0xe0a33e,
+  info: 0x5865f2,
   pending: 0xe0a33e,
   allowed: 0x3ba55d,
   denied: 0xed4245,
@@ -156,6 +158,24 @@ export function closedPayload(ask: RemoteAsk, outcome: RemoteClose): DiscordMess
   };
 
   return { embeds: [fit(embed)], components: [] };
+}
+
+/**
+ * An announcement: an embed and nothing else.
+ *
+ * No components, because there is nothing to press, and no mentions are parsed
+ * — a notice must never be able to ping a channel because of a character that
+ * happened to be in its text.
+ */
+export function noticePayload(notice: RemoteNotice): DiscordMessagePayload & { allowed_mentions: unknown } {
+  const embed = {
+    title: clip(notice.title, LIMIT.title),
+    description: clip(notice.body ?? '', LIMIT.description),
+    color: notice.tone === 'info' ? COLOUR.info : COLOUR.warn,
+    fields: [] as unknown[],
+    footer: { text: 'Agent Wrangler' },
+  };
+  return { embeds: [fit(embed)], components: [], allowed_mentions: { parse: [] } };
 }
 
 /** One action row. Five buttons is Discord's limit and three is our maximum. */

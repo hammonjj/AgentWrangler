@@ -13,7 +13,7 @@
  * way would put the allowlist in as many places as there are transports.
  */
 import type { Disposable } from '../core/events';
-import type { RemoteAsk } from '../shared/remote';
+import type { RemoteAsk, RemoteNotice } from '../shared/remote';
 
 /** Where a mirrored ask lives on the remote service. Addressable after a restart. */
 export interface RemoteMessageRef {
@@ -68,4 +68,9 @@ export interface RemoteTransport extends Disposable {
   close(ref: RemoteMessageRef, ask: RemoteAsk, outcome: RemoteClose): Promise<void>;
   /** A private word with whoever pressed: not authorised, too late, unknown. */
   reply(invocation: RemoteInvocation, text: string): Promise<void>;
+  /**
+   * Announce something that already happened. Post and forget: no ref comes
+   * back, because nothing will ever edit or close it.
+   */
+  notify(notice: RemoteNotice): Promise<void>;
 }

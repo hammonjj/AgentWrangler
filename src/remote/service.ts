@@ -27,7 +27,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Emitter, type Disposable } from '../core/events';
 import type { SessionActions } from '../ui/actions';
 import type { SessionDTO } from '../shared/model';
-import { remoteAskFor, type RemoteAsk } from '../shared/remote';
+import { remoteAskFor, type RemoteAsk, type RemoteNotice } from '../shared/remote';
 import type { AuditLog } from './audit';
 import { MirrorStore, type Mirror } from './mirrorStore';
 import { redactForDisplay } from './redact';
@@ -201,6 +201,34 @@ export class RemoteControlService implements Disposable {
       if (!mirror) await this.publish(transport, ask);
       else if (mirror.renderHash !== renderHash(ask)) await this.update(transport, mirror, ask);
     }
+  }
+
+  /**
+   * Announce something that has already happened — auto-pause, today.
+   *
+   * Deliberately not part of `pass()`. A notice is an event, not a state to
+   * reconcile towards: the reconciler's whole guarantee is that running it twice
+   * changes nothing, and an event re-derived on every pass would post again
+   * every time the store ticked. So this is a direct call from whoever knows the
+   * thing happened, sent once.
+   *
+   * It goes through the same queue as everything else so it cannot interleave
+   * with a pass, and it does *not* require an authorized-user allowlist: the
+   * allowlist governs who may press a button, and there is no button here.
+   * Failure is swallowed by the queue — the local dialog already said it, and a
+   * dropped Discord message must not stop agents from being paused.
+   */
+  notify(notice: RemoteNotice): Promise<void> {
+    return this.enqueue(async () => {
+      const transport = this.transport;
+      if (this.disposed || !transport || !this.config().enabled) return;
+      if (!transport.connected) {
+        // No queueing for later: by the time a reconnect lands this is old news.
+        this.log(`notice dropped, not connected: ${notice.title}`);
+        return;
+      }
+      await transport.notify(notice);
+    });
   }
 
   /**

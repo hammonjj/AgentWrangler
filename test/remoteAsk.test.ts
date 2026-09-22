@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { askKeyFor, remoteAskFor } from '../src/shared/remote';
+import { askKeyFor, doneNoticeFor, remoteAskFor } from '../src/shared/remote';
 import type { SessionDTO } from '../src/shared/model';
 
 /** A session blocked on a permission prompt that can still be answered. */
@@ -156,5 +156,47 @@ describe('remoteAskFor', () => {
     expect(ask?.toolName).toBe('a tool');
     expect(ask?.subject).toBeUndefined();
     expect(ask?.context.repository).toBeUndefined();
+  });
+});
+
+describe('doneNoticeFor', () => {
+  const done = (extra: Partial<SessionDTO> = {}): SessionDTO =>
+    blocked({
+      status: 'done',
+      permissionRequestId: undefined,
+      blockedReason: undefined,
+      blockedAsk: undefined,
+      ...extra,
+    });
+
+  it('announces a finished agent with where it was working', () => {
+    expect(doneNoticeFor(done())).toEqual({
+      title: '✅ test-session finished',
+      body: 'proj · dev\nIt is idle until you send it something.',
+      tone: 'info',
+    });
+  });
+
+  it('prefers the nickname, as every other surface does', () => {
+    expect(doneNoticeFor(done({ nickname: 'the refactor' }))?.title).toBe('✅ the refactor finished');
+  });
+
+  it('says nothing about a session that is not finished', () => {
+    expect(doneNoticeFor(blocked())).toBeUndefined();
+    expect(doneNoticeFor(done({ status: 'busy' }))).toBeUndefined();
+    expect(doneNoticeFor(done({ status: 'ended' }))).toBeUndefined();
+  });
+
+  it('stays quiet about an archived session', () => {
+    expect(doneNoticeFor(done({ archived: true }))).toBeUndefined();
+  });
+
+  it('announces a finished Codex session too: no decision is being offered', () => {
+    expect(doneNoticeFor(done({ provider: 'codex' }))?.title).toBe('✅ test-session finished');
+  });
+
+  it('carries no transcript content, and copes with no project or branch', () => {
+    const notice = doneNoticeFor(done({ projectName: undefined, gitBranch: undefined }));
+    expect(notice?.body).toBe('It is idle until you send it something.');
   });
 });

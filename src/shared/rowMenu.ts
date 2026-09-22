@@ -30,9 +30,16 @@ export interface RowMenuItem {
  * cannot be signalled — offering the item there would only ever produce an
  * error message. A session this window runs is closable regardless of pid,
  * since the runner holds the handle itself.
+ *
+ * Deliberately **not** gated on the provider. It used to be Claude-only, which
+ * left archiving as the only way to get a finished Codex conversation out of
+ * the way — and archiving hides a row rather than stopping anything. The two
+ * conditions above are the real ones, and they answer for any provider: a Codex
+ * thread this window runs has no pid of its own (one app-server serves them
+ * all) but is closable through `runnerOwned`, and a Codex conversation running
+ * somewhere else has neither and correctly does not offer the item.
  */
 export function canCloseSession(s: SessionDTO): boolean {
-  if (s.provider !== 'claude') return false;
   if (s.status === 'ended') return false;
   return s.runnerOwned === true || s.pid !== undefined;
 }

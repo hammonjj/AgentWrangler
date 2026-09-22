@@ -102,6 +102,7 @@ export type DashboardToHost =
    * every other action, and on a card drawn before this field existed.
    */
   | { type: 'action'; key: string; action: DashboardAction; requestId?: string }
+  | { type: 'answerQuestion'; key: string; requestId: string; answers: Record<string, string> }
   | { type: 'setConversationSection'; key: string; section: string }
   | { type: 'createConversationSection'; key: string }
   | { type: 'openExternal'; url: string }

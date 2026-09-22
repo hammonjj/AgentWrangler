@@ -23,6 +23,7 @@ import { createApp } from '../app/createApp';
 import { DictationSetupError, defaultModelPath } from '../core/dictation';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { registerBundleScheme, serveBundles } from './bundleProtocol';
+import { installContextMenuEverywhere } from './contextMenu';
 import { createElectronHost } from './electronHost';
 import { installApplicationMenu } from './menu';
 import { JsonStore } from './jsonStore';
@@ -38,6 +39,11 @@ app.setName('Agent Wrangler');
 
 // Before `whenReady`: a scheme cannot be privileged once a renderer exists.
 registerBundleScheme();
+
+// Before any window is built, so no renderer can be created without it. An
+// Electron app has no right-click menu at all unless it makes one, and a text
+// field with no Cut/Copy/Paste reads as broken.
+installContextMenuEverywhere();
 
 /**
  * Whether this process is the one. The running copy gets a `second-instance`

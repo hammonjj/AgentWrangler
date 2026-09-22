@@ -79,13 +79,16 @@ app.innerHTML = `
     </div>
     <div id="slashcommands" role="listbox" hidden></div>
     <div id="mentions" class="mentions" role="listbox" hidden></div>
-    <div id="attachments" hidden></div>
     <div id="composerInput">
+      <div id="attachments" hidden></div>
       <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
       <input id="attachpick" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
-      <button id="attach" class="clipbtn" title="Attach an image" aria-label="Attach an image"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M10.5 4.6v6a2.5 2.5 0 0 1-5 0V3.7a1.5 1.5 0 0 1 3 0v6.6a.5.5 0 0 1-1 0V5.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-      <button id="mic" class="micbtn" title="Dictate a message" aria-label="Dictate a message"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><rect x="6" y="1.8" width="4" height="7.4" rx="2" fill="currentColor"/><path d="M3.9 7.4a4.1 4.1 0 0 0 8.2 0" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><path d="M8 11.5v2.4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg></button>
-      <button id="send" class="askbtn primary" title="Send this message">Send</button>
+      <div id="composerActions">
+        <button id="attach" class="clipbtn" title="Attach an image" aria-label="Attach an image"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><path d="M10.5 4.6v6a2.5 2.5 0 0 1-5 0V3.7a1.5 1.5 0 0 1 3 0v6.6a.5.5 0 0 1-1 0V5.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button id="mic" class="micbtn" title="Dictate a message" aria-label="Dictate a message"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><rect x="6" y="1.8" width="4" height="7.4" rx="2" fill="currentColor"/><path d="M3.9 7.4a4.1 4.1 0 0 0 8.2 0" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><path d="M8 11.5v2.4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg></button>
+        <span class="grow"></span>
+        <button id="send" class="askbtn primary" title="Send this message">Send</button>
+      </div>
     </div>
   </div>
 </div>
@@ -339,6 +342,7 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       if (children) el.appendChild(children);
       if (activeProvider === 'claude' && (b.name === 'Agent' || b.name === 'Task')) {
         const load = document.createElement('button');
+        load.className = 'subagent-load';
         load.textContent = 'Load subagent work';
         load.addEventListener('click', () => post({ type: 'subagent', id: b.id, toolUseId: b.toolUseId }));
         el.appendChild(load);
@@ -895,7 +899,7 @@ function setCaps(next: ConversationCapabilities): void {
     adoptBtn.title = 'End the process running this session and continue it in this window';
   } else if (next.canResumeHere) {
     adoptBtn.textContent = 'Resume here';
-    adoptBtn.title = 'Continue this ended session in this window';
+    adoptBtn.title = 'Start this session running in this window now, without sending anything';
   }
 
   composerWrite.hidden = !next.canSend;
@@ -908,7 +912,23 @@ function setCaps(next: ConversationCapabilities): void {
   // Cleared on the way in, so a reason from a read-only state cannot survive
   // into a typeable one — the row is hidden then, but a stale sentence waiting
   // in the DOM for the next hiccup is not worth the byte it saves.
-  composerNote.textContent = next.sendHint ?? (next.canSend ? '' : (next.readOnlyReason ?? ''));
+  //
+  // The note says what the *button* next to it is for, and never what Send
+  // does. Those were the same sentence once — "Send resumes this session here…"
+  // printed beside a button reading "Resume here", which reads as two ways to
+  // do one thing and invites the fair question of why the button exists. It
+  // exists because sending is not the only reason to want the session live:
+  // until it is adopted the mode, model and effort pickers are disabled (see
+  // just above), so picking a model before typing needs the button. The hint
+  // about Send moved to where Send is typed — the placeholder.
+  //
+  // With no button — a busy session, where taking over would throw its turn
+  // away — there is nothing to explain, so the Send hint is the note again.
+  composerNote.textContent = next.canResumeHere
+    ? 'Ended. Resume it here, or just type — sending resumes it too.'
+    : next.canAdopt && next.adoptOnSend
+      ? 'Running elsewhere. Take it over here, or just type — sending takes it over too.'
+      : (next.sendHint ?? (next.canSend ? '' : (next.readOnlyReason ?? '')));
   composerRead.hidden = next.canSend && !next.adoptOnSend;
   msgEl.placeholder = next.sendHint ?? (activeProvider === 'codex' ? 'Message Codex…' : 'Message Claude…');
   // The box is sized by `autoGrow`, which until now only ran on input — so

@@ -123,6 +123,18 @@ describe('canCloseSession', () => {
   it('is true for a session this window runs, which needs no pid', () => {
     expect(canCloseSession(session({ pid: undefined, runnerOwned: true }))).toBe(true);
   });
+
+  // It used to be Claude-only, which left archiving — a hide, not a stop — as
+  // the only thing a Codex row could be told to do.
+  it('is true for a Codex thread this window runs, which has no pid of its own', () => {
+    const codex = session({ provider: 'codex', key: 'codex:t-1', pid: undefined, runnerOwned: true });
+    expect(canCloseSession(codex)).toBe(true);
+    expect(rowMenuItems(codex).map((i) => i.action)).toContain('close');
+  });
+
+  it('is false for a Codex conversation running somewhere else — no handle either way', () => {
+    expect(canCloseSession(session({ provider: 'codex', key: 'codex:t-2', pid: undefined }))).toBe(false);
+  });
 });
 
 describe('clampMenuPosition', () => {

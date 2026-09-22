@@ -34,6 +34,14 @@ export class CodexRunner implements ConversationSource {
 
   private currentModel?: string;
 
+  /** The question currently waiting on this runner, if any. */
+  get pendingQuestion(): Extract<ConvBlock, { kind: 'question' }> | undefined {
+    return [...this.blocks].reverse().find(
+      (block): block is Extract<ConvBlock, { kind: 'question' }> =>
+        block.kind === 'question' && this.pendingQuestions.has(block.requestId),
+    );
+  }
+
   constructor(
     readonly server: CodexAppServer,
     readonly threadId: string,

@@ -68,6 +68,26 @@ export interface RemoteAsk {
 }
 
 /**
+ * Something that happened, told to the remote surface once.
+ *
+ * The opposite of a `RemoteAsk` in every way that matters: nothing is waiting on
+ * it, so it has no identity, no lifecycle, no buttons and is never edited or
+ * closed. Auto-pause is the first of these — the agents are already stopped by
+ * the time it is sent, and there is nothing a phone could usefully press.
+ *
+ * It carries no session detail on purpose. A notice is about the machine, and
+ * "which project" is exactly the sort of thing the redaction rules exist to keep
+ * out of a channel that does not need it.
+ */
+export interface RemoteNotice {
+  /** The preview line. */
+  title: string;
+  body?: string;
+  /** A hint, not an instruction; a transport with no notion of tone ignores it. */
+  tone?: 'info' | 'warn';
+}
+
+/**
  * Longest rule text inside an "always allow" label. Transports have their own,
  * tighter limits (a Discord button label caps at 80) and enforce them
  * themselves; this only keeps the label scannable rather than a paragraph.
@@ -125,6 +145,35 @@ export function remoteAskFor(s: SessionDTO): RemoteAsk | undefined {
       model: s.model,
     },
     choices: choicesFor(s),
+  };
+}
+
+/**
+ * "That one is finished", as a notice — or nothing, if it is not news.
+ *
+ * Pure and here rather than in the app for the same reason `remoteAskFor` is:
+ * what a remote surface is told about a session is a fact about the session,
+ * and the wording is then testable without a store, a transport or a network.
+ *
+ * The exclusions match the permission card's, and for the same reasons:
+ * **archived** means "out of my way", and a channel message is the opposite of
+ * that. Unlike the card this is not Claude-only — a Codex session that has
+ * stopped is exactly as finished, and there is no decision here that a provider
+ * would have to be able to carry.
+ *
+ * It discloses the same things the card's header does — agent, repository,
+ * branch — and nothing more. In particular no transcript content: that an agent
+ * finished is the news, and what it said is on the machine where it is safe.
+ */
+export function doneNoticeFor(s: SessionDTO): RemoteNotice | undefined {
+  if (s.status !== 'done') return undefined;
+  if (s.archived) return undefined;
+
+  const where = [s.projectName, s.gitBranch].filter(Boolean).join(' · ');
+  return {
+    title: `✅ ${displayLabel(s)} finished`,
+    body: [where, 'It is idle until you send it something.'].filter(Boolean).join('\n'),
+    tone: 'info',
   };
 }
 

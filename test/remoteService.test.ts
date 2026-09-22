@@ -13,7 +13,7 @@ import type {
   RemoteTransport,
 } from '../src/remote/transport';
 import type { SessionDTO } from '../src/shared/model';
-import type { RemoteAsk } from '../src/shared/remote';
+import type { RemoteAsk, RemoteNotice } from '../src/shared/remote';
 
 /** A transport that records instead of talking to anything. */
 class FakeTransport implements RemoteTransport {
@@ -23,6 +23,7 @@ class FakeTransport implements RemoteTransport {
   updated: { ref: RemoteMessageRef; ask: RemoteAsk }[] = [];
   closed: { ref: RemoteMessageRef; outcome: RemoteClose }[] = [];
   replies: { invocation: RemoteInvocation; text: string }[] = [];
+  notices: RemoteNotice[] = [];
   failPublish = false;
   private seq = 0;
   private invoke = new Emitter<RemoteInvocation>();
@@ -52,6 +53,9 @@ class FakeTransport implements RemoteTransport {
   }
   async reply(invocation: RemoteInvocation, text: string): Promise<void> {
     this.replies.push({ invocation, text });
+  }
+  async notify(notice: RemoteNotice): Promise<void> {
+    this.notices.push(notice);
   }
   dispose(): void {
     this.invoke.dispose();
@@ -483,6 +487,47 @@ describe('RemoteControlService', () => {
       expect(transportB.published).toHaveLength(0);
       svcB.dispose();
       transportB.dispose();
+    });
+  });
+
+  describe('notices', () => {
+    const NOTICE = { title: '⏸️ Agents paused — plan usage reached 98%', body: 'Paused 3 agents.', tone: 'warn' } as const;
+
+    it('posts a notice with no buttons and nothing to reconcile', async () => {
+      const { svc } = await build(fakeSessions([]));
+      await svc.notify(NOTICE);
+      expect(transport.notices).toEqual([NOTICE]);
+      // A notice is an event, not state: reconciling again must not repeat it.
+      await svc.reconcile();
+      expect(transport.notices).toHaveLength(1);
+      expect(svc.mirroredCount).toBe(0);
+      svc.dispose();
+    });
+
+    it('sends nothing when remote control is off', async () => {
+      const { svc } = await build(fakeSessions([]));
+      cfg = { ...cfg, enabled: false };
+      await svc.notify(NOTICE);
+      expect(transport.notices).toHaveLength(0);
+      svc.dispose();
+    });
+
+    it('drops the notice rather than queueing it when disconnected', async () => {
+      const { svc } = await build(fakeSessions([]));
+      await transport.disconnect();
+      await svc.notify(NOTICE);
+      await transport.connect();
+      await svc.whenIdle();
+      expect(transport.notices).toHaveLength(0);
+      svc.dispose();
+    });
+
+    it('still posts with an empty allowlist: there is no button to authorise', async () => {
+      const { svc } = await build(fakeSessions([]));
+      cfg = { ...cfg, authorizedUserIds: [] };
+      await svc.notify(NOTICE);
+      expect(transport.notices).toHaveLength(1);
+      svc.dispose();
     });
   });
 });
