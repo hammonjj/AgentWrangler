@@ -688,9 +688,34 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const history = session.transcriptPath
       ? await readRolloutBlocks(session.transcriptPath).catch(() => ({ blocks: [], truncated: false }))
       : { blocks: [], truncated: false };
-    const runner = await codexRunners.resume(session.sessionId, session.cwd, history.blocks, session.model);
+    let runner: Awaited<ReturnType<CodexRunnerService['resume']>>;
+    for (;;) {
+      try {
+        runner = await codexRunners.resume(session.sessionId, session.cwd, history.blocks, session.model);
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/already has (?:an active|a live local) writer/i.test(message)) throw error;
+        const choice = await dialogs.warn(
+          'This Codex conversation is still open in VS Code.',
+          {
+            modal: true,
+            detail:
+              'Codex allows only one app to write to a conversation at a time. Close this chat in VS Code, then retry. ' +
+              'Or fork it to continue here immediately with the same history under a new conversation ID.',
+          },
+          'Retry',
+          'Fork here',
+        );
+        if (choice === 'Retry') continue;
+        if (choice !== 'Fork here') return;
+        runner = await codexRunners.fork(session.sessionId, session.cwd, history.blocks, session.model);
+        log(`forked active Codex conversation ${session.sessionId} as ${runner.threadId}`);
+        break;
+      }
+    }
     surface?.showCodexRunner(runner);
-    log(`resumed Codex conversation ${session.sessionId} here`);
+    log(`controlling Codex conversation ${runner.threadId} here`);
   };
   const actions: SessionActions = {
     async adoptAndSend(key, text, images, signal) {

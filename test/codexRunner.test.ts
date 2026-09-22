@@ -13,6 +13,7 @@ class FakeServer {
     this.calls.push({ method, params });
     if (method === 'thread/start') return { thread: { id: 'thread-1' } };
     if (method === 'thread/resume') return { thread: { id: params.threadId, model: 'gpt-resumed' } };
+    if (method === 'thread/fork') return { thread: { id: 'thread-forked', model: 'gpt-forked' } };
     if (method === 'model/list') return { data: [] };
     if (method === 'turn/start') return { turn: { id: 'turn-1' } };
     return {};
@@ -48,6 +49,21 @@ describe('CodexRunner', () => {
     service.release('thread-existing');
     expect(service.owns('thread-existing')).toBe(false);
     expect(server.calls).toContainEqual({ method: 'thread/unsubscribe', params: { threadId: 'thread-existing' } });
+    service.dispose();
+  });
+
+  it('forks an externally owned thread into a controllable conversation', async () => {
+    const server = new FakeServer();
+    const service = new CodexRunnerService(server as any);
+    const history: any[] = [{ kind: 'user', id: 'old-prompt', text: 'Existing prompt' }];
+
+    const runner = await service.fork('thread-external', '/Users/test/proj', history);
+
+    expect(server.calls[0]).toEqual({ method: 'thread/fork', params: { threadId: 'thread-external' } });
+    expect(runner.threadId).toBe('thread-forked');
+    expect((await runner.init()).blocks).toEqual(history);
+    expect(runner.composer.model).toBe('gpt-forked');
+    expect(service.owns('thread-forked')).toBe(true);
     service.dispose();
   });
 

@@ -257,6 +257,16 @@ export class CodexRunnerService implements Disposable {
     this.loadModels(runner);
     return runner;
   }
+  async fork(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string): Promise<CodexRunner> {
+    const result = await this.server.request<any>('thread/fork', { threadId });
+    const forkedId = result?.thread?.id;
+    if (typeof forkedId !== 'string') throw new Error('Codex App Server returned no forked thread id');
+    const runner = new CodexRunner(this.server, forkedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks);
+    this.runners.set(forkedId.toLowerCase(), runner);
+    this.change.fire();
+    this.loadModels(runner);
+    return runner;
+  }
   release(threadId: string): void {
     const key = threadId.toLowerCase();
     const runner = this.runners.get(key);
