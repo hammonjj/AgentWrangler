@@ -29,7 +29,14 @@ export class CodexRunner implements ConversationSource {
 
   private currentModel?: string;
 
-  constructor(readonly server: CodexAppServer, readonly threadId: string, readonly cwd: string, model?: string) {
+  constructor(
+    readonly server: CodexAppServer,
+    readonly threadId: string,
+    readonly cwd: string,
+    model?: string,
+    initialBlocks: ConvBlock[] = [],
+  ) {
+    this.blocks = [...initialBlocks];
     this.currentModel = model;
     this.composer.model = model;
     this.subs.push(server.onNotification((event) => this.onNotification(event)), server.onRequest((event) => this.onRequest(event)));
@@ -235,6 +242,31 @@ export class CodexRunnerService implements Disposable {
     const runner = new CodexRunner(this.server, threadId, cwd, result?.model ?? model);
     this.runners.set(threadId.toLowerCase(), runner);
     this.change.fire();
+    this.loadModels(runner);
+    return runner;
+  }
+  async resume(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string): Promise<CodexRunner> {
+    const key = threadId.toLowerCase();
+    const existing = this.runners.get(key);
+    if (existing) return existing;
+    const result = await this.server.request<any>('thread/resume', { threadId });
+    const resumedId = result?.thread?.id ?? threadId;
+    const runner = new CodexRunner(this.server, resumedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks);
+    this.runners.set(resumedId.toLowerCase(), runner);
+    this.change.fire();
+    this.loadModels(runner);
+    return runner;
+  }
+  release(threadId: string): void {
+    const key = threadId.toLowerCase();
+    const runner = this.runners.get(key);
+    if (!runner) return;
+    this.runners.delete(key);
+    runner.shutdown();
+    void this.server.request('thread/unsubscribe', { threadId }).catch(() => undefined);
+    this.change.fire();
+  }
+  private loadModels(runner: CodexRunner): void {
     void this.server.request<any>('model/list', { includeHidden: false }).then((list) => {
       const models = (list?.data ?? []).map((entry: any) => ({
         value: String(entry.model ?? entry.id),
@@ -247,7 +279,6 @@ export class CodexRunnerService implements Disposable {
       runner.setModels(models);
       this.rememberModels?.(models);
     }).catch(() => undefined);
-    return runner;
   }
   dispose(): void { for (const runner of this.runners.values()) runner.shutdown(); this.runners.clear(); this.server.dispose(); this.change.dispose(); }
 }

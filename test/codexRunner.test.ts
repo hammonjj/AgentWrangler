@@ -12,6 +12,7 @@ class FakeServer {
   async request(method: string, params: any): Promise<any> {
     this.calls.push({ method, params });
     if (method === 'thread/start') return { thread: { id: 'thread-1' } };
+    if (method === 'thread/resume') return { thread: { id: params.threadId, model: 'gpt-resumed' } };
     if (method === 'model/list') return { data: [] };
     if (method === 'turn/start') return { turn: { id: 'turn-1' } };
     return {};
@@ -29,6 +30,24 @@ describe('CodexRunner', () => {
       method: 'thread/start',
       params: { cwd: '/Users/test/proj', model: 'gpt-test', config: { model_reasoning_effort: 'high' } },
     });
+    service.dispose();
+  });
+
+  it('resumes an existing thread with its transcript and releases only this client', async () => {
+    const server = new FakeServer();
+    const service = new CodexRunnerService(server as any);
+    const history: any[] = [{ kind: 'assistant', id: 'old-answer', text: 'Existing answer' }];
+
+    const runner = await service.resume('thread-existing', '/Users/test/proj', history);
+
+    expect(server.calls[0]).toEqual({ method: 'thread/resume', params: { threadId: 'thread-existing' } });
+    expect((await runner.init()).blocks).toEqual(history);
+    expect(runner.composer.model).toBe('gpt-resumed');
+    expect(service.owns('THREAD-EXISTING')).toBe(true);
+
+    service.release('thread-existing');
+    expect(service.owns('thread-existing')).toBe(false);
+    expect(server.calls).toContainEqual({ method: 'thread/unsubscribe', params: { threadId: 'thread-existing' } });
     service.dispose();
   });
 

@@ -295,20 +295,27 @@ export class ConversationHost {
   private async caps(session: AgentSession): Promise<ConversationCapabilities> {
     const source = this.source;
     const runner = source instanceof RunnerSource ? source.runner : undefined;
+    const codexRunner = session.provider === 'codex' && source?.kind === 'runner' ? source : undefined;
+    const controlled = runner !== undefined || codexRunner !== undefined;
     const adoptOnSend = !runner && session.provider === 'claude' && !!session.cwd;
-    const canSend = (runner ? runner.canSend : source?.kind === 'runner' && source.send !== undefined) || adoptOnSend;
+    const canSend = (runner ? runner.canSend : codexRunner?.send !== undefined) || adoptOnSend;
 
     const adopt = session.provider === 'claude' ? adoptActionFor(session, runner !== undefined) : undefined;
+    const canAdoptCodex =
+      session.provider === 'codex' &&
+      !codexRunner &&
+      !!session.cwd &&
+      (session.status === 'waiting' || session.status === 'done');
     return {
       canSend,
       adoptOnSend,
       sendHint: adoptOnSend ? (session.statusIsEstimated ? 'Send asks you to confirm taking over this session.' : ['busy', 'stuck', 'blocked'].includes(session.status) ? 'Send queues this message until the session is idle, then takes over here.' : 'Send resumes this session here and ends its previous process.') : undefined,
       canInterrupt: canSend && (source?.composer?.busy ?? false),
-      canAdopt: adopt === 'adopt',
+      canAdopt: adopt === 'adopt' || canAdoptCodex,
       canResumeHere: adopt === 'resume-here',
-      canRelease: runner !== undefined,
-      estimated: runner === undefined && session.statusIsEstimated === true,
-      readOnlyReason: canSend ? undefined : readOnlyReason(session, runner),
+      canRelease: controlled,
+      estimated: !controlled && session.statusIsEstimated === true,
+      readOnlyReason: canSend ? undefined : readOnlyReason(session, runner, canAdoptCodex),
     };
   }
 
@@ -602,10 +609,12 @@ function syntheticSession(runner: RunnerSession, store: SessionStore): AgentSess
 function readOnlyReason(
   session: AgentSession,
   runner: RunnerSession | undefined,
+  canAdoptCodex = false,
 ): string | undefined {
   if (runner) {
     return runner.lifecycle === 'error' ? 'This session stopped with an error.' : undefined;
   }
+  if (canAdoptCodex) return 'Take over this Codex conversation to type here.';
   if (session.status === 'ended') return undefined;
   return 'This session is not currently available for typing here.';
 }

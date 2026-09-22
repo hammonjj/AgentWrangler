@@ -32,6 +32,7 @@ import { resolveClaudeBinary } from '../claude/binary';
 import { ClaudeProvider } from '../claude/claudeProvider';
 import { CodexProvider } from '../codex/codexProvider';
 import { CodexAppServer } from '../codex/appServer';
+import { readRolloutBlocks } from '../codex/rollout';
 import { codexUsageReader } from '../codex/usage';
 import { CodexRunnerService } from '../codex/runner';
 import { isPidAlive, readRegistry } from '../claude/registry';
@@ -674,6 +675,23 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   const adopting = new Set<string>();
+  const adoptCodexSession = async (session: AgentSession): Promise<void> => {
+    if (!session.cwd) throw new Error('Agent Wrangler: this Codex conversation has no working folder to resume.');
+    if (session.status !== 'waiting' && session.status !== 'done') {
+      throw new Error('Agent Wrangler: wait for the current Codex turn to finish before taking over here.');
+    }
+    const existing = codexRunners.get(session.sessionId);
+    if (existing) {
+      surface?.showCodexRunner(existing);
+      return;
+    }
+    const history = session.transcriptPath
+      ? await readRolloutBlocks(session.transcriptPath).catch(() => ({ blocks: [], truncated: false }))
+      : { blocks: [], truncated: false };
+    const runner = await codexRunners.resume(session.sessionId, session.cwd, history.blocks, session.model);
+    surface?.showCodexRunner(runner);
+    log(`resumed Codex conversation ${session.sessionId} here`);
+  };
   const actions: SessionActions = {
     async adoptAndSend(key, text, images, signal) {
       if (adopting.has(key)) throw new Error('A takeover is already pending for this session.');
@@ -722,10 +740,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (!s) return;
       if (adopting.has(key)) return;
       adopting.add(key);
-      void adoptSession(s).catch((e) => dialogs.error(String(e))).finally(() => adopting.delete(key));
+      const adoption = s.provider === 'codex' ? adoptCodexSession(s) : adoptSession(s).then(() => undefined);
+      void adoption.catch((e) => dialogs.error(String(e))).finally(() => adopting.delete(key));
     },
     release(key) {
       const s = store.get(key);
+      if (s?.provider === 'codex') {
+        if (!codexRunners.owns(s.sessionId)) return;
+        codexRunners.release(s.sessionId);
+        log(`released Codex conversation ${s.sessionId}`);
+        return;
+      }
       const runner = runners.get(s?.sessionId);
       if (!s || !runner) return;
       if (!host.shell.runInTerminal) {
