@@ -32,6 +32,13 @@ export interface SettingSpec {
   enumDescriptions?: string[];
   minimum?: number;
   maximum?: number;
+  /**
+   * The key of a boolean this setting only matters under. Preferences nests it
+   * beneath that one and reveals it when it is on — so a feature's own settings
+   * are not four unexplained fields sitting next to the switch that governs
+   * them. Purely presentational: the value is still read whatever is showing.
+   */
+  dependsOn?: string;
 }
 
 export const SETTINGS: SettingSpec[] = [
@@ -298,15 +305,16 @@ export const SETTINGS: SettingSpec[] = [
   // switched on for someone who did not go looking for it.
   {
     key: 'remote.enabled',
-    label: 'Answer prompts from Discord',
+    label: 'Discord integration',
     group: 'Experimental',
     type: 'boolean',
     default: false,
     description:
-      'Mirror permission prompts to a Discord channel, so you can answer them while away from the machine. Agent Wrangler stays in charge: Discord shows the same choices the dashboard does, and pressing one runs the same action. Nothing is published until a bot is connected and at least one Discord user is authorised below.',
+      'Mirror permission prompts to a Discord channel, so you can answer them while away from the machine. Agent Wrangler stays in charge: Discord shows the same choices the dashboard does, and pressing one runs the same action. Connect a bot from the Agent Wrangler menu — the token is kept in the keychain, not here. Nothing is published until that is done and at least one user below is authorised.',
   },
   {
     key: 'remote.discord.guildId',
+    dependsOn: 'remote.enabled',
     label: 'Discord server ID',
     group: 'Experimental',
     type: 'string',
@@ -316,6 +324,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'remote.discord.channelId',
+    dependsOn: 'remote.enabled',
     label: 'Discord channel ID',
     group: 'Experimental',
     type: 'string',
@@ -325,6 +334,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'remote.discord.authorizedUserIds',
+    dependsOn: 'remote.enabled',
     label: 'Authorised Discord users',
     group: 'Experimental',
     type: 'string',

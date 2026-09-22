@@ -31,6 +31,8 @@ const root = document.getElementById('prefsApp');
 const sections = new Map<string, HTMLElement>();
 /** Sidebar links by group name, so the current section can be marked. */
 const navLinks = new Map<string, HTMLButtonElement>();
+/** Wrappers holding the settings that only apply while a boolean is on. */
+const dependents = new Map<string, HTMLElement>();
 let values: Record<string, string | boolean | number> = {};
 /** The controls, so an external change can be reflected without a re-render. */
 const controls = new Map<string, HTMLInputElement | HTMLSelectElement>();
@@ -72,6 +74,8 @@ function write(spec: SettingSpec, value: string | boolean | number): void {
   if (value === valueOf(spec)) return;
   values[spec.key] = value;
   markRow(spec);
+  // Something may be nested under this one, waiting to be shown.
+  if (spec.type === 'boolean') syncReveal(spec.key);
   if (value === spec.default) post({ type: 'reset', key: spec.key });
   else post({ type: 'set', key: spec.key, value });
 }
@@ -235,6 +239,25 @@ function renderRow(spec: SettingSpec): HTMLElement {
   return row;
 }
 
+/**
+ * Show or hide what hangs off a boolean.
+ *
+ * The wrapper animates between `grid-template-rows: 0fr` and `1fr` rather than
+ * a `max-height` guess, so the height it slides to is whatever the content
+ * actually is — no magic number to be wrong when a description wraps to three
+ * lines on a narrow window.
+ *
+ * `inert` as well as hidden: a collapsed field that is still tabbable is a
+ * field someone can type into without being able to see it.
+ */
+function syncReveal(parentKey: string): void {
+  const wrapper = dependents.get(parentKey);
+  if (!wrapper) return;
+  const on = values[parentKey] === true;
+  wrapper.classList.toggle('open', on);
+  wrapper.inert = !on;
+}
+
 /** Push the current value into an existing control. */
 function applyValue(spec: SettingSpec): void {
   const control = controls.get(spec.key);
@@ -310,6 +333,7 @@ function render(): void {
   rows.clear();
   sections.clear();
   navLinks.clear();
+  dependents.clear();
 
   const groups = settingGroups();
   root.appendChild(renderNav(groups));
@@ -331,11 +355,32 @@ function render(): void {
     const heading = document.createElement('h2');
     heading.textContent = group;
     section.appendChild(heading);
-    for (const spec of settings) section.appendChild(renderRow(spec));
+
+    // A setting that depends on a boolean is rendered inside a wrapper that
+    // follows it, so the group reads as "the switch, and what it governs"
+    // rather than as a flat list where three of five fields do nothing.
+    for (const spec of settings) {
+      if (spec.dependsOn) {
+        let wrapper = dependents.get(spec.dependsOn);
+        if (!wrapper) {
+          wrapper = document.createElement('div');
+          wrapper.className = 'pf-dependents';
+          const inner = document.createElement('div');
+          inner.className = 'pf-dependents-inner';
+          wrapper.appendChild(inner);
+          dependents.set(spec.dependsOn, wrapper);
+          section.appendChild(wrapper);
+        }
+        wrapper.firstElementChild!.appendChild(renderRow(spec));
+        continue;
+      }
+      section.appendChild(renderRow(spec));
+    }
     main.appendChild(section);
   }
 
   root.appendChild(main);
+  for (const parentKey of dependents.keys()) syncReveal(parentKey);
   markCurrent(groups[0]?.group ?? '');
   watchScroll(main);
 }
@@ -345,9 +390,12 @@ window.addEventListener('message', (event: MessageEvent) => {
   if (!message || message.type !== 'values') return;
   values = message.values ?? {};
   if (controls.size === 0) render();
-  else for (const { settings } of settingGroups()) for (const spec of settings) {
-    applyValue(spec);
-    markRow(spec);
+  else {
+    for (const { settings } of settingGroups()) for (const spec of settings) {
+      applyValue(spec);
+      markRow(spec);
+    }
+    for (const parentKey of dependents.keys()) syncReveal(parentKey);
   }
 });
 

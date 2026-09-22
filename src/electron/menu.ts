@@ -37,6 +37,7 @@ export function installApplicationMenu(
             // setting and needs somewhere of its own to be typed.
             { label: 'Connect Discord…', click: () => void wrangler.connectDiscord() },
             { label: 'Disconnect Discord', click: () => void wrangler.disconnectDiscord() },
+            { label: 'Test Remote Control…', click: () => void wrangler.testRemoteControl() },
             { type: 'separator' },
             { role: 'services' },
             { type: 'separator' },
@@ -71,6 +72,7 @@ export function installApplicationMenu(
               { type: 'separator' },
               { label: 'Connect Discord…', click: () => void wrangler.connectDiscord() },
               { label: 'Disconnect Discord', click: () => void wrangler.disconnectDiscord() },
+              { label: 'Test Remote Control…', click: () => void wrangler.testRemoteControl() },
               { type: 'separator' },
               { role: 'quit' },
             ] as MenuItemConstructorOptions[])),

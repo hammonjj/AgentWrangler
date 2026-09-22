@@ -156,6 +156,8 @@ export interface AgentWranglerApp {
   connectDiscord(): Promise<void>;
   /** Forget the token and close the connection. */
   disconnectDiscord(): Promise<void>;
+  /** Check every part of the remote setup and report each separately. */
+  testRemoteControl(): Promise<void>;
   /** The session picker, for commands invoked without one. */
   pickSession(filter?: (s: AgentSession) => boolean): Promise<AgentSession | undefined>;
   /** Wrap a key-taking action so it asks which session when given nothing. */
@@ -718,6 +720,89 @@ export function createApp(host: HostServices): AgentWranglerApp {
     );
   };
 
+  /**
+   * Check the whole setup and post a real card.
+   *
+   * Every failure this can have looks the same from the outside — nothing
+   * appears in Discord — so it reports each check separately rather than
+   * succeeding or failing as a whole. The channel check is its own line on
+   * purpose: a private channel needs the bot added *to the channel*, and the
+   * server check passes while that is missing.
+   */
+  const testRemoteControl = async (): Promise<void> => {
+    const cfg = getConfig();
+    const token = await host.secrets.get(DISCORD_BOT_TOKEN_KEY);
+    const lines: string[] = [];
+    const ok = (m: string) => lines.push(`✓  ${m}`);
+    const bad = (m: string) => lines.push(`✗  ${m}`);
+
+    lines.push(cfg.remoteEnabled ? '✓  Discord integration is on' : '✗  Discord integration is off in Preferences → Experimental');
+    if (!token) {
+      bad('No bot token. Use Connect Discord… first.');
+      void dialogs.warn('Agent Wrangler — remote control', { detail: lines.join('\n') }, 'OK');
+      return;
+    }
+    ok('A bot token is stored');
+
+    const api = async (route: string) =>
+      fetch(`https://discord.com/api/v10${route}`, { headers: { Authorization: `Bot ${token}` } });
+
+    try {
+      const me = await api('/users/@me');
+      if (me.ok) ok(`Token works — the bot is ${((await me.json()) as { username?: string }).username ?? 'unnamed'}`);
+      else bad(`Discord rejected the token (HTTP ${me.status})`);
+
+      const application = await api('/applications/@me');
+      if (application.ok) {
+        const url = ((await application.json()) as { interactions_endpoint_url?: string }).interactions_endpoint_url;
+        if (url) bad(`An Interactions Endpoint URL is set (${url}). Clear it, or button presses go there instead of to this app.`);
+        else ok('No Interactions Endpoint URL, so presses arrive here');
+      }
+
+      if (!cfg.remoteGuildId) bad('No server ID set');
+      else {
+        const guild = await api(`/guilds/${cfg.remoteGuildId}`);
+        if (guild.ok) ok(`In the server "${((await guild.json()) as { name?: string }).name ?? cfg.remoteGuildId}"`);
+        else bad(`Cannot see that server (HTTP ${guild.status}). Is the bot invited?`);
+      }
+
+      if (!cfg.remoteChannelId) bad('No channel ID set');
+      else {
+        const channel = await api(`/channels/${cfg.remoteChannelId}`);
+        if (channel.ok) ok(`Can see #${((await channel.json()) as { name?: string }).name ?? cfg.remoteChannelId}`);
+        else bad(`Cannot see that channel (HTTP ${channel.status}). A private channel needs the bot added to the channel itself, not just the server.`);
+      }
+
+      if (cfg.remoteAuthorizedUserIds.length === 0) bad('No authorised users, so nothing will be published at all');
+      else ok(`${cfg.remoteAuthorizedUserIds.length} authorised user(s)`);
+
+      lines.push(remoteControl.connected ? '✓  Connected to the Discord gateway' : '✗  Not connected to the gateway yet');
+
+      // Only post when everything else passed: a card in a channel nobody can
+      // act on is litter, and the lines above already say why.
+      if (!lines.some((l) => l.startsWith('✗')) && cfg.remoteChannelId) {
+        const posted = await fetch(`https://discord.com/api/v10/channels/${cfg.remoteChannelId}/messages`, {
+          method: 'POST',
+          headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            embeds: [
+              {
+                title: 'Agent Wrangler — test message',
+                description: 'Everything checks out. Real permission prompts will appear here, with buttons.',
+                color: 0x3ba55d,
+              },
+            ],
+          }),
+        });
+        lines.push(posted.ok ? '✓  Posted a test message to the channel' : `✗  Could not post (HTTP ${posted.status})`);
+      }
+    } catch (err) {
+      bad(`Could not reach Discord — ${String(err)}`);
+    }
+
+    void dialogs.warn('Agent Wrangler — remote control', { detail: lines.join('\n') }, 'OK');
+  };
+
   const disconnectDiscord = async (): Promise<void> => {
     await host.secrets.delete(DISCORD_BOT_TOKEN_KEY);
     await disconnectTransport();
@@ -1251,6 +1336,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     uninstallHooks,
     connectDiscord,
     disconnectDiscord,
+    testRemoteControl,
     pickSession,
     withSession,
 
