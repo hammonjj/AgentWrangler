@@ -198,6 +198,8 @@ export type ConversationToHost =
   /** The pane's own button for "give this conversation a tab of its own". */
   | { type: 'openInTab' }
   | { type: 'resumeHere' }
+  /** Install Claude status hooks from the transcript warning. */
+  | { type: 'installHooks' }
   /** "Show the rest" on a block whose text was capped for the wire. */
   | { type: 'requestBlockText'; id: string; toolUseId?: string }
   | { type: 'archive'; requestId: string; before?: string; beforeTime?: string; query?: string }

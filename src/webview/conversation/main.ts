@@ -1053,14 +1053,22 @@ function setComposer(c: ComposerState): void {
 }
 
 function setBanner(next: ConversationCapabilities): void {
-  if (!next.estimated) {
+  if (!next.estimated || activeProvider !== 'claude') {
     banner.hidden = true;
+    banner.replaceChildren();
     return;
   }
   banner.hidden = false;
-  banner.textContent =
-    'Status here is estimated from the transcript, and a permission prompt cannot be answered. ' +
-    'Install the Agent Wrangler status hooks, then restart this session.';
+  banner.replaceChildren();
+  const text = document.createElement('span');
+  text.textContent =
+    'Status is estimated from this Claude transcript, and permission prompts cannot be answered here. ' +
+    'Install the status hooks, then restart this Claude session.';
+  const install = document.createElement('button');
+  install.type = 'button';
+  install.textContent = 'Install status hooks';
+  install.addEventListener('click', () => post({ type: 'installHooks' }));
+  banner.append(text, install);
 }
 
 function autoGrow(): void {

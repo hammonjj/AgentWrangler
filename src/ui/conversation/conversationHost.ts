@@ -383,6 +383,9 @@ export class ConversationHost {
       case 'openInTab':
         if (key) this.actions.openInTab(key);
         return;
+      case 'installHooks':
+        this.actions.installHooks();
+        return;
       case 'adopt':
       case 'resumeHere':
         // One action: adopting an idle session ends its process first, and an

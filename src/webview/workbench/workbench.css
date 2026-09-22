@@ -44,9 +44,21 @@ body {
   flex: 0 0 auto;
   min-width: 0;
   height: 100%;
-  overflow-y: auto;
-  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   position: relative;
+}
+
+/* The usage strip is a fixed sibling above #app. Only #app owns scrolling, so
+   plan limits remain visible while the agent rows move underneath them. */
+#wbTable > #usage {
+  flex: 0 0 auto;
+}
+#wbTable > #app {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 /* The conversation takes whatever is left, so the two always fill the tab. */

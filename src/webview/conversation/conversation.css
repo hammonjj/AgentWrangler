@@ -112,10 +112,29 @@ body,
 
 #banner {
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 6px 12px;
   font-size: 0.9em;
   background: var(--vscode-inputValidation-warningBackground, rgba(200, 160, 0, 0.15));
   border-bottom: 1px solid var(--vscode-inputValidation-warningBorder, transparent);
+}
+#banner span {
+  flex: 1 1 auto;
+}
+#banner button {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  font: inherit;
+  cursor: pointer;
+}
+#banner button:hover {
+  background: var(--vscode-button-hoverBackground);
 }
 
 /* ---- transcript ---- */
