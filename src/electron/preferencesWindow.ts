@@ -21,7 +21,8 @@ import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostSettings } from '../host/hostServices';
 import { settingUpdate, type HostToPreferences, type PreferencesToHost } from '../shared/preferences';
-import { SETTINGS, settingsFor } from '../shared/settings';
+import { isSettingActionId, type SettingActionId } from '../shared/preferences';
+import { SETTINGS } from '../shared/settings';
 import { documentUrl } from './bundleProtocol';
 import { TO_HOST, TO_WEBVIEW } from './channels';
 
@@ -32,6 +33,11 @@ export interface PreferencesWindowOptions {
   appRoot: string;
   /** Centred over the workbench when there is one. */
   parentWindow(): BrowserWindow | undefined;
+  /**
+   * Run one of the window's buttons. Kept as a callback rather than reaching
+   * for the app, so this window still knows nothing but settings.
+   */
+  runAction?(id: SettingActionId): Promise<{ ok: boolean; lines: string[] }>;
 }
 
 const BY_KEY = new Map(SETTINGS.map((s) => [s.key, s]));
@@ -65,7 +71,7 @@ export class PreferencesWindow implements Disposable {
 
     const parent = this.opts.parentWindow();
     const win = new BrowserWindow({
-      width: 720,
+      width: 880,
       height: 760,
       minWidth: 520,
       minHeight: 420,
@@ -123,6 +129,10 @@ export class PreferencesWindow implements Disposable {
       this.close();
       return;
     }
+    if (message.type === 'action') {
+      void this.runAction(message.id);
+      return;
+    }
 
     // The rules live in `settingUpdate`, in shared, where they can be tested
     // without a window: only a declared key, only its declared type, and reset
@@ -136,10 +146,40 @@ export class PreferencesWindow implements Disposable {
     void this.opts.settings.update(update.key, update.value);
   }
 
+  /**
+   * Run a button and report back into the window.
+   *
+   * The id is checked against the closed set rather than trusted: this arrives
+   * over the same channel as everything else, and "run whatever it says" is not
+   * a thing a renderer should be able to ask for.
+   */
+  private async runAction(id: unknown): Promise<void> {
+    if (!isSettingActionId(id)) {
+      this.opts.log(`preferences: refused action ${String(id)}`);
+      return;
+    }
+    if (!this.opts.runAction) return;
+    this.post({ type: 'actionBusy', id });
+    try {
+      const result = await this.opts.runAction(id);
+      this.post({ type: 'actionResult', id, ok: result.ok, lines: result.lines });
+    } catch (err) {
+      this.post({ type: 'actionResult', id, ok: false, lines: [`✗  ${String(err)}`] });
+    }
+    // Connecting or disconnecting changes what the rest of the window should
+    // say about itself, and a token is not a setting, so nothing else would.
+    this.push();
+  }
+
+  private post(message: HostToPreferences): void {
+    if (!this.window || this.window.isDestroyed()) return;
+    this.window.webContents.send(TO_WEBVIEW, message);
+  }
+
   private push(): void {
     if (!this.window || this.window.isDestroyed()) return;
     const values: Record<string, string | boolean | number> = {};
-    for (const spec of settingsFor('app')) values[spec.key] = this.opts.settings.get(spec.key, spec.default);
+    for (const spec of SETTINGS) values[spec.key] = this.opts.settings.get(spec.key, spec.default);
     const message: HostToPreferences = { type: 'values', values };
     this.window.webContents.send(TO_WEBVIEW, message);
   }

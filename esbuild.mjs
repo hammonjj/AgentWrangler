@@ -17,25 +17,6 @@ const watchLogger = {
   },
 };
 
-/** Extension-host bundle (Node). */
-const host = {
-  entryPoints: ['src/extension.ts'],
-  bundle: true,
-  format: 'cjs',
-  platform: 'node',
-  target: 'node20',
-  external: ['vscode'],
-  outfile: 'dist/extension.js',
-  sourcemap: true,
-  minify: false,
-  // The Claude Agent SDK ships as ESM and calls `createRequire(import.meta.url)`
-  // at load. Bundled to CJS that expression is empty and the module throws
-  // before it exports anything, so point it at this file's own URL.
-  define: { 'import.meta.url': '__aw_import_meta_url' },
-  banner: { js: "var __aw_import_meta_url = require('url').pathToFileURL(__filename).href;" },
-  plugins: [watchLogger],
-};
-
 /**
  * Electron main process and preload.
  *
@@ -54,7 +35,7 @@ const electronMain = {
   format: 'cjs',
   platform: 'node',
   target: 'node22',
-  external: ['electron', 'vscode'],
+  external: ['electron'],
   outfile: 'dist/electron/main.js',
   sourcemap: true,
   minify: false,
@@ -101,7 +82,7 @@ const web = {
   plugins: [watchLogger],
 };
 
-const configs = [host, web, electronMain, electronPreload];
+const configs = [web, electronMain, electronPreload];
 
 if (watch) {
   const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));

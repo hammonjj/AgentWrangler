@@ -1,20 +1,14 @@
 /**
  * Every setting, declared once.
  *
- * There are two places a person changes these now — VSCode's settings UI, which
- * reads `contributes.configuration` in `package.json`, and the app's
- * Preferences window, which has to render the same list itself. Two hand-kept
- * copies of twenty-two settings would drift on the first one added, and the
- * drift would be silent: the app would simply not offer it.
- *
- * So this is the list, `package.json` is generated-shaped from it, and
- * `test/settingsSchema.test.ts` fails if they stop matching. Keys are written
+ * The Preferences window renders straight from this list: `group` is its
+ * section heading and the order here is the order on screen. Keys are written
  * without the `agentWrangler.` prefix, the way `HostSettings` takes them.
  *
- * `group` and `label` are for the Preferences window and mean nothing to
- * VSCode, which derives its own headings from the key path. `hosts` is how a
- * setting that only makes sense in one of them stays out of the other's UI
- * without disappearing from `package.json`.
+ * This used to be the single source for two front ends — the app's Preferences
+ * window and VSCode's settings UI, which read a hand-mirrored copy in
+ * `package.json` that a test checked for drift. The extension is gone, so the
+ * mirror, the `hosts` filter and that test went with it.
  */
 
 export type SettingType = 'string' | 'boolean' | 'number';
@@ -22,21 +16,29 @@ export type SettingType = 'string' | 'boolean' | 'number';
 export interface SettingSpec {
   /** Dotted, without the `agentWrangler.` prefix — e.g. `autoPause.percent`. */
   key: string;
+  /**
+   * What the Preferences window calls it. The key is still shown underneath,
+   * because that is its name in `settings.json` and in the documentation — the
+   * label is there to be scanned, not to replace it.
+   */
+  label: string;
   /** The Preferences window's section heading. */
   group: string;
   type: SettingType;
   default: string | boolean | number;
-  /** The same prose VSCode shows. Kept identical so the test can compare them. */
+  /** The sentence under the control in Preferences. */
   description: string;
   enum?: string[];
   enumDescriptions?: string[];
   minimum?: number;
   maximum?: number;
   /**
-   * Which front ends offer it. Absent means both. `openOnStartup` is the
-   * current exception: the app has one window and always opens it.
+   * The key of a boolean this setting only matters under. Preferences nests it
+   * beneath that one and reveals it when it is on — so a feature's own settings
+   * are not four unexplained fields sitting next to the switch that governs
+   * them. Purely presentational: the value is still read whatever is showing.
    */
-  hosts?: ('vscode' | 'app')[];
+  dependsOn?: string;
 }
 
 export const SETTINGS: SettingSpec[] = [
@@ -44,6 +46,7 @@ export const SETTINGS: SettingSpec[] = [
   // ---- Conversations ----
   {
     key: 'runner.defaultPermissionMode',
+    label: 'Permission mode for new conversations',
     group: 'Conversations',
     type: 'string',
     default: "acceptEdits",
@@ -58,6 +61,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'runner.provider',
+    label: 'Provider for the next conversation',
     group: 'Conversations',
     type: 'string',
     enum: ['anthropic', 'openai'],
@@ -67,6 +71,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'runner.model',
+    label: 'Model for new Claude conversations',
     group: 'Conversations',
     type: 'string',
     default: "",
@@ -75,6 +80,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'runner.effort',
+    label: 'Reasoning effort',
     group: 'Conversations',
     type: 'string',
     enum: ["", "low", "medium", "high", "xhigh", "max"],
@@ -92,6 +98,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'codexRunner.model',
+    label: 'Model for new Codex conversations',
     group: 'Conversations',
     type: 'string',
     default: "",
@@ -100,6 +107,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'codexRunner.effort',
+    label: 'Codex reasoning effort',
     group: 'Conversations',
     type: 'string',
     enum: ['', 'low', 'medium', 'high', 'xhigh'],
@@ -115,6 +123,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'runner.confirmTakeoverOnSend',
+    label: 'Confirm before taking a session over',
     group: 'Conversations',
     type: 'boolean',
     default: false,
@@ -123,26 +132,18 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'runner.autoResumeLastOnStartup',
+    label: 'Resume the last conversation on startup',
     group: 'Conversations',
     type: 'boolean',
     default: true,
     description:
       'After a window reload, resume the conversation this window was running. Only the most recent one, only if it was running in the last few hours, and never one something else has picked up in the meantime.',
   },
-  {
-    key: 'openOnStartup',
-    group: 'Conversations',
-    type: 'boolean',
-    default: true,
-    // The app has one window and opens it; there is nothing to decide.
-    hosts: ['vscode'],
-    description:
-      'Open the Agent Wrangler workbench automatically when a window starts. A tab restored by VSCode is left as it came back.',
-  },
 
   // ---- Agents and status ----
   {
     key: 'stuckThresholdSeconds',
+    label: 'Call a silent agent stuck after',
     group: 'Agents and status',
     type: 'number',
     default: 600,
@@ -152,6 +153,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'pollIntervalSeconds',
+    label: 'Reconciliation poll interval',
     group: 'Agents and status',
     type: 'number',
     default: 5,
@@ -161,6 +163,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'endedWindowHours',
+    label: 'Keep ended sessions visible for',
     group: 'Agents and status',
     type: 'number',
     default: 48,
@@ -170,6 +173,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'maxEndedSessions',
+    label: 'Most ended sessions to show',
     group: 'Agents and status',
     type: 'number',
     default: 50,
@@ -179,6 +183,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'notifyOnWaiting',
+    label: 'Notify when an agent needs you',
     group: 'Agents and status',
     type: 'boolean',
     default: false,
@@ -187,6 +192,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'showCodexSubagents',
+    label: 'Show Codex subagents as their own rows',
     group: 'Agents and status',
     type: 'boolean',
     default: false,
@@ -197,6 +203,7 @@ export const SETTINGS: SettingSpec[] = [
   // ---- Plan usage ----
   {
     key: 'showUsage',
+    label: 'Show plan usage cards',
     group: 'Plan usage',
     type: 'boolean',
     default: true,
@@ -205,6 +212,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'usagePollIntervalSeconds',
+    label: 'How often to re-read plan usage',
     group: 'Plan usage',
     type: 'number',
     default: 60,
@@ -214,6 +222,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'autoPause.enabled',
+    label: 'Pause every agent near the plan limit',
     group: 'Plan usage',
     type: 'boolean',
     default: false,
@@ -222,6 +231,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'autoPause.percent',
+    label: 'Pause at this percentage',
     group: 'Plan usage',
     type: 'number',
     default: 98,
@@ -234,6 +244,7 @@ export const SETTINGS: SettingSpec[] = [
   // ---- Dictation ----
   {
     key: 'dictation.inputDevice',
+    label: 'Microphone',
     group: 'Dictation',
     type: 'string',
     default: ":default",
@@ -242,6 +253,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'dictation.modelPath',
+    label: 'Whisper model',
     group: 'Dictation',
     type: 'string',
     default: "",
@@ -250,6 +262,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'dictation.whisperPath',
+    label: 'Path to whisper-cli',
     group: 'Dictation',
     type: 'string',
     default: "",
@@ -258,6 +271,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'dictation.ffmpegPath',
+    label: 'Path to ffmpeg',
     group: 'Dictation',
     type: 'string',
     default: "",
@@ -268,6 +282,7 @@ export const SETTINGS: SettingSpec[] = [
   // ---- Binaries ----
   {
     key: 'claudeBinaryPath',
+    label: 'Claude Code binary',
     group: 'Binaries',
     type: 'string',
     default: "claude",
@@ -276,28 +291,63 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'codexBinaryPath',
+    label: 'Codex binary',
     group: 'Binaries',
     type: 'string',
     default: "codex",
     description:
-      'Codex CLI binary used for plan usage and conversations. The default discovers the newest compatible executable bundled with the OpenAI VS Code extension, then falls back to PATH. Set an explicit path to override discovery.',
+      'Codex CLI binary used for plan usage and conversations. The default discovers the newest compatible executable bundled with the OpenAI Codex extension, then falls back to PATH. Set an explicit path to override discovery.',
+  },
+
+  // ---- Experimental ----
+  // Off by default and grouped apart on purpose: everything here can reach
+  // outside the machine, and none of it has been lived with long enough to be
+  // switched on for someone who did not go looking for it.
+  {
+    key: 'remote.enabled',
+    label: 'Discord integration',
+    group: 'Experimental',
+    type: 'boolean',
+    default: false,
+    description:
+      'Mirror permission prompts to a Discord channel, so you can answer them while away from the machine. Agent Wrangler stays in charge: Discord shows the same choices the dashboard does, and pressing one runs the same action. Connect a bot from the Agent Wrangler menu — the token is kept in the keychain, not here. Nothing is published until that is done and at least one user below is authorised.',
+  },
+  {
+    key: 'remote.discord.guildId',
+    dependsOn: 'remote.enabled',
+    label: 'Discord server ID',
+    group: 'Experimental',
+    type: 'string',
+    default: '',
+    description:
+      'The server the channel belongs to. A press from anywhere else is ignored. Turn on Developer Mode in Discord, then right-click the server and Copy Server ID.',
+  },
+  {
+    key: 'remote.discord.channelId',
+    dependsOn: 'remote.enabled',
+    label: 'Discord channel ID',
+    group: 'Experimental',
+    type: 'string',
+    default: '',
+    description:
+      'The channel prompts are posted to. A private channel is the sensible choice, in which case the bot must be given access to it explicitly — being in the server is not enough.',
+  },
+  {
+    key: 'remote.discord.authorizedUserIds',
+    dependsOn: 'remote.enabled',
+    label: 'Authorised Discord users',
+    group: 'Experimental',
+    type: 'string',
+    default: '',
+    description:
+      'Comma-separated Discord user IDs allowed to answer prompts. IDs rather than usernames: a username can be changed and reused, and this is the only thing between someone in the channel and a permission decision. Empty means nobody, and nothing is published at all.',
   },
 ];
 
-/** The `agentWrangler.`-prefixed name, which is what `package.json` uses. */
-export function qualifiedKey(key: string): string {
-  return `agentWrangler.${key}`;
-}
-
-/** The settings a given front end should show, in declaration order. */
-export function settingsFor(host: 'vscode' | 'app'): SettingSpec[] {
-  return SETTINGS.filter((s) => (s.hosts ?? ['vscode', 'app']).includes(host));
-}
-
 /** Group headings in declaration order, with no duplicates. */
-export function settingGroups(host: 'vscode' | 'app'): { group: string; settings: SettingSpec[] }[] {
+export function settingGroups(): { group: string; settings: SettingSpec[] }[] {
   const out: { group: string; settings: SettingSpec[] }[] = [];
-  for (const s of settingsFor(host)) {
+  for (const s of SETTINGS) {
     const last = out[out.length - 1];
     if (last && last.group === s.group) last.settings.push(s);
     else out.push({ group: s.group, settings: [s] });
@@ -305,20 +355,3 @@ export function settingGroups(host: 'vscode' | 'app'): { group: string; settings
   return out;
 }
 
-/**
- * The `contributes.configuration.properties` entry for a setting — the shape
- * `package.json` holds, rebuilt from the declaration so the test can compare
- * the two rather than trusting them to have been edited together.
- */
-export function vscodeProperty(s: SettingSpec): Record<string, unknown> {
-  const out: Record<string, unknown> = { type: s.type };
-  if (s.enum) {
-    out.enum = s.enum;
-    out.enumDescriptions = s.enumDescriptions;
-  }
-  out.default = s.default;
-  if (s.minimum !== undefined) out.minimum = s.minimum;
-  if (s.maximum !== undefined) out.maximum = s.maximum;
-  out.description = s.description;
-  return out;
-}

@@ -26,7 +26,6 @@ import { displayTitle, type AgentSession, type SessionStatus } from '../../share
 import type { SessionActions } from '../actions';
 import type { PaneChannel } from '../paneChannel';
 import { adoptActionFor } from '../openTarget';
-import type { DiffViewer } from './diffViewer';
 import { RunnerSource } from './runnerSource';
 import { CodexTranscriptSource } from './codexTranscriptSource';
 import type { ConversationSource } from './source';
@@ -41,15 +40,14 @@ const MAX_DROPPED_PATHS = 20;
 /**
  * The two things the pane needs from the host and cannot get from a service:
  * somewhere to put a message, and what to do when dictation turns out not to be
- * installed. Both differ per host — a VSCode notification with buttons, versus
- * a native message box — and neither belongs in a session service.
+ * installed. Neither belongs in a session service.
  */
 export interface ConversationHostUi {
   dialogs: HostDialogs;
   /**
-   * Dictation asked for a tool that is missing. The VSCode implementation
-   * offers the Homebrew command and the model download; a host with nowhere to
-   * run a command can simply report it.
+   * Dictation asked for a tool that is missing. The app offers the Homebrew
+   * command and the model download; a host with nowhere to run a command can
+   * simply report it.
    */
   offerDictationSetup(err: DictationSetupError): Promise<void>;
 }
@@ -96,12 +94,6 @@ export class ConversationHost {
     private codexRunners: CodexRunnerService,
     private actions: SessionActions,
     private dictation: DictationService,
-    /**
-     * Where "open this edit properly" goes. Optional because there is no
-     * honest diff editor outside VSCode yet; absent, the pane's own +/- block
-     * is the whole story and the button says so.
-     */
-    private diffs: DiffViewer | undefined,
     private files: FileSuggestService,
     private onTitle: (title: string) => void,
     private ui: ConversationHostUi,
@@ -123,10 +115,10 @@ export class ConversationHost {
   /**
    * Point the pane at a session.
    *
-   * The session may not be in the store yet: VSCode restores panels during
-   * activation, before the provider's first scan has run. So an unknown key is
-   * remembered and bound as soon as it appears, rather than dropped — which is
-   * what made a restored pane come back blank.
+   * The session may not be in the store yet: a window is restored before the
+   * provider's first scan has run. So an unknown key is remembered and bound as
+   * soon as it appears, rather than dropped — which is what made a restored
+   * pane come back blank.
    */
   show(key: string): void {
     if (this.binding?.kind === 'store' && this.binding.key === key) return;
@@ -444,8 +436,9 @@ export class ConversationHost {
       case 'openDiff':
         // No diff editor here means the card's own +/- block is all there is.
         // Saying so is better than a button that swallows the click.
-        if (!this.diffs) this.ui.dialogs.flash('Agent Wrangler: opening a diff needs VSCode for now.', 4000);
-        else await this.diffs.open(m.file, m.patch);
+        // No separate diff view yet. The card already renders the whole patch,
+        // so this is a missing convenience rather than missing information.
+        this.ui.dialogs.flash('Agent Wrangler: the card below shows the whole patch; a side-by-side view is not built yet.', 4000);
         return;
       case 'fileSuggest': {
         const cwd = this.session?.cwd;

@@ -1,9 +1,10 @@
 /**
  * `HostServices` over Electron.
  *
- * The mirror of `src/host/vscode/vscodeHost.ts`, and the same rule applies: it
- * translates, it does not decide. Where it differs from that file is where the
- * editor was genuinely giving something away for free.
+ * The only implementation, now that the extension is gone, and the rule it was
+ * written under still holds: it translates, it does not decide. The notes below
+ * record where the editor used to give something away for free, because those
+ * are the places this file had to grow something of its own.
  *
  * - **Settings and state** were `workspace.getConfiguration` and two `Memento`s;
  *   they are three JSON files in `userData` now. The services behind them never
@@ -13,17 +14,19 @@
  * - **`input` and `pick`** were `showInputBox` and `showQuickPick`, and Electron
  *   has neither, so they go to `PaletteWindow` — a small frameless child window
  *   that is the app's version of both.
- * - **`runInTerminal`** is absent, which is a fact about the platform and not an
- *   oversight: there is no `sendText` outside VSCode. `HostShell` makes it
- *   optional, so *Release* is simply not offered.
+ * - **`runInTerminal`** shells out to Terminal.app through AppleScript. There is
+ *   no in-window terminal to send text to, and *Release* and *Resume in
+ *   terminal* both need one, so the platform's own terminal stands in.
  */
 
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { type BrowserWindow, clipboard, dialog, shell } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostDialogs, HostServices, HostShell, InputOptions, PickItem, PickOptions } from '../host/hostServices';
 import { JsonSettings, JsonStore } from './jsonStore';
+import { ElectronSecrets } from './secrets';
 import { TOAST } from './channels';
 
 export interface ElectronHostOptions {
@@ -100,14 +103,14 @@ function dialogsFor(opts: ElectronHostOptions): HostDialogs {
     flash: (message) => toast(message),
     input: async (options) => {
       if (!opts.palette) {
-        toast(`${options.title ?? 'That'} needs VSCode for now.`);
+        toast(`${options.title ?? 'That'} is unavailable: no palette window.`);
         return undefined;
       }
       return opts.palette.input(options);
     },
     pick: async (items, options) => {
       if (!opts.palette) {
-        toast(`${options?.placeHolder ?? 'Choosing from a list'} needs VSCode for now.`);
+        toast(`${options?.placeHolder ?? 'Choosing from a list'} is unavailable: no palette window.`);
         return undefined;
       }
       return opts.palette.pick(items, options);
@@ -135,8 +138,42 @@ function shellFor(opts: ElectronHostOptions): HostShell {
         if (err) opts.log(`openPath ${target}: ${err}`);
       });
     },
-    // runInTerminal is deliberately absent. See the header.
+    /**
+     * Hand a command to Terminal.app.
+     *
+     * This was the one capability only VSCode had, and *Release*, *Resume in
+     * terminal* and the dictation `brew install` helper all sat behind it. With
+     * the extension gone they would simply have stopped working, so rather than
+     * lose three features it shells out to the terminal the platform already
+     * has.
+     *
+     * AppleScript rather than `open -a Terminal <script>`: `do script` takes a
+     * command directly, so nothing has to be written to disk, and the window it
+     * opens is a normal interactive shell the user can keep typing into — which
+     * is the whole point for *Release*, where the session carries on there.
+     *
+     * The command is composed by `resumeCommand`, but it still ends up inside
+     * an AppleScript string literal, so both escapes are applied: `\\` and `"`
+     * for AppleScript, and the `cd` is quoted for the shell.
+     */
+    runInTerminal: (command, { cwd }) => {
+      const script = `cd ${shellQuote(cwd)} && ${command}`;
+      const applescript = `tell application "Terminal"\nactivate\ndo script ${appleScriptString(script)}\nend tell`;
+      execFile('osascript', ['-e', applescript], (err) => {
+        if (err) opts.log(`runInTerminal failed: ${String(err)}`);
+      });
+    },
   };
+}
+
+/** Single-quote for `sh`, closing and reopening around any embedded quote. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** A double-quoted AppleScript literal. Backslash first, or it doubles the escapes. */
+function appleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
 export interface ElectronHost extends HostServices {
@@ -169,6 +206,9 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     dialogs: dialogsFor(opts),
     shell: shellFor(opts),
     clipboard: { writeText: async (text) => clipboard.writeText(text) },
+    // Beside the other state, but a file of its own: see `secrets.ts` for why
+    // a credential must not live in `settings.json`.
+    secrets: new ElectronSecrets(path.join(userDataDir, 'secrets.json'), opts.log),
     // Machine-wide by design: there is no workspace, and the launcher already
     // merges Claude Code's own history with everything currently running.
     workspaceFolders: () => [],

@@ -89,6 +89,7 @@ export class PaletteWindow implements Disposable {
         prompt: options.prompt,
         value: options.value,
         placeholder: options.placeHolder,
+        password: options.password,
         validates: typeof options.validateInput === 'function',
       },
       options.validateInput,

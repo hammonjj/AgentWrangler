@@ -24,6 +24,7 @@
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'node:child_process';
+import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { waitForAdoptable } from '../core/adoptQueue';
@@ -67,6 +68,12 @@ import { TurnStats } from '../core/turnStats';
 import { FileUsageCache } from '../core/usageCache';
 import { UsageService } from '../core/usageService';
 import { FileSuggestService } from '../core/fileSuggest';
+import { FileAuditLog } from '../remote/audit';
+import { DiscordTransport } from '../remote/discord/transport';
+import { MirrorStore } from '../remote/mirrorStore';
+import { auditFile, DISCORD_BOT_TOKEN_KEY, mirrorFile } from '../remote/paths';
+import { RemoteControlService } from '../remote/service';
+import type { RemoteTransport } from '../remote/transport';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import type { PermissionModeName } from '../shared/conversation';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
@@ -123,6 +130,8 @@ export interface AgentWranglerApp {
   launcher: ConversationLauncher;
   dictation: DictationService;
   files: FileSuggestService;
+  /** Mirrors permission prompts to a remote surface. Inert until given a transport. */
+  remoteControl: RemoteControlService;
   actions: SessionActions;
   getConfig: ConfigGetter;
 
@@ -143,6 +152,14 @@ export interface AgentWranglerApp {
   pauseAll(wanted: boolean): void;
   installHooks(): Promise<void>;
   uninstallHooks(): Promise<void>;
+  /** Experimental: store a Discord bot token and open the connection. */
+  connectDiscord(): Promise<{ ok: boolean; lines: string[] }>;
+  /** Forget the token and close the connection. */
+  disconnectDiscord(): Promise<{ ok: boolean; lines: string[] }>;
+  /** Check every part of the remote setup, reporting each in a dialog. */
+  testRemoteControl(): Promise<void>;
+  /** The same actions, for the Preferences window, reporting in place. */
+  runSettingAction(id: 'connectDiscord' | 'testRemote' | 'disconnectDiscord'): Promise<{ ok: boolean; lines: string[] }>;
   /** The session picker, for commands invoked without one. */
   pickSession(filter?: (s: AgentSession) => boolean): Promise<AgentSession | undefined>;
   /** Wrap a key-taking action so it asks which session when given nothing. */
@@ -646,6 +663,167 @@ export function createApp(host: HostServices): AgentWranglerApp {
     browseForProject: () => browseForProject(),
   };
 
+  /**
+   * Store a bot token and connect.
+   *
+   * The token is checked against Discord before it is saved — a typo otherwise
+   * fails much later, as a gateway close code, which reads like a bug rather
+   * than a mistyped credential.
+   */
+  const connectDiscord = async (): Promise<{ ok: boolean; lines: string[] }> => {
+    if (!host.secrets.available) {
+      return { ok: false, lines: ['✗  This system cannot store secrets securely, so nothing was saved.'] };
+    }
+    const token = await dialogs.input({
+      title: 'Connect Discord',
+      prompt: 'Bot token, from the Bot tab of your Discord application. Stored in the system keychain, never in settings.',
+      password: true,
+    });
+    if (token === undefined) return { ok: false, lines: [] };
+    if (token.trim() === '') return { ok: false, lines: ['✗  No token was entered.'] };
+
+    let who: { username?: string };
+    try {
+      const res = await fetch('https://discord.com/api/v10/users/@me', {
+        headers: { Authorization: `Bot ${token.trim()}` },
+      });
+      if (!res.ok) return { ok: false, lines: [`✗  Discord rejected that token (HTTP ${res.status}).`] };
+      who = (await res.json()) as { username?: string };
+    } catch (err) {
+      return { ok: false, lines: [`✗  Could not reach Discord — ${String(err)}`] };
+    }
+
+    await host.secrets.store(DISCORD_BOT_TOKEN_KEY, token.trim());
+    log(`remote: stored a bot token for ${who.username ?? 'the bot'}`);
+    // A stored token changes nothing a settings listener would see, so the
+    // reconnect has to be asked for here.
+    await disconnectTransport();
+    await syncRemoteTransport();
+
+    const cfg = getConfig();
+    const missing = [
+      cfg.remoteGuildId ? '' : 'a server ID',
+      cfg.remoteChannelId ? '' : 'a channel ID',
+      cfg.remoteAuthorizedUserIds.length > 0 ? '' : 'at least one authorised user',
+      cfg.remoteEnabled ? '' : 'Discord integration switched on',
+    ].filter(Boolean);
+    return {
+      ok: missing.length === 0,
+      lines:
+        missing.length === 0
+          ? [`✓  Connected as ${who.username ?? 'the bot'}.`]
+          : [`✓  Token saved for ${who.username ?? 'the bot'}.`, `✗  Still needed: ${missing.join(', ')}.`],
+    };
+  };
+
+  /**
+   * Check the whole setup and post a real card.
+   *
+   * Every failure this can have looks the same from the outside — nothing
+   * appears in Discord — so it reports each check separately rather than
+   * succeeding or failing as a whole. The channel check is its own line on
+   * purpose: a private channel needs the bot added *to the channel*, and the
+   * server check passes while that is missing.
+   */
+  const checkRemoteControl = async (): Promise<{ ok: boolean; lines: string[] }> => {
+    const cfg = getConfig();
+    const token = await host.secrets.get(DISCORD_BOT_TOKEN_KEY);
+    const lines: string[] = [];
+    const ok = (m: string) => lines.push(`✓  ${m}`);
+    const bad = (m: string) => lines.push(`✗  ${m}`);
+
+    lines.push(cfg.remoteEnabled ? '✓  Discord integration is on' : '✗  Discord integration is off in Preferences → Experimental');
+    if (!token) {
+      bad('No bot token. Press Connect Discord… first.');
+      return { ok: false, lines };
+    }
+    ok('A bot token is stored');
+
+    const api = async (route: string) =>
+      fetch(`https://discord.com/api/v10${route}`, { headers: { Authorization: `Bot ${token}` } });
+
+    try {
+      const me = await api('/users/@me');
+      if (me.ok) ok(`Token works — the bot is ${((await me.json()) as { username?: string }).username ?? 'unnamed'}`);
+      else bad(`Discord rejected the token (HTTP ${me.status})`);
+
+      const application = await api('/applications/@me');
+      if (application.ok) {
+        const url = ((await application.json()) as { interactions_endpoint_url?: string }).interactions_endpoint_url;
+        if (url) bad(`An Interactions Endpoint URL is set (${url}). Clear it, or button presses go there instead of to this app.`);
+        else ok('No Interactions Endpoint URL, so presses arrive here');
+      }
+
+      if (!cfg.remoteGuildId) bad('No server ID set');
+      else {
+        const guild = await api(`/guilds/${cfg.remoteGuildId}`);
+        if (guild.ok) ok(`In the server "${((await guild.json()) as { name?: string }).name ?? cfg.remoteGuildId}"`);
+        else bad(`Cannot see that server (HTTP ${guild.status}). Is the bot invited?`);
+      }
+
+      if (!cfg.remoteChannelId) bad('No channel ID set');
+      else {
+        const channel = await api(`/channels/${cfg.remoteChannelId}`);
+        if (channel.ok) ok(`Can see #${((await channel.json()) as { name?: string }).name ?? cfg.remoteChannelId}`);
+        else bad(`Cannot see that channel (HTTP ${channel.status}). A private channel needs the bot added to the channel itself, not just the server.`);
+      }
+
+      if (cfg.remoteAuthorizedUserIds.length === 0) bad('No authorised users, so nothing will be published at all');
+      else ok(`${cfg.remoteAuthorizedUserIds.length} authorised user(s)`);
+
+      lines.push(remoteControl.connected ? '✓  Connected to the Discord gateway' : '✗  Not connected to the gateway yet');
+
+      // Only post when everything else passed: a card in a channel nobody can
+      // act on is litter, and the lines above already say why.
+      if (!lines.some((l) => l.startsWith('✗')) && cfg.remoteChannelId) {
+        const posted = await fetch(`https://discord.com/api/v10/channels/${cfg.remoteChannelId}/messages`, {
+          method: 'POST',
+          headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            embeds: [
+              {
+                title: 'Agent Wrangler — test message',
+                description: 'Everything checks out. Real permission prompts will appear here, with buttons.',
+                color: 0x3ba55d,
+              },
+            ],
+          }),
+        });
+        lines.push(posted.ok ? '✓  Posted a test message to the channel' : `✗  Could not post (HTTP ${posted.status})`);
+      }
+    } catch (err) {
+      bad(`Could not reach Discord — ${String(err)}`);
+    }
+
+    return { ok: !lines.some((l) => l.startsWith('✗')), lines };
+  };
+
+  /** The menu's version: run the checks and put them in a dialog. */
+  const testRemoteControl = async (): Promise<void> => {
+    const { lines } = await checkRemoteControl();
+    void dialogs.warn('Agent Wrangler — remote control', { detail: lines.join('\n') }, 'OK');
+  };
+
+  const disconnectDiscord = async (): Promise<{ ok: boolean; lines: string[] }> => {
+    await host.secrets.delete(DISCORD_BOT_TOKEN_KEY);
+    await disconnectTransport();
+    log('remote: token removed and disconnected');
+    return { ok: true, lines: ['✓  The bot token has been removed and the connection closed.'] };
+  };
+
+  /**
+   * One entry point for the Preferences window's buttons.
+   *
+   * The menu versions wrap these in dialogs; the window shows the same lines in
+   * place, because a six-line check reads better beside the fields it is about
+   * than as a modal over them.
+   */
+  const runSettingAction = async (id: 'connectDiscord' | 'testRemote' | 'disconnectDiscord') => {
+    if (id === 'connectDiscord') return connectDiscord();
+    if (id === 'disconnectDiscord') return disconnectDiscord();
+    return checkRemoteControl();
+  };
+
   const installHooks = async (): Promise<void> => {
     const dir = hookLogDir();
     const choice = await dialogs.warn(
@@ -888,6 +1066,104 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // Files offered after an `@` in the composer, per session folder.
   const files = new FileSuggestService();
 
+  /**
+   * Mirroring permission prompts to a remote surface.
+   *
+   * Constructed always, connected never — so far. It holds no transport until
+   * something hands it one, and with none it does nothing at all: no file is
+   * written, no message is posted, and `remote.enabled` does not exist as a
+   * setting yet. The transport and the leader lease that decides which process
+   * gets it arrive in later phases; this is here so the wiring is reviewed
+   * once, against a service whose whole behaviour is already covered by tests.
+   */
+  const remoteConfig = () => {
+    const cfg = getConfig();
+    return {
+      enabled: cfg.remoteEnabled,
+      guildId: cfg.remoteGuildId,
+      channelId: cfg.remoteChannelId,
+      authorizedUserIds: cfg.remoteAuthorizedUserIds,
+      homeDir: os.homedir(),
+    };
+  };
+  const remoteControl = new RemoteControlService(
+    store,
+    actions,
+    new MirrorStore(mirrorFile()),
+    remoteConfig,
+    new FileAuditLog(auditFile()),
+    (message) => log(`remote: ${message}`),
+  );
+  host.subscribe(remoteControl);
+
+  /**
+   * Connect the transport, or take it away — whichever the settings now say.
+   *
+   * The token is read on every connect rather than held: it can be replaced or
+   * revoked while the app runs, and a cached copy would keep a dead credential
+   * alive until a restart. Nothing is constructed at all until the setting is
+   * on and a token exists, so the default configuration opens no socket and
+   * touches no file.
+   */
+  let transport: RemoteTransport | undefined;
+  let syncing: Promise<void> = Promise.resolve();
+
+  const disconnectTransport = async (): Promise<void> => {
+    if (!transport) return;
+    remoteControl.setTransport(undefined);
+    const going = transport;
+    transport = undefined;
+    await going.disconnect();
+    going.dispose();
+  };
+
+  const syncRemoteTransport = (): Promise<void> => {
+    syncing = syncing.then(async () => {
+      const cfg = remoteConfig();
+      const token = cfg.enabled ? await host.secrets.get(DISCORD_BOT_TOKEN_KEY) : undefined;
+      const wanted = cfg.enabled && !!token && !!cfg.guildId && !!cfg.channelId;
+
+      if (!wanted) {
+        if (transport) log('remote: disconnecting');
+        await disconnectTransport();
+        return;
+      }
+      if (transport) return; // already connected, and the token is read per connect
+
+      const next = new DiscordTransport({
+        config: () => ({ guildId: cfg.guildId, channelId: cfg.channelId }),
+        restDeps: { token: () => token!, log: (m) => log(`remote: ${m}`) },
+        // No `gatewayUrl`: the transport asks `GET /gateway/bot` through its
+        // own REST client, which already has the token and the rate limiter.
+        gatewayDeps: { token: () => token!, log: (m) => log(`remote: ${m}`) },
+        log: (m) => log(`remote: ${m}`),
+      });
+      transport = next;
+      remoteControl.setTransport(next);
+      try {
+        await next.connect();
+        log('remote: connecting to Discord');
+      } catch (err) {
+        log(`remote: could not connect — ${String(err)}`);
+      }
+    });
+    return syncing;
+  };
+
+  host.subscribe({ dispose: () => void disconnectTransport() });
+  host.subscribe(
+    host.settings.onDidChange((affects) => {
+      if (
+        affects('remote.enabled') ||
+        affects('remote.discord.guildId') ||
+        affects('remote.discord.channelId') ||
+        affects('remote.discord.authorizedUserIds')
+      ) {
+        void syncRemoteTransport();
+      }
+    }),
+  );
+
   // Opt-in "waiting on you" toasts, with a per-session cooldown.
   const lastToastAt = new Map<string, number>();
   host.subscribe(
@@ -1053,6 +1329,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     dictation,
     files,
     actions,
+    remoteControl,
     getConfig,
 
     attachSurface(next) {
@@ -1071,6 +1348,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
     },
     installHooks,
     uninstallHooks,
+    connectDiscord,
+    disconnectDiscord,
+    testRemoteControl,
+    runSettingAction,
     pickSession,
     withSession,
 
@@ -1081,6 +1362,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
       void store.register(codexProvider).catch((err) => log(`Codex provider start failed: ${String(err)}`));
       log('Agent Wrangler started');
       void checkHookHealth();
+      // Off by default, so this normally reads the setting and stops.
+      void syncRemoteTransport();
       // After the store's first scan, so "is it running elsewhere?" has an answer.
       setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), 2000);
     },

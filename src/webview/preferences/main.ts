@@ -1,11 +1,9 @@
 /**
  * The Preferences window.
  *
- * VSCode has a settings UI and generates it from `contributes.configuration`;
- * an app has to draw its own. Rather than a second hand-written list of the
- * same twenty-two settings, this renders `src/shared/settings.ts` — the one
- * declaration both front ends read, with a test that keeps it and
- * `package.json` in step.
+ * Rendered entirely from `src/shared/settings.ts`, so adding a setting is one
+ * edit there and nothing here: the sections, their order, and the sidebar that
+ * navigates them all fall out of the declaration.
  *
  * Every edit is written immediately. There is no OK/Cancel, because there is
  * nothing to cancel: each setting takes effect where it is read, the reads are
@@ -15,7 +13,7 @@
 
 import './preferences.css';
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
-import type { HostToPreferences, PreferencesToHost } from '../../shared/preferences';
+import type { HostToPreferences, PreferencesToHost, SettingActionId } from '../../shared/preferences';
 import { settingGroups, type SettingSpec } from '../../shared/settings';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
@@ -29,6 +27,16 @@ const post = (message: PreferencesToHost) => host.postMessage(message);
 const TYPING_SETTLE_MS = 350;
 
 const root = document.getElementById('prefsApp');
+/** Section elements by group name, for the sidebar to scroll to. */
+const sections = new Map<string, HTMLElement>();
+/** Sidebar links by group name, so the current section can be marked. */
+const navLinks = new Map<string, HTMLButtonElement>();
+/** Wrappers holding the settings that only apply while a boolean is on. */
+const dependents = new Map<string, HTMLElement>();
+/** Action buttons by id, so one can be disabled while it runs. */
+const actionButtons = new Map<SettingActionId, HTMLButtonElement>();
+/** Where an action's result is written, per group. */
+const actionResults = new Map<string, HTMLElement>();
 let values: Record<string, string | boolean | number> = {};
 /** The controls, so an external change can be reflected without a re-render. */
 const controls = new Map<string, HTMLInputElement | HTMLSelectElement>();
@@ -70,6 +78,8 @@ function write(spec: SettingSpec, value: string | boolean | number): void {
   if (value === valueOf(spec)) return;
   values[spec.key] = value;
   markRow(spec);
+  // Something may be nested under this one, waiting to be shown.
+  if (spec.type === 'boolean') syncReveal(spec.key);
   if (value === spec.default) post({ type: 'reset', key: spec.key });
   else post({ type: 'set', key: spec.key, value });
 }
@@ -183,12 +193,16 @@ function renderRow(spec: SettingSpec): HTMLElement {
 
   const label = document.createElement('label');
   label.className = 'pf-label';
-  // The key is the label. These are the names in `settings.json` and in the
-  // documentation, and inventing prettier ones would make the two sets of
-  // words for one setting that this file exists to avoid.
-  label.textContent = spec.key;
+  label.textContent = spec.label;
   const id = `pf-${spec.key.replace(/\./g, '-')}`;
   label.htmlFor = id;
+
+  // The key rides along underneath. It is the name in `settings.json` and in
+  // the documentation, so hiding it would leave two sets of words for one
+  // setting and no way to get from one to the other.
+  const key = document.createElement('code');
+  key.className = 'pf-key';
+  key.textContent = spec.key;
 
   const control = controlFor(spec);
   control.id = id;
@@ -210,7 +224,7 @@ function renderRow(spec: SettingSpec): HTMLElement {
 
   const head = document.createElement('div');
   head.className = 'pf-head';
-  head.append(label, reset);
+  head.append(label, key, reset);
 
   const body = document.createElement('div');
   body.className = 'pf-body';
@@ -229,6 +243,25 @@ function renderRow(spec: SettingSpec): HTMLElement {
   return row;
 }
 
+/**
+ * Show or hide what hangs off a boolean.
+ *
+ * The wrapper animates between `grid-template-rows: 0fr` and `1fr` rather than
+ * a `max-height` guess, so the height it slides to is whatever the content
+ * actually is — no magic number to be wrong when a description wraps to three
+ * lines on a narrow window.
+ *
+ * `inert` as well as hidden: a collapsed field that is still tabbable is a
+ * field someone can type into without being able to see it.
+ */
+function syncReveal(parentKey: string): void {
+  const wrapper = dependents.get(parentKey);
+  if (!wrapper) return;
+  const on = values[parentKey] === true;
+  wrapper.classList.toggle('open', on);
+  wrapper.inert = !on;
+}
+
 /** Push the current value into an existing control. */
 function applyValue(spec: SettingSpec): void {
   const control = controls.get(spec.key);
@@ -239,41 +272,213 @@ function applyValue(spec: SettingSpec): void {
   if (spec.enum && control instanceof HTMLSelectElement) renderEnumHint(spec, control);
 }
 
+/** The sidebar: one entry per group, in declaration order. */
+function renderNav(groups: { group: string }[]): HTMLElement {
+  const nav = document.createElement('nav');
+  nav.className = 'pf-nav';
+  nav.setAttribute('aria-label', 'Preferences sections');
+
+  const title = document.createElement('h1');
+  title.className = 'pf-navtitle';
+  title.textContent = 'Preferences';
+  nav.appendChild(title);
+
+  const list = document.createElement('div');
+  list.className = 'pf-navlist';
+  for (const { group } of groups) {
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'pf-navlink';
+    link.textContent = group;
+    link.addEventListener('click', () => {
+      sections.get(group)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      markCurrent(group);
+    });
+    navLinks.set(group, link);
+    list.appendChild(link);
+  }
+  nav.appendChild(list);
+  return nav;
+}
+
+function markCurrent(group: string): void {
+  for (const [name, link] of navLinks) link.classList.toggle('current', name === group);
+}
+
+/**
+ * Keep the sidebar in step with the scroll position.
+ *
+ * The topmost section still intersecting the reading area wins, rather than
+ * whichever crossed a line most recently — otherwise scrolling up through a
+ * short section skips its entry entirely.
+ */
+function watchScroll(scroller: HTMLElement): void {
+  const visible = new Set<string>();
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const group = (entry.target as HTMLElement).dataset.group ?? '';
+        if (entry.isIntersecting) visible.add(group);
+        else visible.delete(group);
+      }
+      const order = [...sections.keys()];
+      const first = order.find((g) => visible.has(g));
+      if (first) markCurrent(first);
+    },
+    { root: scroller, rootMargin: '0px 0px -65% 0px', threshold: 0 },
+  );
+  for (const section of sections.values()) observer.observe(section);
+}
+
+/**
+ * The buttons a feature needs that are not settings.
+ *
+ * Connecting a credential and checking that it works are actions, not values,
+ * and they belong beside the fields they are about — a token typed from a menu
+ * while the settings sit in another window is two places to look for one job.
+ */
+const ACTIONS: { id: SettingActionId; label: string; tone?: 'primary' | 'danger'; title: string }[] = [
+  {
+    id: 'connectDiscord',
+    label: 'Connect Discord…',
+    tone: 'primary',
+    title: 'Paste a bot token. It is checked against Discord, then kept in the system keychain.',
+  },
+  { id: 'testRemote', label: 'Test connection', title: 'Check the token, server, channel, authorised users and gateway.' },
+  { id: 'disconnectDiscord', label: 'Disconnect', tone: 'danger', title: 'Forget the token and close the connection.' },
+];
+
+function renderActions(group: string): HTMLElement {
+  const bar = document.createElement('div');
+  bar.className = 'pf-actions';
+
+  const buttons = document.createElement('div');
+  buttons.className = 'pf-actionrow';
+  for (const action of ACTIONS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `pf-action${action.tone ? ` ${action.tone}` : ''}`;
+    button.textContent = action.label;
+    button.title = action.title;
+    button.addEventListener('click', () => {
+      // The host answers with `actionBusy` then `actionResult`; nothing is
+      // assumed here about how long it takes or whether it worked.
+      post({ type: 'action', id: action.id });
+    });
+    actionButtons.set(action.id, button);
+    buttons.appendChild(button);
+  }
+
+  const result = document.createElement('pre');
+  result.className = 'pf-actionresult';
+  result.hidden = true;
+  actionResults.set(group, result);
+
+  bar.append(buttons, result);
+  return bar;
+}
+
+function showActionResult(ok: boolean, lines: string[]): void {
+  for (const result of actionResults.values()) {
+    result.textContent = lines.join('\n');
+    result.classList.toggle('bad', !ok);
+    result.hidden = lines.length === 0;
+  }
+}
+
+function setActionsBusy(busy: boolean, running?: SettingActionId): void {
+  for (const [id, button] of actionButtons) {
+    button.disabled = busy;
+    if (id === running) button.classList.toggle('running', busy);
+  }
+}
+
 function render(): void {
   if (!root) return;
   root.textContent = '';
   controls.clear();
   rows.clear();
+  sections.clear();
+  navLinks.clear();
+  dependents.clear();
+  actionButtons.clear();
+  actionResults.clear();
 
-  const header = document.createElement('header');
-  header.className = 'pf-top';
-  const title = document.createElement('h1');
-  title.textContent = 'Preferences';
+  const groups = settingGroups();
+  root.appendChild(renderNav(groups));
+
+  const main = document.createElement('div');
+  main.className = 'pf-main';
+
   const note = document.createElement('p');
-  note.className = 'pf-desc';
+  note.className = 'pf-desc pf-intro';
   note.textContent = 'Saved as you type. Everything takes effect without restarting.';
-  header.append(title, note);
-  root.appendChild(header);
+  main.appendChild(note);
 
-  for (const { group, settings } of settingGroups('app')) {
+  for (const { group, settings } of groups) {
     const section = document.createElement('section');
     section.className = 'pf-group';
+    section.dataset.group = group;
+    sections.set(group, section);
+
     const heading = document.createElement('h2');
     heading.textContent = group;
     section.appendChild(heading);
-    for (const spec of settings) section.appendChild(renderRow(spec));
-    root.appendChild(section);
+
+    // A setting that depends on a boolean is rendered inside a wrapper that
+    // follows it, so the group reads as "the switch, and what it governs"
+    // rather than as a flat list where three of five fields do nothing.
+    for (const spec of settings) {
+      if (spec.dependsOn) {
+        let wrapper = dependents.get(spec.dependsOn);
+        if (!wrapper) {
+          wrapper = document.createElement('div');
+          wrapper.className = 'pf-dependents';
+          const inner = document.createElement('div');
+          inner.className = 'pf-dependents-inner';
+          wrapper.appendChild(inner);
+          dependents.set(spec.dependsOn, wrapper);
+          section.appendChild(wrapper);
+        }
+        wrapper.firstElementChild!.appendChild(renderRow(spec));
+        continue;
+      }
+      section.appendChild(renderRow(spec));
+    }
+    // The Discord buttons live inside the reveal, under the fields they act on.
+    const wrapper = dependents.get('remote.enabled');
+    if (group === 'Experimental' && wrapper) wrapper.firstElementChild!.appendChild(renderActions(group));
+    main.appendChild(section);
   }
+
+  root.appendChild(main);
+  for (const parentKey of dependents.keys()) syncReveal(parentKey);
+  markCurrent(groups[0]?.group ?? '');
+  watchScroll(main);
 }
 
 window.addEventListener('message', (event: MessageEvent) => {
   const message = event.data as HostToPreferences | undefined;
-  if (!message || message.type !== 'values') return;
+  if (!message) return;
+  if (message.type === 'actionBusy') {
+    setActionsBusy(true, message.id);
+    showActionResult(true, ['Working…']);
+    return;
+  }
+  if (message.type === 'actionResult') {
+    setActionsBusy(false);
+    showActionResult(message.ok, message.lines);
+    return;
+  }
+  if (message.type !== 'values') return;
   values = message.values ?? {};
   if (controls.size === 0) render();
-  else for (const { settings } of settingGroups('app')) for (const spec of settings) {
-    applyValue(spec);
-    markRow(spec);
+  else {
+    for (const { settings } of settingGroups()) for (const spec of settings) {
+      applyValue(spec);
+      markRow(spec);
+    }
+    for (const parentKey of dependents.keys()) syncReveal(parentKey);
   }
 });
 

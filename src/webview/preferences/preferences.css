@@ -16,22 +16,91 @@
   display: none !important;
 }
 
+/*
+ * Two columns: a sidebar that navigates, and the settings that scroll.
+ *
+ * The window scrolls in `.pf-main` rather than on the root, so the sidebar
+ * stays put without `position: sticky` and the scrollspy has one obvious
+ * element to observe against.
+ */
 #prefsApp {
   box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr);
   height: 100%;
-  padding: 18px 22px 28px;
-  overflow-y: auto;
+  overflow: hidden;
   color: var(--vscode-foreground);
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
 }
 
-#prefsApp * {
-  box-sizing: border-box;
+#prefsApp .pf-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  padding: 18px 10px 18px 16px;
+  overflow-y: auto;
+  border-right: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-sideBar-background, transparent);
 }
 
-#prefsApp .pf-top {
-  margin-bottom: 20px;
+#prefsApp .pf-navtitle {
+  margin: 0 0 2px;
+  padding: 0 6px;
+  font-size: 1.2em;
+  font-weight: 600;
+}
+
+#prefsApp .pf-navlist {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+#prefsApp .pf-navlink {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+#prefsApp .pf-navlink:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+#prefsApp .pf-navlink:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* The section being read. Deliberately the list-selection colours, so it
+   reads as "you are here" rather than as a pressed button. */
+#prefsApp .pf-navlink.current {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+#prefsApp .pf-main {
+  height: 100%;
+  padding: 18px 22px 60vh;
+  overflow-y: auto;
+}
+
+/* Trailing room below the last section, so even a short one can scroll to the
+   top of the view and light its sidebar entry. Without it the final group can
+   never become "current". */
+
+#prefsApp .pf-intro {
+  margin: 0 0 4px;
+}
+
+#prefsApp * {
+  box-sizing: border-box;
 }
 
 #prefsApp h1 {
@@ -42,7 +111,7 @@
 
 #prefsApp h2 {
   margin: 0;
-  padding: 18px 0 8px;
+  padding: 22px 0 8px;
   font-size: 0.85em;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -199,4 +268,145 @@
   content: '•';
   margin-left: 6px;
   color: var(--vscode-charts-blue);
+}
+
+
+/*
+ * The setting's own name in `settings.json`, under the label it is shown by.
+ * Small and quiet: it is for finding the setting in a file or in the docs, not
+ * for reading down the page.
+ */
+#prefsApp .pf-key {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.82em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.75;
+}
+
+/* A checkbox row puts its control first, so the key would push the label away
+   from it; keep the pair together and let the key sit after both. */
+#prefsApp .pf-type-boolean .pf-key {
+  flex: 0 1 auto;
+}
+
+/*
+ * Settings that only apply while a switch is on.
+ *
+ * `grid-template-rows: 0fr → 1fr` rather than a `max-height` guess: the height
+ * it animates to is whatever the content is, so a description that wraps to
+ * three lines on a narrow window still opens fully. `min-height: 0` on the
+ * child is what lets the row actually collapse.
+ */
+#prefsApp .pf-dependents {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 180ms ease, opacity 180ms ease;
+  opacity: 0;
+}
+
+#prefsApp .pf-dependents.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+#prefsApp .pf-dependents-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Indented and ruled, so the nesting is visible and not just implied by order. */
+#prefsApp .pf-dependents-inner > .pf-row {
+  padding-left: 14px;
+  border-left: 2px solid var(--vscode-panel-border);
+}
+
+/* Someone who prefers no motion gets the same states, without the slide. */
+@media (prefers-reduced-motion: reduce) {
+  #prefsApp .pf-dependents {
+    transition: none;
+  }
+}
+
+/*
+ * The buttons a feature needs that are not settings, and what they report.
+ *
+ * Inside the reveal with the fields they act on, so connecting a token and
+ * telling Discord where to post are one job in one place.
+ */
+#prefsApp .pf-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 0 4px 14px;
+  border-left: 2px solid var(--vscode-panel-border);
+}
+
+#prefsApp .pf-actionrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#prefsApp .pf-action {
+  padding: 5px 12px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 4px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  font: inherit;
+  cursor: pointer;
+}
+
+#prefsApp .pf-action:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+#prefsApp .pf-action.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+#prefsApp .pf-action.primary:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+
+#prefsApp .pf-action.danger {
+  color: var(--vscode-errorForeground);
+}
+
+/* Every button greys out while one runs: they all touch the same connection,
+   and a second press mid-connect is a race nobody meant to start. */
+#prefsApp .pf-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#prefsApp .pf-action.running {
+  opacity: 0.85;
+}
+
+/*
+ * The result, in place rather than in a dialog. A check with six separate
+ * answers is a thing to read next to the fields it is about.
+ */
+#prefsApp .pf-actionresult {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.1));
+  border-left: 3px solid var(--vscode-charts-green, #3ba55d);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.86em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+#prefsApp .pf-actionresult.bad {
+  border-left-color: var(--vscode-errorForeground, #ed4245);
 }

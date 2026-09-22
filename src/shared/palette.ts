@@ -38,6 +38,8 @@ export type PaletteRequest =
       prompt?: string;
       value?: string;
       placeholder?: string;
+      /** Mask the field. For a credential, which must not sit on screen. */
+      password?: boolean;
       /** Whether the host wants to be asked to check each keystroke. */
       validates?: boolean;
     };

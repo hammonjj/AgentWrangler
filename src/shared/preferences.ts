@@ -15,13 +15,38 @@ export type PreferencesToHost =
   | { type: 'set'; key: string; value: string | boolean | number }
   /** Put one setting back to the value it ships with. */
   | { type: 'reset'; key: string }
+  /**
+   * A button was pressed. Not every control in this window is a setting: some
+   * things a feature needs are actions — connecting a credential, checking that
+   * a connection works — and they belong beside the settings they are about
+   * rather than only in a menu.
+   */
+  | { type: 'action'; id: SettingActionId }
   | { type: 'close' };
 
-export type HostToPreferences = {
-  type: 'values';
-  /** Every setting the app offers, keyed without the `agentWrangler.` prefix. */
-  values: Record<string, string | boolean | number>;
-};
+/** The actions Preferences can invoke. A closed set: the host switches on it. */
+export type SettingActionId = 'connectDiscord' | 'testRemote' | 'disconnectDiscord';
+
+export const SETTING_ACTION_IDS: SettingActionId[] = ['connectDiscord', 'testRemote', 'disconnectDiscord'];
+
+export function isSettingActionId(value: unknown): value is SettingActionId {
+  return typeof value === 'string' && (SETTING_ACTION_IDS as string[]).includes(value);
+}
+
+export type HostToPreferences =
+  | {
+      type: 'values';
+      /** Every setting the app offers, keyed without the `agentWrangler.` prefix. */
+      values: Record<string, string | boolean | number>;
+    }
+  /**
+   * What an action did, shown in the window that asked rather than in a dialog
+   * over it. A check with six separate results is a thing to read next to the
+   * fields it is about, not a modal to dismiss.
+   */
+  | { type: 'actionResult'; id: SettingActionId; ok: boolean; lines: string[]; busy?: false }
+  /** The action has started; the button says so and cannot be pressed twice. */
+  | { type: 'actionBusy'; id: SettingActionId };
 
 /**
  * What a `set` or `reset` should actually write, or nothing.
