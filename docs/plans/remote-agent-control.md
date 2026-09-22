@@ -85,7 +85,7 @@ machine's own `allow-readonly.py` PreToolUse hook auto-approves it, and then *ne
 conversations Agent Wrangler runs itself would need cross-window RPC. They do not, for
 permissions: a runner-owned session raises a marker like any other, and any process on the
 machine can settle it with a file write. **One mechanism covers every Claude permission prompt on
-the machine**, which is what makes the leader design in §6 sufficient rather than a stopgap.
+the machine**, whichever process is holding the transport (§6).
 §1.1, §6 and §13 are amended accordingly.
 
 `AskUserQuestion` and `ExitPlanMode` are still runner-only — they never reach
@@ -274,7 +274,6 @@ Two adjustments are needed, both small and both landing before Remote Control (�
 | Session / agent status | Agent Wrangler | `SessionStore` | No |
 | **Which Discord message mirrors which Agent Wrangler ask** | **Remote Control** | `~/.cache/agent-wrangler/remote/mirrors.json` | **Yes** (§5) |
 | Who pressed what, in the remote UI | **Remote Control** | same record, `lastPress` | Yes |
-| Which process owns the Discord connection | **Remote Control** | `~/.cache/agent-wrangler/remote/leader.json` | Yes (a lease) |
 | Gateway session id, seq, resume URL, rate-limit buckets | **Discord transport** | memory | No |
 | Message text, colour, button labels | **Discord transport** | Discord's servers | No |
 
@@ -292,7 +291,6 @@ src/shared/remote.ts             RemoteAsk, RemoteChoice, remoteAskFor()   — p
 src/remote/redact.ts             redactForDisplay()                        — pure
 src/remote/transport.ts          RemoteTransport, RemoteMessageRef, RemoteActor, RemoteInvocation
 src/remote/mirrorStore.ts        the persisted mapping
-src/remote/leader.ts             LeaderLease
 src/remote/audit.ts              append-only log
 src/remote/service.ts            RemoteControlService — the reconciler
 src/remote/discord/ids.ts        custom_id codec                           (pure)
@@ -382,7 +380,7 @@ constructor(
   private audit: AuditLog,
   private log: (m: string) => void,
 ) {}
-setTransport(t: RemoteTransport | undefined): void   // only the leader ever sets one
+setTransport(t: RemoteTransport | undefined): void   // with none, the service is inert
 ```
 
 `sessions` is a narrow structural interface, following `adoptQueue.ts`'s `SessionUpdates`
@@ -402,7 +400,7 @@ reconcile():
      if (!desired.has(askKey))           close(mirror)            // AW says it is over
 ```
 
-Declarative, idempotent, and self-healing after a restart or a leader change: a new process reads
+Declarative, idempotent, and self-healing after a restart: a new process reads
 the mirror file, recomputes `desired` from its own store, and converges.
 
 ---
@@ -471,7 +469,7 @@ interface Mirror {
 ```
 
 **Why anything is persisted at all:** so a process that did not post a message can still edit it.
-Without the file, a window reload orphans live buttons in the channel — a new leader would not know
+Without the file, a restart orphans live buttons in the channel — the next process would not know
 they exist and every press would answer "unknown interaction" forever. That is the entire
 justification, and it bounds the record to identity, address, and what the remote UI has been told.
 
@@ -493,34 +491,53 @@ is dropped on load.
 Every VSCode window runs a whole `createApp`; five windows are five `HookLog`s tailing the same
 files. Left alone that is five bots and five messages for one prompt.
 
-**This is a bet on the extension, and the extension is being retired.** As of 2026-09-21 the
-VSCode extension is no longer used and is slated for removal (see
-`electron-app-migration.md` → *Backlog: retire the VSCode extension*). One app is one process,
-so the contention this section solves mostly disappears with it — at which point the lease could
-shrink to a guard against a second copy of the app, or go entirely. Build it anyway: until the
-extension is actually gone the contention is real, and a dev `npm run electron` running beside
-the installed app reproduces it exactly. It is ~60 lines and it is the difference between one
-Discord message and five.
+### The leader lease was cut. Here is why
 
-**A leader lease, narrowed to the transport only.** `~/.cache/agent-wrangler/remote/leader.json`
-holds `{pid, acquiredAtMs, heartbeatAtMs}`. Acquire with `open(..., 'wx')`; on `EEXIST`, steal if
-the heartbeat is older than 30 s **or** the pid is dead (`isPidAlive`, `src/claude/registry.ts`).
-The leader heartbeats every 10 s and releases on dispose; followers retry every 15 s. A fixed
-machine path, not `host.storageDir` — the extension's globalStorage and the app's userData differ,
-and both front ends must contend for the same lease.
+Earlier drafts of this plan specified a lock file with a heartbeat, so exactly one process owned
+the Discord connection. **It is not being built**, because on 2026-09-22 it turned out to be
+defending against a state that cannot be reached. Three independent things already prevent it:
 
-The leader owns exactly three things: **the Discord connection, publishing, and receiving
-invocations.** It is the authority for nothing about sessions or permissions; it reads its own
-`SessionStore` like every other window.
+1. **One app, enforced by the OS.** `src/electron/main.ts:56` calls
+   `app.requestSingleInstanceLock()` and quits when it loses. A second copy — including a dev
+   `npm run electron` beside the installed one, since both derive the same `userData` — never
+   reaches the point of opening a socket.
+2. **The two front ends cannot both be configured.** Settings are not shared: the app reads
+   `userData/settings.json` (`JsonSettings`) and the extension reads VSCode's own configuration.
+   The bot token is worse than not shared — it is in two different keychains. Enabling remote
+   control in the app does not enable it in the extension, so publishing twice would take
+   deliberately configuring it twice, with two tokens.
+3. **The extension is retired** (`electron-app-migration.md`), so the population of processes
+   that could contend is shrinking to one by design.
 
-**Why a leader in window A can answer a prompt raised in window B:** it does not reach window B at
-all. The decision is a file written into `~/.claude/agentwrangler/decisions/`, and window A's own
-`HookLog` has already read the same marker id from the same shared log. Any window can answer any
-hook-backed prompt today. Remote Control adds no cross-window RPC and needs none.
+And if all three failed at once, the design already degrades safely rather than duplicating: the
+mirror map is a shared file, so a second process loads it, sees the ask already mirrored, and
+publishes nothing. That is not a hypothetical — `remoteService.test.ts` pins it as
+*"a second process does not republish an ask the first already mirrored"*.
 
-This holds for **runner-owned sessions too** (§0.1): a conversation Agent Wrangler started raises
-the same marker, and the leader settles it the same way, whichever window is running it. So
-`remoteAskFor` needs no "is this mine?" predicate in v1 and the leader needs no IPC.
+What is genuinely lost by cutting it: two processes that started simultaneously could both find
+an empty map and both publish, and both would receive every press (a bot token allows several
+gateway connections). The second press handler would find the prompt already answered and say so.
+A narrow, self-correcting window, against a state that needs the single-instance lock to have
+failed first.
+
+**If that changes, this is where it hooks in.** A daemon, a deliberate multi-instance mode, or a
+second machine sharing a home directory would all bring the contention back. The fix is the lease
+as specified — `{pid, acquiredAtMs, heartbeatAtMs}` next to the mirror file, stolen when the
+heartbeat is stale or `isPidAlive` says the holder is gone — gating exactly one thing:
+`service.setTransport(...)`. The service was built to make that a one-line change, and it keeps
+that shape whether or not the lease ever exists.
+
+### Whichever process holds the transport can answer anything
+
+This part survives the cut and is what makes the whole design work. The process publishing to
+Discord does not need to reach the process running the session: a decision is a file written into
+`~/.claude/agentwrangler/decisions/`, and its own `HookLog` has already read the same marker id
+from the same shared log. Any Agent Wrangler on the machine can answer any hook-backed prompt, and
+that is existing behaviour, not something this feature adds.
+
+It holds for **runner-owned sessions too** (§0.1): a conversation Agent Wrangler started raises
+the same marker and is settled the same way. So `remoteAskFor` needs no "is this mine?" predicate,
+and there is no cross-window RPC anywhere in v1.
 
 **When questions and plan approvals are supported**, that changes: those live in one process's
 heap with no marker, so only the owning window can invoke them. `remoteAskFor` is the gate — it
@@ -601,7 +618,7 @@ for exactly this reason. **Fix: pid-qualify the tmp name.** One line.
 
 - **Same process** (dashboard and Discord in one window): already correct. The first `decide` clears
   `permissionRequestId` in its own `HookLog` state (`hookLog.ts:156`), so the second returns `false`.
-- **Different processes** (a local window and the remote leader): both see the marker, both write.
+- **Different processes** (the local UI and a remote press, in separate processes): both see the marker, both write.
   With 7.3 fixed each write is atomic; last rename wins and both callers get `true`. If the two
   answers differ, the agent gets whichever landed last.
 - This is *already* the repo's documented semantics for the analogous race — Claude Code runs its
@@ -737,12 +754,10 @@ Fakes follow `test/adoptQueue.test.ts:6-13` (a nine-line emitter-backed fake ses
 - `remote.enabled` false mid-flight ⇒ all mirrors closed;
 - transport disconnected ⇒ reconcile is a no-op and nothing throws.
 
-**Persistence and leadership**
+**Persistence and recovery**
 
 - `test/remoteMirrorStore.test.ts` — round-trip; corrupt file ⇒ empty; tmp + rename; stale entries
   dropped on load.
-- `test/remoteLeader.test.ts` — acquire; a second instance is a follower; a stale heartbeat is
-  stolen; a dead pid is stolen; release hands over. Injected clock and `isPidAlive`.
 - **Failover** — construct service A, publish, drop it, construct service B over the same mirror
   file and a fresh `FakeTransport`, and assert B closes A's message when the ask disappears.
 
@@ -776,14 +791,13 @@ ln -s ../AgentWrangler/node_modules ../AgentWrangler-remote/node_modules
 |---|---|---|---|
 | **0a** | `main` | §7.1 stale guard + §7.2 unify the pane + §7.3 pid-qualified tmp, with tests | The local UI is more correct today; nothing about Discord |
 | **0b** | ~~throwaway~~ **done 2026-09-21** | Both halves answered; results in §0.1. The gate is open. | ✅ |
-| **1** | `feat/remote-control` | `src/shared/remote.ts` + `src/remote/redact.ts` + their tests | The whole mirrored-view model is pure and reviewable on tests alone |
-| **2** | ″ | `transport.ts` (interface), `mirrorStore.ts`, `audit.ts`, `service.ts`; `FakeTransport` tests; wired into `createApp` with **no transport constructed** | The core works, is testable without Discord, and is inert until a transport exists |
-| **3** | ″ | `leader.ts` + tests; the leader is what calls `service.setTransport(...)` | One publisher per machine; failover covered |
-| **4** | ″ | `discord/{ids,format,rest,gateway,transport}.ts` + fake-socket tests (no new dependency; see §0.1) | The adapter, still unreachable by a user |
-| **5** | ″ | `HostSecrets` on both hosts; four settings in `settings.ts` + `package.json`; `config.ts`; three commands in `extension.ts` and the Electron menu; README | First user-visible phase; first one needing `install-local` and a reload |
-| **6** | ″ | Hardening after a week of dogfooding: laptop-sleep reconnects, burst behaviour, a "enabled but not connected" chip | — |
+| **1** ✅ | `feat/remote-control` | `src/shared/remote.ts` + `src/remote/redact.ts` + their tests | The whole mirrored-view model is pure and reviewable on tests alone |
+| **2** ✅ | ″ | `transport.ts` (interface), `mirrorStore.ts`, `audit.ts`, `service.ts`; `FakeTransport` tests; wired into `createApp` with **no transport constructed** | The core works, is testable without Discord, and is inert until a transport exists |
+| **3** | ″ | `discord/{ids,format,rest,gateway,transport}.ts` + fake-socket tests (no new dependency; see §0.1) | The adapter, still unreachable by a user |
+| **4** | ″ | `HostSecrets`; four settings in `settings.ts` + `package.json`; `config.ts`; three commands in the Electron menu; README | First user-visible phase; first one needing `install-local` and a reload |
+| **5** | ″ | Hardening after a week of dogfooding: laptop-sleep reconnects, burst behaviour, a "enabled but not connected" chip | — |
 
-Everything before phase 5 is provable by `npm test` alone. The network, the secret and the settings
+Everything before the settings phase is provable by `npm test` alone. The network, the secret and the settings
 — the three things that make a change hard to review and hard to revert — arrive last.
 
 ### Configuration (phase 5)
@@ -825,7 +839,7 @@ completion and failure notifications · any new permission classification or pol
 | `remote.transport` enum setting | **Deleted.** One transport; the enum buys nothing until there are two. |
 | `src/remote/core/` vs `src/remote/discord/` | **Simplified** to flat `src/remote/*` + `src/remote/discord/*`. |
 | `pendingStore.ts` holding interaction state | **Simplified** to `mirrorStore.ts` holding identity, address and last press. |
-| Leader election | **Retained, narrowed** to the transport, publishing and receiving. |
+| Leader election | **Cut entirely** (§6). The single-instance lock, unshared settings and the shared mirror map already prevent what it defended against. |
 | `expectedRequestId` stale guard | **Retained and promoted.** Confirmed as a real bug affecting the *local* UI too (§7.1); lands on `main` first, and the conversation pane is unified onto the same action at the same time. |
 | Discord findings — gateway/endpoint exclusivity, 3 s ACK, 15-min token vs 28-min prompt, channel `PATCH` for edits, 4004 terminal, no `discord.js` | **Retained, and now measured** rather than read off the docs — see §0.1. |
 | `ws`, because Node 20 has no global `WebSocket` | **Dropped.** Both hosts run Node 24 and have one (§0.1). No new dependency. |
@@ -860,8 +874,8 @@ completion and failure notifications · any new permission classification or pol
 9. **A stale Discord press cannot affect a newer interaction**, verified by the §10 stale test and
    by the `expectedRequestId` guard in `HookLog.decide`.
 10. An unauthorised presser changes nothing, gets an ephemeral refusal, and appears in the audit log.
-11. Killing the leader window with a message live: another window takes over within ~30 s and can
-    still close that message.
+11. Restarting the app with a message live: the next process reads the mirror map and can still
+    close that message.
 12. **Discord being unavailable never affects local behaviour** — pull the network mid-prompt and the
     local buttons still work; the failure is logged, not toasted.
 13. `npm run typecheck` and `npm test` green; the token appears in no log, setting, error message or

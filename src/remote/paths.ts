@@ -27,8 +27,3 @@ export function mirrorFile(): string {
 export function auditFile(): string {
   return path.join(remoteHome(), 'audit.log');
 }
-
-/** Which process owns the transport. Phase 3. */
-export function leaderFile(): string {
-  return path.join(remoteHome(), 'leader.json');
-}
