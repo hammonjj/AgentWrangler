@@ -32,10 +32,9 @@ export interface UsageSource {
 }
 
 /**
- * The dashboard's behavior, independent of where it is docked. VSCode has two
- * unrelated shells for a webview — WebviewView (bottom panel / sidebar) and
- * WebviewPanel (editor tab) — so the HTML, snapshot pushes and message
- * handling live here and each shell only owns a lifetime.
+ * The dashboard's behavior, independent of the window holding it. The HTML,
+ * snapshot pushes and message handling live here; the shell owns only a
+ * lifetime.
  */
 /** Just enough of `RunnerService` for the dashboard: "are we running this one?" */
 export interface RunnerOwnership {
@@ -90,7 +89,7 @@ export class DashboardHost {
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
       this.store.onDidUpdate(() => this.pushSnapshot()),
       // The launcher's two dropdowns are settings, so a change from anywhere —
-      // the Preferences window, VSCode's settings UI, the other dashboard —
+      // the Preferences window, the menu, the other dashboard —
       // has to reach them or they show a default that is no longer the default.
       this.models.onDidChange(() => void this.pushSnapshot()),
       this.settings.onDidChange((affects) => {

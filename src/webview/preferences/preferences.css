@@ -16,22 +16,91 @@
   display: none !important;
 }
 
+/*
+ * Two columns: a sidebar that navigates, and the settings that scroll.
+ *
+ * The window scrolls in `.pf-main` rather than on the root, so the sidebar
+ * stays put without `position: sticky` and the scrollspy has one obvious
+ * element to observe against.
+ */
 #prefsApp {
   box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr);
   height: 100%;
-  padding: 18px 22px 28px;
-  overflow-y: auto;
+  overflow: hidden;
   color: var(--vscode-foreground);
   font-family: var(--vscode-font-family);
   font-size: var(--vscode-font-size);
 }
 
-#prefsApp * {
-  box-sizing: border-box;
+#prefsApp .pf-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  padding: 18px 10px 18px 16px;
+  overflow-y: auto;
+  border-right: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-sideBar-background, transparent);
 }
 
-#prefsApp .pf-top {
-  margin-bottom: 20px;
+#prefsApp .pf-navtitle {
+  margin: 0 0 2px;
+  padding: 0 6px;
+  font-size: 1.2em;
+  font-weight: 600;
+}
+
+#prefsApp .pf-navlist {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+#prefsApp .pf-navlink {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+#prefsApp .pf-navlink:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+#prefsApp .pf-navlink:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+/* The section being read. Deliberately the list-selection colours, so it
+   reads as "you are here" rather than as a pressed button. */
+#prefsApp .pf-navlink.current {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+#prefsApp .pf-main {
+  height: 100%;
+  padding: 18px 22px 60vh;
+  overflow-y: auto;
+}
+
+/* Trailing room below the last section, so even a short one can scroll to the
+   top of the view and light its sidebar entry. Without it the final group can
+   never become "current". */
+
+#prefsApp .pf-intro {
+  margin: 0 0 4px;
+}
+
+#prefsApp * {
+  box-sizing: border-box;
 }
 
 #prefsApp h1 {
@@ -42,7 +111,7 @@
 
 #prefsApp h2 {
   margin: 0;
-  padding: 18px 0 8px;
+  padding: 22px 0 8px;
   font-size: 0.85em;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -199,4 +268,28 @@
   content: '•';
   margin-left: 6px;
   color: var(--vscode-charts-blue);
+}
+
+
+/*
+ * The setting's own name in `settings.json`, under the label it is shown by.
+ * Small and quiet: it is for finding the setting in a file or in the docs, not
+ * for reading down the page.
+ */
+#prefsApp .pf-key {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.82em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.75;
+}
+
+/* A checkbox row puts its control first, so the key would push the label away
+   from it; keep the pair together and let the key sit after both. */
+#prefsApp .pf-type-boolean .pf-key {
+  flex: 0 1 auto;
 }

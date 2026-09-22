@@ -1,11 +1,9 @@
 /**
  * The Preferences window.
  *
- * VSCode has a settings UI and generates it from `contributes.configuration`;
- * an app has to draw its own. Rather than a second hand-written list of the
- * same twenty-two settings, this renders `src/shared/settings.ts` — the one
- * declaration both front ends read, with a test that keeps it and
- * `package.json` in step.
+ * Rendered entirely from `src/shared/settings.ts`, so adding a setting is one
+ * edit there and nothing here: the sections, their order, and the sidebar that
+ * navigates them all fall out of the declaration.
  *
  * Every edit is written immediately. There is no OK/Cancel, because there is
  * nothing to cancel: each setting takes effect where it is read, the reads are
@@ -29,6 +27,10 @@ const post = (message: PreferencesToHost) => host.postMessage(message);
 const TYPING_SETTLE_MS = 350;
 
 const root = document.getElementById('prefsApp');
+/** Section elements by group name, for the sidebar to scroll to. */
+const sections = new Map<string, HTMLElement>();
+/** Sidebar links by group name, so the current section can be marked. */
+const navLinks = new Map<string, HTMLButtonElement>();
 let values: Record<string, string | boolean | number> = {};
 /** The controls, so an external change can be reflected without a re-render. */
 const controls = new Map<string, HTMLInputElement | HTMLSelectElement>();
@@ -183,12 +185,16 @@ function renderRow(spec: SettingSpec): HTMLElement {
 
   const label = document.createElement('label');
   label.className = 'pf-label';
-  // The key is the label. These are the names in `settings.json` and in the
-  // documentation, and inventing prettier ones would make the two sets of
-  // words for one setting that this file exists to avoid.
-  label.textContent = spec.key;
+  label.textContent = spec.label;
   const id = `pf-${spec.key.replace(/\./g, '-')}`;
   label.htmlFor = id;
+
+  // The key rides along underneath. It is the name in `settings.json` and in
+  // the documentation, so hiding it would leave two sets of words for one
+  // setting and no way to get from one to the other.
+  const key = document.createElement('code');
+  key.className = 'pf-key';
+  key.textContent = spec.key;
 
   const control = controlFor(spec);
   control.id = id;
@@ -210,7 +216,7 @@ function renderRow(spec: SettingSpec): HTMLElement {
 
   const head = document.createElement('div');
   head.className = 'pf-head';
-  head.append(label, reset);
+  head.append(label, key, reset);
 
   const body = document.createElement('div');
   body.className = 'pf-body';
@@ -239,31 +245,99 @@ function applyValue(spec: SettingSpec): void {
   if (spec.enum && control instanceof HTMLSelectElement) renderEnumHint(spec, control);
 }
 
+/** The sidebar: one entry per group, in declaration order. */
+function renderNav(groups: { group: string }[]): HTMLElement {
+  const nav = document.createElement('nav');
+  nav.className = 'pf-nav';
+  nav.setAttribute('aria-label', 'Preferences sections');
+
+  const title = document.createElement('h1');
+  title.className = 'pf-navtitle';
+  title.textContent = 'Preferences';
+  nav.appendChild(title);
+
+  const list = document.createElement('div');
+  list.className = 'pf-navlist';
+  for (const { group } of groups) {
+    const link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'pf-navlink';
+    link.textContent = group;
+    link.addEventListener('click', () => {
+      sections.get(group)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      markCurrent(group);
+    });
+    navLinks.set(group, link);
+    list.appendChild(link);
+  }
+  nav.appendChild(list);
+  return nav;
+}
+
+function markCurrent(group: string): void {
+  for (const [name, link] of navLinks) link.classList.toggle('current', name === group);
+}
+
+/**
+ * Keep the sidebar in step with the scroll position.
+ *
+ * The topmost section still intersecting the reading area wins, rather than
+ * whichever crossed a line most recently — otherwise scrolling up through a
+ * short section skips its entry entirely.
+ */
+function watchScroll(scroller: HTMLElement): void {
+  const visible = new Set<string>();
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const group = (entry.target as HTMLElement).dataset.group ?? '';
+        if (entry.isIntersecting) visible.add(group);
+        else visible.delete(group);
+      }
+      const order = [...sections.keys()];
+      const first = order.find((g) => visible.has(g));
+      if (first) markCurrent(first);
+    },
+    { root: scroller, rootMargin: '0px 0px -65% 0px', threshold: 0 },
+  );
+  for (const section of sections.values()) observer.observe(section);
+}
+
 function render(): void {
   if (!root) return;
   root.textContent = '';
   controls.clear();
   rows.clear();
+  sections.clear();
+  navLinks.clear();
 
-  const header = document.createElement('header');
-  header.className = 'pf-top';
-  const title = document.createElement('h1');
-  title.textContent = 'Preferences';
+  const groups = settingGroups();
+  root.appendChild(renderNav(groups));
+
+  const main = document.createElement('div');
+  main.className = 'pf-main';
+
   const note = document.createElement('p');
-  note.className = 'pf-desc';
+  note.className = 'pf-desc pf-intro';
   note.textContent = 'Saved as you type. Everything takes effect without restarting.';
-  header.append(title, note);
-  root.appendChild(header);
+  main.appendChild(note);
 
-  for (const { group, settings } of settingGroups('app')) {
+  for (const { group, settings } of groups) {
     const section = document.createElement('section');
     section.className = 'pf-group';
+    section.dataset.group = group;
+    sections.set(group, section);
+
     const heading = document.createElement('h2');
     heading.textContent = group;
     section.appendChild(heading);
     for (const spec of settings) section.appendChild(renderRow(spec));
-    root.appendChild(section);
+    main.appendChild(section);
   }
+
+  root.appendChild(main);
+  markCurrent(groups[0]?.group ?? '');
+  watchScroll(main);
 }
 
 window.addEventListener('message', (event: MessageEvent) => {
@@ -271,7 +345,7 @@ window.addEventListener('message', (event: MessageEvent) => {
   if (!message || message.type !== 'values') return;
   values = message.values ?? {};
   if (controls.size === 0) render();
-  else for (const { settings } of settingGroups('app')) for (const spec of settings) {
+  else for (const { settings } of settingGroups()) for (const spec of settings) {
     applyValue(spec);
     markRow(spec);
   }

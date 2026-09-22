@@ -1,15 +1,20 @@
 # Agent Wrangler — working rules for coding agents
 
-VSCode extension that monitors every Claude Code session on this machine and hosts their
-conversations, in one tab: the agent table and the conversation side by side. Read `README.md` for behaviour, and the active plan
-in `docs/plans/` before touching anything it covers.
+macOS desktop app (Electron) that monitors every Claude Code and Codex session on this machine
+and hosts their conversations in one window: the agent table and the conversation side by side.
+Read `README.md` for behaviour, and the active plan in `docs/plans/` before touching anything it
+covers.
+
+**There is no VSCode extension.** It was removed on 2026-09-22; the app is the only front end.
+Nothing may import `vscode`, and `HostServices` has one implementation.
 
 ## Commands
 
 - `npm run build` · `npm run typecheck` · `npm test` (vitest; pure functions only, plus
   `test/live.integration.test.ts`, which reads the real `~/.claude` and self-skips without it).
-- `npm run install-local` — build, package the `.vsix`, install it over the current version.
-  **Run it yourself after every code change.** It does not reload anything.
+- `npm run electron` — build, then open the window. `npm run electron:nobuild` skips the build.
+- `npm run app:install` — build, package, and put it in `/Applications`.
+  **Run it yourself after every code change**, and say so; it replaces the copy James uses.
 
 ## Branches and worktrees
 
@@ -33,26 +38,25 @@ directory, so each agent has a tree of its own.
 - **Never commit files that are not yours.** In a shared tree `git status` shows other agents'
   work in progress. Commit by path (`git commit <paths>`), never `git commit -a`, and never
   `git add -A` without reading what it picked up.
-- **Only one agent runs `npm run install-local` at a time.** It installs the build of whichever
+- **Only one agent runs `npm run app:install` at a time.** It installs the build of whichever
   tree it ran in, so the last one wins; say which tree you installed from.
 - Merge with `git merge --no-ff` from `main`, then `git worktree remove ../AgentWrangler-<topic>`
   and delete the branch.
 
 ## Hard rules
 
-- **Never reload a VSCode window automatically**, and never run `npm run install-local:reload`
-  unless James asks. *Developer: Reload Window* ends every Claude Code session in that window.
-  Say "a reload is needed" and leave it to him. An unreloaded window running the old build
-  is the usual cause of "my fix didn't work".
+- **Never restart the app automatically.** Its window hosts live conversations, and quitting it
+  ends every session Agent Wrangler is running. Say "a restart is needed" and leave it to James.
+  A running copy on the old build is the usual cause of "my fix didn't work".
 - **The repo is public** (`hammonjj/AgentWrangler`). No real project paths, session titles,
   prompts, transcript content or hook payloads in code, tests, fixtures, docs or commits.
   Fixtures use `/Users/test/proj`-style paths. Never paste `live.integration.test.ts` output anywhere.
 - `src/webview/**` imports only from `src/shared/**` and `src/webview/common/**`.
-  `src/shared/**` has no `vscode`, Node or DOM imports (it is bundled into both the
-  extension host and the webviews); `src/webview/common/**` is browser-only and is where
-  things a webview has exactly one of live — see `paneApi.ts`.
+  `src/shared/**` has no Node or DOM imports (it is bundled into both the main process and the
+  webviews); `src/webview/common/**` is browser-only and is where things a webview has exactly
+  one of live — see `paneApi.ts`.
 - Webview CSP forbids inline styles and inline scripts; use classes and the nonce'd bundle.
-- **The table and the conversation share one webview** (the workbench tab), split by a
+- **The table and the conversation share one webview** (the workbench window), split by a
   divider the user drags. Three things a webview has exactly one of — the API handle, the
   message channel and `setState` — are shared through `src/webview/common/paneApi.ts`. Go
   through it; calling `acquireVsCodeApi()` a second time throws and kills a pane.
@@ -60,21 +64,25 @@ directory, so each agent has a tree of its own.
   full-screen window, but the divider moves, so a pane can be 300px inside a 2000px tab.
   Size off the pane, never the viewport: the table folds its columns below 720px from a
   `ResizeObserver` and exposes that as `#app.narrow`, which is why its narrow styles are a
-  class and not a `@media` query. Scope element selectors to a pane root (`#app`,
-  `#convApp`) or they leak — the conversation renders markdown tables.
+  class and not a `@media` query. Scope element selectors to a pane root (`#app`, `#convApp`,
+  `#prefsApp`) or they leak — the conversation renders markdown tables.
 - Never read `~/.claude/sessions/*.key` files: they are secrets.
 - New source and test files are TypeScript.
 
 ## Layout
 
 `src/claude/*` Claude Code provider (registry, transcript tail/index, hook events + log +
-installer, status) · `src/core/*` provider-agnostic store, config, services · `src/ui/*`
-webview hosts, click routing, relay, terminal · `src/webview/*` browser bundles (one dir per
-bundle, entry `main.ts` + a `.css`; `workbench` is what ships and imports the `dashboard`
-and `conversation` panes, `common/` is shared browser-only code) · `src/shared/*` model and wire protocol · `test/*` vitest.
+installer, status) · `src/codex/*` Codex provider and runner · `src/core/*` provider-agnostic
+store, config, services · `src/remote/*` remote control, with `discord/` below the transport
+boundary · `src/app/createApp.ts` the application, minus the window · `src/electron/*` the main
+process, windows and menu · `src/host/*` the seam the app is written against · `src/ui/*`
+webview hosts and click routing · `src/webview/*` browser bundles (one dir per bundle, entry
+`main.ts` + a `.css`; `workbench` is what ships and imports the `dashboard` and `conversation`
+panes, `common/` is shared browser-only code) · `src/shared/*` model and wire protocol ·
+`test/*` vitest.
 
 ## Verification
 
-Typecheck and tests green, then `npm run install-local`, then tell James which window needs a
-reload and what to click to see the change. Status-hook facts that are not documented by
+Typecheck and tests green, then `npm run app:install`, then tell James the app needs restarting
+and what to click to see the change. Status-hook facts that are not documented by
 Anthropic are recorded in the README ("How status is detected") and in `docs/plans/`.

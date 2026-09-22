@@ -21,7 +21,7 @@ import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostSettings } from '../host/hostServices';
 import { settingUpdate, type HostToPreferences, type PreferencesToHost } from '../shared/preferences';
-import { SETTINGS, settingsFor } from '../shared/settings';
+import { SETTINGS } from '../shared/settings';
 import { documentUrl } from './bundleProtocol';
 import { TO_HOST, TO_WEBVIEW } from './channels';
 
@@ -65,7 +65,7 @@ export class PreferencesWindow implements Disposable {
 
     const parent = this.opts.parentWindow();
     const win = new BrowserWindow({
-      width: 720,
+      width: 880,
       height: 760,
       minWidth: 520,
       minHeight: 420,
@@ -139,7 +139,7 @@ export class PreferencesWindow implements Disposable {
   private push(): void {
     if (!this.window || this.window.isDestroyed()) return;
     const values: Record<string, string | boolean | number> = {};
-    for (const spec of settingsFor('app')) values[spec.key] = this.opts.settings.get(spec.key, spec.default);
+    for (const spec of SETTINGS) values[spec.key] = this.opts.settings.get(spec.key, spec.default);
     const message: HostToPreferences = { type: 'values', values };
     this.window.webContents.send(TO_WEBVIEW, message);
   }

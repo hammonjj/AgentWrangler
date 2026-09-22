@@ -245,8 +245,6 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       app.codexRunners,
       app.actions,
       app.dictation,
-      // No diff editor here yet. The pane says so rather than swallowing the click.
-      undefined,
       app.files,
       // The window is the whole workbench, not one conversation, so its title
       // does not follow the session — the pane shows the name in its header.
