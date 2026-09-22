@@ -153,11 +153,13 @@ export interface AgentWranglerApp {
   installHooks(): Promise<void>;
   uninstallHooks(): Promise<void>;
   /** Experimental: store a Discord bot token and open the connection. */
-  connectDiscord(): Promise<void>;
+  connectDiscord(): Promise<{ ok: boolean; lines: string[] }>;
   /** Forget the token and close the connection. */
-  disconnectDiscord(): Promise<void>;
-  /** Check every part of the remote setup and report each separately. */
+  disconnectDiscord(): Promise<{ ok: boolean; lines: string[] }>;
+  /** Check every part of the remote setup, reporting each in a dialog. */
   testRemoteControl(): Promise<void>;
+  /** The same actions, for the Preferences window, reporting in place. */
+  runSettingAction(id: 'connectDiscord' | 'testRemote' | 'disconnectDiscord'): Promise<{ ok: boolean; lines: string[] }>;
   /** The session picker, for commands invoked without one. */
   pickSession(filter?: (s: AgentSession) => boolean): Promise<AgentSession | undefined>;
   /** Wrap a key-taking action so it asks which session when given nothing. */
@@ -668,35 +670,27 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * fails much later, as a gateway close code, which reads like a bug rather
    * than a mistyped credential.
    */
-  const connectDiscord = async (): Promise<void> => {
+  const connectDiscord = async (): Promise<{ ok: boolean; lines: string[] }> => {
     if (!host.secrets.available) {
-      dialogs.error('Agent Wrangler: this system cannot store secrets securely, so the token was not saved.');
-      return;
+      return { ok: false, lines: ['✗  This system cannot store secrets securely, so nothing was saved.'] };
     }
     const token = await dialogs.input({
       title: 'Connect Discord',
       prompt: 'Bot token, from the Bot tab of your Discord application. Stored in the system keychain, never in settings.',
       password: true,
     });
-    if (token === undefined) return;
-    if (token.trim() === '') {
-      dialogs.error('Agent Wrangler: no token was entered.');
-      return;
-    }
+    if (token === undefined) return { ok: false, lines: [] };
+    if (token.trim() === '') return { ok: false, lines: ['✗  No token was entered.'] };
 
     let who: { username?: string };
     try {
       const res = await fetch('https://discord.com/api/v10/users/@me', {
         headers: { Authorization: `Bot ${token.trim()}` },
       });
-      if (!res.ok) {
-        dialogs.error(`Agent Wrangler: Discord rejected that token (HTTP ${res.status}).`);
-        return;
-      }
+      if (!res.ok) return { ok: false, lines: [`✗  Discord rejected that token (HTTP ${res.status}).`] };
       who = (await res.json()) as { username?: string };
     } catch (err) {
-      dialogs.error(`Agent Wrangler: could not reach Discord — ${String(err)}`);
-      return;
+      return { ok: false, lines: [`✗  Could not reach Discord — ${String(err)}`] };
     }
 
     await host.secrets.store(DISCORD_BOT_TOKEN_KEY, token.trim());
@@ -711,13 +705,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
       cfg.remoteGuildId ? '' : 'a server ID',
       cfg.remoteChannelId ? '' : 'a channel ID',
       cfg.remoteAuthorizedUserIds.length > 0 ? '' : 'at least one authorised user',
-      cfg.remoteEnabled ? '' : 'the Experimental setting switched on',
+      cfg.remoteEnabled ? '' : 'Discord integration switched on',
     ].filter(Boolean);
-    void dialogs.info(
-      missing.length === 0
-        ? `Agent Wrangler: connected to Discord as ${who.username ?? 'the bot'}.`
-        : `Agent Wrangler: token saved for ${who.username ?? 'the bot'}. Still needed in Preferences → Experimental: ${missing.join(', ')}.`,
-    );
+    return {
+      ok: missing.length === 0,
+      lines:
+        missing.length === 0
+          ? [`✓  Connected as ${who.username ?? 'the bot'}.`]
+          : [`✓  Token saved for ${who.username ?? 'the bot'}.`, `✗  Still needed: ${missing.join(', ')}.`],
+    };
   };
 
   /**
@@ -729,7 +725,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * purpose: a private channel needs the bot added *to the channel*, and the
    * server check passes while that is missing.
    */
-  const testRemoteControl = async (): Promise<void> => {
+  const checkRemoteControl = async (): Promise<{ ok: boolean; lines: string[] }> => {
     const cfg = getConfig();
     const token = await host.secrets.get(DISCORD_BOT_TOKEN_KEY);
     const lines: string[] = [];
@@ -738,9 +734,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
     lines.push(cfg.remoteEnabled ? '✓  Discord integration is on' : '✗  Discord integration is off in Preferences → Experimental');
     if (!token) {
-      bad('No bot token. Use Connect Discord… first.');
-      void dialogs.warn('Agent Wrangler — remote control', { detail: lines.join('\n') }, 'OK');
-      return;
+      bad('No bot token. Press Connect Discord… first.');
+      return { ok: false, lines };
     }
     ok('A bot token is stored');
 
@@ -800,14 +795,33 @@ export function createApp(host: HostServices): AgentWranglerApp {
       bad(`Could not reach Discord — ${String(err)}`);
     }
 
+    return { ok: !lines.some((l) => l.startsWith('✗')), lines };
+  };
+
+  /** The menu's version: run the checks and put them in a dialog. */
+  const testRemoteControl = async (): Promise<void> => {
+    const { lines } = await checkRemoteControl();
     void dialogs.warn('Agent Wrangler — remote control', { detail: lines.join('\n') }, 'OK');
   };
 
-  const disconnectDiscord = async (): Promise<void> => {
+  const disconnectDiscord = async (): Promise<{ ok: boolean; lines: string[] }> => {
     await host.secrets.delete(DISCORD_BOT_TOKEN_KEY);
     await disconnectTransport();
     log('remote: token removed and disconnected');
-    void dialogs.info('Agent Wrangler: the Discord bot token has been removed and the connection closed.');
+    return { ok: true, lines: ['✓  The bot token has been removed and the connection closed.'] };
+  };
+
+  /**
+   * One entry point for the Preferences window's buttons.
+   *
+   * The menu versions wrap these in dialogs; the window shows the same lines in
+   * place, because a six-line check reads better beside the fields it is about
+   * than as a modal over them.
+   */
+  const runSettingAction = async (id: 'connectDiscord' | 'testRemote' | 'disconnectDiscord') => {
+    if (id === 'connectDiscord') return connectDiscord();
+    if (id === 'disconnectDiscord') return disconnectDiscord();
+    return checkRemoteControl();
   };
 
   const installHooks = async (): Promise<void> => {
@@ -1337,6 +1351,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     connectDiscord,
     disconnectDiscord,
     testRemoteControl,
+    runSettingAction,
     pickSession,
     withSession,
 

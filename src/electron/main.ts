@@ -165,6 +165,7 @@ void app.whenReady().then(() => {
     log,
     appRoot: APP_ROOT,
     parentWindow: () => window?.browserWindow,
+    runAction: (id) => wrangler.runSettingAction(id),
   });
   installApplicationMenu(wrangler, window, () => preferences.open());
 

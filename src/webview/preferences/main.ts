@@ -13,7 +13,7 @@
 
 import './preferences.css';
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
-import type { HostToPreferences, PreferencesToHost } from '../../shared/preferences';
+import type { HostToPreferences, PreferencesToHost, SettingActionId } from '../../shared/preferences';
 import { settingGroups, type SettingSpec } from '../../shared/settings';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
@@ -33,6 +33,10 @@ const sections = new Map<string, HTMLElement>();
 const navLinks = new Map<string, HTMLButtonElement>();
 /** Wrappers holding the settings that only apply while a boolean is on. */
 const dependents = new Map<string, HTMLElement>();
+/** Action buttons by id, so one can be disabled while it runs. */
+const actionButtons = new Map<SettingActionId, HTMLButtonElement>();
+/** Where an action's result is written, per group. */
+const actionResults = new Map<string, HTMLElement>();
 let values: Record<string, string | boolean | number> = {};
 /** The controls, so an external change can be reflected without a re-render. */
 const controls = new Map<string, HTMLInputElement | HTMLSelectElement>();
@@ -326,6 +330,69 @@ function watchScroll(scroller: HTMLElement): void {
   for (const section of sections.values()) observer.observe(section);
 }
 
+/**
+ * The buttons a feature needs that are not settings.
+ *
+ * Connecting a credential and checking that it works are actions, not values,
+ * and they belong beside the fields they are about — a token typed from a menu
+ * while the settings sit in another window is two places to look for one job.
+ */
+const ACTIONS: { id: SettingActionId; label: string; tone?: 'primary' | 'danger'; title: string }[] = [
+  {
+    id: 'connectDiscord',
+    label: 'Connect Discord…',
+    tone: 'primary',
+    title: 'Paste a bot token. It is checked against Discord, then kept in the system keychain.',
+  },
+  { id: 'testRemote', label: 'Test connection', title: 'Check the token, server, channel, authorised users and gateway.' },
+  { id: 'disconnectDiscord', label: 'Disconnect', tone: 'danger', title: 'Forget the token and close the connection.' },
+];
+
+function renderActions(group: string): HTMLElement {
+  const bar = document.createElement('div');
+  bar.className = 'pf-actions';
+
+  const buttons = document.createElement('div');
+  buttons.className = 'pf-actionrow';
+  for (const action of ACTIONS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `pf-action${action.tone ? ` ${action.tone}` : ''}`;
+    button.textContent = action.label;
+    button.title = action.title;
+    button.addEventListener('click', () => {
+      // The host answers with `actionBusy` then `actionResult`; nothing is
+      // assumed here about how long it takes or whether it worked.
+      post({ type: 'action', id: action.id });
+    });
+    actionButtons.set(action.id, button);
+    buttons.appendChild(button);
+  }
+
+  const result = document.createElement('pre');
+  result.className = 'pf-actionresult';
+  result.hidden = true;
+  actionResults.set(group, result);
+
+  bar.append(buttons, result);
+  return bar;
+}
+
+function showActionResult(ok: boolean, lines: string[]): void {
+  for (const result of actionResults.values()) {
+    result.textContent = lines.join('\n');
+    result.classList.toggle('bad', !ok);
+    result.hidden = lines.length === 0;
+  }
+}
+
+function setActionsBusy(busy: boolean, running?: SettingActionId): void {
+  for (const [id, button] of actionButtons) {
+    button.disabled = busy;
+    if (id === running) button.classList.toggle('running', busy);
+  }
+}
+
 function render(): void {
   if (!root) return;
   root.textContent = '';
@@ -334,6 +401,8 @@ function render(): void {
   sections.clear();
   navLinks.clear();
   dependents.clear();
+  actionButtons.clear();
+  actionResults.clear();
 
   const groups = settingGroups();
   root.appendChild(renderNav(groups));
@@ -376,6 +445,9 @@ function render(): void {
       }
       section.appendChild(renderRow(spec));
     }
+    // The Discord buttons live inside the reveal, under the fields they act on.
+    const wrapper = dependents.get('remote.enabled');
+    if (group === 'Experimental' && wrapper) wrapper.firstElementChild!.appendChild(renderActions(group));
     main.appendChild(section);
   }
 
@@ -387,7 +459,18 @@ function render(): void {
 
 window.addEventListener('message', (event: MessageEvent) => {
   const message = event.data as HostToPreferences | undefined;
-  if (!message || message.type !== 'values') return;
+  if (!message) return;
+  if (message.type === 'actionBusy') {
+    setActionsBusy(true, message.id);
+    showActionResult(true, ['Working…']);
+    return;
+  }
+  if (message.type === 'actionResult') {
+    setActionsBusy(false);
+    showActionResult(message.ok, message.lines);
+    return;
+  }
+  if (message.type !== 'values') return;
   values = message.values ?? {};
   if (controls.size === 0) render();
   else {
