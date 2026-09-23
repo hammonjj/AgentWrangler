@@ -32,6 +32,7 @@ import {
   SECTION_LABEL,
   SECTION_ORDER,
   sectionOf,
+  UNCATEGORIZED_SECTION,
   workingElapsedMs,
   type HookHealth,
   type ProjectDTO,
@@ -74,7 +75,7 @@ let sessions: SessionDTO[] = [];
 let hooks: HookHealth | undefined;
 let usage: UsageState | undefined;
 let codexUsage: UsageState | undefined;
-let conversationSections = ['General'];
+let conversationSections = [UNCATEGORIZED_SECTION];
 type QuestionDraft = { step: number; selected: Record<number, string[]>; other: Record<number, string> };
 const questionDrafts = new Map<string, QuestionDraft>();
 
@@ -222,7 +223,7 @@ function rowMenuHtml(): string {
   });
   const sectionRows = expanded
     ? `<div class="rmsub" role="group" aria-label="Conversation sections">${conversationSections.map((section) =>
-        `<button class="rmrow rmsection${section === (s.conversationSection ?? 'General') ? ' current' : ''}" role="menuitemradio" aria-checked="${section === (s.conversationSection ?? 'General')}" data-section="${esc(section)}"><span>${section === (s.conversationSection ?? 'General') ? '✓' : ''}</span>${esc(section)}</button>`,
+        `<button class="rmrow rmsection${section === (s.conversationSection ?? UNCATEGORIZED_SECTION) ? ' current' : ''}" role="menuitemradio" aria-checked="${section === (s.conversationSection ?? UNCATEGORIZED_SECTION)}" data-section="${esc(section)}"><span>${section === (s.conversationSection ?? UNCATEGORIZED_SECTION) ? '✓' : ''}</span>${esc(section)}</button>`,
       ).join('')}<button class="rmrow rmcreate" role="menuitem" data-create-section><span>＋</span>Create new section…</button></div>`
     : '';
   const rows = items
@@ -1151,7 +1152,7 @@ function render(): void {
 
   const groups = new Map<string, SessionDTO[]>();
   for (const s of visibleSessions) {
-    const group = tableView === 'status' ? sectionOf(s) : (s.conversationSection ?? 'General');
+    const group = tableView === 'status' ? sectionOf(s) : (s.conversationSection ?? UNCATEGORIZED_SECTION);
     const list = groups.get(group);
     if (list) list.push(s);
     else groups.set(group, [s]);

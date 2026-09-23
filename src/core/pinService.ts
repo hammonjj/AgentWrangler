@@ -1,8 +1,9 @@
 /** User-defined conversation sections (historical class name retained for wiring compatibility). */
+import { UNCATEGORIZED_SECTION } from '../shared/model';
 import type { KeyValueStorage } from './archive';
 import { Emitter, type Disposable, type Listener } from './events';
 
-export const GENERAL_SECTION = 'General';
+export { UNCATEGORIZED_SECTION };
 const SECTIONS_KEY = 'agentWrangler.conversationSections';
 const ASSIGNMENTS_KEY = 'agentWrangler.conversationSectionAssignments';
 
@@ -20,7 +21,7 @@ export class PinService {
 
   private readSections(): string[] {
     const raw = this.storage.get<unknown>(SECTIONS_KEY, []);
-    const sections = [GENERAL_SECTION];
+    const sections = [UNCATEGORIZED_SECTION];
     if (!Array.isArray(raw)) return sections;
     for (const value of raw) {
       if (typeof value !== 'string') continue;
@@ -44,7 +45,7 @@ export class PinService {
   }
   sectionFor(key: string): string {
     this.assignments = this.readAssignments();
-    return this.assignments.find((item) => item.key === key)?.section ?? GENERAL_SECTION;
+    return this.assignments.find((item) => item.key === key)?.section ?? UNCATEGORIZED_SECTION;
   }
   assignedAt(key: string): number | undefined {
     this.assignments = this.readAssignments();
@@ -56,7 +57,7 @@ export class PinService {
     const current = this.names;
     if (!clean || current.some((section) => section.toLocaleLowerCase() === clean.toLocaleLowerCase())) return false;
     this.sections = [...current, clean];
-    void this.storage.update(SECTIONS_KEY, this.sections.filter((section) => section !== GENERAL_SECTION));
+    void this.storage.update(SECTIONS_KEY, this.sections.filter((section) => section !== UNCATEGORIZED_SECTION));
     this.emitter.fire();
     return true;
   }
@@ -64,10 +65,10 @@ export class PinService {
   assign(key: string, section: string): void {
     const canonical = this.names.find((name) => name.toLocaleLowerCase() === section.toLocaleLowerCase());
     const current = this.readAssignments();
-    const currentSection = current.find((item) => item.key === key)?.section ?? GENERAL_SECTION;
+    const currentSection = current.find((item) => item.key === key)?.section ?? UNCATEGORIZED_SECTION;
     if (!canonical || currentSection === canonical) return;
     const merged = new Map(current.map((item) => [item.key, item]));
-    if (canonical === GENERAL_SECTION) merged.delete(key);
+    if (canonical === UNCATEGORIZED_SECTION) merged.delete(key);
     else merged.set(key, { key, section: canonical, atMs: Date.now() });
     this.assignments = [...merged.values()];
     void this.storage.update(ASSIGNMENTS_KEY, this.assignments);

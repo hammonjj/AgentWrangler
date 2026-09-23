@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { KeyValueStorage } from '../src/core/archive';
-import { GENERAL_SECTION, PinService } from '../src/core/pinService';
+import { UNCATEGORIZED_SECTION, PinService } from '../src/core/pinService';
 
 function storage(): KeyValueStorage & { data: Map<string, unknown> } {
   const data = new Map<string, unknown>();
@@ -21,8 +21,8 @@ describe('conversation sections', () => {
   });
 
   it('always provides General and assigns new conversations there', () => {
-    expect(svc.names).toEqual([GENERAL_SECTION]);
-    expect(svc.sectionFor('claude:a')).toBe(GENERAL_SECTION);
+    expect(svc.names).toEqual([UNCATEGORIZED_SECTION]);
+    expect(svc.sectionFor('claude:a')).toBe(UNCATEGORIZED_SECTION);
   });
 
   it('creates a section, assigns a conversation, and survives reload', () => {
@@ -32,7 +32,7 @@ describe('conversation sections', () => {
     expect(svc.assignedAt('claude:a')).toEqual(expect.any(Number));
 
     const revived = new PinService(store);
-    expect(revived.names).toEqual([GENERAL_SECTION, 'Client work']);
+    expect(revived.names).toEqual([UNCATEGORIZED_SECTION, 'Client work']);
     expect(revived.sectionFor('claude:a')).toBe('Client work');
   });
 
@@ -41,8 +41,8 @@ describe('conversation sections', () => {
     svc.create('Two');
     svc.assign('claude:a', 'One');
     svc.assign('claude:b', 'Two');
-    svc.assign('claude:a', GENERAL_SECTION);
-    expect(svc.sectionFor('claude:a')).toBe(GENERAL_SECTION);
+    svc.assign('claude:a', UNCATEGORIZED_SECTION);
+    expect(svc.sectionFor('claude:a')).toBe(UNCATEGORIZED_SECTION);
     expect(svc.sectionFor('claude:b')).toBe('Two');
   });
 
@@ -50,7 +50,7 @@ describe('conversation sections', () => {
     expect(svc.create('  ')).toBe(false);
     expect(svc.create('Research')).toBe(true);
     expect(svc.create('research')).toBe(false);
-    expect(svc.create('General')).toBe(false);
+    expect(svc.create('uncategorized')).toBe(false);
   });
 
   it('ignores unknown assignments and stored junk', () => {
@@ -61,7 +61,7 @@ describe('conversation sections', () => {
       { key: 'broken' },
     ]);
     const revived = new PinService(store);
-    expect(revived.names).toEqual([GENERAL_SECTION, 'Valid']);
+    expect(revived.names).toEqual([UNCATEGORIZED_SECTION, 'Valid']);
     expect(revived.sectionFor('claude:a')).toBe('Valid');
     revived.assign('claude:a', 'Missing');
     expect(revived.sectionFor('claude:a')).toBe('Valid');
@@ -94,7 +94,7 @@ describe('conversation sections', () => {
     expect(other.names).toContain('Shared');
     svc.assign('claude:a', 'Shared');
     expect(other.sectionFor('claude:a')).toBe('Shared');
-    other.assign('claude:a', GENERAL_SECTION);
-    expect(svc.sectionFor('claude:a')).toBe(GENERAL_SECTION);
+    other.assign('claude:a', UNCATEGORIZED_SECTION);
+    expect(svc.sectionFor('claude:a')).toBe(UNCATEGORIZED_SECTION);
   });
 });

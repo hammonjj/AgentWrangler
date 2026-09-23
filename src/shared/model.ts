@@ -131,7 +131,7 @@ export interface AgentSession {
   prLink?: PrLink;
   /** User shoved this session out of the way (host decorates from ArchiveService). */
   archived?: boolean;
-  /** User-defined organizational section; absent means the always-present General section. */
+  /** User-defined organizational section; absent means the always-present Uncategorized section. */
   conversationSection?: string;
   /** When this conversation was assigned to its section. */
   sectionAssignedAt?: number;
@@ -260,7 +260,7 @@ export const STATUS_RANK: Record<SessionStatus, number> = {
 };
 
 export const STATUS_LABEL: Record<SessionStatus, string> = {
-  blocked: 'Blocked on you',
+  blocked: 'Waiting',
   waiting: 'Waiting',
   stuck: 'Possibly stuck',
   done: 'Done',
@@ -286,6 +286,13 @@ export function compareSessions(a: AgentSession, b: AgentSession): number {
   if (rank !== 0) return rank;
   return b.lastActivityAt - a.lastActivityAt;
 }
+
+/**
+ * The always-present conversation section every session starts in. Shared
+ * because both the store (which persists assignments) and the dashboard pane
+ * (which renders the section menu and group headers) have to agree on it.
+ */
+export const UNCATEGORIZED_SECTION = 'Uncategorized';
 
 /** Dashboard status sections. Named conversation sections are a separate view. */
 export type SectionId = SessionStatus | 'paused' | 'archived';
