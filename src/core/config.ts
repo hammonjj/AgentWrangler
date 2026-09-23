@@ -22,6 +22,13 @@ export interface WranglerConfig {
   autoPausePercent: number;
   /** Experimental: mirror permission prompts to a remote surface. */
   remoteEnabled: boolean;
+  /**
+   * The toolbar's Discord button: whether announcements are posted at all.
+   * Separate from `remoteEnabled` because it is a thing you flip several times
+   * a day — turning the integration off instead would drop the socket and take
+   * the permission cards with it.
+   */
+  remoteNotificationsEnabled: boolean;
   remoteGuildId: string;
   remoteChannelId: string;
   /** Comma-separated in the setting; split and trimmed here. */
@@ -63,6 +70,8 @@ export const DEFAULT_CONFIG: WranglerConfig = {
   autoPausePercent: 98,
   // Off, and empty. Nothing about this runs until someone goes looking for it.
   remoteEnabled: false,
+  // On, so switching the integration on does not also need a second switch.
+  remoteNotificationsEnabled: true,
   remoteGuildId: '',
   remoteChannelId: '',
   remoteAuthorizedUserIds: [],
@@ -107,6 +116,7 @@ export function readConfig(settings: HostSettings): WranglerConfig {
     autoPauseEnabled: settings.get('autoPause.enabled', d.autoPauseEnabled),
     autoPausePercent: settings.get('autoPause.percent', d.autoPausePercent),
     remoteEnabled: settings.get('remote.enabled', d.remoteEnabled),
+    remoteNotificationsEnabled: settings.get('remote.notificationsEnabled', d.remoteNotificationsEnabled),
     remoteGuildId: settings.get('remote.discord.guildId', d.remoteGuildId),
     remoteChannelId: settings.get('remote.discord.channelId', d.remoteChannelId),
     remoteAuthorizedUserIds: parseIdList(settings.get('remote.discord.authorizedUserIds', '')),

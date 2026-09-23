@@ -118,6 +118,7 @@ function blocked(extra: Partial<SessionDTO> = {}): SessionDTO {
 
 const CONFIG: RemoteConfig = {
   enabled: true,
+  notificationsEnabled: true,
   guildId: 'G1',
   channelId: 'C1',
   authorizedUserIds: ['U-allowed'],
@@ -509,6 +510,26 @@ describe('RemoteControlService', () => {
       cfg = { ...cfg, enabled: false };
       await svc.notify(NOTICE);
       expect(transport.notices).toHaveLength(0);
+      svc.dispose();
+    });
+
+    it('muted posts nothing at all: no notice, and the open cards are closed', async () => {
+      const { svc } = await build(fakeSessions([blocked()]));
+      await svc.reconcile();
+      expect(svc.mirroredCount).toBe(1);
+
+      // Off is off. A button that says notifications are off while permission
+      // cards keep arriving reads as broken, so the mute covers them too.
+      cfg = { ...cfg, notificationsEnabled: false };
+      await svc.notify(NOTICE);
+      expect(transport.notices).toHaveLength(0);
+      await svc.reconcile();
+      expect(svc.mirroredCount).toBe(0);
+
+      // The prompt itself is untouched, so switching back on republishes it.
+      cfg = { ...cfg, notificationsEnabled: true };
+      await svc.reconcile();
+      expect(svc.mirroredCount).toBe(1);
       svc.dispose();
     });
 

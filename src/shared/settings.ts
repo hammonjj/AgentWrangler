@@ -343,6 +343,16 @@ export const SETTINGS: SettingSpec[] = [
       'Comma-separated Discord user IDs allowed to answer prompts. IDs rather than usernames: a username can be changed and reused, and this is the only thing between someone in the channel and a permission decision. Empty means nobody, and nothing is published at all.',
   },
   {
+    key: 'remote.notificationsEnabled',
+    dependsOn: 'remote.enabled',
+    label: 'Post to Discord',
+    group: 'Experimental',
+    type: 'boolean',
+    default: true,
+    description:
+      'The master switch behind the toolbar’s Discord button, which is the same setting and is the quick way to flip it. Off posts nothing at all — no permission prompts, no finished-agent messages, no auto-pause announcements — and closes any card still open in the channel. The prompts themselves are untouched: they wait in Agent Wrangler, and switching this back on republishes the ones still being asked.',
+  },
+  {
     key: 'remote.notifyOnDone',
     dependsOn: 'remote.enabled',
     label: 'Say when an agent finishes',

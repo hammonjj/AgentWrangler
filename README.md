@@ -168,6 +168,16 @@ happens; if Discord is disconnected at that moment it is dropped rather than
 delivered late, since by the time a reconnect lands it is no longer news. A pause
 *you* pressed sends nothing: you are sitting in front of the machine that did it.
 
+**The toolbar's Discord button is all of it, not some of it.** Lit, everything
+above goes to the channel; unlit, nothing does — permission cards included, and
+any card still open in the channel is closed as cancelled when you press it. It
+used to exempt permission prompts, on the reasoning that muting one could strand
+an agent you are away from; in practice a button reading *off* while the channel
+keeps filling up reads as broken, and the prompt is not lost either way — it is
+still waiting in Agent Wrangler, and switching the button back on republishes
+whatever is still being asked. It is the same thing as `remote.notificationsEnabled`
+in Preferences, and appears in the toolbar only once Discord is configured.
+
 **What it does not do yet.** Questions (`AskUserQuestion`) and plan approvals are
 not mirrored — they never reach the `PermissionRequest` hook, so they are only
 answerable in the app. There is no Slack transport, no chat, and no way to start
