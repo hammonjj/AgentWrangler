@@ -287,6 +287,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const runner = runners.get(id) ?? codexRunners.get(id);
       return runner ? runner.answer(requestId, answers) : false;
     },
+    // Claude only: Codex has no plan-mode concept, so there is nothing to ask
+    // it and nothing it could be told.
+    pendingPlan: (id: string | undefined) => {
+      const plan = runners.get(id)?.pendingPlan;
+      return plan ? { requestId: plan.requestId, plan: plan.plan, more: plan.more } : undefined;
+    },
+    decidePlan: async (id: string | undefined, requestId: string, approve: boolean, feedback?: string) => {
+      const runner = runners.get(id);
+      return runner ? runner.decidePlan(requestId, approve, feedback) : false;
+    },
     onDidChange: (listener: () => void) => {
       const claude = runners.onDidChange(listener);
       const codex = codexRunners.onDidChange(listener);
@@ -1140,14 +1150,29 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * `remoteAskFor` skips archived and paused sessions — a frozen process cannot
    * act on an answer, so a button offering one would appear to work and do
    * nothing — but those two fields are decorations, and handing it raw store
-   * sessions meant neither was ever set. It fires on the archive and the pause
-   * service too, so pausing an agent closes its mirrored prompt immediately
-   * rather than whenever the session next happens to move.
+   * sessions meant neither was ever set.
+   *
+   * It also carries what this window's own runners are parked on. A question or
+   * a plan never reaches the `PermissionRequest` hook, so the store has no way
+   * to learn about one: it exists only in the heap of the process running the
+   * session, which — since the app holds a single-instance lock — is this one.
+   *
+   * The change sources are why this is a view rather than a mapped array.
+   * Archiving a row, pausing a process and a runner reaching an ask all change
+   * what should be mirrored while touching nothing a provider scan would
+   * notice, so a consumer watching only the store would not hear about any of
+   * them until the session next moved of its own accord.
    */
   const remoteSessions = new DecoratedSessions(
     store,
-    { isArchived: (key) => archive.isArchived(key), isPaused: (pid) => pause.isPaused(pid) },
-    [archive, pause],
+    {
+      isArchived: (key) => archive.isArchived(key),
+      isPaused: (pid) => pause.isPaused(pid),
+      runnerOwned: (id) => runnerOwnership.owns(id),
+      pendingQuestion: (id) => runnerOwnership.pendingQuestion?.(id),
+      pendingPlan: (id) => runnerOwnership.pendingPlan?.(id),
+    },
+    [archive, pause, runnerOwnership],
   );
   host.subscribe(remoteSessions);
   const remoteControl = new RemoteControlService(

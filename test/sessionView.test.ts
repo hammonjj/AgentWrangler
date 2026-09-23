@@ -75,6 +75,49 @@ describe('decorateSession', () => {
   });
 });
 
+describe('the runner decorations', () => {
+  const question = { requestId: 'req_1', questions: [{ question: 'Alpha or Beta?', header: 'Choice', options: [{ label: 'Alpha', description: 'the first' }] }] };
+  const plan = { requestId: 'req_2', plan: '# Plan', more: 12 };
+
+  it('carries what this window is parked on, keyed by session id', () => {
+    const decorated = decorateSession(session(), {
+      ...none,
+      runnerOwned: (id) => id === 'sess-a',
+      pendingQuestion: (id) => (id === 'sess-a' ? question : undefined),
+      pendingPlan: (id) => (id === 'sess-a' ? plan : undefined),
+    });
+    expect(decorated).toMatchObject({ runnerOwned: true, pendingQuestion: question, pendingPlan: plan });
+  });
+
+  it('leaves a session this window does not run completely alone', () => {
+    // The store's own sessions are every agent on the machine; only the ones
+    // this process runs have an in-process ask to report.
+    const s = session({ sessionId: 'somebody-elses' });
+    const decorated = decorateSession(s, {
+      ...none,
+      runnerOwned: (id) => id === 'sess-a',
+      pendingQuestion: (id) => (id === 'sess-a' ? question : undefined),
+      pendingPlan: () => undefined,
+    });
+    expect(decorated).toBe(s);
+  });
+
+  it('is optional: a consumer that does not care about in-process asks passes none', () => {
+    expect(decorateSession(session(), none).pendingPlan).toBeUndefined();
+    expect(decorateSession(session(), none).runnerOwned).toBeUndefined();
+  });
+
+  it('drops the ask the moment the runner settles it', () => {
+    let parked: typeof plan | undefined = plan;
+    const source = sourceOf(session());
+    const view = new DecoratedSessions(source, { ...none, pendingPlan: () => parked });
+    expect(view.sessions[0].pendingPlan).toEqual(plan);
+    parked = undefined;
+    expect(view.sessions[0].pendingPlan).toBeUndefined();
+    view.dispose();
+  });
+});
+
 describe('DecoratedSessions', () => {
   it('decorates what the source holds, live', () => {
     const source = new FakeSource();

@@ -177,6 +177,24 @@ export interface AgentSession {
     questions: import('./conversation').QuestionView[];
   };
   /**
+   * The plan a runner-owned session is waiting for approval on.
+   *
+   * The sibling of `pendingQuestion`, and present for the same reason: an
+   * `ExitPlanMode` never reaches the `PermissionRequest` hook, so the only
+   * place it exists is the heap of the process running the session. A surface
+   * that is not the conversation pane can only know about it from here.
+   *
+   * `plan` is the markdown as the pane renders it and `more` is how many
+   * characters were held back by the block cap — a truncated plan must be
+   * visibly truncated wherever it is shown, because approving a plan you have
+   * only half read is the mistake this field makes possible.
+   */
+  pendingPlan?: {
+    requestId: string;
+    plan: string;
+    more?: number;
+  };
+  /**
    * For `blocked`: set while our PermissionRequest hook is still waiting for a
    * decision file, i.e. while Allow/Deny from the dashboard can still land.
    * Absent once the user has answered in Claude Code itself.

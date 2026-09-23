@@ -24,20 +24,30 @@ mixed together. A branch that is being worked on gets **its own worktree**, whic
 directory, so each agent has a tree of its own.
 
 - **The primary tree stays on `main`.** `~/Documents/GitHub/AgentWrangler` is checked out on
-  `main` and is not switched to anything else. Small self-contained changes land there.
-- **Anything bigger than one sitting gets a branch and a worktree:**
+  `main` and is not switched to anything else. Do not *work* there — it is the tree every
+  other agent's `git status` is looking at, and editing it is how two agents' changes end up
+  in one commit.
+- **Every feature gets its own worktree. No exceptions, however small it looks.**
   ```bash
   git worktree add ../AgentWrangler-<topic> -b feat/<topic>
   ln -s ../AgentWrangler/node_modules ../AgentWrangler-<topic>/node_modules
   ```
-  Then open that folder in VSCode and work there. The symlink is why `npm install` is not
-  needed in the new tree; re-run it only if `package.json` gains a dependency.
+  When it is done: commit, merge to `main`, push, and remove the worktree. Branch strategy
+  beyond that is not worth ceremony on a personal project — the worktree is there to keep
+  agents off each other, not to model a release process.
+  The symlink is why `npm install` is not needed in the new tree; re-run it only if
+  `package.json` gains a dependency.
 - **Never `git checkout` or `git switch` in a tree you did not create.** Another agent is
   probably in it, and switching the branch under them is exactly what mixes the work together.
   `git worktree list` says who is where.
 - **Never commit files that are not yours.** In a shared tree `git status` shows other agents'
   work in progress. Commit by path (`git commit <paths>`), never `git commit -a`, and never
   `git add -A` without reading what it picked up.
+  **`M` next to a file you edited does not mean the diff is yours.** `git commit <path>` takes
+  the whole working-tree file, so someone else's half-finished edits in it ride along under
+  your message — and vanish from their `git status`, so they will not notice. Run
+  `git diff <paths>` and read it before committing, every time. This has happened: see
+  `docs/plans/remote-questions-and-plans.md` §1.
 - **Only one agent runs `npm run app:install` at a time.** It installs the build of whichever
   tree it ran in, so the last one wins; say which tree you installed from.
 - Merge with `git merge --no-ff` from `main`, then `git worktree remove ../AgentWrangler-<topic>`

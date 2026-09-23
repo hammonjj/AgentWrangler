@@ -322,6 +322,39 @@ describe('RunnerSession', () => {
     await expect(rejected).resolves.toMatchObject({ behavior: 'deny', message: 'too broad' });
   });
 
+  it('offers the plan it is parked on, and stops the moment it is settled', async () => {
+    // The sibling of `pendingQuestion`, and the only way a surface that is not
+    // the conversation pane can learn a plan is waiting: an ExitPlanMode never
+    // reaches the PermissionRequest hook, so it exists nowhere but this heap.
+    const { session, fake } = makeSession();
+    expect(session.pendingPlan).toBeUndefined();
+
+    void fake.calls.options.canUseTool('ExitPlanMode', { plan: '# Plan\n\ndo the thing' }, askOptions());
+    await settle();
+    expect(session.pendingPlan).toMatchObject({ requestId: 'req_1', plan: '# Plan\n\ndo the thing' });
+
+    session.decidePlan('req_1', true);
+    expect(session.pendingPlan).toBeUndefined();
+  });
+
+  it('reports the last plan when a conversation has approved earlier ones', async () => {
+    const { session, fake } = makeSession();
+    void fake.calls.options.canUseTool('ExitPlanMode', { plan: 'first' }, askOptions());
+    await settle();
+    session.decidePlan('req_1', true);
+    void fake.calls.options.canUseTool('ExitPlanMode', { plan: 'second' }, askOptions({ requestId: 'req_2' }));
+    await settle();
+    expect(session.pendingPlan?.plan).toBe('second');
+  });
+
+  it('carries the held-back length, so a truncated plan can be shown as truncated', async () => {
+    const { session, fake } = makeSession();
+    const plan = `# Plan\n\n${'step. '.repeat(2000)}`;
+    void fake.calls.options.canUseTool('ExitPlanMode', { plan }, askOptions());
+    await settle();
+    expect(session.pendingPlan?.more).toBe(plan.length - MAX_BLOCK_CHARS);
+  });
+
   it('holds the rest of a plan too long for the wire, instead of losing it', async () => {
     // The plan is the block that is acted on rather than read: approving the
     // half that fitted is approving something you have not seen. A real one

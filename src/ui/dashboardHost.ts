@@ -43,6 +43,15 @@ export interface RunnerOwnership {
   wasRunning?(sessionId: string): boolean;
   pendingQuestion?(sessionId: string | undefined): { requestId: string; questions: QuestionView[] } | undefined;
   answer?(sessionId: string | undefined, requestId: string, answers: Record<string, string>): Promise<boolean>;
+  /**
+   * The plan a runner-owned session is parked on, and how to settle it. Not
+   * consumed by the dashboard yet — the conversation pane is still the only
+   * place a plan is read and approved — but declared here because this is the
+   * interface `createApp` builds its one runner facade against, and the remote
+   * layer answers plans through the same object.
+   */
+  pendingPlan?(sessionId: string | undefined): { requestId: string; plan: string; more?: number } | undefined;
+  decidePlan?(sessionId: string | undefined, requestId: string, approve: boolean, feedback?: string): Promise<boolean>;
   onDidChange(listener: () => void): Disposable;
 }
 
