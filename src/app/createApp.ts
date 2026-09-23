@@ -1106,6 +1106,36 @@ export function createApp(host: HostServices): AgentWranglerApp {
       dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
       return 'gone';
     },
+    async answerQuestion(key, requestId, answers) {
+      const s = store.get(key);
+      if (!s) return 'unsupported';
+      // `owns` rather than a try-and-see: a session running in a terminal has
+      // no question here to answer, and saying so is not the same as failing.
+      if (!runnerOwnership.owns(s.sessionId) || !runnerOwnership.answer) return 'unsupported';
+      const parked = runnerOwnership.pendingQuestion?.(s.sessionId);
+      if (parked && parked.requestId !== requestId) return 'stale';
+      const answered = await runnerOwnership.answer(s.sessionId, requestId, answers);
+      if (answered) {
+        log(`question answered for ${s.name ?? s.sessionId}`);
+        return 'applied';
+      }
+      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that question.`, 4000);
+      return 'gone';
+    },
+    async decidePlan(key, requestId, approve, feedback) {
+      const s = store.get(key);
+      if (!s) return 'unsupported';
+      if (!runnerOwnership.owns(s.sessionId) || !runnerOwnership.decidePlan) return 'unsupported';
+      const parked = runnerOwnership.pendingPlan?.(s.sessionId);
+      if (parked && parked.requestId !== requestId) return 'stale';
+      const decided = await runnerOwnership.decidePlan(s.sessionId, requestId, approve, feedback);
+      if (decided) {
+        log(`plan ${approve ? 'approved' : 'rejected'} for ${s.name ?? s.sessionId}`);
+        return 'applied';
+      }
+      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that plan.`, 4000);
+      return 'gone';
+    },
   };
 
   // One microphone, so one recorder for the whole process however many panes are open.

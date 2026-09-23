@@ -311,10 +311,15 @@ export class DashboardHost {
   }
 
   private async answerQuestion(key: string, requestId: string, answers: Record<string, string>): Promise<void> {
-    const session = this.store.get(key);
-    if (!session || !this.runners.answer) return;
-    const answered = await this.runners.answer(session.sessionId, requestId, answers);
-    if (!answered) this.dialogs.flash('Agent Wrangler: that question has already been answered.', 4000);
+    // Through the shared action rather than straight to the runner. The remote
+    // layer answers questions too, and a second write path is a second place
+    // for "is this still the question the button was drawn from?" to be got
+    // wrong — the same reason `decidePermission` is an action and not a call
+    // into `HookLog` from here.
+    const outcome = await this.actions.answerQuestion(key, requestId, answers);
+    if (outcome === 'stale' || outcome === 'gone') {
+      this.dialogs.flash('Agent Wrangler: that question has already been answered.', 4000);
+    }
     this.pushSnapshot();
   }
 
