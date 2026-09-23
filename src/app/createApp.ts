@@ -53,6 +53,7 @@ import { ProjectsService } from '../claude/projects';
 import { transcriptPathFor } from '../claude/transcriptHistory';
 import { fetchUsage } from '../claude/usageFetch';
 import { ArchiveService } from '../core/archive';
+import { DecoratedSessions } from '../core/sessionView';
 import { ColumnPrefsService } from '../core/columnPrefs';
 import { readConfig, type ConfigGetter } from '../core/config';
 import { DictationService } from '../core/dictation';
@@ -1125,14 +1126,32 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const cfg = getConfig();
     return {
       enabled: cfg.remoteEnabled,
+      notificationsEnabled: cfg.remoteNotificationsEnabled,
       guildId: cfg.remoteGuildId,
       channelId: cfg.remoteChannelId,
       authorizedUserIds: cfg.remoteAuthorizedUserIds,
       homeDir: os.homedir(),
     };
   };
-  const remoteControl = new RemoteControlService(
+  /**
+   * The store as the remote layer must see it: with the archive and the pause
+   * state applied.
+   *
+   * `remoteAskFor` skips archived and paused sessions — a frozen process cannot
+   * act on an answer, so a button offering one would appear to work and do
+   * nothing — but those two fields are decorations, and handing it raw store
+   * sessions meant neither was ever set. It fires on the archive and the pause
+   * service too, so pausing an agent closes its mirrored prompt immediately
+   * rather than whenever the session next happens to move.
+   */
+  const remoteSessions = new DecoratedSessions(
     store,
+    { isArchived: (key) => archive.isArchived(key), isPaused: (pid) => pause.isPaused(pid) },
+    [archive, pause],
+  );
+  host.subscribe(remoteSessions);
+  const remoteControl = new RemoteControlService(
+    remoteSessions,
     actions,
     new MirrorStore(mirrorFile()),
     remoteConfig,
@@ -1207,6 +1226,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
       ) {
         void syncRemoteTransport();
       }
+      // The toolbar button. Nothing about the connection changes, but what may
+      // be published does, so the surface has to be reconciled: off closes the
+      // open cards, on republishes whatever is still being asked.
+      if (affects('remote.notificationsEnabled')) void remoteControl.reconcile();
     }),
   );
 
@@ -1257,8 +1280,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
       for (const s of u.becameWaiting) {
         if (archive.isArchived(s.key)) continue; // archived sessions stay quiet
         const notice = doneNoticeFor(s);
-        if (!notice) continue; // blocked: the permission card is already saying so
-        if (now - (lastDoneNoticeAt.get(s.key) ?? 0) < 30_000) continue;
+        // Logged rather than silent: "it finished and Discord said nothing" is
+        // otherwise impossible to tell apart from "it never looked finished".
+        if (!notice) {
+          log(`remote: no done notice for ${s.key} (status ${s.status})`);
+          continue; // blocked: the permission card is already saying so
+        }
+        if (now - (lastDoneNoticeAt.get(s.key) ?? 0) < 30_000) {
+          log(`remote: done notice for ${s.key} inside the cooldown`);
+          continue;
+        }
         lastDoneNoticeAt.set(s.key, now);
         announceRemote?.(notice);
       }

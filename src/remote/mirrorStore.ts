@@ -20,6 +20,7 @@
  */
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import type { RemoteAskKind } from '../shared/remote';
 import type { RemoteActor, RemoteMessageRef } from './transport';
 
 /**
@@ -35,6 +36,18 @@ export interface Mirror {
   askKey: string;
   sessionKey: string;
   requestId: string;
+  /**
+   * Which sort of ask this message mirrors.
+   *
+   * The one exception to "the record is an address and an identity, and nothing
+   * else", and it earns its place: the closing message is rendered *after* the
+   * ask has left live state, so there is nothing left to ask what it was. A
+   * question closed as "✅ Allowed" would be the wrong sentence.
+   *
+   * Absent in records written before this field existed, which `load` fills in
+   * as `permission` — the only kind that could have been mirrored then.
+   */
+  kind: RemoteAskKind;
   ref: RemoteMessageRef;
   /** Hash of what was rendered, so a failover does not re-edit an unchanged message. */
   renderHash: string;
@@ -54,6 +67,15 @@ const MAX_AGE_MS = 2 * 60 * 60 * 1000;
 export interface MirrorStoreFile {
   version: 1;
   mirrors: Mirror[];
+}
+
+/**
+ * A record with no `kind` predates the field, and the only kind that could have
+ * been mirrored then was a permission. Applied on load rather than on read so
+ * nothing downstream has to carry the `?? 'permission'`.
+ */
+function migrate(m: Mirror): Mirror {
+  return m.kind === undefined ? { ...m, kind: 'permission' } : m;
 }
 
 function usable(m: unknown, nowMs: number): m is Mirror {
@@ -96,7 +118,7 @@ export class MirrorStore {
     const list = (parsed as Partial<MirrorStoreFile>)?.mirrors;
     if (!Array.isArray(list)) return;
     const nowMs = this.now();
-    for (const m of list) if (usable(m, nowMs)) this.byAskKey.set(m.askKey, m);
+    for (const m of list) if (usable(m, nowMs)) this.byAskKey.set(m.askKey, migrate(m));
   }
 
   all(): Mirror[] {

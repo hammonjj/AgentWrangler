@@ -44,6 +44,17 @@ export type PermissionActions = Pick<SessionActions, 'decidePermission'>;
 
 export interface RemoteConfig {
   enabled: boolean;
+  /**
+   * The toolbar's Discord button: everything outbound, or nothing. Off silences
+   * `notify()` *and* permission mirroring — the button that says "notifications
+   * are off" posting permission cards anyway is the one thing it must not do.
+   * Anything already published is closed as `cancelled` when it goes off, so
+   * the channel is not left holding live buttons nobody is listening for.
+   *
+   * The prompt itself is untouched: it is still there in Agent Wrangler, and
+   * turning the button back on republishes it while it is still open.
+   */
+  notificationsEnabled: boolean;
   guildId: string;
   channelId: string;
   /** Stable service-side user ids. Empty means nobody, and publishing is refused. */
@@ -163,9 +174,9 @@ export class RemoteControlService implements Disposable {
     const cfg = this.config();
     const transport = this.transport;
 
-    // Disabled, or nothing to publish through: close anything still showing
-    // rather than leaving live buttons behind, then stop.
-    if (!cfg.enabled || !transport) {
+    // Disabled, muted, or nothing to publish through: close anything still
+    // showing rather than leaving live buttons behind, then stop.
+    if (!cfg.enabled || !cfg.notificationsEnabled || !transport) {
       if (transport) await this.closeAll(transport, 'cancelled');
       return;
     }
@@ -221,12 +232,18 @@ export class RemoteControlService implements Disposable {
   notify(notice: RemoteNotice): Promise<void> {
     return this.enqueue(async () => {
       const transport = this.transport;
-      if (this.disposed || !transport || !this.config().enabled) return;
+      const cfg = this.config();
+      if (this.disposed || !transport) return;
+      if (!cfg.enabled || !cfg.notificationsEnabled) {
+        this.log(`notice suppressed, notifications off: ${notice.title}`);
+        return;
+      }
       if (!transport.connected) {
         // No queueing for later: by the time a reconnect lands this is old news.
         this.log(`notice dropped, not connected: ${notice.title}`);
         return;
       }
+      this.log(`notice: ${notice.title}`);
       await transport.notify(notice);
     });
   }
@@ -338,6 +355,7 @@ export class RemoteControlService implements Disposable {
         askKey: ask.askKey,
         sessionKey: ask.sessionKey,
         requestId: ask.requestId,
+        kind: ask.kind,
         ref,
         renderHash: renderHash(ask),
         publishedAtMs: Date.now(),
@@ -462,7 +480,7 @@ function placeholderAsk(mirror: Mirror): RemoteAsk {
     askKey: mirror.askKey,
     sessionKey: mirror.sessionKey,
     requestId: mirror.requestId,
-    kind: 'permission',
+    kind: mirror.kind,
     title: '',
     toolName: '',
     context: { agent: '' },

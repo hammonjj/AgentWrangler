@@ -14,6 +14,12 @@ describe('custom_id', () => {
     }
   });
 
+  it('round-trips an option index, which is how a question offers its own choices', () => {
+    for (const choice of ['opt0', 'opt4', 'approve']) {
+      expect(decodeCustomId(encodeCustomId(ID, choice))?.choiceId).toBe(choice);
+    }
+  });
+
   it('stays inside Discord’s length limit for a real id', () => {
     // 16 random bytes as base64url is 22 chars; the longest label we build.
     expect(encodeCustomId('A'.repeat(22), 'always').length).toBeLessThanOrEqual(MAX_CUSTOM_ID);
@@ -33,7 +39,8 @@ describe('custom_id', () => {
       ['a short interaction id', 'aw:abc:allow'],
       ['punctuation in the interaction id', 'aw:abcd/efgh.ijkl:allow'],
       ['uppercase in the choice', `aw:${ID}:ALLOW`],
-      ['a choice with digits', `aw:${ID}:allow1`],
+      ['a choice starting with a digit', `aw:${ID}:0opt`],
+      ['punctuation in the choice', `aw:${ID}:opt_0`],
       ['something longer than the limit', `aw:${'A'.repeat(200)}:allow`],
     ];
     for (const [name, input] of bad) {

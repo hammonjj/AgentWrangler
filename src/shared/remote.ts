@@ -35,6 +35,18 @@ export interface RemoteChoice {
   tone?: 'primary' | 'danger';
 }
 
+/**
+ * Which sort of interaction a remote surface is showing.
+ *
+ * Only `permission` is ever produced today — `AskUserQuestion` and
+ * `ExitPlanMode` never reach the `PermissionRequest` hook, so they do not
+ * appear in `remoteAskFor` at all. The other two are named here anyway because
+ * the *mirror map* is persisted: a record written now is read by a build that
+ * knows all three, and a kind that only becomes nameable later is a migration
+ * for no reason. See `docs/plans/remote-questions-and-plans.md`.
+ */
+export type RemoteAskKind = 'permission' | 'question' | 'plan';
+
 /** Who and where, for the header. A projection, so no pid, cwd or transcript path leaks. */
 export interface RemoteAskContext {
   agent: string;
@@ -56,8 +68,13 @@ export interface RemoteAsk {
   askKey: string;
   sessionKey: string;
   requestId: string;
-  /** The seam for questions and plan approvals later; only permissions exist today. */
-  kind: 'permission';
+  /**
+   * The seam for questions and plan approvals later. `remoteAskFor` produces
+   * only `permission` today; the field is typed over the whole space so the
+   * persisted mirror record and the closing message can be written against one
+   * vocabulary rather than two.
+   */
+  kind: RemoteAskKind;
   /** One line, for a notification preview: who wants what. */
   title: string;
   toolName: string;

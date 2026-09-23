@@ -10,6 +10,7 @@ function mirror(extra: Partial<Mirror> = {}): Mirror {
     askKey: 'claude:sess-a#100-1',
     sessionKey: 'claude:sess-a',
     requestId: '100-1',
+    kind: 'permission',
     ref: { channelId: 'C1', messageId: 'M1' },
     renderHash: 'h1',
     publishedAtMs: Date.now(),
@@ -91,6 +92,24 @@ describe('MirrorStore', () => {
     const s = new MirrorStore(file);
     await s.load();
     expect(s.all()).toHaveLength(1);
+  });
+
+  it('reads a record written before `kind` existed as a permission', async () => {
+    // The file is a cache shared with whatever build ran last. A record from
+    // before the field could only ever have mirrored a permission, and the
+    // closing message needs *some* kind to render from.
+    const { kind: _dropped, ...legacy } = mirror();
+    await fsp.writeFile(file, JSON.stringify({ version: 1, mirrors: [legacy] }), 'utf8');
+    const s = new MirrorStore(file);
+    await s.load();
+    expect(s.get('claude:sess-a#100-1')?.kind).toBe('permission');
+  });
+
+  it('keeps the kind it was given', async () => {
+    await fsp.writeFile(file, JSON.stringify({ version: 1, mirrors: [mirror({ kind: 'question' })] }), 'utf8');
+    const s = new MirrorStore(file);
+    await s.load();
+    expect(s.get('claude:sess-a#100-1')?.kind).toBe('question');
   });
 
   it('drops records too old to have a message left to edit', async () => {

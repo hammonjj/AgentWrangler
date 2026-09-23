@@ -21,8 +21,15 @@ export const MAX_CUSTOM_ID = 100;
 
 /** 16 random bytes as base64url is 22 chars; allow room without allowing junk. */
 const INTERACTION_ID = /^[A-Za-z0-9_-]{8,64}$/;
-/** `allow` | `always` | `deny` today; kept general, but bounded and lowercase. */
-const CHOICE_ID = /^[a-z][a-z-]{0,23}$/;
+/**
+ * `allow` | `always` | `deny` today; kept general, but bounded and lowercase.
+ *
+ * Digits are allowed after the first character because a question's choices are
+ * its own options by index (`opt3`). That is not authority leaking into the id:
+ * it indexes the ask's option list, which is re-fetched from live state before
+ * a press is applied, so an index that no longer exists resolves to nothing.
+ */
+const CHOICE_ID = /^[a-z][a-z0-9-]{0,23}$/;
 
 export interface ParsedCustomId {
   interactionId: string;
