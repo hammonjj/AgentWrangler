@@ -84,6 +84,8 @@ export class ConversationHost {
   private subagentFiles = new Map<string, string>();
   /** Capability computation is async and can overlap; only the newest may land. */
   private capsSeq = 0;
+  /** This pane started the recording the shared `DictationService` is making. */
+  private ownsDictation = false;
 
   constructor(
     private webview: PaneChannel,
@@ -143,6 +145,9 @@ export class ConversationHost {
 
   dispose(): void {
     this.pendingSend?.abort();
+    // A pane closed mid-recording must not leave the microphone open, or a
+    // transcription running for a composer that no longer exists.
+    this.cancelDictation();
     this.disposeSource();
     for (const s of this.subs) s.dispose();
     this.subs = [];
@@ -322,6 +327,9 @@ export class ConversationHost {
     const source = this.source;
     switch (m.type) {
       case 'ready':
+        // A webview that says ready again has reloaded and forgotten it was
+        // recording; nothing on screen could stop the microphone now.
+        this.cancelDictation();
         this.ready = true;
         await this.sendInit();
         return;
@@ -522,20 +530,38 @@ export class ConversationHost {
    * Drive the microphone. Every path ends by telling the webview what state it
    * is in, because the button cannot un-stick itself: it went red on a click
    * and only a message from here turns it back.
+   *
+   * The recorder is shared by every pane, so each host only stops or cancels a
+   * recording it started itself — Escape in one pane must not throw away what
+   * is being dictated into another.
    */
   private async dictate(action: 'start' | 'stop' | 'cancel'): Promise<void> {
     if (action === 'cancel') {
-      this.dictation.cancel();
+      this.cancelDictation();
       this.post({ type: 'dictation', state: 'idle' });
       return;
     }
 
     if (action === 'start') {
       try {
-        const began = this.dictation.start();
+        const began = this.dictation.start({
+          preview: (p) => {
+            if (this.ownsDictation) this.post({ type: 'dictationPreview', ...p });
+          },
+          ended: (reason) => {
+            if (!this.ownsDictation) return;
+            if (reason.kind === 'limit') {
+              void this.finishDictation('Recording reached its five-minute limit and stopped.');
+              return;
+            }
+            this.ownsDictation = false;
+            this.post({ type: 'dictation', state: 'idle', message: reason.message });
+          },
+        });
+        this.ownsDictation = began;
         this.post(
           began
-            ? { type: 'dictation', state: 'recording' }
+            ? { type: 'dictation', state: 'recording', livePreview: this.dictation.previewing }
             : { type: 'dictation', state: 'idle', message: 'Already recording in another conversation.' },
         );
       } catch (e) {
@@ -546,14 +572,34 @@ export class ConversationHost {
       return;
     }
 
+    if (!this.ownsDictation) {
+      // A stop racing a start that failed, or a pane reloaded mid-recording.
+      this.post({ type: 'dictation', state: 'idle' });
+      return;
+    }
+    await this.finishDictation();
+  }
+
+  /** Close the microphone and hand the webview the final text. Never sends it. */
+  private async finishDictation(notice?: string): Promise<void> {
+    // The limit and a click can arrive together; only one of them finishes.
+    if (this.dictation.current !== 'recording') return;
     this.post({ type: 'dictation', state: 'transcribing' });
     try {
       const text = await this.dictation.stop();
-      this.post({ type: 'dictation', state: 'idle', text });
+      this.post({ type: 'dictation', state: 'idle', text, notice });
     } catch (e) {
-      this.post({ type: 'dictation', state: 'idle', message: 'Could not transcribe.' });
-      this.ui.dialogs.error(`Agent Wrangler: dictation failed — ${(e as Error).message}`);
+      this.post({ type: 'dictation', state: 'idle', message: `Could not transcribe: ${(e as Error).message}` });
+    } finally {
+      this.ownsDictation = false;
     }
+  }
+
+  /** Throw away a recording this pane started, if there is one. Harmless otherwise. */
+  private cancelDictation(): void {
+    if (!this.ownsDictation) return;
+    this.ownsDictation = false;
+    this.dictation.cancel();
   }
 }
 

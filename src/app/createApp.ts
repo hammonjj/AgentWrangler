@@ -1146,6 +1146,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       whisperPath: host.settings.get<string>('dictation.whisperPath', ''),
       modelPath: host.settings.get<string>('dictation.modelPath', ''),
       inputDevice: host.settings.get<string>('dictation.inputDevice', ':default'),
+      livePreview: host.settings.get<boolean>('dictation.livePreview', true),
     }),
   });
 
@@ -1532,6 +1533,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     },
 
     dispose() {
+      dictation.cancel(); // never leave ffmpeg holding the microphone after the app has gone
       store.dispose();
     },
   };

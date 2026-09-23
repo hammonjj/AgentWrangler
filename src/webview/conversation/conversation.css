@@ -980,6 +980,109 @@ body,
   }
 }
 
+/*
+ * The live preview strip, inside the composer frame directly above the text.
+ *
+ * Provisional text is set apart three ways — a heading that says it may change,
+ * italics, and a dimmed colour — so it cannot be mistaken for what is in the
+ * box. It wraps and caps at a few lines, scrolling to the newest words, because
+ * the pane is often 300px wide and a long dictation must not push the text box
+ * and Send off the bottom.
+ */
+#composerInput > .dictation {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border-left: 2px solid var(--vscode-inputValidation-errorBorder, #f14c4c);
+  background: var(--vscode-textBlockQuote-background, rgba(128, 128, 128, 0.1));
+  font-size: 0.92em;
+}
+.dictation .dicthead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.dictation .dictlabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.dictation .dictdot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--vscode-inputValidation-errorBorder, #f14c4c);
+}
+.dictation.live .dictdot {
+  animation: micpulse 1.4s ease-in-out infinite;
+}
+.dictation .dictdetail {
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+}
+.dictation .dicttext {
+  max-height: 5.4em;
+  overflow-y: auto;
+  line-height: 1.35;
+  font-style: italic;
+  color: var(--vscode-descriptionForeground, inherit);
+  overflow-wrap: anywhere;
+}
+.dictation .dicttext.empty {
+  opacity: 0.7;
+}
+/* Finishing: the words stay up so the eye has something to compare the final
+   text with, but dimmer, and the dot stops pulsing — the microphone is closed. */
+.dictation.busy {
+  border-left-color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+}
+.dictation.busy .dictdot {
+  background: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+}
+.dictation.busy .dicttext {
+  opacity: 0.6;
+}
+.dictation.warn .dictdetail {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+.dictation.error {
+  border-left-color: var(--vscode-inputValidation-errorBorder, #f14c4c);
+  background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.12));
+}
+.dictation.error .dictlabel,
+.dictation.info .dictlabel {
+  font-weight: normal;
+}
+.dictation.info {
+  border-left-color: var(--vscode-focusBorder);
+}
+.dictation.info .dictdot {
+  background: var(--vscode-focusBorder);
+}
+.dictation .dictclose {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.1em;
+  line-height: 1;
+}
+.dictation .dictclose:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+@media (prefers-reduced-motion: reduce) {
+  .dictation.live .dictdot {
+    animation: none;
+  }
+}
+
 /* A reply still arriving gets a caret, so a pause reads as thinking. */
 .blk.assistant.streaming .body > :last-child::after {
   content: '▍';

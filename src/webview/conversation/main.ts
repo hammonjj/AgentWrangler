@@ -11,6 +11,7 @@ import type {
   QuestionView,
 } from '../../shared/conversation';
 import { decodedBytes, IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES } from '../../shared/conversation';
+import { describeDictation, spliceDictation } from '../../shared/dictationText';
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { displayTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
@@ -81,6 +82,11 @@ app.innerHTML = `
     <div id="mentions" class="mentions" role="listbox" hidden></div>
     <div id="composerInput">
       <div id="attachments" hidden></div>
+      <div id="dictation" class="dictation" hidden>
+        <div class="dicthead"><span class="dictdot" aria-hidden="true"></span><span id="dictLabel" class="dictlabel" role="status"></span><button id="dictClose" class="dictclose" title="Dismiss" aria-label="Dismiss" hidden>×</button></div>
+        <div id="dictDetail" class="dictdetail" hidden></div>
+        <div id="dictText" class="dicttext" aria-label="Provisional dictation"></div>
+      </div>
       <textarea id="msg" rows="1" placeholder="Message Claude…  (Enter to send, Shift+Enter for a new line)"></textarea>
       <input id="attachpick" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden>
       <div id="composerActions">
@@ -115,6 +121,11 @@ const effortSel = document.getElementById('effort') as HTMLSelectElement;
 const queuedEl = document.getElementById('queued')!;
 const msgEl = document.getElementById('msg') as HTMLTextAreaElement;
 const micBtn = document.getElementById('mic') as HTMLButtonElement;
+const dictEl = document.getElementById('dictation')!;
+const dictLabel = document.getElementById('dictLabel')!;
+const dictDetail = document.getElementById('dictDetail')!;
+const dictText = document.getElementById('dictText')!;
+const dictClose = document.getElementById('dictClose') as HTMLButtonElement;
 const sendBtn = document.getElementById('send') as HTMLButtonElement;
 const attachmentsEl = document.getElementById('attachments')!;
 const attachBtn = document.getElementById('attach') as HTMLButtonElement;
@@ -1496,8 +1507,27 @@ let micState: MicState = 'idle';
 
 const MIC_LABEL: Record<MicState, string> = {
   idle: 'Dictate a message',
-  recording: 'Stop recording and insert the text',
-  transcribing: 'Transcribing…',
+  recording: 'Stop recording and put the text in the box (does not send)',
+  transcribing: 'Finishing transcription…',
+};
+
+/**
+ * What the strip above the text shows. The preview lives there and never in
+ * the textarea: it is provisional, and putting it in the box would mean either
+ * rewriting the user's draft on every revision or leaving stale words behind
+ * when a revision shortened. The box only ever receives the final text, once.
+ */
+const dict = {
+  /** Session the recording was started in; the final text goes to its draft. */
+  session: '',
+  livePreview: true,
+  text: '',
+  recordedMs: 0,
+  coveredMs: 0,
+  previewError: undefined as string | undefined,
+  /** A result or problem to show once the recording is over. */
+  flash: undefined as { tone: 'error' | 'info'; text: string } | undefined,
+  flashTimer: undefined as number | undefined,
 };
 
 function setMicState(state: MicState, message?: string): void {
@@ -1509,32 +1539,145 @@ function setMicState(state: MicState, message?: string): void {
   micBtn.disabled = state === 'transcribing';
   micBtn.title = message ?? MIC_LABEL[state];
   micBtn.setAttribute('aria-label', message ?? MIC_LABEL[state]);
+  renderDictation();
+}
+
+function flashDictation(tone: 'error' | 'info', text: string): void {
+  if (dict.flashTimer !== undefined) window.clearTimeout(dict.flashTimer);
+  dict.flash = { tone, text };
+  // Errors stay long enough to read a sentence about System Settings; a
+  // "nothing heard" is a glance.
+  dict.flashTimer = window.setTimeout(clearDictationFlash, tone === 'error' ? 12000 : 4000);
+  renderDictation();
+}
+
+function clearDictationFlash(): void {
+  if (dict.flashTimer !== undefined) window.clearTimeout(dict.flashTimer);
+  dict.flashTimer = undefined;
+  dict.flash = undefined;
+  renderDictation();
+}
+
+dictClose.addEventListener('click', clearDictationFlash);
+
+function renderDictation(): void {
+  dictEl.classList.remove('live', 'busy', 'warn', 'error', 'info');
+  if (micState === 'idle') {
+    if (!dict.flash) {
+      dictEl.hidden = true;
+      return;
+    }
+    dictEl.hidden = false;
+    dictEl.classList.add(dict.flash.tone);
+    dictLabel.textContent = dict.flash.text;
+    dictDetail.hidden = true;
+    dictText.hidden = true;
+    dictClose.hidden = false;
+    return;
+  }
+  const view = describeDictation({
+    state: micState,
+    livePreview: dict.livePreview,
+    recordedMs: dict.recordedMs,
+    coveredMs: dict.coveredMs,
+    previewError: dict.previewError,
+    elsewhere: dict.session !== '' && dict.session !== activeSession,
+  });
+  dictEl.hidden = false;
+  dictEl.classList.add(view.tone);
+  dictLabel.textContent = view.label;
+  dictDetail.hidden = !view.detail;
+  dictDetail.textContent = view.detail ?? '';
+  dictClose.hidden = true;
+  dictText.hidden = !dict.livePreview;
+  dictText.classList.toggle('empty', dict.text === '');
+  dictText.textContent =
+    dict.text || (micState === 'recording' ? 'Speak — words appear here as they are recognised.' : '');
+  // Newest words are the ones being checked, so keep them in view when a long
+  // dictation outgrows the strip's few lines.
+  dictText.scrollTop = dictText.scrollHeight;
+}
+
+function resetDictationPreview(): void {
+  dict.text = '';
+  dict.recordedMs = 0;
+  dict.coveredMs = 0;
+  dict.previewError = undefined;
 }
 
 /**
- * Drop dictated text in at the cursor rather than replacing what is there: the
- * usual reason to dictate is to finish a sentence that was started by hand.
+ * Put the final text in the composer of the conversation it was dictated in,
+ * at the caret, without removing anything already typed. If the pane has moved
+ * to another conversation meanwhile, it goes into that conversation's saved
+ * draft instead, so it is waiting there on the way back.
  */
-function insertDictated(text: string): void {
-  if (!text) return;
-  const start = msgEl.selectionStart ?? msgEl.value.length;
-  const end = msgEl.selectionEnd ?? start;
-  const before = msgEl.value.slice(0, start);
-  const after = msgEl.value.slice(end);
-  // A space only where one is actually missing, so dictating twice does not
-  // build up a gap and dictating into an empty box does not start with one.
-  const pad = before.length > 0 && !/\s$/.test(before) ? ' ' : '';
-  msgEl.value = `${before}${pad}${text}${after}`;
-  const caret = before.length + pad.length + text.length;
-  msgEl.setSelectionRange(caret, caret);
+function deliverDictated(text: string): void {
+  const target = dict.session;
+  if (target && target !== activeSession) {
+    const draft = drafts.get(target) ?? { text: '', images: [] };
+    drafts.set(target, { ...draft, text: spliceDictation(draft.text, draft.text.length, text).value });
+    note('Dictation finished after you switched conversations; the text is in the draft of the one you left.');
+    return;
+  }
+  // The end of a selection, never the selection itself: see `spliceDictation`.
+  const caret = msgEl.selectionEnd ?? msgEl.value.length;
+  const next = spliceDictation(msgEl.value, caret, text);
+  msgEl.value = next.value;
+  msgEl.setSelectionRange(next.caret, next.caret);
   autoGrow();
   msgEl.focus();
+}
+
+function startDictation(): void {
+  clearDictationFlash();
+  resetDictationPreview();
+  dict.session = activeSession;
+  dict.livePreview = true;
+  // Optimistic: the host confirms with a `dictation` message, and turns it
+  // back if a tool is missing. Waiting for that first would make the button
+  // feel dead for as long as it takes to find ffmpeg.
+  setMicState('recording');
+  post({ type: 'dictate', action: 'start' });
+}
+
+/** Stop and transcribe. Only ever fills the box — sending stays a separate act. */
+function stopDictation(): void {
+  if (micState !== 'recording') return;
+  setMicState('transcribing');
+  post({ type: 'dictate', action: 'stop' });
+}
+
+function onDictationMessage(m: Extract<HostToConversation, { type: 'dictation' }>): void {
+  // A quick second click has already moved this pane on to `transcribing`; the
+  // host's late "recording" confirmation of the first click must not undo it.
+  if (m.state === 'recording' && micState === 'transcribing') return;
+  if (m.state === 'recording') dict.livePreview = m.livePreview !== false;
+  if (m.state === 'idle') {
+    if (m.text) deliverDictated(m.text);
+    if (m.message) flashDictation('error', m.message);
+    else if (m.notice) flashDictation('info', m.notice);
+    else if (m.text === '') flashDictation('info', 'Nothing was heard, so nothing was added.');
+    resetDictationPreview();
+    dict.session = '';
+  }
+  setMicState(m.state, m.state === 'idle' ? undefined : m.message);
+}
+
+function onDictationPreview(m: Extract<HostToConversation, { type: 'dictationPreview' }>): void {
+  if (micState !== 'recording') return; // a preview straggling in behind a stop
+  dict.text = m.text;
+  dict.recordedMs = m.recordedMs;
+  dict.coveredMs = m.coveredMs;
+  dict.previewError = m.previewError;
+  renderDictation();
 }
 
 // Escape abandons a recording. Without it the only way out of a mistaken click
 // is to stop and then delete whatever the room was transcribed as.
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && micState === 'recording') {
+    resetDictationPreview();
+    dict.session = '';
     setMicState('idle');
     post({ type: 'dictate', action: 'cancel' });
   }
@@ -1542,16 +1685,8 @@ window.addEventListener('keydown', (e) => {
 
 micBtn.addEventListener('click', () => {
   if (micState === 'transcribing') return;
-  if (micState === 'recording') {
-    setMicState('transcribing');
-    post({ type: 'dictate', action: 'stop' });
-  } else {
-    // Optimistic: the host confirms with a `dictation` message, and turns it
-    // back if a tool is missing. Waiting for that first would make the button
-    // feel dead for as long as it takes to find ffmpeg.
-    setMicState('recording');
-    post({ type: 'dictate', action: 'start' });
-  }
+  if (micState === 'recording') stopDictation();
+  else startDictation();
 });
 
 // ---- events ----
@@ -1719,6 +1854,11 @@ vscodeApi.onMessage((body) => {
         const draft = drafts.get(activeSession);
         msgEl.value = draft?.text ?? ''; attachments = draft?.images ?? []; msgEl.readOnly = false;
         renderAttachments(); autoGrow();
+        // Moving to another conversation ends a recording rather than letting
+        // it carry on into a composer it was not started in. The text is
+        // finished and filed in the draft of the conversation it belongs to.
+        stopDictation();
+        renderDictation();
       }
       archiveRequest = ''; searchResults.hidden = true; searchResults.replaceChildren(); searchNodes.clear(); searchBlocks.clear();
       nodes.clear();
@@ -1759,6 +1899,7 @@ vscodeApi.onMessage((body) => {
       if (activeSession !== m.session.key) {
         const draft = drafts.get(activeSession);
         if (draft) { drafts.delete(activeSession); drafts.set(m.session.key, draft); }
+        if (dict.session === activeSession) dict.session = m.session.key;
         if (pendingSend) pendingSend = { ...pendingSend, session: m.session.key };
         activeSession = m.session.key;
         vscodeApi.setState({ key: activeSession });
@@ -1830,8 +1971,10 @@ vscodeApi.onMessage((body) => {
       for (const text of m.notes) note(text);
       break;
     case 'dictation':
-      setMicState(m.state, m.message);
-      if (m.text) insertDictated(m.text);
+      onDictationMessage(m);
+      break;
+    case 'dictationPreview':
+      onDictationPreview(m);
       break;
     case 'error':
       appendBlocks([{ kind: 'note', id: `e${Date.now()}`, tone: 'error', text: m.text }]);
