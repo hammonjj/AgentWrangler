@@ -185,6 +185,23 @@ your home directory is folded to `~`. Every publish, press, refusal and
 resolution is appended to `~/.cache/agent-wrangler/remote/audit.log`, which
 records IDs and tool names but not command text — the channel already has that.
 
+**Exactly one gateway socket, always.** Discord will happily let one bot hold
+several connections at once, and they are not redundancy: every socket receives
+every interaction, all of them race to acknowledge the press, and the losers get
+`404 Unknown interaction` — which the card renders as *"The application didn't
+respond in time."* They also breed. Each socket that dies asks for a replacement,
+so a gateway that can be holding two is a gateway that will be holding two
+hundred by morning, blowing Discord's identify limit and going silent.
+`DiscordGateway` therefore keeps its per-connection state (the socket, its
+heartbeat timer, whether the last beat was acknowledged) on a `Connection`
+record, not on the instance, and every callback checks it is still the current
+one before acting. A superseded connection is inert: its close event asks for
+nothing, its heartbeat sends nothing. There is one reconnect chain, single-flight
+and epoch-stamped, so closes arriving during a backoff cannot start chains of
+their own. The test fake fires a close event when closed locally, exactly as a
+real `WebSocket` does — a fake that stayed quiet is what let this through the
+first time.
+
 **One known race.** If you answer at the machine and in Discord within the same
 half-second, whichever decision file lands last wins. This is the same race
 Claude Code's own dialog already has with Agent Wrangler's buttons, and it is
