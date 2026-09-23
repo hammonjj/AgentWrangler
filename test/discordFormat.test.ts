@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { askPayload, closedPayload } from '../src/remote/discord/format';
-import type { RemoteAsk } from '../src/shared/remote';
+import type { RemotePermissionAsk, RemotePlanAsk, RemoteQuestionAsk } from '../src/shared/remote';
 import type { RemoteClose } from '../src/remote/transport';
 
 const INTERACTION = 'AbCd1234_-efGhIjKlMn';
 
-function ask(extra: Partial<RemoteAsk> = {}): RemoteAsk {
+function ask(extra: Partial<RemotePermissionAsk> = {}): RemotePermissionAsk {
   return {
     askKey: 'claude:sess-a#100-1',
     sessionKey: 'claude:sess-a',
@@ -195,5 +195,118 @@ describe('closedPayload', () => {
   it('does not repeat the command on the way out', () => {
     const embed = closedPayload(ask(), { outcome: 'allowed', atMs: at }).embeds[0] as { description: string };
     expect(embed.description).not.toContain('git push');
+  });
+});
+
+const QUESTION: RemoteQuestionAsk = {
+  askKey: 'claude:sess-q#req_7',
+  sessionKey: 'claude:sess-q',
+  requestId: 'req_7',
+  kind: 'question',
+  title: 'agent-q is asking: Which database?',
+  toolName: 'AskUserQuestion',
+  question: 'Which database?',
+  header: 'Database',
+  options: [
+    { label: 'Postgres', description: 'the boring one' },
+    { label: 'SQLite', description: 'the small one' },
+  ],
+  context: { agent: 'agent-q' },
+  choices: [
+    { action: 'opt0', label: 'Postgres', tone: 'primary' },
+    { action: 'opt1', label: 'SQLite' },
+  ],
+};
+
+const PLAN: RemotePlanAsk = {
+  askKey: 'claude:sess-p#req_9',
+  sessionKey: 'claude:sess-p',
+  requestId: 'req_9',
+  kind: 'plan',
+  title: 'agent-p wants to start on a plan',
+  toolName: 'ExitPlanMode',
+  plan: '# Plan\n\n1. rewrite everything',
+  context: { agent: 'agent-p' },
+  choices: [{ action: 'approve', label: 'Approve plan', tone: 'primary' }],
+  note: 'Request changes in Agent Wrangler; only approval can be given from here.',
+};
+
+describe('a question card', () => {
+  it('says it is a question rather than a permission', () => {
+    const embed = askPayload(INTERACTION, QUESTION).embeds[0] as { title: string; description: string };
+    expect(embed.title).toContain('a question for you');
+    expect(embed.description).toContain('Which database?');
+  });
+
+  it('lists every option with its description, even though they are buttons', () => {
+    // A button label is clipped at 80 and carries no description, and the
+    // description is often the half that decides it.
+    const embed = askPayload(INTERACTION, QUESTION).embeds[0] as { description: string };
+    expect(embed.description).toContain('Postgres');
+    expect(embed.description).toContain('the boring one');
+    expect(embed.description).toContain('the small one');
+  });
+
+  it('gives one button per option, carrying the index', () => {
+    const rows = askPayload(INTERACTION, QUESTION).components as { components: { custom_id: string; label: string }[] }[];
+    expect(rows[0].components.map((c) => c.label)).toEqual(['Postgres', 'SQLite']);
+    expect(rows[0].components.map((c) => c.custom_id)).toEqual([
+      `aw:${INTERACTION}:opt0`,
+      `aw:${INTERACTION}:opt1`,
+    ]);
+  });
+
+  it('posts no components at all when the question cannot be buttoned', () => {
+    const readOnly = { ...QUESTION, choices: [], note: 'Answer this in Agent Wrangler — it takes more than one answer.' };
+    const payload = askPayload(INTERACTION, readOnly);
+    expect(payload.components).toEqual([]);
+    expect((payload.embeds[0] as { description: string }).description).toContain('more than one answer');
+  });
+});
+
+describe('a plan card', () => {
+  it('renders the plan as markdown rather than as a command', () => {
+    // It is prose meant to be read; a code block makes a wall of monospace.
+    const embed = askPayload(INTERACTION, PLAN).embeds[0] as { title: string; description: string };
+    expect(embed.title).toContain('plan approval');
+    expect(embed.description).toContain('1. rewrite everything');
+    expect(embed.description).not.toContain('```');
+  });
+
+  it('offers approval only, and says where rejection lives', () => {
+    const payload = askPayload(INTERACTION, PLAN);
+    const rows = payload.components as { components: { custom_id: string }[] }[];
+    expect(rows[0].components).toHaveLength(1);
+    expect(rows[0].components[0].custom_id).toBe(`aw:${INTERACTION}:approve`);
+    expect((payload.embeds[0] as { description: string }).description).toContain('Request changes in Agent Wrangler');
+  });
+
+  it('says how much of the plan is not on the card', () => {
+    // Approving a plan turns on having read it, so a truncated one must say so.
+    const embed = askPayload(INTERACTION, { ...PLAN, more: 4200 }).embeds[0] as { description: string };
+    expect(embed.description).toMatch(/4,200 more characters/);
+  });
+});
+
+describe('closing a question', () => {
+  const closed = (outcome: RemoteClose) => closedPayload(QUESTION, outcome).embeds[0] as { title: string };
+
+  it('names the answer, which is the whole news', () => {
+    const title = closed({ outcome: 'answered', label: 'Postgres', by: { id: 'U1', displayName: 'James' }, atMs: 0 }).title;
+    expect(title).toBe('✅ James chose Postgres');
+  });
+
+  it('falls back gracefully for a mirror written before labels were kept', () => {
+    const title = closed({ outcome: 'answered', by: { id: 'U1', displayName: 'James' }, atMs: 0 }).title;
+    expect(title).toBe('✅ Answered by James');
+  });
+
+  it('says approved rather than allowed when it was a plan', () => {
+    const embed = closedPayload(PLAN, { outcome: 'allowed', by: { id: 'U1', displayName: 'James' }, atMs: 0 });
+    expect((embed.embeds[0] as { title: string }).title).toBe('✅ Approved by James');
+  });
+
+  it('removes the buttons, as it does for a permission', () => {
+    expect(closedPayload(QUESTION, { outcome: 'answered', label: 'Postgres', atMs: 0 }).components).toEqual([]);
   });
 });

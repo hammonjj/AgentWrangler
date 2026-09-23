@@ -1,6 +1,6 @@
 # Mirroring questions and plan approvals
 
-**Status:** proposed. Sibling of `remote-agent-control.md`, which built the permission mirror and
+**Status:** built (2026-09-23), on `feat/remote-asks`. Sibling of `remote-agent-control.md`, which built the permission mirror and
 deferred this ("§6 — when questions and plan approvals are supported"). Read that first; this plan
 assumes its vocabulary (`RemoteAsk`, `remoteAskFor`, the reconciler, the mirror map) and changes
 only what it has to.
@@ -88,7 +88,7 @@ separator that could impersonate the three-field shape) and is still not a place
 
 ---
 
-## 2. The one thing that actually unblocks this: a decorated snapshot
+## 2. The one thing that actually unblocks this: a decorated snapshot ✅
 
 `RemoteControlService` takes a `SessionSnapshot` — `{ sessions, onDidUpdate }` — and that interface
 is already exactly right. It just gets handed the wrong object.
@@ -130,7 +130,7 @@ accessor returns `undefined` and the dashboard gains the same card for free.
 
 ---
 
-## 3. `RemoteAsk` becomes a union
+## 3. `RemoteAsk` becomes a union ✅
 
 Today `kind: 'permission'` is a literal with a comment calling itself the seam. Cash it in.
 
@@ -212,7 +212,7 @@ in what leaves the machine and should be a conscious yes, not a side effect.
 
 ---
 
-## 4. The press path
+## 4. The press path ✅
 
 `applyInvocation`'s five checks (scope, known mirror, authorised actor, still-the-same-ask,
 offered-choice) are unchanged and re-run identically — they are checks about the mirror, not about
@@ -246,7 +246,7 @@ index safe to put in a `custom_id`.
 
 ---
 
-## 5. Closing the message
+## 5. Closing the message ✅
 
 `RemoteClose.outcome` is `'allowed' | 'denied' | 'answered-locally' | 'cancelled'`, and
 `closedPayload` renders "✅ Allowed by X" / "❌ Denied by X". Add `'answered'`, carrying the label,
@@ -278,12 +278,26 @@ settled at the machine, and `answered-locally` already says exactly that.
 ## 7. Order of work
 
 1. ~~**The four defects** (§1), on `main`, with the paused/archived regression test.~~ **Done.**
-2. `decoratedSnapshot` (§2), plus `pendingPlan` down the runner → `RunnerOwnership` → DTO path. The
+2. ~~`decoratedSnapshot` (§2), plus `pendingPlan` down the runner → `RunnerOwnership` → DTO path. The
    dashboard gains a plan card as a side effect; that is a feature, not scope creep, and it is where
    the plan rendering gets its first eyes.
-3. `SessionActions.answerQuestion` / `.decidePlan` (§4), with `DashboardHost` re-pointed.
-4. The `RemoteAsk` union (§3) — pure, testable on its own, and the largest single diff.
-5. Transport and format: the union's rendering, `note`, `'answered'`, `Mirror.kind`.
-6. README: replace "What it does not do yet" with what it now does and does not send (§3.3).
+3. ~~`SessionActions.answerQuestion` / `.decidePlan` (§4), with `DashboardHost` re-pointed.~~ **Done.**
+4. ~~The `RemoteAsk` union (§3).~~ **Done.**
+5. ~~Transport and format: the union's rendering, `note`, `'answered'`, `Mirror.kind`.~~ **Done.**
+6. ~~README (§3.3).~~ **Done.**
 
-Steps 2-6 are more than one sitting, so they get a worktree: `feat/remote-asks`.
+All of it landed on `feat/remote-asks`.
+
+## 8. Built differently from the plan
+
+- **The dashboard's plan card was not built.** §7 step 2 expected it as a side effect. Another
+  agent had uncommitted work in `dashboard/main.ts` and `dashboardHost.ts` at the time and a
+  second editor in those files would have guaranteed a conflict. `pendingPlan` reaches the DTO,
+  so the card is a webview-only change whenever it is wanted.
+- **`Mirror.lastPress` gained a `label`.** §5 assumed the closing message could render the chosen
+  answer, but a choice id cannot: `opt2` indexes options that no longer exist by the time the card
+  closes. The label is captured at press time instead.
+- **Redaction is exhaustive on `kind`** rather than reaching for `subject`, so a future ask that
+  adds a text field cannot quietly skip the scrubber. A plan's `more` is recomputed after
+  redaction, so the "not shown" count includes what the cap took as well as what the block cap
+  had already held back.

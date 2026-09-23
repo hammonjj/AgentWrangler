@@ -15,6 +15,15 @@ import type {
 import type { SessionDTO } from '../src/shared/model';
 import type { RemoteAsk, RemoteNotice } from '../src/shared/remote';
 
+/** The three write paths, each reporting success and recording nothing. */
+function noopActions() {
+  return {
+    decidePermission: async () => 'applied' as const,
+    answerQuestion: async () => 'applied' as const,
+    decidePlan: async () => 'applied' as const,
+  };
+}
+
 /** A transport that records instead of talking to anything. */
 class FakeTransport implements RemoteTransport {
   readonly id = 'fake';
@@ -116,6 +125,48 @@ function blocked(extra: Partial<SessionDTO> = {}): SessionDTO {
   };
 }
 
+/** A session this window runs, parked on a question from its own runner. */
+function asking(extra: Partial<SessionDTO> = {}): SessionDTO {
+  return {
+    provider: 'claude',
+    sessionId: 'sess-q',
+    key: 'claude:sess-q',
+    title: 'agent-q',
+    status: 'blocked',
+    lastActivityAt: 1,
+    runnerOwned: true,
+    pendingQuestion: {
+      requestId: 'req_7',
+      questions: [
+        {
+          question: 'Which database?',
+          header: 'Database',
+          options: [
+            { label: 'Postgres', description: 'the boring one' },
+            { label: 'SQLite', description: 'the small one' },
+          ],
+        },
+      ] as never,
+    },
+    ...extra,
+  };
+}
+
+/** A session this window runs, parked on a plan. */
+function planning(extra: Partial<SessionDTO> = {}): SessionDTO {
+  return {
+    provider: 'claude',
+    sessionId: 'sess-p',
+    key: 'claude:sess-p',
+    title: 'agent-p',
+    status: 'blocked',
+    lastActivityAt: 1,
+    runnerOwned: true,
+    pendingPlan: { requestId: 'req_9', plan: '# Plan\n\nrewrite everything' },
+    ...extra,
+  };
+}
+
 const CONFIG: RemoteConfig = {
   enabled: true,
   notificationsEnabled: true,
@@ -129,6 +180,8 @@ describe('RemoteControlService', () => {
   let transport: FakeTransport;
   let audit: MemoryAuditLog;
   let decisions: { key: string; behavior: string; expectedRequestId?: string }[];
+  let answersGiven: { key: string; requestId: string; answers: Record<string, string> }[] = [];
+  let plansDecided: { key: string; requestId: string; approve: boolean }[] = [];
   let outcome: 'applied' | 'stale' | 'gone' | 'unsupported';
   let cfg: RemoteConfig;
 
@@ -139,6 +192,14 @@ describe('RemoteControlService', () => {
       {
         decidePermission: async (key, behavior, opts) => {
           decisions.push({ key, behavior, expectedRequestId: opts?.expectedRequestId });
+          return outcome;
+        },
+        answerQuestion: async (key, requestId, answers) => {
+          answersGiven.push({ key, requestId, answers });
+          return outcome;
+        },
+        decidePlan: async (key, requestId, approve) => {
+          plansDecided.push({ key, requestId, approve });
           return outcome;
         },
       },
@@ -156,6 +217,8 @@ describe('RemoteControlService', () => {
     transport = new FakeTransport();
     audit = new MemoryAuditLog();
     decisions = [];
+    answersGiven = [];
+    plansDecided = [];
     outcome = 'applied';
     cfg = { ...CONFIG };
   });
@@ -231,7 +294,8 @@ describe('RemoteControlService', () => {
         blocked({ blockedAsk: { body: 'GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz012345 npm publish', isCommand: true } }),
       ]);
       const { svc } = await build(sessions);
-      expect(transport.published[0].ask.subject?.body).not.toContain('ghp_');
+      const posted = transport.published[0].ask;
+      expect(posted.kind === 'permission' && posted.subject?.body).not.toContain('ghp_');
       svc.dispose();
     });
   });
@@ -425,7 +489,7 @@ describe('RemoteControlService', () => {
 
     it('does nothing at all with no transport', async () => {
       const store = new MirrorStore(path.join(dir, 'm.json'));
-      const svc = new RemoteControlService(fakeSessions([blocked()]), { decidePermission: async () => 'applied' }, store, () => cfg, audit);
+      const svc = new RemoteControlService(fakeSessions([blocked()]), noopActions(), store, () => cfg, audit);
       await svc.reconcile();
       expect(svc.mirroredCount).toBe(0);
       svc.dispose();
@@ -450,7 +514,7 @@ describe('RemoteControlService', () => {
       const sessions = fakeSessions([blocked()]);
 
       const storeA = new MirrorStore(file);
-      const svcA = new RemoteControlService(sessions, { decidePermission: async () => 'applied' }, storeA, () => cfg, audit);
+      const svcA = new RemoteControlService(sessions, noopActions(), storeA, () => cfg, audit);
       svcA.setTransport(transport);
       await svcA.reconcile();
       expect(transport.published).toHaveLength(1);
@@ -461,7 +525,7 @@ describe('RemoteControlService', () => {
       const transportB = new FakeTransport();
       const storeB = new MirrorStore(file);
       const sessionsB = fakeSessions([]); // the ask is over by now
-      const svcB = new RemoteControlService(sessionsB, { decidePermission: async () => 'applied' }, storeB, () => cfg, audit);
+      const svcB = new RemoteControlService(sessionsB, noopActions(), storeB, () => cfg, audit);
       svcB.setTransport(transportB);
       await svcB.reconcile();
 
@@ -476,13 +540,13 @@ describe('RemoteControlService', () => {
       const file = path.join(dir, 'shared.json');
       const sessions = fakeSessions([blocked()]);
       const storeA = new MirrorStore(file);
-      const svcA = new RemoteControlService(sessions, { decidePermission: async () => 'applied' }, storeA, () => cfg, audit);
+      const svcA = new RemoteControlService(sessions, noopActions(), storeA, () => cfg, audit);
       svcA.setTransport(transport);
       await svcA.reconcile();
       svcA.dispose();
 
       const transportB = new FakeTransport();
-      const svcB = new RemoteControlService(sessions, { decidePermission: async () => 'applied' }, new MirrorStore(file), () => cfg, audit);
+      const svcB = new RemoteControlService(sessions, noopActions(), new MirrorStore(file), () => cfg, audit);
       svcB.setTransport(transportB);
       await svcB.reconcile();
       expect(transportB.published).toHaveLength(0);
@@ -550,5 +614,138 @@ describe('RemoteControlService', () => {
       expect(transport.notices).toHaveLength(1);
       svc.dispose();
     });
+  });
+});
+
+describe('RemoteControlService, questions and plans', () => {
+  let dir: string;
+  let transport: FakeTransport;
+  let audit: MemoryAuditLog;
+  let cfg: RemoteConfig;
+  let answers: { key: string; requestId: string; answers: Record<string, string> }[];
+  let plans: { key: string; requestId: string; approve: boolean }[];
+  let outcome: 'applied' | 'stale' | 'gone' | 'unsupported';
+
+  const build = async (sessions: SessionSnapshot) => {
+    const svc = new RemoteControlService(
+      sessions,
+      {
+        decidePermission: async () => outcome,
+        answerQuestion: async (key, requestId, given) => {
+          answers.push({ key, requestId, answers: given });
+          return outcome;
+        },
+        decidePlan: async (key, requestId, approve) => {
+          plans.push({ key, requestId, approve });
+          return outcome;
+        },
+      },
+      new MirrorStore(path.join(dir, 'mirrors.json')),
+      () => cfg,
+      audit,
+    );
+    svc.setTransport(transport);
+    await svc.reconcile();
+    return svc;
+  };
+
+  beforeEach(async () => {
+    dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aw-remote-qp-'));
+    transport = new FakeTransport();
+    audit = new MemoryAuditLog();
+    cfg = { ...CONFIG };
+    answers = [];
+    plans = [];
+    outcome = 'applied';
+  });
+  afterEach(async () => {
+    await fsp.rm(dir, { recursive: true, force: true });
+  });
+
+  it('turns a pressed option back into the answer the local form would post', async () => {
+    const svc = await build(fakeSessions([asking()]));
+    expect(transport.published).toHaveLength(1);
+    transport.press('opt1');
+    await svc.whenIdle();
+    expect(answers).toEqual([
+      { key: 'claude:sess-q', requestId: 'req_7', answers: { 'Which database?': 'SQLite' } },
+    ]);
+    svc.dispose();
+  });
+
+  it('resolves the index against live state, not against the message', async () => {
+    // The custom_id carries an index because the options it indexes are re-read
+    // at press time. If they changed, the staleness checks refuse it first.
+    const sessions = fakeSessions([asking()]);
+    const svc = await build(sessions);
+    sessions.set([asking({ pendingQuestion: { requestId: 'req_8', questions: asking().pendingQuestion!.questions } })]);
+    await svc.reconcile();
+    transport.pressOn(transport.published[0].interactionId, 'opt0');
+    await svc.whenIdle();
+    expect(answers).toEqual([]);
+    expect(audit.records.some((r) => r.event === 'refused-unknown' || r.event === 'refused-stale')).toBe(true);
+    svc.dispose();
+  });
+
+  it('refuses an option index the question does not have', async () => {
+    const svc = await build(fakeSessions([asking()]));
+    transport.press('opt4');
+    await svc.whenIdle();
+    expect(answers).toEqual([]);
+    svc.dispose();
+  });
+
+  it('closes a question saying what was chosen, not that it was allowed', async () => {
+    const sessions = fakeSessions([asking()]);
+    const svc = await build(sessions);
+    transport.press('opt0');
+    await svc.whenIdle();
+    sessions.set([asking({ pendingQuestion: undefined })]); // the runner settled it
+    await svc.reconcile();
+    expect(transport.closed[0].outcome).toMatchObject({ outcome: 'answered', label: 'Postgres' });
+    svc.dispose();
+  });
+
+  it('approves a plan, and never rejects one', async () => {
+    const svc = await build(fakeSessions([planning()]));
+    expect(transport.published[0].ask.kind).toBe('plan');
+    expect(transport.published[0].ask.choices.map((c) => c.action)).toEqual(['approve']);
+    transport.press('approve');
+    await svc.whenIdle();
+    expect(plans).toEqual([{ key: 'claude:sess-p', requestId: 'req_9', approve: true }]);
+    svc.dispose();
+  });
+
+  it('mirrors a question and a plan on two sessions without crosstalk', async () => {
+    const svc = await build(fakeSessions([asking(), planning()]));
+    expect(transport.published).toHaveLength(2);
+    transport.pressOn(transport.published[0].interactionId, 'opt0');
+    await svc.whenIdle();
+    expect(answers).toHaveLength(1);
+    expect(plans).toHaveLength(0);
+    svc.dispose();
+  });
+
+  it('publishes an unbuttonable question with no components at all', async () => {
+    const multi = asking({
+      pendingQuestion: {
+        requestId: 'req_7',
+        questions: [{ question: 'Which?', header: 'H', multiSelect: true, options: [{ label: 'A' }] }] as never,
+      },
+    });
+    const svc = await build(fakeSessions([multi]));
+    expect(transport.published[0].ask.choices).toEqual([]);
+    expect(transport.published[0].ask.note).toMatch(/Agent Wrangler/);
+    svc.dispose();
+  });
+
+  it('redacts a question and a plan on the way out, as it does a command', async () => {
+    const leaky = planning({
+      pendingPlan: { requestId: 'req_9', plan: 'token GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz012345 then deploy' },
+    });
+    const svc = await build(fakeSessions([leaky]));
+    const posted = transport.published[0].ask;
+    expect(posted.kind === 'plan' && posted.plan).not.toContain('ghp_');
+    svc.dispose();
   });
 });

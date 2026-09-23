@@ -84,4 +84,34 @@ export interface SessionActions {
     behavior: 'allow' | 'deny' | 'always',
     opts?: { expectedRequestId?: string },
   ): Promise<PermissionDecisionOutcome>;
+  /**
+   * Answer the `AskUserQuestion` a runner-owned session is parked on.
+   *
+   * Unlike `decidePermission` this can only ever reach a session *this* process
+   * runs: a question is settled by resolving the SDK's `canUseTool` promise,
+   * and that promise is in one heap with no file anyone else could write. A
+   * session running in a terminal answers `unsupported`, which is the honest
+   * answer rather than a silent no-op.
+   *
+   * `requestId` is required, not optional as it is on `decidePermission`. There
+   * is no marker to fall back on, so an answer with no id has nothing to be
+   * checked against, and a question that has been replaced by the next one
+   * must not receive the answer meant for its predecessor.
+   */
+  answerQuestion(
+    key: string,
+    requestId: string,
+    answers: Record<string, string>,
+  ): Promise<PermissionDecisionOutcome>;
+  /**
+   * Approve or reject the plan a runner-owned session is parked on. Rejecting
+   * carries the feedback back to the model, which is the whole of the
+   * difference between "no" and "no, because".
+   */
+  decidePlan(
+    key: string,
+    requestId: string,
+    approve: boolean,
+    feedback?: string,
+  ): Promise<PermissionDecisionOutcome>;
 }

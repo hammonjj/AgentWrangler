@@ -27,12 +27,29 @@
 import { Emitter, type Disposable, type Listener } from './events';
 import type { AgentSession } from '../shared/model';
 
-/** What the app knows about a session that provider discovery does not. */
+/**
+ * What the app knows about a session that provider discovery does not.
+ *
+ * The runner accessors are optional because they answer a different question
+ * from the other two: not "what has the user decided about this session" but
+ * "what is this window's own copy of it waiting on right now". A consumer that
+ * does not care about in-process asks simply does not pass them.
+ *
+ * They are keyed by `sessionId` rather than by `key` because that is what the
+ * runner registry knows; the store's `key` is a provider-qualified wrapper
+ * around it.
+ */
 export interface SessionDecorations {
   /** The user shoved this row out of the way (`ArchiveService`). */
   isArchived(key: string): boolean;
   /** Its process is stopped and spending nothing (`PauseService`). */
   isPaused(pid: number | undefined): boolean;
+  /** This window runs the session itself, so its in-process asks are answerable here. */
+  runnerOwned?(sessionId: string | undefined): boolean;
+  /** The `AskUserQuestion` this window's runner is parked on, if any. */
+  pendingQuestion?(sessionId: string | undefined): AgentSession['pendingQuestion'];
+  /** The `ExitPlanMode` this window's runner is parked on, if any. */
+  pendingPlan?(sessionId: string | undefined): AgentSession['pendingPlan'];
 }
 
 /** Just enough of `SessionStore` to decorate: the list, and when it moves. */
@@ -58,8 +75,19 @@ export interface ChangeSource {
 export function decorateSession(s: AgentSession, d: SessionDecorations): AgentSession {
   const archived = d.isArchived(s.key) || undefined;
   const paused = d.isPaused(s.pid) || undefined;
-  if (archived === undefined && paused === undefined) return s;
-  return { ...s, archived, paused };
+  const runnerOwned = d.runnerOwned?.(s.sessionId) || undefined;
+  const pendingQuestion = d.pendingQuestion?.(s.sessionId);
+  const pendingPlan = d.pendingPlan?.(s.sessionId);
+  if (
+    archived === undefined &&
+    paused === undefined &&
+    runnerOwned === undefined &&
+    pendingQuestion === undefined &&
+    pendingPlan === undefined
+  ) {
+    return s;
+  }
+  return { ...s, archived, paused, runnerOwned, pendingQuestion, pendingPlan };
 }
 
 /**

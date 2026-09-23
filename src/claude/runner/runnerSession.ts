@@ -125,6 +125,19 @@ export class RunnerSession {
       (block): block is Extract<ConvBlock, { kind: 'question' }> => block.kind === 'question' && block.state === 'pending',
     );
   }
+
+  /**
+   * The plan currently waiting on this runner, if any.
+   *
+   * Symmetrical with `pendingQuestion` in every way, including reading
+   * backwards: a conversation can have approved several plans already, and the
+   * one being asked about is the last.
+   */
+  get pendingPlan(): Extract<ConvBlock, { kind: 'plan' }> | undefined {
+    return [...this.blocks].reverse().find(
+      (block): block is Extract<ConvBlock, { kind: 'plan' }> => block.kind === 'plan' && block.state === 'pending',
+    );
+  }
   private truncated = false;
   /** What was said before this process took the conversation over. */
   private historyPromise?: Promise<ConversationHistory>;
