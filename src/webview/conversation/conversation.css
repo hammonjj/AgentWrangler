@@ -197,8 +197,12 @@ body,
   border-radius: 0 6px 6px 0;
   padding: 8px 12px;
 }
+/* Room on the right for the copy button, which is absolutely positioned inside
+   this block — without the reserve it would sit on top of the last line of a
+   reply whose first paragraph runs the full width. */
 .blk.assistant {
   padding: 2px 12px;
+  position: relative;
 }
 
 .worklog {
@@ -547,6 +551,65 @@ body,
 .blk pre:hover .copy,
 .copy:focus {
   opacity: 1;
+}
+
+/* "Copy this reply". Same hover-reveal contract as the `pre` copy button above,
+   but an icon rather than a word: a reply can be one line, and a button wider
+   than the text it belongs to reads as part of the conversation. It sits over
+   the block's top-right padding, out of the text column, and the reveal is on
+   the whole block — the pointer is rarely on the button itself when the reader
+   decides they want it. */
+.blockcopy {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border-radius: 3px;
+  border: 1px solid var(--aw-rule);
+  background: var(--vscode-editor-background, transparent);
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  opacity: 0;
+}
+.blockcopy .cicon {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+.blk.assistant:hover .blockcopy,
+.blockcopy:focus,
+.blockcopy:focus-visible {
+  opacity: 1;
+}
+.blockcopy:hover {
+  color: var(--vscode-foreground);
+  border-color: var(--vscode-focusBorder, var(--aw-rule));
+}
+/* The result of the press, said without moving anything: the glyph is replaced
+   in place, so the button never changes size under the pointer. */
+.blockcopy[data-state] .cicon {
+  display: none;
+}
+.blockcopy[data-state] {
+  opacity: 1;
+  font-size: 0.8em;
+  line-height: 1;
+}
+.blockcopy[data-state='done']::after {
+  content: '✓';
+  color: var(--aw-done, var(--vscode-charts-green, #4ec9b0));
+}
+.blockcopy[data-state='busy']::after {
+  content: '…';
+}
+.blockcopy[data-state='fail']::after {
+  content: '✕';
+  color: var(--vscode-charts-red, #f14c4c);
 }
 
 /* ---- composer ---- */

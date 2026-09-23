@@ -130,6 +130,8 @@ const blockState = new Map<string, ConvBlock>();
 const expanded = new Set<string>();
 /** Ids with a re-fetch already scheduled, so a streaming block asks once a tick, not once a delta. */
 const refetching = new Set<string>();
+/** Ids whose full text was fetched for a copy, so the reply lands on the clipboard and not on screen. */
+const copyPending = new Set<string>();
 
 let stick = true;
 let newCount = 0;
@@ -175,6 +177,74 @@ function appendShowMore(el: HTMLElement, id: string, more: number | undefined): 
     expanded.add(id);
     const block = searchBlocks.get(id) ?? blockState.get(id);
     post({ type: 'requestBlockText', id, toolUseId: block?.kind === 'tool' ? block.toolUseId : undefined });
+  });
+  el.appendChild(btn);
+}
+
+/**
+ * "Copy this reply", on every assistant block.
+ *
+ * What lands on the clipboard is the markdown source, not the rendered HTML:
+ * that is what the agent actually wrote, and it is what pastes usefully into a
+ * ticket, a commit message or another agent. Selecting the text by hand gets
+ * you the rendering instead — bullets flattened, code fences gone — which is
+ * the reason this button exists at all.
+ *
+ * Hover-revealed and absolutely positioned, the same as the `<pre>` copy
+ * button, so a conversation being read is not a column of buttons. It is in the
+ * tab order regardless, and `:focus` reveals it, so it is reachable without a
+ * pointer.
+ */
+function flashCopy(btn: HTMLButtonElement, label: string, state: 'done' | 'busy' | 'fail' = 'done', ms = 1200): void {
+  btn.dataset.state = state;
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  setTimeout(() => {
+    if (!btn.isConnected) return;
+    delete btn.dataset.state;
+    btn.title = COPY_REPLY_LABEL;
+    btn.setAttribute('aria-label', COPY_REPLY_LABEL);
+  }, ms);
+}
+
+const COPY_REPLY_LABEL = 'Copy this reply as markdown';
+const COPY_GLYPH = `<svg class="cicon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path fill="none" stroke="currentColor" stroke-width="1.2" d="M5.6 5.6V2.6h7.8v7.8h-3"/><rect x="2.6" y="5.6" width="7.8" height="7.8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>`;
+
+function writeCopy(btn: HTMLButtonElement, text: string, label = 'Copied'): void {
+  navigator.clipboard.writeText(text).then(
+    () => flashCopy(btn, label),
+    () => flashCopy(btn, 'Copy failed', 'fail', 1600),
+  );
+}
+
+/** Write the just-arrived full text, flashing the block's rebuilt copy button. */
+function finishPendingCopy(node: HTMLElement, text: string): void {
+  const btn = node.querySelector('.blockcopy') as HTMLButtonElement | null;
+  if (btn) writeCopy(btn, text);
+  else void navigator.clipboard.writeText(text);
+}
+
+function appendBlockCopy(el: HTMLElement, b: ConvBlock): void {
+  const btn = document.createElement('button');
+  btn.className = 'blockcopy';
+  btn.innerHTML = COPY_GLYPH;
+  btn.title = COPY_REPLY_LABEL;
+  btn.setAttribute('aria-label', COPY_REPLY_LABEL);
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const block = searchBlocks.get(b.id) ?? blockState.get(b.id);
+    const text = block && 'text' in block ? (block.text ?? '') : '';
+    const more = block && 'more' in block ? block.more : undefined;
+    // Under the wire cap the webview already holds the whole reply. Over it,
+    // copying what is on screen would silently hand over a prefix, so the rest
+    // is fetched first and the clipboard is written when it lands.
+    if (!more) {
+      writeCopy(btn, text);
+      return;
+    }
+    copyPending.add(b.id);
+    flashCopy(btn, 'Fetching the rest…', 'busy', 4000);
+    post({ type: 'requestBlockText', id: b.id });
   });
   el.appendChild(btn);
 }
@@ -257,6 +327,9 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
       renderMarkdown(body, b.text);
       el.appendChild(body);
       appendShowMore(el, b.id, b.more);
+      // Not while it is still being written: a reply copied mid-sentence is a
+      // half-answer that looks like a whole one on the clipboard.
+      if (!b.streaming) appendBlockCopy(el, b);
       break;
     }
     case 'thinking': {
@@ -1712,18 +1785,33 @@ vscodeApi.onMessage((body) => {
           btn.disabled = true;
           btn.textContent = 'The rest is no longer held — reopen the conversation to read it in full';
         }
+        // A copy was waiting on this. Copying the prefix anyway and saying so is
+        // better than copying nothing, but it must say so — a partial reply that
+        // claims to be whole is the one outcome worth avoiding.
+        if (copyPending.delete(m.id)) {
+          const copy = node.querySelector('.blockcopy') as HTMLButtonElement | null;
+          const prefix = 'text' in prev ? (prev.text ?? '') : '';
+          if (copy) writeCopy(copy, prefix, 'Copied only the part still held');
+        }
         break;
       }
+      const wantsCopy = copyPending.delete(m.id);
       // Expanding a block above the view would push everything below it down,
       // so the block is held still instead: whatever the reader was looking at
       // stays where it was.
       const before = node.getBoundingClientRect().top;
       if (searchNodes.has(m.id)) {
         const next = (prev.kind === 'tool' ? { ...prev, result: { ...prev.result, text: m.text, truncated: false } } : prev.kind === 'plan' ? { ...prev, plan: m.text, more: undefined } : { ...prev, text: m.text, more: undefined }) as ConvBlock;
-        searchBlocks.set(m.id, next); fillNode(node, next); break;
+        searchBlocks.set(m.id, next); fillNode(node, next);
+        if (wantsCopy) finishPendingCopy(node, m.text);
+        break;
       }
       patchBlock(m.id, (prev.kind === 'tool' ? { result: { ...prev.result, text: m.text, truncated: false } } : prev.kind === 'plan' ? { plan: m.text, more: undefined } : { text: m.text, more: undefined }) as Partial<ConvBlock>, false);
       scroller.scrollTop += node.getBoundingClientRect().top - before;
+      // After the patch, not before: `fillNode` rebuilds the block, so the
+      // button the click came from is already detached and a flash on it would
+      // go nowhere.
+      if (wantsCopy) finishPendingCopy(node, m.text);
       break;
     }
     case 'fileSuggestions':
