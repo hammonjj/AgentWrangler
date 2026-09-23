@@ -139,7 +139,7 @@ export class ClaudeProvider implements AgentProvider {
 
       // The one thing hooks cannot report: a permission prompt answered in the
       // Claude Code window. Nothing fires until the allowed tool *finishes*, so
-      // without this the row sits in Blocked on you for as long as the command
+      // without this the row sits blocked on that prompt for as long as the command
       // runs. Claude Code's own status in the pid file says otherwise, and says
       // it at once.
       if (hook && status === 'blocked' && blockClearedByClaude(hook.blockedSinceMs, r)) {

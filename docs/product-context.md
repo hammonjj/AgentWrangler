@@ -45,12 +45,14 @@ Its competitor is a wall of terminal tabs.
   *on the pane*; it is genuinely used at ~300px wide. Any feature proposal must survive a
   narrow pane.
 - **Status has two tiers.** Hooks (installed into `~/.claude/settings.json`, opt-in) are
-  ground truth — *Blocked on you* means a permission prompt genuinely exists. Transcript
+  ground truth — a row shown as stopped at a permission prompt means one genuinely exists. Transcript
   inference is the always-on fallback and renders with a hollow dot meaning *estimated*.
   Anything that claims certainty must say which tier it came from.
-- **Sections.** The table groups rows: Pinned / Blocked on you / Waiting / Possibly stuck /
-  Done / Busy / Paused / Ended / Archived, plus a second "sections" view for the user's own
-  named groupings.
+- **Sections.** The table groups rows: Pinned / Waiting / Possibly stuck / Done / Busy /
+  Paused / Ended / Archived, plus a second "sections" view for the user's own named
+  groupings (everything starts in *Uncategorized*). *Waiting* holds both the `blocked`
+  and `waiting` statuses — one instruction, one heading — with permission prompts sorted
+  to the top of it.
 
 ## 4. What exists today (capability inventory)
 
@@ -178,6 +180,7 @@ features are sliced — prefer slices that land independently.
 Codex. *Hook-backed* vs *estimated* — the two status tiers. *Runner-owned* — a session whose
 process this app started or adopted (the app can type into it); everything else is read-only
 plus hook-answerable. *Adopt / take over* — end a session's process elsewhere and resume the
-same id here. *Release* — the reverse. *Blocked on you* — a permission prompt is genuinely
-open. *Waiting* vs *Done* — both idle; Waiting means the last reply asked something.
+same id here. *Release* — the reverse. *Blocked* — the internal status for "a permission
+prompt is genuinely open"; on screen it reads *Waiting*, like the status of the same name.
+*Waiting* vs *Done* — both idle; Waiting means the agent wants something from you.
 *Pane* — either half of the workbench window. *Workbench* — the one shipped webview bundle.

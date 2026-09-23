@@ -19,6 +19,17 @@ describe('sectionOf', () => {
   });
 
   /**
+   * Both statuses say the same thing to the person reading the table, and both
+   * render as "Waiting", so they share a section: two headings with one word
+   * between them would look like the list repeating itself. `blocked` is still
+   * its own status everywhere it is acted on — the card, the dot, the bell.
+   */
+  it('files a blocked session under Waiting, with no section of its own', () => {
+    expect(sectionOf(session({ status: 'blocked' }))).toBe('waiting');
+    expect(SECTION_ORDER).not.toContain('blocked');
+  });
+
+  /**
    * The reason paused is a section rather than only a chip: a frozen session's
    * status stopped moving the moment it was stopped. Left in Busy it would read
    * as work in progress, and the stuck threshold would relabel it *Possibly

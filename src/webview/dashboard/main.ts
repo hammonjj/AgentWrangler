@@ -1205,7 +1205,14 @@ function render(): void {
   for (const group of groupOrder) {
     const rows = groups.get(group) ?? [];
     if (tableView === 'status' && rows.length === 0) continue;
-    rows.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+    // Newest first, except that a permission prompt outranks activity inside
+    // the Waiting section: it is the one row in the table where the agent is
+    // stopped until you press something, and burying it under a conversation
+    // that merely asked a question would be the wrong way round.
+    rows.sort((a, b) => {
+      const blocked = Number(b.status === 'blocked') - Number(a.status === 'blocked');
+      return blocked !== 0 ? blocked : b.lastActivityAt - a.lastActivityAt;
+    });
     const collapseKey = tableView === 'status' ? group : `named:${group}`;
     const isCollapsed = collapsed.has(collapseKey);
     const label = tableView === 'status' ? SECTION_LABEL[group as SectionId] : group;

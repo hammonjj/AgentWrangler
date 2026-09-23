@@ -54,7 +54,7 @@ export interface LiveStatusInput {
  * and there is no hook in between — Claude Code 2.1.270 has no
  * `PermissionGranted` event (only `PermissionDenied`, for the other answer).
  * `PostToolUse` fires when the tool has *finished*, so allowing a ten-minute
- * test run in the Claude Code window leaves the row in Blocked on you for the
+ * test run in the Claude Code window leaves the row blocked on a prompt for the
  * whole ten minutes, which is exactly backwards: the moment it is allowed is
  * the moment it stops needing the human.
  *

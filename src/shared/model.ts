@@ -322,7 +322,6 @@ export type SectionId = SessionStatus | 'paused' | 'archived';
  * before a list of sessions that are already over.
  */
 export const SECTION_ORDER: SectionId[] = [
-  'blocked',
   'waiting',
   'stuck',
   'done',
@@ -349,7 +348,15 @@ export const SECTION_LABEL: Record<SectionId, string> = {
  */
 export function sectionOf(s: AgentSession): SectionId {
   if (s.archived) return 'archived';
-  return s.paused ? 'paused' : s.status;
+  if (s.paused) return 'paused';
+  // One Waiting section, not two. `blocked` and `waiting` are different facts
+  // about the agent — one cannot get past a permission prompt, the other ended
+  // its turn on a question — but they are the same instruction to the person
+  // reading the table, and since both render as "Waiting" two sections under
+  // one heading would only be a list that appears to repeat itself. The
+  // distinction survives where it is actionable: a blocked row sorts to the top
+  // of the section and opens a card with buttons, a waiting one does not.
+  return s.status === 'blocked' ? 'waiting' : s.status;
 }
 
 /**
