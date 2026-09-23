@@ -32,7 +32,14 @@ export type HostToDashboard =
       /** Saved column layout. Absent only before the host has read storage once. */
       columns?: ColumnPrefs;
       showCodexSubagents?: boolean;
-      /** Always starts with General, followed by user-created organizational sections. */
+      /**
+       * The toolbar's Discord button. `configured` is what makes it exist at
+       * all — with the integration off there is nothing to mute — and `on` is
+       * whether announcements are being posted. Absent only before the host has
+       * read settings once.
+       */
+      discord?: { configured: boolean; on: boolean };
+      /** Always starts with Uncategorized, followed by user-created organizational sections. */
       conversationSections: string[];
       /**
        * What the launcher's model and effort dropdowns show: the models the
@@ -112,6 +119,8 @@ export type DashboardToHost =
   /** A column was dragged, hidden or shown — persist this layout for every dashboard. */
   | { type: 'setColumns'; prefs: ColumnPrefs }
   | { type: 'setShowCodexSubagents'; value: boolean }
+  /** The bar's Discord button: post announcements to the channel, or go quiet. */
+  | { type: 'setDiscordNotifications'; value: boolean }
   /** Start a Claude Code conversation in `cwd`, this window running it, and show the pane. */
   | { type: 'newConversation'; cwd: string; provider?: 'claude' | 'codex' }
   /** The launcher's dropdowns: the default a *new* conversation starts on. */

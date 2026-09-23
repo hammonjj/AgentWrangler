@@ -100,6 +100,9 @@ export class DashboardHost {
           affects('runner.model') || affects('runner.effort') || affects('runner.provider') ||
           affects('codexRunner.model') || affects('codexRunner.effort')
         ) void this.pushSnapshot();
+        // The Discord button is a view onto two settings, either of which can be
+        // changed from the Preferences window or the other dashboard.
+        if (affects('remote.enabled') || affects('remote.notificationsEnabled')) void this.pushSnapshot();
         if (affects('showCodexSubagents')) {
           this.actions.refreshAll();
           void this.pushSnapshot();
@@ -191,6 +194,10 @@ export class DashboardHost {
       codexUsage: this.codexUsage.enabled ? this.codexUsage.usage : undefined,
       columns: this.columns.value,
       showCodexSubagents: this.settings.get('showCodexSubagents', false),
+      discord: {
+        configured: this.settings.get('remote.enabled', false),
+        on: this.settings.get('remote.notificationsEnabled', true),
+      },
       conversationSections: this.pins.names,
       launcher: {
         models: this.models.value,
@@ -263,6 +270,14 @@ export class DashboardHost {
         if (typeof m.value === 'boolean') {
           void this.settings.update('showCodexSubagents', m.value).catch((error: unknown) => {
             this.dialogs.error(`Could not change Codex session visibility: ${String(error)}`);
+            void this.pushSnapshot();
+          });
+        }
+        break;
+      case 'setDiscordNotifications':
+        if (typeof m.value === 'boolean') {
+          void this.settings.update('remote.notificationsEnabled', m.value).catch((error: unknown) => {
+            this.dialogs.error(`Could not change Discord notifications: ${String(error)}`);
             void this.pushSnapshot();
           });
         }

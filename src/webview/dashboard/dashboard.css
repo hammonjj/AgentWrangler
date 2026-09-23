@@ -332,6 +332,36 @@ body {
   color: var(--vscode-editor-background);
 }
 
+/* The Discord button. Unlit is an outline-weight glyph in the bar's own muted
+   foreground — off is a quiet state, not an alarm — and lit fills it with
+   Discord's own blurple rather than the paused colour `.ctlbtn.on` gives every
+   other control here, because this button is not about anything being stopped.
+   The mark keeps its colour against the filled background by being drawn in the
+   editor background, the same inversion the pause button uses. */
+#bar .discordbtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+}
+#bar .discordbtn[hidden] {
+  display: none;
+}
+#bar .discordbtn .dicon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+#bar .ctlbtn.discordbtn.on {
+  background: #5865f2;
+  border-color: transparent;
+  color: #ffffff;
+}
+#bar .ctlbtn.discordbtn.on:hover:not(:disabled) {
+  background: #4752c4;
+}
+
 #bar .projbtn:focus-visible,
 #bar .newbtn:focus-visible,
 #bar .ctlbtn:focus-visible,
