@@ -65,6 +65,56 @@ function codeBlock(body: string, language = 'sh'): string {
   return `\`\`\`${language}\n${body.replace(/`/g, '`​')}\n\`\`\``;
 }
 
+/** What the card calls itself, per kind. */
+const HEADLINE: Record<RemoteAsk['kind'], string> = {
+  permission: 'Agent Wrangler — permission required',
+  question: 'Agent Wrangler — a question for you',
+  plan: 'Agent Wrangler — plan approval',
+};
+
+/**
+ * The body of the card, which is the one part that is genuinely different per
+ * kind: a command to run, a question with its options, or a plan to read.
+ *
+ * A plan is markdown and stays markdown — it is prose meant to be read, and a
+ * code block would make a wall of monospace out of it. A command stays in a
+ * code block for the opposite reason: it is a literal string whose every
+ * character matters.
+ */
+function bodyFor(ask: RemoteAsk): string[] {
+  const parts: string[] = [];
+  switch (ask.kind) {
+    case 'permission':
+      if (ask.subject?.body) {
+        parts.push('**Requested action**');
+        parts.push(codeBlock(ask.subject.body, ask.subject.isCommand ? 'sh' : ''));
+      }
+      if (ask.subject?.summary) {
+        parts.push('**Reason**');
+        parts.push(ask.subject.summary);
+      }
+      return parts;
+    case 'question':
+      parts.push(`**${ask.header ?? 'Question'}**`);
+      parts.push(ask.question);
+      if (ask.options.length > 0) {
+        parts.push('');
+        // Listed even when they are buttons: a button label is clipped at 80
+        // and carries no description, and the description is often the part
+        // that decides it.
+        for (const o of ask.options) {
+          parts.push(o.description ? `• **${o.label}** — ${o.description}` : `• **${o.label}**`);
+        }
+      }
+      return parts;
+    case 'plan':
+      parts.push(ask.plan);
+      // The one number on this card that changes what a press means.
+      if (ask.more) parts.push(`\n*…and ${ask.more.toLocaleString()} more characters not shown here.*`);
+      return parts;
+  }
+}
+
 /**
  * The card as posted, with its buttons.
  *
@@ -82,23 +132,17 @@ export function askPayload(interactionId: string, ask: RemoteAsk): DiscordMessag
     field('Model', ask.context.model),
   ].filter(Boolean);
 
-  const parts: string[] = [];
-  if (ask.subject?.body) {
-    parts.push('**Requested action**');
-    parts.push(codeBlock(ask.subject.body, ask.subject.isCommand ? 'sh' : ''));
-  }
-  if (ask.subject?.summary) {
-    parts.push('**Reason**');
-    parts.push(ask.subject.summary);
-  }
+  const parts = bodyFor(ask);
   // A choice whose label carries a detail (where an "always" rule is saved)
   // says so in the body: a Discord button has no tooltip to put it in.
   for (const choice of ask.choices) {
     if (choice.detail) parts.push(`*${choice.label}: ${choice.detail}*`);
   }
+  // What this card cannot do, when it cannot do everything the local one can.
+  if (ask.note) parts.push(`*${ask.note}*`);
 
   const embed = {
-    title: clip('Agent Wrangler — permission required', LIMIT.title),
+    title: clip(HEADLINE[ask.kind], LIMIT.title),
     description: clip(parts.join('\n'), LIMIT.description),
     color: COLOUR.pending,
     fields,
@@ -125,12 +169,19 @@ export function closedPayload(ask: RemoteAsk, outcome: RemoteClose): DiscordMess
 
   const headline =
     outcome.outcome === 'allowed'
-      ? `✅ Allowed${by}`
+      ? `✅ ${ask.kind === 'plan' ? 'Approved' : 'Allowed'}${by}`
       : outcome.outcome === 'denied'
         ? `❌ Denied${by}`
-        : outcome.outcome === 'cancelled'
-          ? '⃠ No longer being asked'
-          : '↩︎ Answered in Agent Wrangler';
+        : outcome.outcome === 'answered'
+          ? // The answer is the news, so it goes in the headline rather than
+            // the body. Falls back to the plain form if the label is missing —
+            // a mirror written by an older build has no label to show.
+            outcome.label
+            ? `✅ ${outcome.by?.displayName ?? 'Answered'}${outcome.by ? ' chose' : ':'} ${outcome.label}`
+            : `✅ Answered${by}`
+          : outcome.outcome === 'cancelled'
+            ? '⃠ No longer being asked'
+            : '↩︎ Answered in Agent Wrangler';
 
   // Deliberately not "allowed" or "denied" when nobody pressed here: the hook
   // path cannot observe which answer was given at the machine, and inventing
@@ -148,7 +199,7 @@ export function closedPayload(ask: RemoteAsk, outcome: RemoteClose): DiscordMess
     title: clip(headline, LIMIT.title),
     description: clip([detail, `Resolved at ${when}`].filter(Boolean).join('\n'), LIMIT.description),
     color:
-      outcome.outcome === 'allowed'
+      outcome.outcome === 'allowed' || outcome.outcome === 'answered'
         ? COLOUR.allowed
         : outcome.outcome === 'denied'
           ? COLOUR.denied

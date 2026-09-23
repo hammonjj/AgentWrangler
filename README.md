@@ -56,7 +56,7 @@ including streaming replies, interruption, and approval decisions.
 - **A banner at the top says when status is only estimated** — hooks not installed, disabled, or stale — with an *Install hooks* button. Once installed, it lists the live sessions that predate the install and still need a restart.
 - **Clicking a row opens the conversation here.** Every session — started here, in a VSCode window, in a terminal, on this machine at all — opens in the **conversation pane** beside the dashboard, and the click never moves focus or jumps you between windows. The pane reads the session's transcript live, so it works for conversations Agent Wrangler has nothing to do with.
   - **What it renders**: prompts and replies as markdown, thinking collapsed, one card per tool call that expands to its input and output, edits as a diff. Code blocks have a copy button; links open in the browser.
-  - **Permission prompts can be answered from it.** A *Blocked on you* session grows a card naming the tool and what it wants, with **Allow** and **Deny**. This is the same hook race the dashboard buttons use, so answering in Claude Code instead simply flips the card to *answered there*. (`AskUserQuestion` and plan approval are shown but cannot be answered from outside, by Claude Code's design.)
+  - **Permission prompts can be answered from it.** A *Blocked on you* session grows a card naming the tool and what it wants, with **Allow** and **Deny**. This is the same hook race the dashboard buttons use, so answering in Claude Code instead simply flips the card to *answered there*. (`AskUserQuestion` and plan approval cannot go through the hook at all, by Claude Code's design — they are answerable only for conversations this window is running, where the app holds the callback itself.)
   - **Send takes over here.** For an idle external session, sending ends its previous process and resumes it here. For hook-backed busy sessions, the message waits until idle. Estimated status requires confirmation. Cancel leaves the draft intact; Release hands the session back to a terminal.
   - **Open in its own tab** (a row's right-click menu, or the pane's own *Own tab* button) gives a session a tab that row clicks never swap away. One reusable pane plus a couple of these means browsing five agents costs one tab. It was called *Pin* until pinning a dashboard row needed the word; the two are unrelated, and one menu cannot have two items called Pin.
   - **Ended sessions** open in the pane too, with *Resume here* or sending a message as the way to continue them.
@@ -178,10 +178,37 @@ still waiting in Agent Wrangler, and switching the button back on republishes
 whatever is still being asked. It is the same thing as `remote.notificationsEnabled`
 in Preferences, and appears in the toolbar only once Discord is configured.
 
-**What it does not do yet.** Questions (`AskUserQuestion`) and plan approvals are
-not mirrored — they never reach the `PermissionRequest` hook, so they are only
-answerable in the app. There is no Slack transport, no chat, and no way to start
-or stop an agent remotely.
+**Questions and plans are mirrored too, for conversations this window runs.**
+A permission prompt is answerable from anywhere because answering one is a file
+write into a directory every process shares. An `AskUserQuestion` and an
+`ExitPlanMode` are not: they are settled by resolving a callback that exists
+only inside the process running the session. Since Agent Wrangler holds a
+single-instance lock, that process is the one holding the Discord connection, so
+a conversation **started in the app** mirrors its questions and plans as well as
+its permissions. A session running in a terminal still mirrors permissions only —
+there is no callback here to resolve.
+
+A question posts one button per option, and the card lists each option with its
+description, since a button label cannot carry one. A plan posts with **Approve**
+and nothing else: rejecting a plan carries your feedback back to the model, and a
+rejection with no feedback is a worse thing to send than none at all, so *Request
+changes* stays in the app. The same goes for anything else that needs typing —
+the *Other* box, a multi-select, more than five options, or several questions in
+a row. Those still post, so you know an agent is waiting on you, but they say to
+answer at the machine rather than offering a button that cannot say what you mean.
+
+**What that means for what leaves the machine.** Until now a card carried a
+command and Claude's one-line reason for wanting to run it. A question carries
+the model's question and its options; a plan carries the model's prose about your
+codebase. Both go through the same scrubbing as a command — home folded to `~`,
+secret-looking values masked, length capped — but they are closer to transcript
+content than anything sent before, so it is worth knowing before you switch it
+on. A plan is capped at 1,200 characters and the card says how many it is not
+showing: approving a plan is the one remote action that depends on having read
+the thing, and a plan you have read half of is exactly the mistake to avoid.
+
+**What it does not do yet.** There is no Slack transport, no chat, and no way to
+start or stop an agent remotely.
 
 **Security.** The token is in the keychain, encrypted by the OS, in its own file
 at mode 0600 — never in settings, never logged, and stripped from error

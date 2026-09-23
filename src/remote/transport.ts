@@ -42,11 +42,18 @@ export interface RemoteInvocation {
 
 /** Why a mirrored ask is being closed, and what the message should end up saying. */
 export interface RemoteClose {
-  outcome: 'allowed' | 'denied' | 'answered-locally' | 'cancelled';
+  /**
+   * `answered` is the one that carries information the others cannot: a
+   * question was not allowed or denied, it was *answered with something*, and
+   * which something is the whole news. `label` is that answer.
+   */
+  outcome: 'allowed' | 'denied' | 'answered' | 'answered-locally' | 'cancelled';
   /** Present when a remote press caused it; absent when it was settled at the machine. */
   by?: RemoteActor;
-  /** The choice that was pressed, for the wording — `allow`, `always`, `deny`. */
+  /** The choice that was pressed, for the wording — `allow`, `always`, `deny`, `approve`, `opt<n>`. */
   choiceId?: string;
+  /** What that choice's button said, for an `answered` outcome. */
+  label?: string;
   atMs: number;
 }
 

@@ -26,8 +26,8 @@ import { displayLabel, type PermissionAsk, type SessionDTO } from './model';
  * invoked. A transport renders the label and hands the action back; it never
  * invents one.
  */
-export interface RemoteChoice {
-  action: DashboardAction;
+export interface RemoteChoice<A extends RemoteChoiceAction = RemoteChoiceAction> {
+  action: A;
   label: string;
   /** What this choice costs beyond the obvious — where an "always" rule is saved. */
   detail?: string;
@@ -36,14 +36,24 @@ export interface RemoteChoice {
 }
 
 /**
+ * Everything a press can say.
+ *
+ * The permission verbs are `DashboardAction`s, unchanged. `approve` and
+ * `opt<n>` are not remote-only inventions either, despite not appearing in that
+ * union: `opt2` is an index into *this ask's own option list*, resolved locally
+ * against state re-read at press time into the very `answers` record the
+ * dashboard's own stepper posts. A transport still never invents one — it
+ * hands back what it was given.
+ */
+export type RemoteChoiceAction = Extract<DashboardAction, 'allow' | 'deny' | 'always'> | 'approve' | `opt${number}`;
+
+/**
  * Which sort of interaction a remote surface is showing.
  *
- * Only `permission` is ever produced today — `AskUserQuestion` and
- * `ExitPlanMode` never reach the `PermissionRequest` hook, so they do not
- * appear in `remoteAskFor` at all. The other two are named here anyway because
- * the *mirror map* is persisted: a record written now is read by a build that
- * knows all three, and a kind that only becomes nameable later is a migration
- * for no reason. See `docs/plans/remote-questions-and-plans.md`.
+ * A permission is hook-backed and answerable by any process on the machine; a
+ * question and a plan live in the heap of whichever process runs the session
+ * and are answerable only there. The mirror map persists this, so a record
+ * written by one build is still closeable by the next.
  */
 export type RemoteAskKind = 'permission' | 'question' | 'plan';
 
@@ -63,26 +73,70 @@ export interface RemoteAskContext {
  * than the one that replaces it — the two together are what let a press arriving
  * minutes later be checked against live state before anything is applied.
  */
-export interface RemoteAsk {
+interface RemoteAskBase {
   /** `${sessionKey}#${requestId}`. Stable while the ask is open, gone when it is. */
   askKey: string;
   sessionKey: string;
   requestId: string;
-  /**
-   * The seam for questions and plan approvals later. `remoteAskFor` produces
-   * only `permission` today; the field is typed over the whole space so the
-   * persisted mirror record and the closing message can be written against one
-   * vocabulary rather than two.
-   */
-  kind: RemoteAskKind;
   /** One line, for a notification preview: who wants what. */
   title: string;
   toolName: string;
+  context: RemoteAskContext;
+  /**
+   * What this card cannot do, in one line, when it cannot do everything the
+   * local one can. Rendered plainly rather than as a disabled button: a greyed
+   * *Request changes* says "you could have done this", which is a different and
+   * more annoying lie than "do this at the machine".
+   */
+  note?: string;
+}
+
+/** A hook-backed permission prompt. Answerable from any process on the machine. */
+export interface RemotePermissionAsk extends RemoteAskBase {
+  kind: 'permission';
   /** Claude's own description and the literal thing that will happen. Reused as-is. */
   subject?: PermissionAsk;
-  context: RemoteAskContext;
-  choices: RemoteChoice[];
+  choices: RemoteChoice<'allow' | 'always' | 'deny'>[];
 }
+
+/**
+ * An `AskUserQuestion`. In-process only, and mirrored with one button per
+ * option — or with none at all, when the shape needs more than buttons offer.
+ */
+export interface RemoteQuestionAsk extends RemoteAskBase {
+  kind: 'question';
+  question: string;
+  /** The model's own short label for the question ("Choice", "Database"). */
+  header?: string;
+  /** Kept whole even when unbuttonable, so the card can still say what is being asked. */
+  options: { label: string; description?: string }[];
+  /** True when the local form takes several answers, which buttons cannot express. */
+  multiSelect?: boolean;
+  choices: RemoteChoice<`opt${number}`>[];
+}
+
+/** An `ExitPlanMode`. In-process only, approvable remotely; rejection is not. */
+export interface RemotePlanAsk extends RemoteAskBase {
+  kind: 'plan';
+  plan: string;
+  /** Characters the block cap held back, so a truncated plan reads as truncated. */
+  more?: number;
+  choices: RemoteChoice<'approve'>[];
+}
+
+/**
+ * One Agent Wrangler interaction, ready to mirror.
+ *
+ * `askKey` is its identity and `requestId` is what makes it *this* ask rather
+ * than the one that replaces it — the two together are what let a press arriving
+ * minutes later be checked against live state before anything is applied.
+ *
+ * A union rather than one shape with optional halves, so that the code applying
+ * a press switches on `kind` and the compiler checks it reached every arm. The
+ * three are genuinely different acts: one writes a decision file, one resolves
+ * a promise with an answer, one resolves a promise with an approval.
+ */
+export type RemoteAsk = RemotePermissionAsk | RemoteQuestionAsk | RemotePlanAsk;
 
 /**
  * Something that happened, told to the remote surface once.
@@ -115,33 +169,49 @@ function ellipsize(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+/** Longest question or option text kept in a card's own body. */
+const MAX_QUESTION_LABEL = 300;
+/** Discord caps a button label at 80; leave room for the transport's own clip. */
+const MAX_OPTION_LABEL = 72;
+/** More options than one Discord action row holds. */
+const MAX_BUTTON_CHOICES = 5;
+
 /**
  * The remote ask this session presents, or nothing.
  *
- * The conditions mirror what the dashboard already does, because a remote
- * surface must never offer a decision the local one would not:
+ * Three kinds, tried in the order a session could plausibly be parked on them.
+ * A session is only ever waiting on one thing, so the order is a tiebreak that
+ * should never fire rather than a priority worth arguing about.
  *
- * - `permissionRequestId` is the whole gate. The provider only sets it while
- *   the hook script's marker still exists, i.e. while a decision can still
- *   land, which is exactly when `permissionRow` renders buttons.
+ * Two exclusions apply to all three, because a remote surface must never offer
+ * a decision the local one would not:
+ *
  * - **archived** sessions are skipped, matching the toast wiring: archived
  *   means "out of my way", and a channel message is the opposite of that.
  * - **paused** sessions are skipped, matching the status-bar bell: a frozen
  *   process cannot act on an answer until it is resumed, so offering one
  *   remotely would produce a button that appears to work and does nothing.
- *
- * Note what is *not* excluded: a session Agent Wrangler runs itself. Those
- * raise the same marker as any other (verified — see the plan's §0.1), and a
- * marker is answerable by any process on the machine, so they mirror like the
- * rest. `AskUserQuestion` and `ExitPlanMode` never reach `PermissionRequest`
- * and so never appear here at all, which is why questions and plans are out of
- * scope rather than explicitly filtered.
  */
 export function remoteAskFor(s: SessionDTO): RemoteAsk | undefined {
+  if (s.archived || s.paused) return undefined;
+  return permissionAskFor(s) ?? questionAskFor(s) ?? planAskFor(s);
+}
+
+/**
+ * A hook-backed permission prompt.
+ *
+ * `permissionRequestId` is the whole gate. The provider only sets it while the
+ * hook script's marker still exists, i.e. while a decision can still land,
+ * which is exactly when `permissionRow` renders buttons.
+ *
+ * Note what is *not* excluded: a session Agent Wrangler runs itself. Those
+ * raise the same marker as any other, and a marker is answerable by any
+ * process on the machine, so they mirror like the rest.
+ */
+function permissionAskFor(s: SessionDTO): RemotePermissionAsk | undefined {
   if (s.provider !== 'claude') return undefined;
   if (s.status !== 'blocked') return undefined;
   if (!s.permissionRequestId) return undefined;
-  if (s.archived || s.paused) return undefined;
 
   const agent = displayLabel(s);
   const toolName = s.blockedReason ?? 'a tool';
@@ -154,14 +224,125 @@ export function remoteAskFor(s: SessionDTO): RemoteAsk | undefined {
     title: `${agent} needs permission for ${toolName}`,
     toolName,
     subject: s.blockedAsk,
-    context: {
-      agent,
-      repository: s.projectName,
-      branch: s.gitBranch,
-      worktree: s.worktree,
-      model: s.model,
-    },
+    context: contextFor(s),
     choices: choicesFor(s),
+  };
+}
+
+/**
+ * An `AskUserQuestion` this window's own runner is parked on.
+ *
+ * `runnerOwned` is the gate, and it is a real one rather than a formality: a
+ * question is settled by resolving a `canUseTool` promise, so only the process
+ * holding that promise can answer it. Since the app holds a single-instance
+ * lock, the process holding the transport is that process — which is why this
+ * needs no lease and no cross-window call.
+ *
+ * Note there is no `status === 'blocked'` check. The pending ask *is* the
+ * evidence, and it is better evidence than a status that a hook has to deliver:
+ * a Codex question never touches the Claude hook log at all.
+ */
+function questionAskFor(s: SessionDTO): RemoteQuestionAsk | undefined {
+  if (!s.runnerOwned) return undefined;
+  const parked = s.pendingQuestion;
+  if (!parked || parked.questions.length === 0) return undefined;
+
+  const agent = displayLabel(s);
+  const first = parked.questions[0];
+  const question = ellipsize(first.question, MAX_QUESTION_LABEL);
+  const options = first.options.map((o) => ({ label: o.label, description: o.description }));
+
+  return {
+    askKey: askKeyFor(s.key, parked.requestId),
+    sessionKey: s.key,
+    requestId: parked.requestId,
+    kind: 'question',
+    title: `${agent} is asking: ${question}`,
+    toolName: 'AskUserQuestion',
+    question,
+    header: first.header,
+    options,
+    multiSelect: first.multiSelect,
+    context: contextFor(s),
+    ...answerableShape(parked.questions.length, first),
+  };
+}
+
+/**
+ * Which of a question's shapes this slice can put on buttons, and what to say
+ * when it cannot.
+ *
+ * Buttons are one press, one answer. A multi-select form, a stepper of several
+ * questions, or more options than an action row holds are all asking for
+ * something a row of buttons cannot express, and guessing on the user's behalf
+ * would be worse than pointing at the machine. The *Other* box is free text
+ * and never becomes a button in this slice at all.
+ *
+ * The card is still published either way. Knowing an agent is waiting on you is
+ * most of the value, and it is the half that does not need a button.
+ */
+function answerableShape(
+  count: number,
+  first: { options: { label: string }[]; multiSelect?: boolean },
+): Pick<RemoteQuestionAsk, 'choices' | 'note'> {
+  if (count > 1) {
+    return { choices: [], note: 'Answer this in Agent Wrangler — there is more than one question here.' };
+  }
+  if (first.multiSelect) {
+    return { choices: [], note: 'Answer this in Agent Wrangler — it takes more than one answer.' };
+  }
+  if (first.options.length === 0 || first.options.length > MAX_BUTTON_CHOICES) {
+    return { choices: [], note: 'Answer this in Agent Wrangler — it has too many options for buttons.' };
+  }
+  return {
+    choices: first.options.map((o, i) => ({
+      action: `opt${i}` as const,
+      label: ellipsize(o.label, MAX_OPTION_LABEL),
+      tone: i === 0 ? ('primary' as const) : undefined,
+    })),
+  };
+}
+
+/**
+ * An `ExitPlanMode` this window's own runner is parked on.
+ *
+ * **Approve only.** `decidePlan(requestId, false, feedback)` rejects *with a
+ * message*, and a rejection carrying none tells the model it was turned down
+ * and nothing about why — a worse act than the local button rather than a
+ * smaller one. So there is no *Request changes* here, and the note says where
+ * to find it.
+ *
+ * `more` travels with the plan because approving a plan is the one remote act
+ * that turns on having read the thing: a card showing half a plan must say so.
+ */
+function planAskFor(s: SessionDTO): RemotePlanAsk | undefined {
+  if (!s.runnerOwned) return undefined;
+  const parked = s.pendingPlan;
+  if (!parked) return undefined;
+
+  const agent = displayLabel(s);
+  return {
+    askKey: askKeyFor(s.key, parked.requestId),
+    sessionKey: s.key,
+    requestId: parked.requestId,
+    kind: 'plan',
+    title: `${agent} wants to start on a plan`,
+    toolName: 'ExitPlanMode',
+    plan: parked.plan,
+    more: parked.more,
+    context: contextFor(s),
+    choices: [{ action: 'approve', label: 'Approve plan', tone: 'primary' }],
+    note: 'Request changes in Agent Wrangler; only approval can be given from here.',
+  };
+}
+
+function contextFor(s: SessionDTO): RemoteAskContext {
+  return {
+    agent: displayLabel(s),
+    repository: s.projectName,
+    branch: s.gitBranch,
+    worktree: s.worktree,
+    model: s.model,
   };
 }
 
@@ -210,8 +391,8 @@ export function askKeyFor(sessionKey: string, requestId: string): string {
  * and the detail names where it is saved, because agreeing to this from a
  * phone should not be vaguer than agreeing to it at the machine.
  */
-function choicesFor(s: SessionDTO): RemoteChoice[] {
-  const choices: RemoteChoice[] = [{ action: 'allow', label: 'Allow once', tone: 'primary' }];
+function choicesFor(s: SessionDTO): RemotePermissionAsk['choices'] {
+  const choices: RemotePermissionAsk['choices'] = [{ action: 'allow', label: 'Allow once', tone: 'primary' }];
 
   if (s.alwaysAllow && s.alwaysAllow.rules.length > 0) {
     const rules = ellipsize(s.alwaysAllow.rules.join(', '), MAX_RULE_LABEL);

@@ -58,7 +58,17 @@ export interface Mirror {
    * is what lets the closing message say "allowed by X" rather than the vaguer
    * "answered somewhere".
    */
-  lastPress?: { actor: RemoteActor; choiceId: string; atMs: number };
+  lastPress?: {
+    actor: RemoteActor;
+    choiceId: string;
+    /**
+     * What the button said. Kept because a choice id is not self-describing
+     * once the ask is gone: "opt2" cannot be rendered into "chose *Postgres*",
+     * and the options it indexed no longer exist to look it up in.
+     */
+    label?: string;
+    atMs: number;
+  };
 }
 
 /** Anything older than this is dropped on load: its message is long gone. */

@@ -25,9 +25,15 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { Emitter, type Disposable } from '../core/events';
-import type { SessionActions } from '../ui/actions';
+import type { PermissionDecisionOutcome, SessionActions } from '../ui/actions';
 import type { SessionDTO } from '../shared/model';
-import { remoteAskFor, type RemoteAsk, type RemoteNotice } from '../shared/remote';
+import {
+  remoteAskFor,
+  type RemoteAsk,
+  type RemoteAskKind,
+  type RemoteChoiceAction,
+  type RemoteNotice,
+} from '../shared/remote';
 import type { AuditLog } from './audit';
 import { MirrorStore, type Mirror } from './mirrorStore';
 import { redactForDisplay } from './redact';
@@ -39,8 +45,11 @@ export interface SessionSnapshot {
   onDidUpdate(listener: () => void): Disposable;
 }
 
-/** Just the one action. Narrow on purpose: this may answer prompts, nothing else. */
-export type PermissionActions = Pick<SessionActions, 'decidePermission'>;
+/**
+ * Just the three. Narrow on purpose: this may answer prompts, nothing else —
+ * it cannot start, stop, adopt or archive anything.
+ */
+export type PermissionActions = Pick<SessionActions, 'decidePermission' | 'answerQuestion' | 'decidePlan'>;
 
 export interface RemoteConfig {
   enabled: boolean;
@@ -314,16 +323,17 @@ export class RemoteControlService implements Disposable {
 
     this.audit.write({ event: 'pressed', askKey: ask.askKey, sessionKey: ask.sessionKey, toolName: ask.toolName, ...base, choiceId: choice.action });
 
-    // 6. Apply it, through the same action the dashboard button uses. The
-    //    expected request id is what stops this landing on a newer prompt if
-    //    one opened between the checks above and here.
-    const behavior = choice.action as 'allow' | 'deny' | 'always';
-    let outcome: Awaited<ReturnType<PermissionActions['decidePermission']>>;
+    // 6. Apply it, through the same action the local button uses. The expected
+    //    request id is what stops this landing on a newer prompt if one opened
+    //    between the checks above and here. Which action depends on the kind:
+    //    a permission writes a decision file that any process can honour, a
+    //    question and a plan resolve a promise that only this one holds.
+    let outcome: PermissionDecisionOutcome;
     try {
-      outcome = await this.actions.decidePermission(ask.sessionKey, behavior, { expectedRequestId: ask.requestId });
+      outcome = await this.applyChoice(ask, choice.action);
     } catch (err) {
       this.audit.write({ event: 'apply-failed', askKey: ask.askKey, ...base, detail: String(err) });
-      this.log(`remote: applying ${behavior} failed: ${String(err)}`);
+      this.log(`remote: applying ${choice.action} failed: ${String(err)}`);
       await transport.reply(invocation, 'Agent Wrangler could not apply that decision.');
       return;
     }
@@ -340,8 +350,43 @@ export class RemoteControlService implements Disposable {
     // Remember who, so the closing message can say it. The close itself is left
     // to the next reconcile, which is driven by Agent Wrangler noticing the ask
     // is gone — the same path a local answer takes.
-    await this.mirrors.put({ ...mirror, lastPress: { actor: invocation.actor, choiceId: choice.action, atMs: Date.now() } });
+    await this.mirrors.put({
+      ...mirror,
+      lastPress: { actor: invocation.actor, choiceId: choice.action, label: choice.label, atMs: Date.now() },
+    });
     this.changeEmitter.fire();
+  }
+
+  /**
+   * Route a pressed choice to the action that settles it.
+   *
+   * Exhaustive on `kind` on purpose: adding a fourth sort of ask should fail to
+   * compile here rather than fall through to a default that silently does the
+   * wrong thing with somebody's agent.
+   *
+   * A question's `opt<n>` is turned back into an answer *here*, from the ask
+   * re-read from live state a few lines above — never from the message. That is
+   * what makes an index safe to put in a `custom_id`: if the options changed,
+   * the index is resolved against the options that exist now, and the
+   * staleness checks have already refused anything that moved on.
+   */
+  private applyChoice(ask: RemoteAsk, action: RemoteChoiceAction): Promise<PermissionDecisionOutcome> {
+    switch (ask.kind) {
+      case 'permission':
+        return this.actions.decidePermission(ask.sessionKey, action as 'allow' | 'deny' | 'always', {
+          expectedRequestId: ask.requestId,
+        });
+      case 'question': {
+        const index = Number(action.slice('opt'.length));
+        const option = ask.options[index];
+        if (!option) return Promise.resolve('stale');
+        return this.actions.answerQuestion(ask.sessionKey, ask.requestId, { [ask.question]: option.label });
+      }
+      case 'plan':
+        // Approve only. A rejection with no feedback is a different act from
+        // the local button's, so it is not offered — see `planAskFor`.
+        return this.actions.decidePlan(ask.sessionKey, ask.requestId, true);
+    }
   }
 
   // ---- mirror operations ----
@@ -421,25 +466,62 @@ export class RemoteControlService implements Disposable {
     const press = mirror.lastPress;
     if (!press) return { outcome: 'answered-locally', atMs: Date.now() };
     return {
-      outcome: press.choiceId === 'deny' ? 'denied' : 'allowed',
+      outcome: closedOutcomeFor(mirror.kind, press.choiceId),
+      label: press.label,
       by: press.actor,
       choiceId: press.choiceId,
       atMs: press.atMs,
     };
   }
 
-  /** Scrub and cap anything on its way out. Applied here so every transport gets it. */
+  /**
+   * Scrub and cap anything on its way out. Applied here so every transport gets
+   * it, and switched on `kind` so no member of the union can quietly acquire a
+   * text field that skips the scrubber.
+   *
+   * A question's text and a plan's prose are closer to transcript content than
+   * a permission's command ever was, and they go through exactly the same
+   * treatment: home folded to `~`, secrets masked, length capped. The cap on a
+   * plan is what makes `more` matter — see `planPayload`.
+   */
   private redact(ask: RemoteAsk): RemoteAsk {
     const home = this.config().homeDir;
-    if (!ask.subject) return ask;
-    return {
-      ...ask,
-      subject: {
-        ...ask.subject,
-        summary: ask.subject.summary === undefined ? undefined : redactForDisplay(ask.subject.summary, { home, max: MAX_SUMMARY_CHARS }),
-        body: ask.subject.body === undefined ? undefined : redactForDisplay(ask.subject.body, { home, max: MAX_BODY_CHARS }),
-      },
-    };
+    const short = (s: string): string => redactForDisplay(s, { home, max: MAX_SUMMARY_CHARS });
+    const long = (s: string): string => redactForDisplay(s, { home, max: MAX_BODY_CHARS });
+
+    switch (ask.kind) {
+      case 'permission': {
+        if (!ask.subject) return ask;
+        return {
+          ...ask,
+          subject: {
+            ...ask.subject,
+            summary: ask.subject.summary === undefined ? undefined : short(ask.subject.summary),
+            body: ask.subject.body === undefined ? undefined : long(ask.subject.body),
+          },
+        };
+      }
+      case 'question':
+        return {
+          ...ask,
+          question: short(ask.question),
+          options: ask.options.map((o) => ({
+            label: short(o.label),
+            description: o.description === undefined ? undefined : short(o.description),
+          })),
+        };
+      case 'plan': {
+        const plan = long(ask.plan);
+        return {
+          ...ask,
+          plan,
+          // Whatever the cap took is added to what the block cap already held
+          // back, so the card's "+N more" counts every character the reader
+          // cannot see rather than only some of them.
+          more: (ask.more ?? 0) + Math.max(0, ask.plan.length - plan.length) || undefined,
+        };
+      }
+    }
   }
 
   dispose(): void {
@@ -452,16 +534,34 @@ export class RemoteControlService implements Disposable {
   }
 }
 
+/**
+ * How a settled ask should read, given what it was and which button was hit.
+ *
+ * A permission was allowed or denied; a plan that got its one button was
+ * approved; a question was *answered*, and "allowed" would say nothing about
+ * what was chosen.
+ */
+function closedOutcomeFor(kind: RemoteAskKind, choiceId: string): RemoteClose['outcome'] {
+  if (kind === 'question') return 'answered';
+  if (kind === 'plan') return 'allowed';
+  return choiceId === 'deny' ? 'denied' : 'allowed';
+}
+
 /** What was rendered, so an unchanged ask is not re-edited after a failover. */
 export function renderHash(ask: RemoteAsk): string {
   return createHash('sha256')
     .update(
       JSON.stringify([
         ask.askKey,
+        ask.kind,
         ask.title,
         ask.toolName,
-        ask.subject?.summary ?? '',
-        ask.subject?.body ?? '',
+        ask.note ?? '',
+        // Everything a card's body is drawn from, per kind. A field missing
+        // here is a field whose change never reaches an already-posted message.
+        ask.kind === 'permission' ? [ask.subject?.summary ?? '', ask.subject?.body ?? ''] : [],
+        ask.kind === 'question' ? [ask.question, ask.options.map((o) => [o.label, o.description ?? ''])] : [],
+        ask.kind === 'plan' ? [ask.plan, ask.more ?? 0] : [],
         ask.context,
         ask.choices.map((c) => [c.action, c.label]),
       ]),
@@ -476,14 +576,21 @@ export function renderHash(ask: RemoteAsk): string {
  * already in the channel, and re-sending it on the way out adds nothing.
  */
 function placeholderAsk(mirror: Mirror): RemoteAsk {
-  return {
+  const base = {
     askKey: mirror.askKey,
     sessionKey: mirror.sessionKey,
     requestId: mirror.requestId,
-    kind: mirror.kind,
     title: '',
     toolName: '',
     context: { agent: '' },
     choices: [],
   };
+  switch (mirror.kind) {
+    case 'question':
+      return { ...base, kind: 'question', question: '', options: [], choices: [] };
+    case 'plan':
+      return { ...base, kind: 'plan', plan: '', choices: [] };
+    default:
+      return { ...base, kind: 'permission', choices: [] };
+  }
 }

@@ -154,7 +154,7 @@ describe('remoteAskFor', () => {
       permissionRequestId: '1-2',
     });
     expect(ask?.toolName).toBe('a tool');
-    expect(ask?.subject).toBeUndefined();
+    expect(ask?.kind === 'permission' && ask.subject).toBeUndefined();
     expect(ask?.context.repository).toBeUndefined();
   });
 });
@@ -198,5 +198,156 @@ describe('doneNoticeFor', () => {
   it('carries no transcript content, and copes with no project or branch', () => {
     const notice = doneNoticeFor(done({ projectName: undefined, gitBranch: undefined }));
     expect(notice?.body).toBe('It is idle until you send it something.');
+  });
+});
+
+/** A session this window runs, parked on a question its runner raised. */
+function asking(questions: unknown[], extra: Partial<SessionDTO> = {}): SessionDTO {
+  return {
+    provider: 'claude',
+    sessionId: 'sess-q',
+    key: 'claude:sess-q',
+    title: 'test-session',
+    status: 'blocked',
+    lastActivityAt: 1000,
+    runnerOwned: true,
+    projectName: 'proj',
+    pendingQuestion: { requestId: 'req_7', questions: questions as never },
+    ...extra,
+  };
+}
+
+const ONE_QUESTION = [
+  {
+    question: 'Which database?',
+    header: 'Database',
+    options: [
+      { label: 'Postgres', description: 'the boring one' },
+      { label: 'SQLite', description: 'the small one' },
+    ],
+  },
+];
+
+describe('remoteAskFor, for a question', () => {
+  it('projects a runner-owned question, one button per option', () => {
+    const ask = remoteAskFor(asking(ONE_QUESTION));
+    expect(ask).toMatchObject({
+      askKey: 'claude:sess-q#req_7',
+      requestId: 'req_7',
+      kind: 'question',
+      toolName: 'AskUserQuestion',
+      question: 'Which database?',
+      header: 'Database',
+    });
+    expect(ask?.choices.map((c) => [c.action, c.label])).toEqual([
+      ['opt0', 'Postgres'],
+      ['opt1', 'SQLite'],
+    ]);
+    expect(ask?.note).toBeUndefined();
+  });
+
+  it('keeps the options whole, so the card can show what each one means', () => {
+    const ask = remoteAskFor(asking(ONE_QUESTION));
+    expect(ask?.kind === 'question' && ask.options).toEqual([
+      { label: 'Postgres', description: 'the boring one' },
+      { label: 'SQLite', description: 'the small one' },
+    ]);
+  });
+
+  it('says who is asking and what, for the notification preview', () => {
+    expect(remoteAskFor(asking(ONE_QUESTION))?.title).toBe('test-session is asking: Which database?');
+  });
+
+  describe('is only answerable when buttons can say it', () => {
+    const unbuttonable = (questions: unknown[]) => {
+      const ask = remoteAskFor(asking(questions));
+      expect(ask).toBeDefined();
+      expect(ask?.choices).toEqual([]);
+      return ask?.note ?? '';
+    };
+
+    it('publishes a stepper of several questions read-only', () => {
+      expect(unbuttonable([...ONE_QUESTION, ...ONE_QUESTION])).toMatch(/more than one question/);
+    });
+
+    it('publishes a multi-select read-only', () => {
+      expect(unbuttonable([{ ...ONE_QUESTION[0], multiSelect: true }])).toMatch(/more than one answer/);
+    });
+
+    it('publishes a question with more options than an action row holds read-only', () => {
+      const many = [{ ...ONE_QUESTION[0], options: Array.from({ length: 6 }, (_, i) => ({ label: `o${i}` })) }];
+      expect(unbuttonable(many)).toMatch(/too many options/);
+    });
+
+    it('still publishes: knowing an agent is waiting is most of the point', () => {
+      // The alternative — skipping it — is the case this slice exists to avoid.
+      expect(remoteAskFor(asking([{ ...ONE_QUESTION[0], multiSelect: true }]))).toBeDefined();
+    });
+  });
+
+  it('is not offered for a session this window does not run', () => {
+    // A question is settled by resolving a promise in one process's heap.
+    expect(remoteAskFor(asking(ONE_QUESTION, { runnerOwned: undefined }))).toBeUndefined();
+  });
+
+  it('does not need the status to say blocked: the pending ask is the evidence', () => {
+    // A Codex question never touches the Claude hook log, so its status can be
+    // anything the provider last reported.
+    expect(remoteAskFor(asking(ONE_QUESTION, { status: 'busy' }))).toBeDefined();
+  });
+
+  it('is skipped when archived or paused, like every other ask', () => {
+    expect(remoteAskFor(asking(ONE_QUESTION, { archived: true }))).toBeUndefined();
+    expect(remoteAskFor(asking(ONE_QUESTION, { paused: true }))).toBeUndefined();
+  });
+
+  it('yields to a permission prompt on the same session', () => {
+    const both = asking(ONE_QUESTION, { permissionRequestId: '1-2', blockedReason: 'Bash' });
+    expect(remoteAskFor(both)?.kind).toBe('permission');
+  });
+});
+
+/** A session this window runs, parked on a plan. */
+function planning(extra: Partial<SessionDTO> = {}): SessionDTO {
+  return {
+    provider: 'claude',
+    sessionId: 'sess-p',
+    key: 'claude:sess-p',
+    title: 'test-session',
+    status: 'blocked',
+    lastActivityAt: 1000,
+    runnerOwned: true,
+    pendingPlan: { requestId: 'req_9', plan: '# Plan\n\nrewrite everything' },
+    ...extra,
+  };
+}
+
+describe('remoteAskFor, for a plan', () => {
+  it('projects a runner-owned plan with one button', () => {
+    const ask = remoteAskFor(planning());
+    expect(ask).toMatchObject({
+      askKey: 'claude:sess-p#req_9',
+      kind: 'plan',
+      toolName: 'ExitPlanMode',
+      plan: '# Plan\n\nrewrite everything',
+    });
+    expect(ask?.choices.map((c) => c.action)).toEqual(['approve']);
+  });
+
+  it('offers no rejection, and says where to find one', () => {
+    // Rejecting a plan carries feedback to the model. A rejection with none is
+    // a worse act than the local button, not a smaller one.
+    const ask = remoteAskFor(planning());
+    expect(ask?.choices.some((c) => c.action !== 'approve')).toBe(false);
+    expect(ask?.note).toMatch(/Request changes in Agent Wrangler/);
+  });
+
+  it('carries how much of the plan is not shown', () => {
+    const ask = remoteAskFor(planning({ pendingPlan: { requestId: 'req_9', plan: 'half', more: 4200 } }));
+    expect(ask?.kind === 'plan' && ask.more).toBe(4200);
+  });
+
+  it('is not offered for a session this window does not run', () => {
+    expect(remoteAskFor(planning({ runnerOwned: undefined }))).toBeUndefined();
   });
 });
