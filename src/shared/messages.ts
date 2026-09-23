@@ -173,10 +173,26 @@ export type HostToConversation =
   /**
    * Where dictation has got to. `text` arrives once, with `state: 'idle'`, and
    * is what the composer inserts; an empty string means nothing was said.
-   * `message` is a problem worth showing on the button rather than as an error
-   * block — a missing tool, usually, which the host has already offered to fix.
+   * `message` is a problem shown beside the composer rather than as an error
+   * block — a missing tool, a refused microphone, a failed transcription.
+   * `notice` is information that is not a failure (the recording limit).
    */
-  | { type: 'dictation'; state: 'idle' | 'recording' | 'transcribing'; text?: string; message?: string }
+  | {
+      type: 'dictation';
+      state: 'idle' | 'recording' | 'transcribing';
+      text?: string;
+      message?: string;
+      notice?: string;
+      /** With `recording`: whether previews will follow (`dictation.livePreview`). */
+      livePreview?: boolean;
+    }
+  /**
+   * Provisional text while recording, replacing the previous preview whole.
+   * Never inserted into the composer: the final `dictation` text is a fresh
+   * transcription of the entire recording. `recordedMs - coveredMs` is how far
+   * behind the preview is.
+   */
+  | { type: 'dictationPreview'; text: string; recordedMs: number; coveredMs: number; previewError?: string }
   /**
    * Answer to `fileSuggest`. `query` comes back so a slow answer to an earlier
    * keystroke cannot replace the list for what is on screen now.
@@ -224,7 +240,8 @@ export type ConversationToHost =
   | { type: 'openFile'; path: string }
   /**
    * The microphone button. `stop` transcribes what was recorded and answers
-   * with a `dictation` message; `cancel` throws it away without transcribing.
+   * with a `dictation` message — it never sends anything to the agent;
+   * `cancel` throws the audio away without transcribing.
    */
   | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' }
   /** An `@` is being typed: what files in the session's folder match so far. */

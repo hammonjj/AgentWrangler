@@ -243,6 +243,15 @@ export const SETTINGS: SettingSpec[] = [
 
   // ---- Dictation ----
   {
+    key: 'dictation.livePreview',
+    label: 'Live preview while dictating',
+    group: 'Dictation',
+    type: 'boolean',
+    default: true,
+    description:
+      'Show the words being recognised beside the composer while you speak. The preview re-runs whisper.cpp on the last few seconds of audio about once a second, on this machine, so it costs CPU and may change as you talk. The text put in the composer when you stop is always a fresh transcription of the whole recording. Turn this off on a slow machine or with a large model.',
+  },
+  {
     key: 'dictation.inputDevice',
     label: 'Microphone',
     group: 'Dictation',

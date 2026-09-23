@@ -784,7 +784,55 @@ Asked for after the launcher: a microphone button like Claude Code's, filling th
   remedies, transcript cleaning, and the service lifecycle against an injected `spawn` so no
   process is created and no microphone is opened.
 - Not done: no live partial text while speaking (whisper.cpp transcribes a finished file), and
-  no audio level meter. Both would need a streaming backend.
+  no audio level meter. (Live text followed in 3.6b, below, without a streaming backend.)
+
+### Phase 3.6b — Live dictation preview — **SHIPPED 2026-09-23**
+
+The one thing 3.6 left out: seeing the words while speaking, so a misheard one is caught
+before the recording ends.
+
+**Constraint.** whisper-cli transcribes finished files only. `whisper-stream` streams, but it
+captures through SDL rather than ffmpeg — a second recording stack with its own device
+selection and permission story — so it was not used. What made a preview cheap anyway: a warm
+`whisper-cli` pass over 2–6 s of audio is **0.19–0.29 s** here (M-series, `ggml-base.en`).
+
+**What shipped.**
+
+- ffmpeg writes s16le to **stdout** instead of a WAV. The audio is held in memory (32 KB/s,
+  9.6 MB at the five-minute cap), and each pass writes its own complete WAV. This also retires
+  the zero-length-RIFF-header hazard: the header is written by us, from the real length.
+- A loop re-transcribes the **tail** (audio since the last cut) once ≥0.7 s of new audio has
+  arrived. At 18 s the tail is cut at its quietest 200 ms (searched from 8 s in to 1.5 s from the
+  end), that stretch is transcribed once more and frozen, and the tail restarts — so no pass
+  exceeds one 30 s Whisper window and cost stays flat.
+- Tail stretches with no 100 ms frame above RMS 180 are not sent to Whisper during the preview
+  (it invents "Thank you." for silence). Never applied to the final pass.
+- **The final text is a fresh pass over the whole recording**, identical to 3.6. The preview is
+  never inserted. Measured with a 20.5 s spoken clip streamed in real time (`ffmpeg -re`):
+  preview lag (audio recorded − audio covered) median 256 ms, p90 384 ms, max 1.4 s at the
+  cut; final pass 330–400 ms after stop.
+- The preview is shown in a strip inside the composer frame, not in the textarea: putting it in
+  the box would mean rewriting the user's draft on every revision. The box receives the final
+  text once, at the selection's *end* (a selection is never replaced).
+- States the strip distinguishes: listening (pulsing dot, "preview, may change"), behind by
+  ≥3 s, recogniser starting (no pass finished after 3 s), preview failed (recording continues),
+  finishing, nothing heard, error. Errors that used to be modal dialogs (transcription failed)
+  are now in the strip; a missing tool still gets the install offer.
+- Ownership: the recorder is one per process; each `ConversationHost` only stops/cancels a
+  recording it started, cancels on `dispose` and on a second `ready` (webview reload). The app's
+  `dispose` cancels too. `stdin` EPIPE on a dead ffmpeg is swallowed (it would have crashed the
+  main process). ffmpeg exiting by itself: code 0 with audio = the five-minute cap, transcribed;
+  otherwise a "could not open the microphone" message naming System Settings.
+- Session switch mid-recording: the webview stops, and the final text goes into the saved draft
+  of the conversation it was started in.
+- `dictation.livePreview` (default on) turns the preview off.
+- Tests: `test/dictation.test.ts` drives the service with fake processes that read the WAVs the
+  service writes (preview replacement, silence gate, cut placement, lag heartbeat during a hung
+  pass, preview failure, empty/rapid stop, refused mic, the cap, cancel mid-preview and
+  mid-final, temp-file cleanup); `test/dictationText.test.ts` covers joining and composer
+  splicing.
+- Not done: no audio level meter; accuracy of the preview on a word split at a cut is lower (the
+  final pass does not have that problem).
 
 ### Phase 4a — Composer polish — **SHIPPED 2026-09-13**
 
