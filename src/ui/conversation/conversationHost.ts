@@ -293,7 +293,8 @@ export class ConversationHost {
     const adopt = session.provider === 'claude' ? adoptActionFor(session, runner !== undefined) : undefined;
     const canAdoptCodex =
       session.provider === 'codex' &&
-      !codexRunner &&
+      // A thread shown read-only because another app holds it can be taken over again.
+      (!codexRunner || !!codexRunner.readOnlyReason) &&
       !!session.cwd &&
       (session.status === 'waiting' || session.status === 'done');
     return {
@@ -305,7 +306,7 @@ export class ConversationHost {
       canResumeHere: adopt === 'resume-here',
       canRelease: controlled,
       estimated: !controlled && session.statusIsEstimated === true,
-      readOnlyReason: canSend ? undefined : readOnlyReason(session, runner, canAdoptCodex),
+      readOnlyReason: canSend ? undefined : (live?.readOnlyReason ?? readOnlyReason(session, runner, canAdoptCodex)),
     };
   }
 

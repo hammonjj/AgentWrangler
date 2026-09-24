@@ -113,6 +113,8 @@ export interface SessionHandle {
   readonly composer: ComposerState;
   readonly blocks: readonly ConvBlock[];
   readonly canSend: boolean;
+  /** Why `canSend` is false for a session that is still shown (a Codex thread open in another app). */
+  readonly readOnlyReason?: string;
   readonly pendingQuestion: Extract<ConvBlock, { kind: 'question' }> | undefined;
   readonly pendingPlan: Extract<ConvBlock, { kind: 'plan' }> | undefined;
   /**

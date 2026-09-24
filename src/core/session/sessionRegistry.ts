@@ -218,7 +218,8 @@ export class SessionRegistry {
 }
 
 /** The part of the registry an executor writes to. */
-export type ExecutorRegistry = Pick<SessionRegistry, 'live' | 'touch' | 'setState' | 'isInterrupted'>;
+export type ExecutorRegistry = Pick<SessionRegistry, 'live' | 'touch' | 'setState' | 'isInterrupted'> &
+  Partial<Pick<SessionRegistry, 'forget'>>;
 
 function isRecord(r: unknown): r is SessionRecord {
   if (!r || typeof r !== 'object') return false;
