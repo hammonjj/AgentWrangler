@@ -149,17 +149,6 @@ export class RunnerService implements SessionExecutor, Disposable {
     for (const s of this.sessions) if (s.hosted) s.reconfigure();
   }
 
-  /**
-   * Sessions with a turn actually in flight, for the sleep blocker. One
-   * parked on a question or permission is not: asks are held for days, and
-   * one left overnight must not keep the machine awake all night.
-   */
-  busyCount(): number {
-    let n = 0;
-    for (const s of this.sessions) if (s.lifecycle === 'running' && !s.awaitingAnswer) n++;
-    return n;
-  }
-
   async launch(request: LaunchRequest): Promise<RunnerView> {
     if (request.provider !== 'claude') throw new Error(`RunnerService cannot launch a ${request.provider} session`);
     const { provider: _provider, initialBlocks: _blocks, ...opts } = request;

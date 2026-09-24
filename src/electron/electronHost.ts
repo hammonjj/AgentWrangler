@@ -22,7 +22,7 @@
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { type BrowserWindow, clipboard, dialog, shell } from 'electron';
+import { type BrowserWindow, clipboard, dialog, Notification, shell } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostDialogs, HostServices, HostShell, InputOptions, PickItem, PickOptions } from '../host/hostServices';
 import { JsonSettings, JsonStore } from './jsonStore';
@@ -178,6 +178,34 @@ function appleScriptString(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
+/**
+ * `Notification`, kept alive until it is dismissed or clicked: one that is only
+ * referenced by a local is collected, and its click handler with it, while the
+ * banner is still in Notification Centre.
+ */
+function notifierFor(opts: ElectronHostOptions): HostServices['notify'] {
+  if (!Notification.isSupported()) return undefined;
+  const live = new Set<Notification>();
+  return ({ title, body, onClick }) => {
+    const n = new Notification({ title, body });
+    live.add(n);
+    const drop = () => live.delete(n);
+    n.on('click', () => {
+      drop();
+      onClick?.();
+    });
+    n.on('close', drop);
+    n.on('failed', (_event, error) => {
+      drop();
+      opts.log(`notification failed: ${error}`);
+    });
+    n.show();
+    // Unclicked banners are not closed on macOS until the user clears them;
+    // bound the set so a week of them does not accumulate.
+    if (live.size > 50) live.delete(live.values().next().value as Notification);
+  };
+}
+
 export interface ElectronHost extends HostServices {
   /** The settings document, so the menu can toggle things the panes cannot. */
   readonly settingsStore: JsonSettings;
@@ -211,6 +239,7 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     dialogs: dialogsFor(opts),
     shell: shellFor(opts),
     clipboard: { writeText: async (text) => clipboard.writeText(text) },
+    notify: notifierFor(opts),
     // Beside the other state, but a file of its own: see `secrets.ts` for why
     // a credential must not live in `settings.json`.
     secrets: new ElectronSecrets(path.join(userDataDir, 'secrets.json'), opts.log),

@@ -231,11 +231,6 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     return this.exec.outdated === true;
   }
 
-  /** Waiting on the user: a question, a plan or a permission is pending. */
-  get awaitingAnswer(): boolean {
-    return this.pending.size > 0;
-  }
-
   /** The machine woke from sleep. */
   wake(): void {
     this.exec.wake?.();

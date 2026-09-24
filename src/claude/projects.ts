@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Emitter, type Disposable, type Listener } from '../core/events';
 import type { ProjectDTO } from '../shared/model';
+import { orderProjects } from '../shared/projectOrder';
 import { claudeHome, isSessionJsonlName, projectsDir, slugForCwd } from './paths';
 
 /**
@@ -63,10 +64,13 @@ export function rankProjects(candidates: ProjectCandidate[]): ProjectDTO[] {
     else if ((c.lastUsedAt ?? 0) > (prev.lastUsedAt ?? 0)) prev.lastUsedAt = c.lastUsedAt;
   }
 
-  return [...byDir.values()]
-    .map((c) => ({ dir: c.dir, name: path.basename(c.dir) || c.dir, lastUsedAt: c.lastUsedAt }))
-    .sort((a, b) => (b.lastUsedAt ?? 0) - (a.lastUsedAt ?? 0) || a.name.localeCompare(b.name));
+  return orderProjects(
+    [...byDir.values()].map((c) => ({ dir: c.dir, name: path.basename(c.dir) || c.dir, lastUsedAt: c.lastUsedAt })),
+    NO_FAVOURITES,
+  );
 }
+
+const NO_FAVOURITES: ReadonlySet<string> = new Set();
 
 /** The `projects` keys of `~/.claude.json`. A missing or unreadable file is not an error: no list, no dropdown entries. */
 export async function readConfigProjectDirs(file: string): Promise<string[]> {
@@ -145,6 +149,13 @@ export interface HiddenProjects {
   unhide(dir: string): void;
 }
 
+/** The starred folders, behind an interface for the same reason: `FavouriteProjectsService` is the implementation. */
+export interface FavouriteProjects {
+  readonly value: ReadonlySet<string>;
+  favourite(dir: string): void;
+  unfavourite(dir: string): void;
+}
+
 /** What a caller contributes on top of Claude Code's own history — workspace folders and live session cwds. */
 export interface ExtraProjects {
   /** Always offered, even when Claude Code has never run there. */
@@ -199,6 +210,8 @@ export class ProjectsService {
       ttlMs?: number;
       /** Folders the user removed from the dropdown. Absent = nothing is hidden. */
       hidden?: HiddenProjects;
+      /** Folders the user starred, which lead the list. Absent = no favourites. */
+      favourites?: FavouriteProjects;
       /** Overridden only by tests, which must never read the real `~/.claude`. */
       file?: string;
       root?: string;
@@ -231,7 +244,23 @@ export class ProjectsService {
   remove(dir: string): void {
     this.browsed.delete(dir);
     this.opts.hidden?.hide(dir);
+    // A removed folder is not a favourite any more: browsing back to it should
+    // bring it back as an ordinary row, not silently re-pin it to the top.
+    this.opts.favourites?.unfavourite(dir);
     this.cache = this.cache.filter((p) => p.dir !== dir);
+    this.emitter.fire();
+  }
+
+  /**
+   * Star or un-star a folder. Re-orders the cache at once rather than waiting
+   * for a scan, since the user is looking at the open menu when they click.
+   */
+  setFavourite(dir: string, favourite: boolean): void {
+    const favs = this.opts.favourites;
+    if (!favs) return;
+    if (favourite) favs.favourite(dir);
+    else favs.unfavourite(dir);
+    this.cache = orderProjects(this.cache, favs.value);
     this.emitter.fire();
   }
 
@@ -251,7 +280,11 @@ export class ProjectsService {
     return readProjects({ ...extra, workspaceFolders: [...extra.workspaceFolders, ...this.browsed] }, this.opts)
       .then((all) => {
         const hidden = this.opts.hidden?.value;
-        const list = hidden && hidden.size > 0 ? all.filter((p) => !hidden.has(p.dir)) : all;
+        const shown = hidden && hidden.size > 0 ? all.filter((p) => !hidden.has(p.dir)) : all;
+        // Favourites only re-order what the scan found, so a starred folder that
+        // has been deleted is dropped with every other missing one.
+        const favs = this.opts.favourites?.value;
+        const list = favs && favs.size > 0 ? orderProjects(shown, favs) : shown;
         this.cache = list;
         this.readAt = Date.now();
         return list;

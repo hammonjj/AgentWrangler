@@ -134,13 +134,18 @@ export const LATEST_MESSAGE_KINDS = [
   'rate_limit_event',
 ] as const;
 
-/** `type` or `type/subtype` of a raw message, when it is one `latest` keeps. */
+/**
+ * The `latest` key for a raw message, when it is one `latest` keeps: its
+ * `type/subtype` if that is listed, else its bare `type` (every `result` has
+ * a subtype, `success` or an error, and all of them are kept as `result`).
+ */
 export function latestKindOf(msg: unknown): string | undefined {
   if (!msg || typeof msg !== 'object') return undefined;
   const m = msg as { type?: unknown; subtype?: unknown };
   if (typeof m.type !== 'string') return undefined;
-  const kind = typeof m.subtype === 'string' ? `${m.type}/${m.subtype}` : m.type;
-  return (LATEST_MESSAGE_KINDS as readonly string[]).includes(kind) ? kind : undefined;
+  const kinds = LATEST_MESSAGE_KINDS as readonly string[];
+  if (typeof m.subtype === 'string' && kinds.includes(`${m.type}/${m.subtype}`)) return `${m.type}/${m.subtype}`;
+  return kinds.includes(m.type) ? m.type : undefined;
 }
 
 /**

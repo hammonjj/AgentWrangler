@@ -17,7 +17,8 @@
     "app:install": "npm run app:package && bash scripts/install-app.sh",
     "app:signing-setup": "bash scripts/setup-signing-cert.sh",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "vitest run test/sessionHost.integration.test.ts test/sessionLifecycle.integration.test.ts"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.268",

@@ -18,6 +18,7 @@ import {
 } from '../../shared/columns';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
+import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
 import { canPauseSession, clampMenuPosition, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
 import {
@@ -1018,24 +1019,47 @@ function renderLauncher(): void {
 
 function renderMenu(): void {
   const cur = currentProject();
+  // A rule under the last favourite, when there is anything below it to separate.
+  // Favourites are always first, so the last one sits just before the first non-favourite.
+  const lastFav = projects.filter((p) => p.favourite).length - 1;
   const rows = projects
-    .map(
-      (p) => `<div class="pmrow${p.dir === cur ? ' on' : ''}">
+    .map((p, i) => {
+      const cls = `pmrow${p.dir === cur ? ' on' : ''}${i === lastFav && i < projects.length - 1 ? ' favlast' : ''}`;
+      const fav = p.favourite === true;
+      const favLabel = fav ? `Unfavourite ${p.name}` : `Favourite ${p.name} — keep it at the top of this list`;
+      return `<div class="${cls}">
 <button class="pmname" data-dir="${esc(p.dir)}" role="option" aria-selected="${p.dir === cur}" title="${esc(p.dir)}">${esc(p.name)}</button>
+<button class="pmfav${fav ? ' on' : ''}" data-fav="${esc(p.dir)}" aria-pressed="${fav}" title="${esc(favLabel)}" aria-label="${esc(favLabel)}">${fav ? '★' : '☆'}</button>
 <button class="pmx" data-rm="${esc(p.dir)}" title="Remove ${esc(p.name)} from this list. Browsing to it again brings it back." aria-label="Remove ${esc(p.name)} from this list">✕</button>
-</div>`,
-    )
+</div>`;
+    })
     .join('');
   const empty = projects.length === 0 ? '<div class="pmempty">No folders yet</div>' : '';
   // First, and never removable: it is the default, and it is the one row that
   // is always a valid answer even on a machine with no projects at all.
   const globalRow = `<div class="pmrow${cur === GLOBAL_PROJECT_DIR ? ' on' : ''}">
 <button class="pmname" data-dir="${esc(GLOBAL_PROJECT_DIR)}" role="option" aria-selected="${cur === GLOBAL_PROJECT_DIR}" title="${esc(GLOBAL_TITLE)}">Global</button>
+<span class="pmfav" aria-hidden="true"></span>
 <span class="pmx" aria-hidden="true"></span>
 </div>`;
+  // Redrawing replaces every button, so whichever one had focus (a star just
+  // pressed from the keyboard, say) is found again by what it points at.
+  const focused = menuFocusKey();
   // Browse is always present: with nothing in the list it is the only way in,
   // and it is also the only way a removed folder comes back.
   projMenu.innerHTML = `${globalRow}${empty}${rows}<button class="pmbrowse" data-browse="1">Browse…</button>`;
+  if (focused) projMenu.querySelector<HTMLElement>(focused)?.focus();
+}
+
+/** A selector for the menu button that has focus, stable across a redraw. */
+function menuFocusKey(): string | undefined {
+  const el = document.activeElement;
+  if (!(el instanceof HTMLElement) || !projMenu.contains(el)) return undefined;
+  for (const attr of ['fav', 'rm', 'dir', 'browse'] as const) {
+    const v = el.dataset[attr];
+    if (v !== undefined) return `[data-${attr}="${CSS.escape(v)}"]`;
+  }
+  return undefined;
 }
 
 function openProjMenu(): void {
@@ -1068,6 +1092,19 @@ projMenu.addEventListener('click', (e) => {
     // The menu stays open: clearing three stale folders should be three clicks,
     // not three round trips through opening it again.
     post({ type: 'removeProject', dir: rm.dataset.rm! });
+    return;
+  }
+  const star = target.closest<HTMLElement>('[data-fav]');
+  if (star) {
+    // Menu stays open and the selection is untouched, like a removal. The row
+    // moves now; the host's snapshot, sorted the same way, confirms it.
+    const dir = star.dataset.fav!;
+    const favourite = !projects.find((p) => p.dir === dir)?.favourite;
+    const favs = new Set(projects.filter((p) => p.favourite && p.dir !== dir).map((p) => p.dir));
+    if (favourite) favs.add(dir);
+    projects = orderProjects(projects, favs);
+    renderMenu();
+    post({ type: 'setProjectFavourite', dir, favourite });
     return;
   }
   if (target.closest('[data-browse]')) {

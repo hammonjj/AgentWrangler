@@ -38,6 +38,8 @@ export interface PreferencesWindowOptions {
    * for the app, so this window still knows nothing but settings.
    */
   runAction?(id: SettingActionId): Promise<{ ok: boolean; lines: string[] }>;
+  /** Told when the window is created and when it has closed, for the Dock icon. */
+  onDidChangeOpen?(open: boolean): void;
 }
 
 const BY_KEY = new Map(SETTINGS.map((s) => [s.key, s]));
@@ -104,9 +106,15 @@ export class PreferencesWindow implements Disposable {
     win.once('ready-to-show', () => win.show());
     win.on('closed', () => {
       this.window = undefined;
+      this.opts.onDidChangeOpen?.(false);
     });
+    this.opts.onDidChangeOpen?.(true);
 
     void win.loadURL(documentUrl('preferences'));
+  }
+
+  get isOpen(): boolean {
+    return this.window !== undefined && !this.window.isDestroyed();
   }
 
   close(): void {

@@ -111,6 +111,9 @@ describe.runIf(process.platform === 'darwin')('session host recovery, end to end
     const m = manifestFor(id)!;
     expect(m.agentPid).toBeDefined();
     const agent = m.agentPid!;
+    // Mid-turn, as the CLI is when an orphan matters: an idle one exits on stdin EOF by itself.
+    await view.send('hold');
+    await until(() => view.lifecycle === 'running');
 
     // The host dies without a word: its agent is reparented to launchd and keeps running.
     process.kill(m.hostPid, 'SIGKILL');
@@ -123,8 +126,8 @@ describe.runIf(process.platform === 'darwin')('session host recovery, end to end
     const swept = await sweepOrphans(id, sweepDeps(sup));
     expect(swept).toMatchObject({ swept: [agent], clear: true });
     expect(isPidAlive(agent)).toBe(false);
-    // It removed its own file on SIGTERM, as the CLI does.
-    expect(fs.existsSync(path.join(sessionsDir, `${agent}.json`))).toBe(false);
+    // Its file may stay behind (this fake does not remove it); it is stale now, and ignored.
+    expect(await liveAgents(id)).toEqual([]);
 
     // The manifest has done its job.
     sup.forget(m);

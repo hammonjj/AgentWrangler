@@ -21,7 +21,7 @@ import { writeJsonAtomic } from '../core/session/manifestFile';
 import type { HostBoot, HostEvent, HostManifest } from '../shared/sessionProtocol';
 import { CAPABILITY_CONFIGURE_IDLE, CONTROL_OPS, HOST_PROTOCOL_VERSION, backgroundTaskCount } from '../shared/sessionProtocol';
 import { agentEnv } from './env';
-import { fakeQuery, spawnFakeAgent } from './fakeQuery';
+import { fakeQuery } from './fakeQuery';
 import { IdleRule, monotonicMs } from './idleRule';
 import { HostServer } from './server';
 
@@ -116,6 +116,20 @@ async function main(): Promise<void> {
       manifest.agentPid = child.pid;
       manifest.agentStartTime = child.pid ? startTimeOf(child.pid) : undefined;
       writeManifest();
+      // Orphan tests: the fake agent gets a `sessions/<pid>.json` in Claude
+      // Code's shape, as the real CLI writes its own, for the core's sweep.
+      const fakeSessionsDir = fake ? process.env.AW_FAKE_CLAUDE_SESSIONS_DIR : undefined;
+      if (fakeSessionsDir && child.pid) {
+        try {
+          fs.mkdirSync(fakeSessionsDir, { recursive: true });
+          fs.writeFileSync(
+            `${fakeSessionsDir}/${child.pid}.json`,
+            JSON.stringify({ pid: child.pid, sessionId: manifest.sessionId, procStart: manifest.agentStartTime }),
+          );
+        } catch (err) {
+          say(`could not write the fake sessions file: ${String(err)}`);
+        }
+      }
     });
     child.once('exit', (code, signal) => {
       agentExit = { code, signal };
@@ -131,17 +145,8 @@ async function main(): Promise<void> {
     }, { once: true });
     return child as unknown as SpawnedProcess;
   };
-  const sdkOptions: Partial<Options> = fake ? {} : { env: agentEnv(process.env), spawnClaudeCodeProcess: spawnAgent };
-  // Orphan tests: a real process standing in for `claude`, so killing the
-  // host leaves something for the core's sweep to find (CP2 open item).
-  const fakeSessionsDir = fake ? process.env.AW_FAKE_CLAUDE_SESSIONS_DIR : undefined;
-  if (fakeSessionsDir) {
-    const child = spawnFakeAgent(fakeSessionsDir, boot.launch.resume ?? boot.launch.sessionId ?? '', startTimeOf);
-    agent = child;
-    manifest.agentPid = child.pid;
-    manifest.agentStartTime = child.pid ? startTimeOf(child.pid) : undefined;
-    child.once('exit', (code, signal) => (agentExit = { code, signal }));
-  }
+  // The fake agent spawns its dummy child through the same hook, so tests see a real agent process.
+  const sdkOptions: Partial<Options> = { env: agentEnv(process.env), spawnClaudeCodeProcess: spawnAgent };
 
   const session = new ClaudeSdkSession(
     {
@@ -229,8 +234,6 @@ async function main(): Promise<void> {
       }
     }
     if (e.type === 'exit') {
-      // The fake agent has no SDK to end it; it goes when the session does.
-      if (fakeSessionsDir && agent && agent.exitCode === null && agent.signalCode === null) agent.kill('SIGTERM');
       // The tombstone: how the core tells "ended" from "lost" after a restart.
       manifest.exit = { ...e.exit, at: Date.now(), lastSeq: e.seq };
       writeManifest();

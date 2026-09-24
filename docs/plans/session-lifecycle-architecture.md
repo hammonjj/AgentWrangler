@@ -144,7 +144,8 @@ observation.
 ### 1.9 Notifications and remote control
 
 - In-app only: `dialogs.info` message boxes for waiting, done and blocked (`notifyOnWaiting`), and
-  `flash` toasts. There is no Electron `Notification`, tray or dock badge.
+  `flash` toasts. There is no Electron `Notification`, tray or dock badge. *(Superseded by
+  Stage 6, #18: `HostServices.notify` → Electron `Notification`, and `src/electron/tray.ts`.)*
 - `RemoteControlService` (`src/remote/service.ts`) is a **reconciler** over a decorated snapshot
   (`DecoratedSessions`, `src/core/sessionView.ts`). It persists only the mirror map
   (`src/remote/mirrorStore.ts`) and an audit log. It can call only `decidePermission`,
@@ -1484,8 +1485,8 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
     view's current model, mode and effort, and sends there. The pane never rebinds. A failure
     leaves a note and an ended, resumable session. No "older build" badge yet.
   - **Power.** `powerMonitor` `resume` → every `HostClient` forgets missed pings and pings now,
-    and the Discord gateway drops its socket and resumes at once. `powerSaveBlocker`
-    (`prevent-app-suspension`) while any AW-run session is mid-turn.
+    and the Discord gateway drops its socket and resumes at once. `powerSaveBlocker` is #18's
+    (`shouldPreventAppSuspension`: working, or holding a permission ask).
   - **Permissions.** Hook script v2 exits after logging when `AGENTWRANGLER_HOSTED=1`; the app
     rewrites an installed older script at startup (it is AW's own file). Host-held permission
     asks are put on the row and the remote by `withHostedPermission`, keyed by the host's
@@ -1499,14 +1500,14 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
     hook's copy of another prompt; `end` and a migration wait for the old host (and so its
     agent) to be gone before sweeping; Release sweeps before the terminal resumes; a dead host
     older than the record's `liveSince` no longer decides it; a host SIGTERMed by Stop host gets
-    10 s (it gives its agent 5); Stop host refuses without a recorded start time; a parked ask
-    does not hold off sleep; ambient tasks do not count; the script refresh never downgrades; a
+    10 s (it gives its agent 5); Stop host refuses without a recorded start time; ambient tasks do not count; the script refresh never downgrades; a
     recordless host the machine has booted since is a restart (auto-resumable), not a crash; a
     Close or quit during a migration ends or lets go of the new host. Left for the soak/CP3:
     `AGENTWRANGLER_HOSTED` is inherited by everything a hosted agent runs (a nested `claude`
     loses the file path; not a way in); the sweep's ppid-1 rule would also end a deliberately
     headless `claude` on the same id (a lost manifest's `agentPid` could prove ownership); an
-    unreachable host during an answer reads as "no longer waiting".
+    unreachable host during an answer reads as "no longer waiting"; #18's power block counts a
+    parked permission ask, so one left overnight holds off idle sleep.
   - **Not done here:** the §16 manual rows and the gating acceptance test (James's, during the
     soak); M3 (logout); CP3; the default flip and removing the setting; staggering the replay of
     several busy hosts at startup (§15.2 open item).
@@ -1836,6 +1837,17 @@ Levels:
 - **L**: live, opt-in (`AW_LIVE_CLAUDE=1`), self-skipping like `live.integration.test.ts`, output
   never pasted.
 - **M**: manual, recorded once per stage in the merge notes.
+
+**The I rows (#16)** are `test/sessionHost.integration.test.ts` (the Stage 3 basics) and
+`test/sessionLifecycle.integration.test.ts` (the rest), on the harness in `test/support/`. Both
+run in `npm test` (about 35 s, which is most of it) and alone as `npm run test:integration`. A
+test fails if it leaves a process behind that it did not declare, and cleanup only signals a
+pid whose start time still matches. The fake
+agent (`src/sessionHost/fakeQuery.ts`) spawns a real dummy child through the host's
+`spawnClaudeCodeProcess`. That child is what makes env hygiene, orphaning, the §7.1 escalation
+and "the agent never stalls" real. The orphan-sweep rows are `it.todo` until Stage 4 (#15)
+adds the sweep. The suite found that `snapshot.latest` never kept `result`: every result has a
+subtype, and `latestKindOf` matched only `type/subtype`. Fixed with #16.
 
 | Scenario | Level | How | Stage |
 |---|---|---|---|

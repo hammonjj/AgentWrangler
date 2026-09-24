@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import { app, Notification, powerMonitor, powerSaveBlocker } from 'electron';
 import { createApp } from '../app/createApp';
 import { DictationSetupError, defaultModelPath } from '../core/dictation';
+import { shouldPreventAppSuspension } from '../core/menuBar';
 import { agentCount, quitIntentSource, quitPolicy, type QuitSource } from '../core/session/quitPolicy';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { registerBundleScheme, serveBundles } from './bundleProtocol';
@@ -32,6 +33,7 @@ import { JsonStore } from './jsonStore';
 import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
 import { createSessionHostRuntime } from './sessionHostRuntime';
+import { MenuBar, menuBarSessions } from './tray';
 import { WorkbenchWindow } from './workbenchWindow';
 
 // Before anything reads `getPath('userData')` — which is derived from it — and
@@ -181,7 +183,22 @@ void app.whenReady().then(() => {
     appRoot: APP_ROOT,
     parentWindow: () => window?.browserWindow,
     runAction: (id) => wrangler.runSettingAction(id),
+    onDidChangeOpen: () => syncDock(),
   });
+
+  // ---- Windowless (playbook Stage 6) ----
+  //
+  // With no window open the app is a menu-bar app: the Dock icon goes, the
+  // menu-bar item stays. It comes back when a window opens. `dock.show()` does
+  // not activate the app, so reopening from the menu bar or a notification is
+  // the only thing that brings it forward — and that is the user's click.
+  const syncDock = () => {
+    if (!app.dock) return;
+    const visible = window?.isOpen || preferences?.isOpen;
+    if (visible && !app.dock.isVisible()) void app.dock.show();
+    else if (!visible && app.dock.isVisible()) app.dock.hide();
+  };
+  window.onDidChangeOpen(() => syncDock());
   // ---- Quitting (playbook §7.2, §11.10) ----
   //
   // Electron gives `before-quit` no reason, so the sources the app owns label
@@ -228,28 +245,60 @@ void app.whenReady().then(() => {
   //
   // On wake, links and the Discord gateway are rechecked at once rather than
   // at their next heartbeat (spike M2: a sleep leaves no timer gap to detect
-  // it by). While an agent is mid-turn the machine is kept from *idle* sleep,
-  // so a long turn is not suspended because nobody touched the keyboard; a
-  // lid close or an explicit sleep still sleeps.
+  // it by). Idle sleep while agents work is the power block below.
   powerMonitor.on('resume', () => wrangler.onSystemResume());
-  let sleepBlocker: number | undefined;
-  const syncSleepBlocker = () => {
-    const busy = wrangler.busyAgents() > 0;
-    if (busy && sleepBlocker === undefined) {
-      sleepBlocker = powerSaveBlocker.start('prevent-app-suspension');
-      log('an agent is working: holding off idle sleep');
-    } else if (!busy && sleepBlocker !== undefined) {
-      powerSaveBlocker.stop(sleepBlocker);
-      sleepBlocker = undefined;
-      log('no agent is working: idle sleep allowed again');
+
+  const menuBar = new MenuBar({
+    app: wrangler,
+    surface: window,
+    openPreferences: () => preferences.open(),
+    quit: () => requestQuit('menu'),
+    quitAndStopAll: () => requestQuit('menuStopAll'),
+  });
+
+  // Open at login: opt-in, and a login item only — nothing relaunches the app
+  // after a quit or a crash. Packaged builds only: in development it would
+  // register the bare Electron binary.
+  const syncLoginItem = () => {
+    if (!app.isPackaged) return;
+    const wanted = host.settings.get<boolean>('openAtLogin', false);
+    if (app.getLoginItemSettings().openAtLogin === wanted) return;
+    app.setLoginItemSettings({ openAtLogin: wanted });
+    log(`open at login ${wanted ? 'on' : 'off'}`);
+  };
+  syncLoginItem();
+  host.subscribe(host.settings.onDidChange((affects) => {
+    if (affects('openAtLogin')) syncLoginItem();
+  }));
+
+  // App Nap (spike S2, playbook §11.10): held only while an agent this app
+  // runs is working or holding a permission ask, because the same assertion
+  // also stops idle system sleep.
+  let powerBlockId: number | undefined;
+  const syncPowerBlock = () => {
+    const wanted = shouldPreventAppSuspension(menuBarSessions(wrangler));
+    if (wanted && powerBlockId === undefined) {
+      powerBlockId = powerSaveBlocker.start('prevent-app-suspension');
+    } else if (!wanted && powerBlockId !== undefined) {
+      powerSaveBlocker.stop(powerBlockId);
+      powerBlockId = undefined;
     }
   };
-  host.subscribe(wrangler.sessions.onDidChange(syncSleepBlocker));
+  host.subscribe(wrangler.store.onDidUpdate(() => syncPowerBlock()));
 
-  window.open();
+  // Launched as a login item: start in the menu bar, not in your face.
+  const atLogin = app.isPackaged && app.getLoginItemSettings().wasOpenedAtLogin;
+  if (atLogin) {
+    log('opened at login; starting in the menu bar');
+    syncDock();
+  } else {
+    window.open();
+  }
   wrangler.start();
 
   const teardown = () => {
+    menuBar.dispose();
+    if (powerBlockId !== undefined) powerSaveBlocker.stop(powerBlockId);
     preferences.dispose();
     palette?.dispose();
     window?.dispose();
@@ -317,8 +366,8 @@ void app.whenReady().then(() => {
  *
  * The usual rule is the other way round, and it is wrong for this: the app is
  * running conversations. Quitting ends every runner it owns, and the point of
- * closing a window is usually to get it off the screen. The tray item that
- * makes this obvious is a later feature; until then, quit from the menu.
+ * closing a window is usually to get it off the screen. The menu-bar item
+ * (`tray.ts`) is what shows it is still running, and where it quits from.
  */
 app.on('window-all-closed', () => {
   // Deliberately empty. See above.

@@ -69,6 +69,8 @@ export interface ProjectSource {
   add(dir: string): void;
   /** Stop offering a folder. Persisted, since the next scan would otherwise find it again. */
   remove(dir: string): void;
+  /** Star or un-star a folder, which pins it to the top. Persisted. */
+  setFavourite(dir: string, favourite: boolean): void;
   onDidChange(listener: () => void): Disposable;
 }
 
@@ -328,6 +330,10 @@ export class DashboardHost {
         // Drops it from the cache synchronously and fires, which is what pushes
         // the new list — here and to every other dashboard.
         this.projects.remove(m.dir);
+        break;
+      case 'setProjectFavourite':
+        // Same path as a removal: re-orders the cache and fires.
+        this.projects.setFavourite(m.dir, m.favourite);
         break;
       case 'refreshProjects':
         void this.refreshProjects();

@@ -208,6 +208,12 @@ export interface HostServices {
   shell: HostShell;
   clipboard: { writeText(text: string): Promise<void> };
   /**
+   * An OS notification, which takes neither focus nor the window. `onClick`
+   * runs when it is clicked. Absent means this host has none, and the caller
+   * falls back to `dialogs.info`.
+   */
+  notify?(notice: { title: string; body: string; onClick?: () => void }): void;
+  /**
    * Credentials, kept out of the settings file.
    *
    * Settings are plain JSON a user may open, copy, or paste into an issue; a
