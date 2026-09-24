@@ -64,6 +64,7 @@ import { DecoratedSessions } from '../core/sessionView';
 import { ColumnPrefsService } from '../core/columnPrefs';
 import { readConfig, type ConfigGetter } from '../core/config';
 import { DictationService } from '../core/dictation';
+import { FavouriteProjectsService } from '../core/favouriteProjects';
 import { HiddenProjectsService } from '../core/hiddenProjects';
 import { ModelCatalogService } from '../core/modelCatalog';
 import { MAX_NICKNAME_LENGTH, NicknameService } from '../core/nicknameService';
@@ -726,7 +727,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         .filter((s): s is typeof s & { cwd: string } => typeof s.cwd === 'string')
         .map((s) => ({ dir: s.cwd, lastUsedAt: s.lastActivityAt })),
     }),
-    { hidden: hiddenProjects },
+    { hidden: hiddenProjects, favourites: new FavouriteProjectsService(host.globalState) },
   );
 
   /** The folder dialog, shared by the dashboard's Browse… row and the picker's. */
