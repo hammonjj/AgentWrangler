@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { Emitter, type Disposable } from '../../core/events';
 import type { HostSupervisor } from '../../core/session/hostSupervisor';
 import { createLocalClaudeHandle } from '../../core/session/localClaudeHandle';
+import { HOST_LOST } from '../../core/session/recovery';
 import { adoptHostedClaude, spawnHostedClaude } from '../../core/session/remoteClaudeHandle';
 import type { LaunchRequest, SessionExecutor } from '../../core/session/sessionHandle';
 import type { ExecutorRegistry, SessionRecord } from '../../core/session/sessionRegistry';
@@ -44,6 +45,14 @@ export interface RunnerServiceDeps {
   rememberModels?: (models: ModelChoice[] | undefined) => void;
   /** Session hosts: where new sessions run when `enabled()` says so, and how surviving ones are adopted. */
   hosts?: { supervisor: HostSupervisor; enabled: () => boolean };
+  /**
+   * The orphan sweep (§7.3): resolves once nothing else runs the id, rejects
+   * (with a sentence for the user) when something still does. Awaited before
+   * every resume, and before a version migration.
+   */
+  beforeResume?: (sessionId: string) => Promise<void>;
+  /** A host died under a live session without an exit record; its agent may be orphaned. */
+  onHostLost?: (sessionId: string) => void;
 }
 
 /** What starting a Claude session takes. The `LaunchRequest` minus the provider. */
@@ -69,7 +78,7 @@ export class RunnerService implements SessionExecutor, Disposable {
     // the pane all know it before the first turn.
     const launch = hosts && !opts.resume && !opts.sessionId ? { ...opts, sessionId: randomUUID() } : opts;
     const session = hosts
-      ? spawnHostedClaude(launch, { supervisor: hosts.supervisor, binary, log: this.deps.log, loadHistory })
+      ? spawnHostedClaude(launch, { supervisor: hosts.supervisor, binary, log: this.deps.log, loadHistory, beforeResume: this.deps.beforeResume })
       : createLocalClaudeHandle(launch, { query: this.deps.query, binary, log: this.deps.log, loadHistory });
     const place = this.deps.locate?.(opts.cwd) ?? {};
     this.track(session, (id) =>
@@ -105,17 +114,57 @@ export class RunnerService implements SessionExecutor, Disposable {
         effort: record?.launch.effort,
         origin: record?.origin,
       },
-      { supervisor, binary: record?.launch.binary ?? '', log: this.deps.log, loadHistory: this.deps.loadHistory ?? loadResumeHistory },
+      {
+        supervisor,
+        // Only used if it moves to a new host (§7.4), which is a fresh start: today's binary.
+        binary: this.deps.binary(),
+        log: this.deps.log,
+        loadHistory: this.deps.loadHistory ?? loadResumeHistory,
+        beforeResume: this.deps.beforeResume,
+      },
     );
     this.track(session);
     this.deps.log(`adopted session ${manifest.sessionId} from host ${manifest.hostId}`);
     return session;
   }
 
+  /**
+   * Resume an existing id here: the only way any caller should. The sweep
+   * runs first (§7.3), and only once it says nothing else runs the id does
+   * the history get read and the new process start, so the orphan's last
+   * words are in the history and there is never a second process on the id.
+   */
+  async resume(opts: RunnerStartOptions & { resume: string }): Promise<RunnerView> {
+    await this.deps.beforeResume?.(opts.resume);
+    return this.start(opts);
+  }
+
+  /** The machine woke from sleep: every hosted session rechecks its link. */
+  wakeAll(): void {
+    for (const s of this.sessions) s.wake();
+  }
+
+  /** A setting hosts apply themselves changed (the idle-orphan rule): tell them. */
+  reconfigureAll(): void {
+    for (const s of this.sessions) if (s.hosted) s.reconfigure();
+  }
+
+  /**
+   * Sessions with a turn actually in flight, for the sleep blocker. One
+   * parked on a question or permission is not: asks are held for days, and
+   * one left overnight must not keep the machine awake all night.
+   */
+  busyCount(): number {
+    let n = 0;
+    for (const s of this.sessions) if (s.lifecycle === 'running' && !s.awaitingAnswer) n++;
+    return n;
+  }
+
   async launch(request: LaunchRequest): Promise<RunnerView> {
     if (request.provider !== 'claude') throw new Error(`RunnerService cannot launch a ${request.provider} session`);
     const { provider: _provider, initialBlocks: _blocks, ...opts } = request;
-    return this.start(opts);
+    // A resume goes through the sweep like every other (§7.3).
+    return opts.resume ? this.resume({ ...opts, resume: opts.resume }) : this.start(opts);
   }
 
   get(sessionId: string | undefined): RunnerView | undefined {
@@ -224,11 +273,25 @@ export class RunnerService implements SessionExecutor, Disposable {
         if (lifecycle === 'error') {
           // A host that died without an exit record may have left its agent
           // running mid-turn: the conversation is resumable, so say interrupted.
-          if (session.lastExit?.reason === 'lost') this.deps.registry?.setState(id, 'interrupted', 'host lost');
-          else this.deps.registry?.setState(id, 'failed', 'agent error');
+          if (session.lastExit?.reason === 'lost') {
+            this.deps.registry?.setState(id, 'interrupted', HOST_LOST);
+            // Sweep now, while the orphan's turn is still fresh, rather than
+            // leave it running headless until someone resumes (§7.3, S1).
+            this.deps.onHostLost?.(id);
+          } else this.deps.registry?.setState(id, 'failed', 'agent error');
         }
       }
       this.changeEmitter.fire();
+    });
+    // An ask opening or settling changes what the row and the remote offer
+    // (a hosted session's permission reaches them only from here), without
+    // any lifecycle change to announce it.
+    const askKinds = new Set(['permission', 'question', 'plan']);
+    session.onAppend((blocks) => {
+      if (blocks.some((b) => askKinds.has(b.kind))) this.changeEmitter.fire();
+    });
+    session.onPatch((p) => {
+      if ('state' in p.block) this.changeEmitter.fire();
     });
     // The model list arrives a moment after start, and is the only place it is
     // ever published; the launcher needs it too. See `ModelCatalogService`.

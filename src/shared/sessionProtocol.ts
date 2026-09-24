@@ -82,6 +82,13 @@ export interface HostExit {
   hostSignal?: string;
   /** The last of the agent's stderr, for a failure worth explaining. */
   stderrTail?: string;
+  /**
+   * With `reason: 'stopped'`: what stopped it when no client asked.
+   * `idleTimeout`: the idle-orphan rule (§7.5) parked an idle session no
+   * client had connected to for `orphanIdleHours`. Added in Stage 4; readers
+   * ignore values they do not know.
+   */
+  trigger?: 'idleTimeout';
 }
 
 /** Host → client. Every event has a `seq`. */
@@ -134,6 +141,23 @@ export function latestKindOf(msg: unknown): string | undefined {
   if (typeof m.type !== 'string') return undefined;
   const kind = typeof m.subtype === 'string' ? `${m.type}/${m.subtype}` : m.type;
   return (LATEST_MESSAGE_KINDS as readonly string[]).includes(kind) ? kind : undefined;
+}
+
+/**
+ * How many background tasks (`run_in_background` shells, subagents, …) the
+ * session reported last, from `latest`. Ending the CLI kills every one of
+ * them, so a session with any is never ended automatically: not by the
+ * idle-orphan rule, not by a version migration (§7.4, §7.5). Unknown or
+ * malformed counts as none only when nothing was ever reported.
+ */
+export function backgroundTaskCount(latest: Record<string, unknown> | undefined): number {
+  const msg = latest?.['system/background_tasks_changed'] as { tasks?: unknown } | undefined;
+  if (!msg) return 0;
+  // A report this reader cannot read is not proof of none. Ambient tasks
+  // (live-update watchers) are not work: the SDK says to leave them out of
+  // activity, and counting them would mean never parking or migrating.
+  if (!Array.isArray(msg.tasks)) return 1;
+  return msg.tasks.filter((t) => !(t && typeof t === 'object' && (t as { ambient?: unknown }).ambient === true)).length;
 }
 
 /** Everything a client needs to catch up without the event history. */
@@ -236,6 +260,9 @@ export type ControlRequest =
 //                                                     does not have (see `control.<op>` capabilities)
 //   end         {graceMs?}                          → {ok: true}, once the agent has exited
 //   ping        {}                                  → {seq, now}
+//   configure   ConfigureParams                     → {ok: true}; core only. Stage 4, additive:
+//                                                     only sent to a host advertising
+//                                                     `configure.orphanIdleHours`
 //
 // Notifications (host → core):
 //   event       {event: HostEvent}                  every event, in seq order
@@ -278,6 +305,18 @@ export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const MAX_PAGE_BYTES = 1024 * 1024;
 
 export type ClientRole = 'core' | 'observer';
+
+/** The capability a host advertises when it takes `configure`. */
+export const CAPABILITY_CONFIGURE_IDLE = 'configure.orphanIdleHours';
+
+/**
+ * `configure`: settings the core owns that the host must apply while no core
+ * is connected. Fields a host does not know are ignored.
+ */
+export interface ConfigureParams {
+  /** The idle-orphan rule (§7.5): hours with no client before an idle session is parked. 0 = never. */
+  orphanIdleHours?: number;
+}
 
 export interface HelloParams {
   client: { role: ClientRole; build: string; pid: number; capabilities?: string[] };
@@ -363,6 +402,8 @@ export interface HostBoot {
   manifestPath: string;
   hostBuild: string;
   runtimeDir?: string;
+  /** The idle-orphan rule's hours at spawn; `configure` changes it later. Absent = never. */
+  orphanIdleHours?: number;
   launch: {
     cwd: string;
     resume?: string;

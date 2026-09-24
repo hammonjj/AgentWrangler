@@ -13,6 +13,7 @@ import {
   PERMISSION_SCRIPT_NAME,
   permissionScript,
   permissionScriptPath,
+  refreshPermissionScript,
   removeHooks,
   uninstallHooks,
   type HooksConfig,
@@ -95,6 +96,28 @@ describe('mergeHooks', () => {
     expect(second.hooks.PreToolUse).toHaveLength(2); // replaced, not appended
     expect(second.hooks.PreToolUse[0]).toEqual(USER_HOOK.PreToolUse[0]);
     expect(second.hooks.PreToolUse[1].hooks![0].command).toBe(hookCommandFor(LOG_DIR, 'PreToolUse'));
+  });
+});
+
+describe('refreshPermissionScript', () => {
+  it('upgrades an installed older script, never installs one, never downgrades', async () => {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aw-refresh-'));
+    try {
+      expect(await refreshPermissionScript(dir)).toBe(false);
+      await expect(fsp.access(permissionScriptPath(dir))).rejects.toBeDefined();
+
+      await fsp.writeFile(permissionScriptPath(dir), '#!/bin/sh\n# Agent Wrangler PermissionRequest hook, v1. old\n');
+      expect(await refreshPermissionScript(dir)).toBe(true);
+      expect(await fsp.readFile(permissionScriptPath(dir), 'utf8')).toBe(permissionScript());
+      expect(await refreshPermissionScript(dir)).toBe(false);
+
+      const newer = '#!/bin/sh\n# Agent Wrangler PermissionRequest hook, v99. from a later build\n';
+      await fsp.writeFile(permissionScriptPath(dir), newer);
+      expect(await refreshPermissionScript(dir)).toBe(false);
+      expect(await fsp.readFile(permissionScriptPath(dir), 'utf8')).toBe(newer);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -181,6 +204,38 @@ describe('permissionScript', () => {
       // Cleaned up after itself.
       expect(await fsp.readdir(requests)).toEqual([]);
       expect(await fsp.readdir(path.join(dir, 'decisions'))).toEqual([]);
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it('end to end, hosted: logs the prompt, and a decision file cannot answer it', async () => {
+    // A session in a session host is answered through the host only
+    // (AGENTWRANGLER_HOSTED, Stage 4). A decision file written in advance,
+    // under every id the script could pick, must not be printed.
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aw-script-e2e-'));
+    try {
+      const file = path.join(dir, 'permission-hook.sh');
+      await fsp.writeFile(file, script, { encoding: 'utf8', mode: 0o755 });
+      const decision = '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}\n';
+      await fsp.mkdir(path.join(dir, 'decisions'), { recursive: true });
+      await fsp.writeFile(path.join(dir, 'decisions', 'planted.json'), decision, 'utf8');
+      const sid = 'cccccccc-2222-3333-4444-555555555555';
+      const child = cp.spawn('/bin/sh', [file], { cwd: dir, env: { ...process.env, AGENTWRANGLER_HOSTED: '1' } });
+      let stdout = '';
+      child.stdout.on('data', (d) => (stdout += String(d)));
+      // Plant a decision under the id the script would use, as soon as its pid is known.
+      if (child.pid) await fsp.writeFile(path.join(dir, 'decisions', `${process.pid}-${child.pid}.json`), decision, 'utf8');
+      child.stdin.end(`${JSON.stringify({ session_id: sid, hook_event_name: 'PermissionRequest', tool_name: 'Bash' })}\n`);
+
+      const code = await new Promise<number | null>((resolve) => child.on('close', resolve));
+      expect(code).toBe(0);
+      expect(stdout).toBe('');
+      // Still logged, so the row shows the session waiting; no marker, no pending line.
+      const lines = (await fsp.readFile(path.join(dir, `${process.pid}.jsonl`), 'utf8')).trim().split('\n');
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0])).toMatchObject({ hook_event_name: 'PermissionRequest', session_id: sid });
+      expect(await fsp.readdir(path.join(dir, 'requests')).catch(() => [])).toEqual([]);
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
     }

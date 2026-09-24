@@ -41,7 +41,7 @@ const PERMISSION_HOOK_MAX_POLLS = 3400; // × 0.5 s ≈ 28 min
 
 export const PERMISSION_SCRIPT_NAME = 'permission-hook.sh';
 /** Bumped whenever the script text changes; `currentState` reports the old file as stale. */
-export const PERMISSION_SCRIPT_VERSION = 1;
+export const PERMISSION_SCRIPT_VERSION = 2;
 
 export function permissionScriptPath(logDir: string): string {
   return path.join(logDir, PERMISSION_SCRIPT_NAME);
@@ -63,6 +63,13 @@ export function permissionScriptPath(logDir: string): string {
  * `$PPID` is the Claude process and `$$` this hook's shell, so the id is
  * unique per prompt without parsing anything. The session id is the one field
  * pulled out of the JSON, and it is a UUID, so a `sed` capture is safe.
+ *
+ * v2: a session Agent Wrangler runs in a session host (`AGENTWRANGLER_HOSTED=1`
+ * in its environment) stops after step 1. The prompt is still logged, so the
+ * row shows the session waiting, but no marker is left and no decision file
+ * is read: a hosted session's prompt is answered only through its host, which
+ * only a client holding the host's token can reach (playbook §12, decided §22).
+ * A file any local process can write must not be a way around that.
  */
 export function permissionScript(): string {
   return [
@@ -75,6 +82,8 @@ export function permissionScript(): string {
     'dir=$(dirname "$0")',
     'payload=$(cat)',
     'printf \'%s\\n\' "$payload" >> "$dir/$PPID.jsonl"',
+    '# A session in an Agent Wrangler session host is answered through the host only.',
+    '[ "$AGENTWRANGLER_HOSTED" = "1" ] && exit 0',
     'sid=$(printf \'%s\' "$payload" | sed -n \'s/.*"session_id":"\\([^"]*\\)".*/\\1/p\' | head -n 1)',
     '[ -n "$sid" ] || exit 0',
     'id="$PPID-$$"',
@@ -280,6 +289,30 @@ async function permissionScriptCurrent(logDir: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Bring an installed PermissionRequest script up to this version, touching
+ * nothing else. The script is Agent Wrangler's own file in its own log
+ * directory, and every prompt re-reads it, so this updates every session at
+ * once without a `settings.json` write. Where the script was never installed
+ * it stays absent: installing hooks is the user's call. True if it changed.
+ */
+export async function refreshPermissionScript(logDir: string): Promise<boolean> {
+  let text: string;
+  try {
+    text = await fsp.readFile(permissionScriptPath(logDir), 'utf8');
+  } catch {
+    return false;
+  }
+  if (text === permissionScript()) return false;
+  // Only ever an upgrade: a newer build (a dev tree beside the installed app)
+  // may have written a later version, and two builds must not keep rewriting
+  // each other's script. An unversioned file is an old one.
+  const installed = Number(/PermissionRequest hook, v(\d+)\./.exec(text)?.[1] ?? 0);
+  if (installed > PERMISSION_SCRIPT_VERSION) return false;
+  await writePermissionScript(logDir);
+  return true;
 }
 
 /** Write the PermissionRequest script (tmp + rename, executable). */

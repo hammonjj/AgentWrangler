@@ -101,8 +101,11 @@ These are the repo's actual precedents. A feature proposal that violates one nee
 explicitly and argue for it.
 
 1. **Never steal attention.** No window jumps, no auto-focus, no auto-restart, no auto-reload.
-   Quitting the app ends the live sessions it hosts, so the app never restarts itself; it says
-   a restart is needed and leaves it to the user.
+   The app never restarts itself; it says a restart is needed and leaves it to the user.
+   Quitting ends the in-process sessions it runs. Conversations in session hosts (the
+   *Keep conversations running when Agent Wrangler quits* setting, the default once its soak
+   is done) survive a quit, a crash and a reinstall, so for them a restart costs a moment's
+   reconnect, not the conversation.
 2. **Do not write into other tools' files.** Claude Code owns `~/.claude.json`,
    `~/.claude/sessions/*`, and the transcripts. Nicknames, removed projects and sections live
    on our side precisely because rewriting someone else's state to tidy our UI is not a trade

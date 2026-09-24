@@ -73,9 +73,28 @@ waits, and Agent Wrangler reconnects to it when it opens again.
   a token and a socket per host, readable by you only), `logs/host-*.log`, and `runtimes/`, a
   clone of the app that hosts run from so a reinstall never pulls the program out from under
   them. A token opens its host's socket, so both are readable by your user only; a process
-  running as you could use them, which is the same limit the permission hook file already has.
-- It is experimental until crash recovery is hardened (#15): a host that crashes is reported,
-  but an agent it leaves behind is not yet cleaned up automatically.
+  running as you could use them.
+- **A hosted conversation's permission prompts are answered only through its host**: from the
+  pane, the row's Allow/Deny, or Discord. The host sets `AGENTWRANGLER_HOSTED=1` for `claude`,
+  and the permission hook then logs the prompt (so the row shows it waiting) without waiting
+  for a decision file, so writing one cannot approve anything. Conversations outside a host keep
+  the file path. The app updates the hook script by itself; `settings.json` is not touched.
+- **After a reinstall**, a conversation keeps running on the build it started with until its next
+  message while idle: then it moves to a fresh host of the new build (same session, same model,
+  mode and effort) before the message is sent. A busy one, one waiting on a question or
+  permission, or one with background tasks is never moved; it moves on a later idle message.
+- **If a host crashes**, the `claude` it ran may keep going on its own for a while. Agent
+  Wrangler finds it (by its `~/.claude/sessions/<pid>.json`, checked against the process's start
+  time) and ends it, waiting for it to exit, before anything resumes that session, so there is
+  never a second process on one conversation. The row shows **interrupted** and Resume brings it
+  back; a crashed one is never resumed automatically.
+- **Idle conversations are parked** after *End idle sessions with no Agent Wrangler connected
+  after* (default 24 hours, 0 = never) with the app closed: ended gracefully, resumable as
+  usual. Never one that is working, waiting on a question or permission, or running background
+  tasks, and time the machine spends asleep does not count.
+- While a conversation is working, the Mac is kept from *idle* sleep (a lid close still sleeps).
+  On wake, the app rechecks its hosts and reconnects Discord at once.
+- Still experimental until a week of daily use has shown the recovery paths behave (#15).
 
 **Codex conversations survive a quit.** Agent Wrangler runs every Codex thread in one
 background `codex app-server` of its own, detached from the app, so quitting, a crash or a

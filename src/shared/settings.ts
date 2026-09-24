@@ -158,6 +158,18 @@ export const SETTINGS: SettingSpec[] = [
     description:
       'Run each new Claude conversation in its own small background process, so quitting, reinstalling or a crash of Agent Wrangler no longer ends it: it keeps working, and Agent Wrangler reconnects when it opens again. ⌘Q then leaves those conversations running; Quit and Stop All Agents (⌥⌘Q) ends them. Applies to conversations started after it is switched on.',
   },
+  {
+    key: 'lifecycle.orphanIdleHours',
+    label: 'End idle sessions with no Agent Wrangler connected after (hours)',
+    group: 'Conversations',
+    type: 'number',
+    default: 24,
+    minimum: 0,
+    // Drop with the setting it hangs off when session hosts become the default.
+    dependsOn: 'experimental.sessionHosts',
+    description:
+      'A conversation left running in the background while Agent Wrangler is quit is ended after this many hours with nothing connected to it, but only if it is idle: never one that is working, waiting on a question or permission, or running background tasks. It can be resumed afterwards with nothing lost. Time the machine spends asleep does not count. 0 = never.',
+  },
 
   // ---- Agents and status ----
   {

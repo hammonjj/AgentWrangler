@@ -11,7 +11,8 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { isSameProcessAlive } from '../procStart';
+import { endProcess, type EndOutcome } from '../../claude/runner/adopt';
+import { isSameProcessAlive, startTimeOf } from '../procStart';
 import type { HostBoot, HostManifest } from '../../shared/sessionProtocol';
 import { HostClient } from './hostClient';
 import { readManifest, readManifests, removeHostFiles } from './manifestFile';
@@ -39,6 +40,8 @@ export interface HostSupervisorOptions {
   hostEnv?: Record<string, string>;
   /** How long a new host gets to write its manifest. */
   startTimeoutMs?: number;
+  /** `lifecycle.orphanIdleHours`, read at each spawn and pushed to hosts on connect. */
+  orphanIdleHours?: () => number;
 }
 
 export interface HostLaunch {
@@ -65,8 +68,17 @@ export interface ScanResult {
   foreign: HostManifest[];
 }
 
-/** A dead host with no exit record keeps its manifest this long, for Stage 4's orphan sweep (its agent pid). */
+/**
+ * A dead host with no exit record keeps its manifest until the orphan sweep
+ * has cleared its session (`forget`), or this long at most.
+ */
 const LOST_MANIFEST_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+/** Host logs outlive their host by this long, for a look after the fact; then they go. */
+export const HOST_LOG_KEEP_MS = 14 * 24 * 60 * 60 * 1000;
+/** How long a signalled host gets before SIGKILL: longer than the 5 s it gives its agent. */
+const HOST_STOP_GRACE_MS = 10_000;
+/** A token with no manifest beside it is from a host that never came up (the app went first). */
+const STRAY_TOKEN_KEEP_MS = 24 * 60 * 60 * 1000;
 
 /** Longest usable socket path: macOS's `sun_path` is 104 bytes including the NUL (spike S3). */
 export const MAX_SOCKET_PATH_BYTES = 103;
@@ -111,6 +123,98 @@ export class HostSupervisor {
     } catch (err) {
       this.opts.log(`runtime gc failed: ${String(err)}`);
     }
+    this.collectStrays(now);
+  }
+
+  /**
+   * A lost host's manifest has done its job once the orphan sweep has
+   * cleared its session: nothing it names can still be running. Re-checked
+   * here, so a manifest whose host came back to life is never removed.
+   */
+  forget(manifest: HostManifest): void {
+    const current = readManifest(path.join(this.opts.runDir, `${manifest.hostId}.json`));
+    if (!current || current.exit) return;
+    if (isSameProcessAlive(current.hostPid, current.hostStartTime)) return;
+    removeHostFiles(this.opts.runDir, current);
+  }
+
+  /**
+   * The live host holding `sessionId`, of any manifest version: while there
+   * is one, the session must not be resumed or taken over (§7.3). Read fresh:
+   * hosts come and go while the app runs.
+   */
+  heldBy(sessionId: string | undefined): { manifest: HostManifest; known: boolean } | undefined {
+    if (!sessionId) return undefined;
+    const id = sessionId.toLowerCase();
+    for (const read of readManifests(this.opts.runDir, true)) {
+      if (read.manifest.sessionId?.toLowerCase() !== id) continue;
+      if (isSameProcessAlive(read.manifest.hostPid, read.manifest.hostStartTime)) return read;
+    }
+    return undefined;
+  }
+
+  /** The agent pids of every live host, for the orphan sweep: those are owned, never orphans. */
+  heldAgentPids(): Set<number> {
+    const out = new Set<number>();
+    for (const { manifest } of readManifests(this.opts.runDir, true)) {
+      if (typeof manifest.agentPid !== 'number') continue;
+      if (isSameProcessAlive(manifest.hostPid, manifest.hostStartTime)) out.add(manifest.agentPid);
+    }
+    return out;
+  }
+
+  /**
+   * Stop a host this app cannot talk to (unreachable, or a manifest version
+   * it does not know): SIGTERM, which makes the host end its agent the way a
+   * logout does, escalating to SIGKILL. Only ever the process the manifest
+   * names, checked by start time before every signal.
+   */
+  async stopHost(manifest: HostManifest): Promise<EndOutcome> {
+    // Without a recorded start time the pid cannot be proved to be the host.
+    if (!manifest.hostStartTime) {
+      this.opts.log(`host ${manifest.hostId}: no recorded start time; not signalling pid ${manifest.hostPid}`);
+      return 'refused';
+    }
+    const outcome = await endProcess(
+      manifest.hostPid,
+      {
+        kill: (pid, sig) => process.kill(pid, sig),
+        isAlive: (pid) => isSameProcessAlive(pid, undefined),
+        startTimeOf,
+        delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+      },
+      manifest.hostStartTime,
+      // The host gives its agent 5 s after SIGTERM, then SIGKILLs it and
+      // writes its exit record. Killing the host first would orphan the agent.
+      { termGraceMs: HOST_STOP_GRACE_MS },
+    );
+    this.opts.log(`host ${manifest.hostId} (session ${manifest.sessionId}): stopped on request → ${outcome}`);
+    return outcome;
+  }
+
+  /** Logs of hosts long gone, and tokens of hosts that never came up. */
+  private collectStrays(now: number): void {
+    const live = new Set(readManifests(this.opts.runDir, true).map((r) => r.manifest.hostId));
+    const oldFiles = (dir: string, match: RegExp, keepMs: number) => {
+      let names: string[] = [];
+      try {
+        names = fs.readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        const m = match.exec(name);
+        if (!m || live.has(m[1])) continue;
+        const file = path.join(dir, name);
+        try {
+          if (now - fs.statSync(file).mtimeMs > keepMs) fs.rmSync(file, { force: true });
+        } catch {
+          // gone meanwhile
+        }
+      }
+    };
+    oldFiles(this.opts.logDir, /^host-([a-z2-7]{8})\.log$/, HOST_LOG_KEEP_MS);
+    oldFiles(this.opts.runDir, /^([a-z2-7]{8})\.token$/, STRAY_TOKEN_KEEP_MS);
   }
 
   /** Start a host for a session. Returns its client at once; the host comes up in the background. */
@@ -140,6 +244,7 @@ export class HostSupervisor {
       hostReady,
       build: this.opts.build,
       log: this.opts.log,
+      orphanIdleHours: this.opts.orphanIdleHours,
     });
     return { client, hostId };
   }
@@ -165,6 +270,7 @@ export class HostSupervisor {
       transcriptUuids,
       build: this.opts.build,
       log: this.opts.log,
+      orphanIdleHours: this.opts.orphanIdleHours,
     });
   }
 
@@ -188,6 +294,7 @@ export class HostSupervisor {
       manifestPath,
       hostBuild: this.opts.runtime.buildId,
       runtimeDir: runtime.runtimeDir,
+      orphanIdleHours: this.opts.orphanIdleHours?.(),
       launch: {
         cwd: launch.cwd,
         resume: launch.resume ? launch.sessionId : undefined,
@@ -227,8 +334,10 @@ export class HostSupervisor {
         throw new Error(`the host ${exited} before it was ready; see ${logFile}`);
       }
       if (Date.now() > deadline) {
-        // Never leave a host running that nobody will ever talk to.
-        if (pid !== undefined) {
+        // Never leave a host running that nobody will ever talk to. The pid
+        // is still this child's: it has not been reaped (no `exit` yet), so
+        // it cannot have been reused.
+        if (pid !== undefined && !exited) {
           try {
             process.kill(pid, 'SIGTERM');
           } catch {

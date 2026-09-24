@@ -66,6 +66,11 @@ export interface RemoteTransport extends Disposable {
 
   connect(): Promise<void>;
   disconnect(): Promise<void>;
+  /**
+   * The machine woke from sleep: the connection is probably dead and does not
+   * know it yet. Reconnect now rather than at the next missed heartbeat.
+   */
+  wake?(): void;
 
   /** Post the ask. `interactionId` is opaque and is what comes back on a press. */
   publish(interactionId: string, ask: RemoteAsk): Promise<RemoteMessageRef>;

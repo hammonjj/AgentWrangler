@@ -110,6 +110,10 @@ export class DiscordTransport implements RemoteTransport {
     this.pending.clear();
   }
 
+  wake(): void {
+    this.gateway.wake();
+  }
+
   async publish(interactionId: string, ask: RemoteAsk): Promise<RemoteMessageRef> {
     const { channelId } = this.deps.config();
     const message = await this.rest.request<{ id: string }>(

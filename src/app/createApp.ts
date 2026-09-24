@@ -38,18 +38,22 @@ import { resolveCodexBinary } from '../codex/binary';
 import { readRolloutBlocks } from '../codex/rollout';
 import { codexUsageReader } from '../codex/usage';
 import { CodexRunnerService } from '../codex/runner';
-import { isPidAlive, readRegistry } from '../claude/registry';
+import { isPidAlive, readProcessEntries, readRegistry } from '../claude/registry';
+import { bootTimeMs, parentPidOf, startTimeOf } from '../core/procStart';
+import { sweepOrphans, sweepRefusal, type SweepResult } from '../core/session/orphanSweep';
 import { endProcess } from '../claude/runner/adopt';
 import { SessionRegistry, type SessionRecord } from '../core/session/sessionRegistry';
-import { autoResumeCandidate } from '../core/session/recovery';
+import { autoResumeCandidate, outcomesFromDeadHosts } from '../core/session/recovery';
 import { checkoutFor } from '../core/checkout';
 import { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerView } from '../claude/runner/runnerView';
+import type { HostManifest } from '../shared/sessionProtocol';
 import { SessionExecutors } from '../core/session/sessionExecutors';
 import { HostSupervisor } from '../core/session/hostSupervisor';
 import { shouldAutoResume } from '../core/session/resumePolicy';
 import {
   currentState,
+  refreshPermissionScript,
   installHooks as writeHooks,
   settingsModifiedAtMs,
   settingsPath,
@@ -172,6 +176,14 @@ export interface AgentWranglerApp {
    * on the next start.
    */
   stopAllForQuit(withinMs: number, opts?: { includeHosted?: boolean }): Promise<void>;
+  /**
+   * The machine woke from sleep (`powerMonitor` `resume`): heartbeats missed
+   * across the sleep are forgotten and each host link rechecks at once, and
+   * the Discord gateway reconnects now rather than at its next heartbeat (§8).
+   */
+  onSystemResume(): void;
+  /** Sessions AW runs that have a turn in flight: while there are any, the machine is kept from idle sleep. */
+  busyAgents(): number;
   startCodexConversation(cwd: string): Promise<void>;
   /** Restart the background Codex server (e.g. to pick up a Codex update). Asks first if it would interrupt anything. */
   restartCodexServer(): Promise<void>;
@@ -244,18 +256,24 @@ export function createApp(host: HostServices): AgentWranglerApp {
         runtime: host.sessionHosts.runtime,
         log,
         build: host.sessionHosts.runtime.buildId,
+        orphanIdleHours: () => host.settings.get<number>('lifecycle.orphanIdleHours', 24),
       })
     : undefined;
   const hostScan = hostSupervisor?.scan() ?? { alive: [], dead: [], foreign: [] };
-  // Then classify what the last run left behind: every session that was live
-  // is interrupted, except those still running in a host (including one this
-  // build cannot talk to, which must not look ownerless). The old runner
-  // registry is imported once from the surface store.
+  // Then classify what the last run left behind (§7.3): every session that
+  // was live is interrupted, except those still running in a host (including
+  // one this build cannot talk to, which must not look ownerless), and those
+  // whose host has since died and said why in its exit record (ended, failed,
+  // parked by the idle rule, or lost: no record at all). Decided before the
+  // interrupted list exists, so auto-resume never picks a session whose host
+  // finished, failed or crashed. The old runner registry is imported once
+  // from the surface store.
   const sessionRegistry = new SessionRegistry(host.sessionState, { legacy: host.workspaceState });
   const startup = sessionRegistry.startup(
     new Set(
       [...hostScan.alive, ...hostScan.foreign].map((m) => m.sessionId).filter((id): id is string => typeof id === 'string'),
     ),
+    outcomesFromDeadHosts(hostScan.dead, hostScan.dead.some((m) => !m.exit) ? bootTimeMs() : undefined),
   );
   if (startup.interrupted.length > 0) {
     log(`${startup.interrupted.length} session(s) were interrupted by the last restart`);
@@ -263,25 +281,56 @@ export function createApp(host: HostServices): AgentWranglerApp {
   for (const m of hostScan.foreign) {
     log(`host ${m.hostId} (session ${m.sessionId}) runs a manifest version this build does not know; leaving it alone`);
   }
-  // Hosts that died while the app was away, by their exit record. A failure
-  // is recorded as one; an agent that finished on its own ended. Anything
-  // else (a logout, Quit and Stop All) stays resumable, as classified above.
-  // A host that died silently may have left its agent running: the orphan
-  // sweep is Stage 4, and its manifest is kept for it.
-  for (const m of hostScan.dead) {
-    if (!m.sessionId) continue;
-    if (!m.exit) {
-      log(`host ${m.hostId} (session ${m.sessionId}) died without an exit record; its agent may still be running`);
-      continue;
-    }
-    const reason = m.exit.reason ?? 'ended';
-    if (reason === 'ended') sessionRegistry.setState(m.sessionId, 'ended');
-    // Stopped by a client or a signal: resumable, as startup classified it.
-    else if (reason === 'stopped' || reason === 'signal') continue;
-    // `error`, `crashed`, and (per the protocol) any reason this build does not know.
-    else sessionRegistry.setState(m.sessionId, 'failed', m.exit.error ?? `host exit: ${reason}`);
-  }
   hostSupervisor?.collect(hostScan);
+
+  // ---- The orphan sweep (§7.3) ----
+  //
+  // Nothing stops a second `claude` resuming an id that one is still running
+  // (spike S1), so before any resume, whatever runs the id is accounted for,
+  // and a `claude` whose host died is ended and waited for. One sweep per id
+  // at a time: a second caller shares the one in flight.
+  const sweeps = new Map<string, Promise<SweepResult>>();
+  const sweepSession = (sessionId: string): Promise<SweepResult> => {
+    const id = sessionId.toLowerCase();
+    const running = sweeps.get(id);
+    if (running) return running;
+    const sweep = sweepOrphans(sessionId, {
+      entries: () => readProcessEntries(sessionsDir()),
+      heldAgentPids: () => hostSupervisor?.heldAgentPids() ?? new Set(),
+      isAlive: isPidAlive,
+      startTimeOf,
+      parentOf: parentPidOf,
+      kill: (pid, sig) => process.kill(pid, sig),
+      delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+      log,
+    })
+      .then((r) => {
+        if (r.swept.length > 0 || !r.clear) {
+          log(`orphan sweep for ${sessionId}: swept [${r.swept.join(', ')}], refused [${r.refused.join(', ')}], owners [${r.owners.join(', ')}], held [${r.held.join(', ')}]`);
+        }
+        return r;
+      })
+      .finally(() => sweeps.delete(id));
+    sweeps.set(id, sweep);
+    return sweep;
+  };
+  /** Resolves when nothing else runs the id; rejects with the reason otherwise. */
+  const beforeResume = async (sessionId: string): Promise<void> => {
+    const why = sweepRefusal(await sweepSession(sessionId));
+    if (why) throw new Error(why);
+  };
+  // Hosts that died with no exit record while the app was away: their agents
+  // may still be running headless. Sweep now; once the id is clear the
+  // manifest has served its purpose.
+  for (const m of hostScan.dead) {
+    if (m.exit || !m.sessionId) continue;
+    log(`host ${m.hostId} (session ${m.sessionId}) died without an exit record; sweeping for its agent`);
+    void sweepSession(m.sessionId)
+      .then((r) => {
+        if (r.clear) hostSupervisor?.forget(m);
+      })
+      .catch((err) => log(`orphan sweep for ${m.sessionId} failed: ${String(err)}`));
+  }
   const locate = (cwd: string) => checkoutFor(cwd);
   const codexRunners = new CodexRunnerService(codexAppServer, (list) => models.remember('openai', list), {
     registry: sessionRegistry,
@@ -366,13 +415,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
     registry: sessionRegistry,
     locate,
     rememberModels: (list) => models.remember('anthropic', list),
-    // Experimental until Stage 4 hardens recovery: new sessions run in hosts
-    // only with the setting on. Surviving hosts are adopted either way.
+    // Experimental until the Stage 4 soak: new sessions run in hosts only
+    // with the setting on. Surviving hosts are adopted either way.
     hosts: hostSupervisor
       ? { supervisor: hostSupervisor, enabled: () => host.settings.get<boolean>('experimental.sessionHosts', false) }
       : undefined,
+    beforeResume,
+    onHostLost: (id) => void sweepSession(id).catch((err) => log(`orphan sweep for ${id} failed: ${String(err)}`)),
   });
   host.subscribe(runners);
+  host.subscribe(
+    host.settings.onDidChange((affects) => {
+      if (affects('lifecycle.orphanIdleHours')) runners.reconfigureAll();
+    }),
+  );
   const sessions = new SessionExecutors([runners, codexRunners]);
 
   // Take back every session still running in a host, before the providers'
@@ -397,6 +453,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
       host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto')) as PermissionModeName;
     return { model, effort, permissionMode };
   };
+  /** The permission cards a runner shows as still pending, oldest first. */
+  const hostedPermissions = (handle: RunnerView) =>
+    handle.blocks.filter(
+      (b): b is Extract<RunnerView['blocks'][number], { kind: 'permission' }> => b.kind === 'permission' && b.state === 'pending',
+    );
   const runnerOwnership: RunnerOwnership = {
     owns: (id: string | undefined) => sessions.owns(id),
     // Interrupted by the last restart and not running here now, either provider.
@@ -419,6 +480,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const handle = sessions.get(id);
       return handle ? (await handle.decidePlan(requestId, approve, feedback)) === 'applied' : false;
     },
+    // Hosted sessions only: an in-process runner's prompt still reaches the
+    // hook file, which the row answers as for any session.
+    pendingPermission: (id: string | undefined) => {
+      const handle = runners.get(id);
+      if (!handle?.hosted) return undefined;
+      const ask = hostedPermissions(handle).at(-1);
+      return ask
+        ? { requestId: ask.requestId, toolName: ask.toolName, ask: { summary: ask.summary, body: ask.body, isCommand: ask.isCommand } }
+        : undefined;
+    },
     onDidChange: (listener: () => void) => sessions.onDidChange(listener),
   };
 
@@ -432,12 +503,26 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * re-checked here in case it started between the click and the confirm.
    */
   const adoptSession = async (s: AgentSession, confirm = true, signal?: AbortSignal) => {
-    const kind = adoptActionFor(s, runners.owns(s.sessionId));
+    let kind = adoptActionFor(s, runners.owns(s.sessionId));
     if (!kind || !s.cwd) return;
     if (!fs.existsSync(s.cwd)) {
       dialogs.error(`Agent Wrangler: ${s.cwd} no longer exists.`);
       return;
     }
+    // A live session host this app is not following holds it (one whose
+    // manifest this build cannot read): never taken over or resumed around
+    // it (§7.3). Stopping that host is offered instead.
+    const held = hostSupervisor?.heldBy(s.sessionId);
+    if (held && !runners.owns(s.sessionId)) {
+      await offerStopHost(held.manifest, displayLabel(s));
+      return;
+    }
+    // A `claude` whose host died is ended first, and waited for (§7.3). If
+    // that is the process this row was showing, there is no owner left to
+    // take over from: it is a plain resume.
+    const swept = await sweepSession(s.sessionId);
+    if (s.pid !== undefined && swept.swept.includes(s.pid)) kind = 'resume-here';
+    if (signal?.aborted) throw new Error('Send cancelled; your draft is preserved.');
 
     if (kind === 'adopt') {
       const choice = !confirm ? 'Take over' : await dialogs.warn(
@@ -475,11 +560,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
       // would burn the whole grace period and then SIGKILL it — the one outcome
       // that can strand a half-written transcript line. Let it run first.
         if (pause.isPaused(now.pid)) pause.resume(now.pid);
-        const outcome = await endProcess(now.pid, {
-          kill: (pid, sig) => process.kill(pid, sig),
-          isAlive: isPidAlive,
-          delay: (ms) => new Promise((r) => setTimeout(r, ms)),
-        });
+        // Checked against the start time Claude Code recorded before every signal.
+        const outcome = await endProcess(now.pid, processControl, live[0]?.procStart);
         log(`adopt ${now.sessionId}: ending pid ${now.pid} → ${outcome}`);
         if (outcome === 'refused') {
           dialogs.error(
@@ -498,10 +580,47 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // A session AW ran before comes back the way it was started; one from a
     // terminal gets the current defaults.
     const previous = sessionRegistry.get(s.sessionId);
-    const runner = runners.start({ cwd: s.cwd, resume: s.sessionId, ...claudeLaunch(previous), origin: previous?.origin });
+    const runner = await runners.resume({ cwd: s.cwd, resume: s.sessionId, ...claudeLaunch(previous), origin: previous?.origin });
     surface?.showSession(runner);
     log(`adopted ${s.sessionId} into this window`);
     return runner;
+  };
+
+  /** How AW signals a pid it means to end: start-time checked when the caller knows the start time. */
+  const processControl = {
+    kill: (pid: number, sig: 'SIGTERM' | 'SIGKILL') => process.kill(pid, sig),
+    isAlive: isPidAlive,
+    startTimeOf,
+    delay: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+  };
+
+  /**
+   * A session held by a live host this app cannot follow (§7.3: unreachable,
+   * or a manifest version it does not know). Its session must not be
+   * resumed or taken over while that host lives; the choices are to stop the
+   * host (which ends its agent the way a logout does) or to leave it.
+   */
+  const offerStopHost = async (manifest: HostManifest, label: string): Promise<void> => {
+    const choice = await dialogs.warn(
+      `${label} is held by a background session host this version of Agent Wrangler cannot talk to.`,
+      {
+        modal: true,
+        detail:
+          'It may still be working. Stopping the host ends its agent gracefully; the conversation is kept in its ' +
+          'transcript and can be resumed afterwards. Leave it to let it carry on.',
+      },
+      'Stop host',
+      'Leave',
+    );
+    if (choice !== 'Stop host' || !hostSupervisor) return;
+    const outcome = await hostSupervisor.stopHost(manifest);
+    if (outcome === 'refused') {
+      dialogs.error(`Agent Wrangler: the host holding ${label} did not stop. See the log.`);
+      return;
+    }
+    if (manifest.sessionId && !runners.owns(manifest.sessionId)) sessionRegistry.setState(manifest.sessionId, 'interrupted', 'host stopped');
+    dialogs.flash(`Agent Wrangler: stopped the host holding ${label}. Resume it when you are ready.`, 5000);
+    void store.forceRefresh();
   };
 
   /**
@@ -563,16 +682,28 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (now.pid !== undefined && pause.isPaused(now.pid)) pause.resume(now.pid);
       await runners.end(runner);
       log(`closed ${now.sessionId}: ended the runner in this window`);
+    } else if (now.provider === 'claude' && hostSupervisor?.heldBy(now.sessionId)) {
+      // A host this app cannot follow: stop the host, which ends its agent
+      // gracefully, rather than kill the agent out from under it.
+      if (now.pid !== undefined && pause.isPaused(now.pid)) pause.resume(now.pid);
+      const held = hostSupervisor.heldBy(now.sessionId)!;
+      const outcome = await hostSupervisor.stopHost(held.manifest);
+      if (outcome === 'refused') {
+        dialogs.error(`Agent Wrangler: the host holding ${label} did not stop. See the log.`);
+        return;
+      }
+      if (!runners.owns(now.sessionId)) sessionRegistry.setState(now.sessionId, 'stopped');
     } else if (now.pid !== undefined) {
       // A stopped process cannot act on SIGTERM, so ending a paused session
       // would burn the whole grace period and then SIGKILL it — the one outcome
       // that can strand a half-written transcript line. Let it run first.
       if (pause.isPaused(now.pid)) pause.resume(now.pid);
-      const outcome = await endProcess(now.pid, {
-        kill: (pid, sig) => process.kill(pid, sig),
-        isAlive: isPidAlive,
-        delay: (ms) => new Promise((r) => setTimeout(r, ms)),
-      });
+      // Checked against the start time Claude Code recorded, when it did: a
+      // pid reused since the row was drawn is never signalled.
+      const entry = now.provider === 'claude'
+        ? (await readRegistry(sessionsDir())).find((e) => e.pid === now.pid)
+        : undefined;
+      const outcome = await endProcess(now.pid, processControl, entry?.procStart);
       log(`close ${now.sessionId}: ending pid ${now.pid} → ${outcome}`);
       if (outcome === 'refused') {
         dialogs.error(
@@ -1151,6 +1282,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
         if (choice !== 'Release') return;
         if (s.pid !== undefined && pause.isPaused(s.pid)) pause.resume(s.pid);
         await runners.end(runner);
+        // The terminal's `claude --resume` is a new owner: nothing of ours may
+        // still be running the id (a host signalled as a fallback gives its
+        // agent a few seconds), so sweep and wait first (§7.3).
+        try {
+          await beforeResume(s.sessionId);
+        } catch (err) {
+          dialogs.error(`Agent Wrangler: not handed to a terminal. ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
         resumeInTerminal(s, getConfig, host.shell, dialogs);
         log(`released ${s.sessionId} to a terminal`);
       })();
@@ -1170,7 +1310,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
     },
     resume(key) {
       const s = store.get(key);
-      if (s) resumeInTerminal(s, getConfig, host.shell, dialogs);
+      if (!s) return;
+      if (s.provider !== 'claude') {
+        resumeInTerminal(s, getConfig, host.shell, dialogs);
+        return;
+      }
+      // A terminal resuming the id is a second owner like any other (§7.3).
+      void beforeResume(s.sessionId)
+        .then(() => resumeInTerminal(s, getConfig, host.shell, dialogs))
+        .catch((err) => dialogs.error(`Agent Wrangler: not resumed. ${err instanceof Error ? err.message : String(err)}`));
     },
     copyId(key) {
       const s = store.get(key);
@@ -1203,26 +1351,32 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const s = store.get(key);
       if (!s || s.provider !== 'claude') return 'unsupported';
       const expected = opts?.expectedRequestId;
+      // A session in a host is answered through the host (§6.1): its ask
+      // waits for days, where the hook gives up after ~28 minutes, and since
+      // Stage 4 the hook does not wait for hosted sessions at all, so the
+      // host is the only way in (`AGENTWRANGLER_HOSTED`). The request named is
+      // answered; with none named, only a lone pending one, so the answer
+      // cannot land on the wrong prompt.
+      const hosted = runners.get(s.sessionId);
+      if (hosted?.hosted) {
+        const pending = hostedPermissions(hosted);
+        const target = expected !== undefined ? pending.find((b) => b.requestId === expected) : pending.length === 1 ? pending[0] : undefined;
+        if (target) {
+          const outcome = await hosted.decide(target.requestId, behavior);
+          if (outcome === 'applied') {
+            log(`permission ${behavior} sent to the host running ${s.name ?? s.sessionId}`);
+            return 'applied';
+          }
+          dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
+          return outcome === 'stale' ? 'stale' : 'gone';
+        }
+      }
       // Caught here only to say the right thing: this snapshot can be a poll
       // behind, so `HookLog.decide` re-checks against the id it read off the
       // event stream, which is the one that actually decides.
       if (expected !== undefined && s.permissionRequestId !== expected) {
         dialogs.flash(`Agent Wrangler: that prompt for ${displayLabel(s)} has already been answered.`, 4000);
         return 'stale';
-      }
-      // A session in a host is answered through the host first (§6.1): its ask
-      // waits for days, where the hook gives up after ~28 minutes. Only when
-      // exactly one permission is pending, so the answer cannot land on the
-      // wrong one; otherwise the hook file, as for any session.
-      const hosted = runners.get(s.sessionId);
-      if (hosted?.hosted) {
-        const pending = hosted.blocks.filter(
-          (b): b is Extract<(typeof hosted.blocks)[number], { kind: 'permission' }> => b.kind === 'permission' && b.state === 'pending',
-        );
-        if (pending.length === 1 && (await hosted.decide(pending[0].requestId, behavior)) === 'applied') {
-          log(`permission ${behavior} sent to the host running ${s.name ?? s.sessionId}`);
-          return 'applied';
-        }
       }
       const sent = await provider.decidePermission(s.sessionId, behavior, expected);
       if (sent) {
@@ -1336,6 +1490,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       runnerOwned: (id) => runnerOwnership.owns(id),
       pendingQuestion: (id) => runnerOwnership.pendingQuestion?.(id),
       pendingPlan: (id) => runnerOwnership.pendingPlan?.(id),
+      pendingPermission: (id) => runnerOwnership.pendingPermission?.(id),
     },
     [archive, pause, runnerOwnership],
   );
@@ -1672,12 +1827,18 @@ export function createApp(host: HostServices): AgentWranglerApp {
       }
       return;
     }
-    const runner = runners.start({
-      cwd: decision.cwd,
-      resume: decision.sessionId,
-      ...claudeLaunch(candidate),
-      origin: candidate?.origin,
-    });
+    let runner: RunnerView;
+    try {
+      runner = await runners.resume({
+        cwd: decision.cwd,
+        resume: decision.sessionId,
+        ...claudeLaunch(candidate),
+        origin: candidate?.origin,
+      });
+    } catch (err) {
+      log(`not resuming ${decision.sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
     log(`resumed ${decision.sessionId} after a restart`);
     // Beside the dashboard, without taking the cursor: a window that has just
     // come back should not start by moving your focus.
@@ -1691,6 +1852,13 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * so say so instead of showing every session as estimated forever.
    */
   const checkHookHealth = async (): Promise<void> => {
+    // An older permission script would still let a decision file answer a
+    // hosted session's prompt; it is ours, so bring it up to date first.
+    try {
+      if (await refreshPermissionScript(hookLogDir())) log('permission hook script updated to this version');
+    } catch (err) {
+      log(`could not update the permission hook script: ${String(err)}`);
+    }
     const state = await currentState(hookLogDir());
     log(`hook install state: ${state.kind}${'why' in state ? ` (${state.why})` : ''}`);
     if (state.kind === 'disabled') {
@@ -1742,6 +1910,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
       // server that only closes the connection, and they keep running; with
       // `--stdio` the child goes, and them with it.
       await runners.endAllForQuit(withinMs, opts);
+    },
+    onSystemResume() {
+      log('woke from sleep: rechecking session hosts and the remote connection');
+      runners.wakeAll();
+      transport?.wake?.();
+    },
+    busyAgents() {
+      return runners.busyCount() + codexRunners.list().filter((h) => h.lifecycle === 'running').length;
     },
     restartCodexServer,
     runnerOwnership,

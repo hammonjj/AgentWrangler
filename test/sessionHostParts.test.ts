@@ -26,7 +26,8 @@ describe('agentEnv', () => {
       XPC_SERVICE_NAME: 'application.x',
       EMPTY: undefined,
     });
-    expect(env).toEqual({ PATH: '/usr/bin', HOME: '/Users/test' });
+    // AGENTWRANGLER_HOSTED is added: the permission hook reads it (Stage 4).
+    expect(env).toEqual({ PATH: '/usr/bin', HOME: '/Users/test', AGENTWRANGLER_HOSTED: '1' });
   });
 });
 

@@ -649,7 +649,9 @@ function readOnlyReason(
     if (runner.lifecycle === 'error') return 'This session stopped with an error.';
     // A hosted session keeps running while the link is down; only typing waits.
     if (runner.lifecycle === 'connecting') return 'Reconnecting to the background process running this session…';
-    if (runner.lifecycle === 'unreachable') return 'The background process running this session is not responding.';
+    if (runner.lifecycle === 'unreachable') {
+      return 'The background process running this session is not responding. Close the session to stop it; the conversation is kept and can be resumed.';
+    }
     return undefined;
   }
   if (canAdoptCodex) return 'Take over this Codex conversation to type here.';

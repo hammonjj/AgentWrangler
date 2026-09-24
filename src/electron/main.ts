@@ -19,7 +19,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { app, Notification } from 'electron';
+import { app, Notification, powerMonitor, powerSaveBlocker } from 'electron';
 import { createApp } from '../app/createApp';
 import { DictationSetupError, defaultModelPath } from '../core/dictation';
 import { agentCount, quitIntentSource, quitPolicy, type QuitSource } from '../core/session/quitPolicy';
@@ -224,6 +224,28 @@ void app.whenReady().then(() => {
   // still running and still watching sessions, so this is a show, not a start.
   app.on('activate', () => window?.open());
 
+  // ---- Sleep (playbook §8 "Machine sleeps") ----
+  //
+  // On wake, links and the Discord gateway are rechecked at once rather than
+  // at their next heartbeat (spike M2: a sleep leaves no timer gap to detect
+  // it by). While an agent is mid-turn the machine is kept from *idle* sleep,
+  // so a long turn is not suspended because nobody touched the keyboard; a
+  // lid close or an explicit sleep still sleeps.
+  powerMonitor.on('resume', () => wrangler.onSystemResume());
+  let sleepBlocker: number | undefined;
+  const syncSleepBlocker = () => {
+    const busy = wrangler.busyAgents() > 0;
+    if (busy && sleepBlocker === undefined) {
+      sleepBlocker = powerSaveBlocker.start('prevent-app-suspension');
+      log('an agent is working: holding off idle sleep');
+    } else if (!busy && sleepBlocker !== undefined) {
+      powerSaveBlocker.stop(sleepBlocker);
+      sleepBlocker = undefined;
+      log('no agent is working: idle sleep allowed again');
+    }
+  };
+  host.subscribe(wrangler.sessions.onDidChange(syncSleepBlocker));
+
   window.open();
   wrangler.start();
 
@@ -275,7 +297,10 @@ void app.whenReady().then(() => {
       if (decision.announceRunning > 0 && Notification.isSupported()) {
         new Notification({
           title: `${agentCount(decision.announceRunning)} keep running`,
-          body: 'Agent Wrangler reconnects when you open it again. ⌥⌘Q quits and stops them.',
+          // The accepted risk of §8.1: nothing enforces the usage cap while the app is shut.
+          body:
+            'Agent Wrangler reconnects when you open it again. ⌥⌘Q quits and stops them.' +
+            (wrangler.getConfig().autoPauseEnabled ? ' Auto-pause is off until then.' : ''),
           silent: true,
         }).show();
         // A moment for the notification to be handed to the system before the process goes.

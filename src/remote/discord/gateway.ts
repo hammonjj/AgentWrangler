@@ -173,6 +173,25 @@ export class DiscordGateway implements Disposable {
     this.setReady(false);
   }
 
+  /**
+   * The machine woke from sleep (`powerMonitor` `resume`). The socket is
+   * almost certainly dead and would only be found so at the next heartbeat,
+   * ~41 s away (§8 "Machine sleeps"). Drop it and dial again at once,
+   * resuming the session so no event is lost. A reconnect already sleeping on
+   * its backoff is superseded, not doubled.
+   */
+  wake(): void {
+    if (!this.wantOpen || this.disposed) return;
+    this.log('woke from sleep; reconnecting now');
+    this.epoch++; // a backoff sleeping across the wake is stale
+    this.reconnecting = false;
+    this.attempt = 0;
+    // 4000: not a normal closure, so the session stays resumable.
+    this.teardown(4000);
+    this.setReady(false);
+    void this.open();
+  }
+
   dispose(): void {
     this.epoch++;
     this.disposed = true;

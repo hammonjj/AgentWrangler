@@ -19,20 +19,23 @@ import { ClaudeSdkSession, type QueryFn } from '../claude/runner/claudeSdkSessio
 import { startTimeOf } from '../core/procStart';
 import { writeJsonAtomic } from '../core/session/manifestFile';
 import type { HostBoot, HostEvent, HostManifest } from '../shared/sessionProtocol';
-import { CONTROL_OPS, HOST_PROTOCOL_VERSION } from '../shared/sessionProtocol';
+import { CAPABILITY_CONFIGURE_IDLE, CONTROL_OPS, HOST_PROTOCOL_VERSION, backgroundTaskCount } from '../shared/sessionProtocol';
 import { agentEnv } from './env';
-import { fakeQuery } from './fakeQuery';
+import { fakeQuery, spawnFakeAgent } from './fakeQuery';
+import { IdleRule, monotonicMs } from './idleRule';
 import { HostServer } from './server';
 
 declare const AW_SDK_VERSION: string | undefined;
 const SDK_VERSION = typeof AW_SDK_VERSION === 'string' ? AW_SDK_VERSION : 'unknown';
 
-/** After the agent exits, how long to wait for a client to take the news before exiting anyway. */
-const DRAIN_MS = 60_000;
+/** After the agent exits, how long to wait for a client to take the news before exiting anyway. Tests shorten it. */
+const DRAIN_MS = Number(process.env.AW_SESSION_HOST_DRAIN_MS) || 60_000;
 /** On a signal, how long the agent gets after SIGTERM before SIGKILL. */
 const SIGNAL_GRACE_MS = 5000;
 /** How much of the agent's stderr an exit record keeps. */
 const STDERR_TAIL_CHARS = 2000;
+/** How often the idle-orphan rule looks. Tests shorten it. */
+const IDLE_CHECK_MS = Number(process.env.AW_SESSION_HOST_IDLE_CHECK_MS) || 60_000;
 
 function log(hostId: string, msg: string): void {
   process.stdout.write(`[${new Date().toISOString()}] host ${hostId} pid ${process.pid}: ${msg}\n`);
@@ -129,6 +132,16 @@ async function main(): Promise<void> {
     return child as unknown as SpawnedProcess;
   };
   const sdkOptions: Partial<Options> = fake ? {} : { env: agentEnv(process.env), spawnClaudeCodeProcess: spawnAgent };
+  // Orphan tests: a real process standing in for `claude`, so killing the
+  // host leaves something for the core's sweep to find (CP2 open item).
+  const fakeSessionsDir = fake ? process.env.AW_FAKE_CLAUDE_SESSIONS_DIR : undefined;
+  if (fakeSessionsDir) {
+    const child = spawnFakeAgent(fakeSessionsDir, boot.launch.resume ?? boot.launch.sessionId ?? '', startTimeOf);
+    agent = child;
+    manifest.agentPid = child.pid;
+    manifest.agentStartTime = child.pid ? startTimeOf(child.pid) : undefined;
+    child.once('exit', (code, signal) => (agentExit = { code, signal }));
+  }
 
   const session = new ClaudeSdkSession(
     {
@@ -142,10 +155,21 @@ async function main(): Promise<void> {
     { query: (fake ? fakeQuery : sdkQuery) as QueryFn, binary: boot.launch.binary, log: say, sdkOptions },
   );
 
+  const idle = new IdleRule(0, monotonicMs());
+  idle.setHours(boot.orphanIdleHours);
+  /** Set while the idle-orphan rule is ending the session, for the exit record. */
+  let idleEnding = false;
+
   const server = new HostServer({
     session,
     token: boot.token,
     log: say,
+    configure: (p) => {
+      if ('orphanIdleHours' in p) {
+        idle.setHours(p.orphanIdleHours);
+        say(`idle-orphan rule: ${idle.currentHours > 0 ? `${idle.currentHours} h` : 'off'}`);
+      }
+    },
     describe: () => ({
       hostId: boot.hostId,
       hostBuild: boot.hostBuild,
@@ -157,7 +181,7 @@ async function main(): Promise<void> {
       agentStartTime: manifest.agentStartTime,
       cwd: boot.launch.cwd,
       startedAt,
-      capabilities: ['wire.largeImagesOmitted', ...CONTROL_OPS.map((op) => `control.${op}`)],
+      capabilities: ['wire.largeImagesOmitted', CAPABILITY_CONFIGURE_IDLE, ...CONTROL_OPS.map((op) => `control.${op}`)],
     }),
   });
   // What only the host knows goes into the exit record: how the agent process
@@ -166,6 +190,7 @@ async function main(): Promise<void> {
     ...exit,
     ...(agentExit && exit.code === undefined && exit.signal === undefined ? agentExit : {}),
     ...(stderrTail && exit.reason !== 'ended' && exit.reason !== 'stopped' ? { stderrTail } : {}),
+    ...(idleEnding && exit.reason === 'stopped' ? { trigger: 'idleTimeout' as const } : {}),
   });
   await server.listen(boot.socketPath);
   // Only once listening: a manifest is a promise that the socket answers.
@@ -204,6 +229,8 @@ async function main(): Promise<void> {
       }
     }
     if (e.type === 'exit') {
+      // The fake agent has no SDK to end it; it goes when the session does.
+      if (fakeSessionsDir && agent && agent.exitCode === null && agent.signalCode === null) agent.kill('SIGTERM');
       // The tombstone: how the core tells "ended" from "lost" after a restart.
       manifest.exit = { ...e.exit, at: Date.now(), lastSeq: e.seq };
       writeManifest();
@@ -212,6 +239,24 @@ async function main(): Promise<void> {
     }
   };
   session.subscribe(session.snapshot().seq, onEvent);
+
+  // The idle-orphan rule (§7.5): park an idle session nobody has connected to
+  // for the configured hours. Never a busy or asking one.
+  const idleTimer = setInterval(() => {
+    const snap = session.snapshot();
+    const due = idle.check(monotonicMs(), {
+      clients: server.clients,
+      state: snap.state,
+      pendingAsks: snap.pendingAsks.length,
+      backgroundTasks: backgroundTaskCount(snap.latest),
+    });
+    if (!due) return;
+    clearInterval(idleTimer);
+    idleEnding = true;
+    say(`no client for ${idle.currentHours} h and the session is idle: ending it (it can be resumed)`);
+    void session.end();
+  }, IDLE_CHECK_MS);
+  idleTimer.unref();
 
   const drainThenExit = async (exitSeq: number) => {
     const deadline = Date.now() + DRAIN_MS;

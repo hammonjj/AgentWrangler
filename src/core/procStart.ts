@@ -30,6 +30,41 @@ export function startTimeOf(pid: number): string | undefined {
   }
 }
 
+/**
+ * `ps -o ppid= -p <pid>`, or undefined when there is no such process. A
+ * process whose parent died is reparented to launchd, so `1` means orphaned.
+ */
+export function parentPidOf(pid: number): number | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    const out = execFileSync('/bin/ps', ['-o', 'ppid=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2000,
+    }).trim();
+    const ppid = Number(out);
+    return out.length > 0 && Number.isInteger(ppid) ? ppid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** When the machine last booted (ms epoch), from `sysctl kern.boottime`; undefined if unreadable. */
+export function bootTimeMs(): number | undefined {
+  try {
+    const out = execFileSync('/usr/sbin/sysctl', ['-n', 'kern.boottime'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2000,
+    });
+    // `{ sec = 1727212345, usec = 123456 } Thu Sep 24 …`
+    const m = /sec\s*=\s*(\d+)/.exec(out);
+    return m ? Number(m[1]) * 1000 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Alive, and (when a start time was recorded) the same process that recorded it. */
 export function isSameProcessAlive(pid: number | undefined, recordedStart: string | undefined): boolean {
   if (pid === undefined || !Number.isInteger(pid) || pid <= 0) return false;

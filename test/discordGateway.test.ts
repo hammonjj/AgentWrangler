@@ -516,3 +516,39 @@ describe('DiscordGateway', () => {
     gateway.dispose();
   });
 });
+
+describe('DiscordGateway.wake (the machine woke from sleep)', () => {
+  it('drops the connection and resumes on a new one at once, without backoff', async () => {
+    const h = build();
+    await h.gateway.connect();
+    const first = h.latest();
+    first.receive(HELLO);
+    await tick();
+    first.receive(ready('sess-9'));
+    const sleepsBefore = h.sleeps.length;
+
+    h.gateway.wake();
+    await tick();
+    await tick();
+    expect(first.closedWith).toEqual([4000]); // not 1000: the session stays resumable
+    expect(h.sockets).toHaveLength(2);
+    expect(h.gateway.connected).toBe(false);
+    // No backoff sleep before dialling again.
+    expect(h.sleeps.slice(sleepsBefore).filter((ms) => ms >= 1000)).toEqual([]);
+
+    const second = h.latest();
+    second.receive(HELLO);
+    await tick();
+    expect(second.lastOf(6)?.d).toMatchObject({ session_id: 'sess-9' }); // RESUME, not IDENTIFY
+    expect(h.liveTimers()).toBeLessThanOrEqual(1);
+    h.gateway.dispose();
+  });
+
+  it('does nothing when the gateway is not meant to be open', async () => {
+    const h = build();
+    h.gateway.wake();
+    await tick();
+    expect(h.sockets).toHaveLength(0);
+    h.gateway.dispose();
+  });
+});
