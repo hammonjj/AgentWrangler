@@ -148,10 +148,24 @@ Exactly one primary type label:
   technical value.
 - `chore` — routine maintenance, configuration, dependency, build, or housekeeping.
 - `documentation` — documentation-only work.
+- `spike` — a time-boxed investigation or prototype whose output is a decision, not shipped code.
+- `testing` — test coverage or test infrastructure, with no behaviour change.
 - `needs-info` — supplementary; may accompany a primary type when important info is missing.
 
 Never apply both `feature` and `improvement`; pick the best fit. Do not use the legacy
 `enhancement` label for new issues.
+
+Topic labels may be added alongside the one type label:
+
+- `orchestration` — the intelligent-orchestration initiative (epic #24,
+  `docs/plans/intelligent-orchestration.md`).
+- `telemetry` — execution telemetry, usage attribution, analytics.
+- `local-model` — local inference models.
+- `future` — deliberately deferred behind a gate stated in the issue. Leave it in `Inbox`; do
+  not groom it into `Ready` until the gate is met.
+
+Orchestration phases are tracked as milestones (`Orchestration P0 · Foundations` …
+`Orchestration · Future`). Give a new orchestration issue the milestone of its phase.
 
 Priority (conservative; default `P2 — Medium` when uncertain):
 
