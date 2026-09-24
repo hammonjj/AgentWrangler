@@ -791,7 +791,8 @@ its state. It adds `connecting` and `unreachable`, which `RunnerLifecycle` lacks
   resume, with zero misses counted. A killed host was declared unreachable after exactly 3 misses.
   Schedule pings with a recursive `setTimeout`, not `setInterval`, so a wake doesn't fire a burst
   of missed ticks. The elapsed-time check (`gap > interval × 3` ⇒ resume) is a useful cross-check
-  alongside `powerMonitor` `resume`.
+  alongside `powerMonitor` `resume`, but only for a frozen process: a real sleep leaves almost no
+  gap, because the monotonic clock stops too (S2 M2, §11.10). `resume` is the wake signal.
 
 ### 9.9 Multiple clients
 
@@ -1027,7 +1028,22 @@ gets several writers, or needs fleet-level queries.
     menu quit, an `osascript` quit, SIGTERM, `kill -9` and a crash of the core, and a full
     install (quit, `rm -rf`, `cp -R` of a new build). The new build reattached with the token
     and ran turns on the same `claude`. One host survived nine core deaths across two builds.
-    Sleep/wake and logout are manual procedures M2 and M3 in the S2 write-up, still pending.
+    **Manual procedures, run 2026-09-24:**
+    - **M1 passed.** A real ⌘Q logged `source=menu` and Dock → Quit logged `UNFLAGGED`; the host
+      survived both (reparented to launchd) and answered a turn.
+    - **M2 passed.** Across ~100 s of sleep, `powerMonitor` logged `suspend` then `resume`, and
+      the core, host and `claude` all survived and answered a turn. **Finding:** the host's
+      longest 1 s-timer gap was ~31 s, not the ~100 s asleep. Node's monotonic clock does not
+      advance during sleep, so a timer gap cannot detect a sleep. That is right for idle
+      timers (§7.5) and heartbeat misses (§9.8), but wake detection must use `powerMonitor`
+      `resume`; the `gap > interval × 3` heuristic is only a cross-check for a frozen process.
+      A turn in flight across the sleep was not tested.
+    - **M3 (logout) deferred.** James could not log out; assumed to behave as the SIGTERM proxy
+      measured (graceful host exit, `claude` gone in ~0.8–1.3 s). Revisit if a logout ever leaves
+      an orphan or an unexpected Interrupted row.
+    - The procedure must create `/tmp/aw-spike-s2/proj` before `spawnHost`. Without it the SDK
+      reports "native binary … failed to launch"; the real cause is the missing cwd. Worth
+      remembering for the host: a missing `cwd` surfaces as a misleading binary error.
 
     **Quit source (S2, U4).** Electron 44 gives no reason on `before-quit`/`will-quit`/`quit`.
     - **Electron turns SIGTERM into a graceful quit itself**, so `before-quit` teardown already
@@ -1038,7 +1054,8 @@ gets several writers, or needs fleet-level queries.
     - Anything unflagged is external: `osascript`, Dock → Quit, logout.
     - `install-app.sh` should announce itself (a `run/quit-intent` marker, later a core-socket
       call) rather than be inferred.
-    - Telling logout from `osascript` via `powerMonitor` `'shutdown'` is unverified (M3).
+    - Telling logout from `osascript` via `powerMonitor` `'shutdown'` is unverified (M3,
+      deferred).
     - With detached hosts no quit source kills a hosted session. The source only decides the UI.
 
 ---
@@ -1337,8 +1354,9 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
   - Start-time guards (`endProcess`, supervisor).
   - The orphan-`claude` sweep, as amended in §7.3: before every resume or adopt, with the
     ppid/`procStart`/manifest identity check and wait-for-exit.
-  - S2's manual procedures M1–M3 (real ⌘Q and Dock Quit, sleep/wake, logout), run once and
-    recorded before CP3.
+  - S2's manual procedures: M1 and M2 passed on 2026-09-24 (§11.10). M3 (logout) is deferred;
+    run it once on the real hosts during the soak if a logout can be spared, otherwise watch
+    for orphans or unexpected Interrupted rows after logouts.
   - Exit records, drain and tombstone GC.
   - The idle-orphan rule.
   - Bounded-drift migration on idle send (§7.4).
@@ -1591,8 +1609,9 @@ are already written into the sections named.
 
 **Still unmeasured, and where each is due:**
 
-- S2 manual procedures M1 (real ⌘Q, Dock Quit), M2 (sleep/wake) and M3 (logout): before the
-  Stage 4 default flip (CP3). M4 (the TCC dialog) is moot on certificate-signed builds; the
+- S2 manual procedures: **M1 (real ⌘Q, Dock Quit) and M2 (sleep/wake) passed on 2026-09-24**
+  (§11.10). M3 (logout) is deferred and assumed to match the SIGTERM proxy; revisit at CP3 or if
+  a logout misbehaves. M4 (the TCC dialog) is moot on certificate-signed builds; the
   Stage 3 re-run replaces it.
 - A certificate-signed clone surviving an install with `~/Documents` access intact: Stage 3.
 - A `thread/read` across the Codex writer lock, and `thread_unload_delay_secs`: Stage 5, non-blocking.
@@ -1609,7 +1628,8 @@ are already written into the sections named.
 - **Stage 3 (#14):** host signal handling and `end` per §7.1; env strips `__CFBundleIdentifier`
   and `XPC_SERVICE_NAME` too; clone re-signed; the signed-clone survival check; no large-frame
   `JSON.parse` on the main thread in the same tick as UI work.
-- **Stage 4 (#15):** the sweep per §7.3, at every resume or adopt; M1–M3.
+- **Stage 4 (#15):** the sweep per §7.3, at every resume or adopt; M3 if a logout can be spared.
+  Wake detection uses `powerMonitor` `resume` (M2: a sleep leaves no timer gap).
 - **Stage 5 (#17):** rewritten from S4 (it predated it).
 
 ---
@@ -1883,8 +1903,8 @@ The gate #11 is itself blocked by #5–#8.
 |---|---|---|---|---|---|
 | U1 | Does `claude` exit promptly on stdin EOF mid-tool, mid-ask, with background shells? Can it orphan? | Orphans hold the session id and corrupt resumes | S1 | yes (CP0) | **Answered: it orphans for the rest of its turn**, and the CLI allows a second owner (silent transcript fork). Sweep is sufficient with four amendments (§11.5). Follow-up: the `PermissionRequest` hook's effect on a mid-ask orphan. `spikes/s1-runner-death.md` |
 | U2 | Do SDK message `uuid`s match transcript entries? | Thin-host reattach dedupe | S1 | yes | **Yes** for `assistant`/`user`, one direction only; host sets `uuid` on sends (§11.5) |
-| U3 | Does a detached host from an APFS-cloned, renamed runtime survive bundle replacement? TCC? Code signature? | Update survivability | S2 | yes | **Go.** Survived every unattended scenario including a full install; TCC access kept; runs ad-hoc but fails static `codesign --verify` (§11.7). Sleep/wake and logout manual (M2, M3). `spikes/s2-detached-host.md` |
-| U4 | Can a menu quit be told apart from an Apple Event quit and SIGTERM in Electron 44? | Non-blocking installs, logout | S2 | yes (for Stage 2) | **Yes, by flagging:** custom Quit item → `menu`; SIGTERM handler installed in `whenReady` → `signal`; unflagged → external; install script announces itself (§11.10). Real ⌘Q pending (M1) |
+| U3 | Does a detached host from an APFS-cloned, renamed runtime survive bundle replacement? TCC? Code signature? | Update survivability | S2 | yes | **Go.** Survived every unattended scenario including a full install; TCC access kept; runs ad-hoc but fails static `codesign --verify` (§11.7). Sleep/wake passed (M2); logout deferred (M3). `spikes/s2-detached-host.md` |
+| U4 | Can a menu quit be told apart from an Apple Event quit and SIGTERM in Electron 44? | Non-blocking installs, logout | S2 | yes (for Stage 2) | **Yes, by flagging:** custom Quit item → `menu`; SIGTERM handler installed in `whenReady` → `signal`; unflagged → external; install script announces itself (§11.10). Real ⌘Q and Dock Quit confirmed (M1, 2026-09-24) |
 | U5 | Does safeStorage re-prompt after an ad-hoc rebuild? | Token storage choice | S2 | no (fallback exists) | **Yes, and it blocks the main thread.** Host tokens go in 0600 files (§10, §12). The Discord token has the same problem |
 | U6 | UDS throughput and backpressure behaviour at streaming rates | Protocol sizing | S3 | no | **Go.** 4 MiB queue / 16 MiB ring / 10 s × 3 heartbeat stand; `messages` paging rules added (§9.4, §9.7, §9.8). `spikes/s3-socket-protocol.md` |
 | U7 | Codex pending approvals after a client disconnect | Codex survivability claims | S4 | for Stage 5 only | **Answered: they survive.** Held server-side with no timeout, re-sent with the same id after `thread/resume`; lost only if the server dies. Option (a) chosen; transport is WebSocket over UDS; Stage 5 amended (§11.8, §13). `spikes/s4-codex-restart.md` |
