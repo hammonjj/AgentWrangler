@@ -274,6 +274,17 @@ function pausedChip(s: SessionDTO): string {
     : '';
 }
 
+/**
+ * Another live agent is in this checkout: one index, one working tree, so a
+ * commit by either can carry the other's edits. Warning only.
+ */
+function sharedChip(s: SessionDTO): string {
+  const shared = s.sharedCheckout;
+  if (!shared) return '';
+  const title = `Shares this checkout with ${shared.others.length === 1 ? 'another live session' : `${shared.others.length} other live sessions`}:\n${shared.others.map((o) => `• ${o}`).join('\n')}\n${shared.root}\nOne index, one working tree: a commit by either can pick up the other's edits. Give each its own worktree.`;
+  return `<span class="chip shared" title="${esc(title)}">shared checkout</span>`;
+}
+
 function statusChip(s: SessionDTO): string {
   if (s.status === 'blocked' && s.blockedReason) {
     return `<span class="chip blk">${esc(capitalize(`needs ${s.blockedReason}`))}</span>`;
@@ -611,7 +622,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${pausedChip(s)}${kindChip}${statusChip(s)}</span></div>
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${pausedChip(s)}${sharedChip(s)}${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -1005,8 +1016,16 @@ const GLOBAL_TITLE = 'No project — runs in a scratch folder of its own';
 function renderLauncher(): void {
   const cur = currentProject();
   const global = cur === GLOBAL_PROJECT_DIR;
-  projName.textContent = global ? 'Global' : (projects.find((p) => p.dir === cur)?.name ?? cur);
-  projBtn.title = global ? GLOBAL_TITLE : cur;
+  const picked = global ? undefined : projects.find((p) => p.dir === cur);
+  projName.textContent = global ? 'Global' : (picked?.name ?? cur);
+  // Starting a second agent in an occupied checkout is allowed, just worth knowing.
+  const occupiedBy = picked?.occupiedBy ?? [];
+  projBtn.classList.toggle('occupied', occupiedBy.length > 0);
+  projBtn.title = global
+    ? GLOBAL_TITLE
+    : occupiedBy.length > 0
+      ? `${cur}\n\nAlready in this checkout:\n${occupiedBy.map((o) => `• ${o}`).join('\n')}\nA new conversation here would share their index and working tree.`
+      : cur;
   newBtn.disabled = false;
   const starts = launchProvider === 'openai' ? 'Codex' : 'Claude Code';
   newBtn.title = global

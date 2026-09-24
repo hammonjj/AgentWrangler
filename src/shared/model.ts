@@ -104,6 +104,13 @@ export interface AgentSession {
   worktree?: string;
   /** Absolute path of that worktree's root, for the cell's tooltip. */
   worktreePath?: string;
+  /**
+   * Other live sessions are working in this session's checkout — the same
+   * main checkout or the same linked worktree — so they share one index and
+   * one working tree, and a commit by one can pick up the other's edits.
+   * `others` are their display titles (host decorates; warning only).
+   */
+  sharedCheckout?: { root: string; others: string[] };
   /** Wire id of the model behind the latest reply, e.g. `claude-opus-5`; the Model column shortens it. */
   model?: string;
   status: SessionStatus;
@@ -262,6 +269,11 @@ export interface ProjectDTO {
   lastUsedAt?: number;
   /** Starred in the dropdown, which pins it to the top. Absent = not a favourite. */
   favourite?: boolean;
+  /**
+   * Titles of live sessions already working in this folder's checkout, so the
+   * launcher can say so before a new one joins them (host decorates). Absent = none.
+   */
+  occupiedBy?: string[];
 }
 
 /**

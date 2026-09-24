@@ -55,6 +55,30 @@ function fromGitFile(dir: string, dotGit: string): CheckoutInfo {
   return { repoRoot: worktree.mainRepo, worktree: dir, branch: branchOf(path.join(resolved, 'HEAD')) };
 }
 
+/** Bounded like the worktree cache, for the same reason. */
+const MAX_ROOT_CACHE = 512;
+const rootCache = new Map<string, string | undefined>();
+
+/**
+ * The checkout root a folder is in — its linked worktree's root, else its
+ * repository's — memoized per folder, because the dashboard asks for every
+ * live row on every snapshot. Undefined outside git.
+ */
+export function checkoutRootFor(cwd: string | undefined): string | undefined {
+  if (!cwd) return undefined;
+  if (rootCache.has(cwd)) return rootCache.get(cwd);
+  const info = checkoutFor(cwd);
+  const root = info.worktree ?? info.repoRoot;
+  if (rootCache.size >= MAX_ROOT_CACHE) rootCache.clear();
+  rootCache.set(cwd, root);
+  return root;
+}
+
+/** Forget every root — the manual Refresh, alongside `clearWorktreeCache`. */
+export function clearCheckoutRootCache(): void {
+  rootCache.clear();
+}
+
 /** `ref: refs/heads/<branch>` → `<branch>`; a detached HEAD (a bare sha) has none. */
 export function parseHead(contents: string): string | undefined {
   const m = /^ref:\s*refs\/heads\/(.+?)\s*$/m.exec(contents);

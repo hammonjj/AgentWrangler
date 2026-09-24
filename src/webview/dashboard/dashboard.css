@@ -149,6 +149,14 @@ body {
   flex: 0 0 auto;
   opacity: 0.7;
 }
+/* A live agent is already in the picked folder's checkout. The tooltip says who. */
+#bar .projbtn.occupied {
+  border-color: var(--aw-waiting);
+}
+#bar .projbtn.occupied #projname::before {
+  content: '⚠ ';
+  color: var(--aw-waiting);
+}
 
 /* Anchored to #bar, which is already positioned, so no measured offset has to
    be written into a style attribute — the CSP drops those. Capped to the same
@@ -946,6 +954,14 @@ button.pbtn:disabled {
   border-color: var(--aw-paused);
   background: var(--aw-paused);
   color: var(--vscode-editor-background);
+}
+
+/* Another live agent is in this checkout. Outlined in the waiting colour: it is
+   a heads-up, not a state the agent is in. */
+.chip.shared {
+  border-color: var(--aw-waiting);
+  color: var(--aw-waiting);
+  white-space: nowrap;
 }
 
 /* Cut off by a restart, conversation intact. Outlined, not filled: it asks for

@@ -8,7 +8,9 @@ import { withHostedPermission, type HostedPermission } from '../core/sessionView
 import type { ModelCatalogService } from '../core/modelCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
-import type { HookHealth, ProjectDTO } from '../shared/model';
+import { displayTitle, GLOBAL_PROJECT_DIR, type HookHealth, type ProjectDTO } from '../shared/model';
+import { checkoutRootFor } from '../core/checkout';
+import { occupantsOf, occupiesCheckout, sharedCheckouts, type CheckoutEntry } from '../core/sharedCheckout';
 import type { QuestionView } from '../shared/conversation';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
@@ -182,7 +184,7 @@ export class DashboardHost {
     await this.pause.refresh(livePids);
     if (seq !== this.snapshotSeq) return; // superseded while we waited
 
-    const sessions = raw.map((row) => {
+    const decorated = raw.map((row) => {
       const s = withHostedPermission(row, this.runners.pendingPermission?.(row.sessionId));
       // Ask the runner first: its child processes are descendants of this
       // extension host, so the process table would call them panel sessions.
@@ -205,6 +207,23 @@ export class DashboardHost {
           undefined,
         openTarget: openTargetFor(),
       };
+    });
+    // Two live agents in one checkout share an index and a working tree. Worked
+    // out here, after `runnerOwned`, because that is what makes a Codex thread live.
+    const occupants: CheckoutEntry[] = decorated.filter(occupiesCheckout).map((s) => ({
+      key: s.key,
+      root: s.worktreePath ?? checkoutRootFor(s.cwd),
+      label: displayTitle(s),
+    }));
+    const shared = sharedCheckouts(occupants);
+    const sessions = decorated.map((s) => {
+      const hit = shared.get(s.key);
+      return hit ? { ...s, sharedCheckout: hit } : s;
+    });
+    const projects = this.projects.value.map((p) => {
+      if (p.dir === GLOBAL_PROJECT_DIR) return p;
+      const occupiedBy = occupantsOf(checkoutRootFor(p.dir), occupants);
+      return occupiedBy.length > 0 ? { ...p, occupiedBy } : p;
     });
     const msg: HostToDashboard = {
       type: 'snapshot',
@@ -232,7 +251,7 @@ export class DashboardHost {
           effort: this.settings.get<string>('codexRunner.effort', ''),
         },
       },
-      projects: this.projects.value.length > 0 ? this.projects.value : undefined,
+      projects: projects.length > 0 ? projects : undefined,
     };
     void this.webview.postMessage(msg);
   }
