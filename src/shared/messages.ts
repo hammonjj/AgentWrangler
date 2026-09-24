@@ -132,6 +132,8 @@ export type DashboardToHost =
   | { type: 'browseProject' }
   /** The X on a dropdown row: stop offering this folder. Browsing back to it undoes this. */
   | { type: 'removeProject'; dir: string }
+  /** The star on a dropdown row: pin this folder to the top of the list, or unpin it. */
+  | { type: 'setProjectFavourite'; dir: string; favourite: boolean }
   /** The dropdown was opened — re-scan, since a folder may have been used elsewhere since the last snapshot. */
   | { type: 'refreshProjects' }
   /**

@@ -221,6 +221,37 @@ body {
   opacity: 1;
   color: var(--aw-stuck);
 }
+/* The star: same always-laid-out box as the X. An unstarred one appears on
+   hover like the X; a starred one always shows, since it is a state and not
+   just an action. */
+.projmenu .pmfav {
+  flex: 0 0 auto;
+  width: 20px;
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.95em;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+}
+.projmenu .pmrow:hover .pmfav,
+.projmenu .pmfav:focus-visible {
+  opacity: 0.7;
+}
+.projmenu .pmfav.on {
+  opacity: 1;
+  color: var(--vscode-charts-yellow, #e2c08d);
+}
+.projmenu .pmfav:hover {
+  opacity: 1;
+}
+.projmenu .pmrow.favlast {
+  margin-bottom: 3px;
+  box-shadow: 0 1px 0 var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
+}
 .projmenu .pmempty {
   padding: 4px 6px;
   color: var(--vscode-descriptionForeground);

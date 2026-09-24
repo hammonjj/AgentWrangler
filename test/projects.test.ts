@@ -8,6 +8,7 @@ import {
   rankProjects,
   readConfigProjectDirs,
   readProjects,
+  type FavouriteProjects,
   type HiddenProjects,
 } from '../src/claude/projects';
 import { slugForCwd } from '../src/claude/paths';
@@ -198,9 +199,14 @@ describe('ProjectsService', () => {
   /** Always isolated: a service pointed at the real `~/.claude.json` would read the machine's own projects. */
   function service(
     extra: () => { workspaceFolders: string[]; sessions: { dir: string; lastUsedAt?: number }[] },
-    opts: { ttlMs?: number; hidden?: HiddenProjects } = {},
+    opts: { ttlMs?: number; hidden?: HiddenProjects; favourites?: FavouriteProjects; root?: string } = {},
   ) {
-    return new ProjectsService(extra, { ...opts, file: configWith([]), root: projectsRoot([]) });
+    return new ProjectsService(extra, { root: projectsRoot([]), ...opts, file: configWith([]) });
+  }
+
+  function favSet(initial: string[] = []): FavouriteProjects & { value: Set<string> } {
+    const value = new Set(initial);
+    return { value, favourite: (d) => void value.add(d), unfavourite: (d) => void value.delete(d) };
   }
 
   /** The storage-free half of `HiddenProjectsService`, which lives in core and needs none of it here. */
@@ -321,5 +327,79 @@ describe('ProjectsService', () => {
     await svc.refresh({ force: true });
     svc.remove(dir);
     expect(fired).toBe(1);
+  });
+
+  /** Three existing folders with transcripts stamped newest → oldest: new, mid, old. */
+  function threeByRecency() {
+    const base = tmp();
+    const dirs = { new: path.join(base, 'new'), mid: path.join(base, 'mid'), old: path.join(base, 'old') };
+    for (const d of Object.values(dirs)) fs.mkdirSync(d);
+    const root = projectsRoot([
+      { dir: dirs.new, mtimeMs: 9_000_000 },
+      { dir: dirs.mid, mtimeMs: 5_000_000 },
+      { dir: dirs.old, mtimeMs: 1_000_000 },
+    ]);
+    return { dirs, root, extra: () => ({ workspaceFolders: Object.values(dirs), sessions: [] }) };
+  }
+
+  it('lists stored favourites first on a scan, the rest by recency', async () => {
+    const { dirs, root, extra } = threeByRecency();
+    const svc = service(extra, { root, favourites: favSet([dirs.old]) });
+
+    const list = await svc.refresh({ force: true });
+    expect(list.map((p) => p.name)).toEqual(['old', 'new', 'mid']);
+    expect(list[0].favourite).toBe(true);
+  });
+
+  it('re-orders the cache at once when a folder is starred, and fires', async () => {
+    const { dirs, root, extra } = threeByRecency();
+    const svc = service(extra, { root, favourites: favSet() });
+    let fired = 0;
+    svc.onDidChange(() => fired++);
+    await svc.refresh({ force: true });
+
+    svc.setFavourite(dirs.mid, true);
+    expect(svc.value.map((p) => p.name)).toEqual(['mid', 'new', 'old']);
+    expect(fired).toBe(1);
+
+    svc.setFavourite(dirs.mid, false);
+    expect(svc.value.map((p) => p.name)).toEqual(['new', 'mid', 'old']);
+  });
+
+  it('keeps a favourite in place when a newer session in another folder arrives', async () => {
+    const { dirs, root } = threeByRecency();
+    let sessions: { dir: string; lastUsedAt?: number }[] = [];
+    const svc = service(() => ({ workspaceFolders: Object.values(dirs), sessions }), {
+      root,
+      favourites: favSet([dirs.old]),
+    });
+    await svc.refresh({ force: true });
+
+    sessions = [{ dir: dirs.mid, lastUsedAt: 99_000_000 }];
+    const list = await svc.refresh({ force: true });
+    expect(list.map((p) => p.name)).toEqual(['old', 'mid', 'new']);
+  });
+
+  it('does not offer a favourite whose folder is gone', async () => {
+    const base = tmp();
+    const here = path.join(base, 'here');
+    const gone = path.join(base, 'gone');
+    fs.mkdirSync(here);
+    const svc = service(() => ({ workspaceFolders: [here, gone], sessions: [] }), { favourites: favSet([gone]) });
+
+    expect((await svc.refresh({ force: true })).map((p) => p.dir)).toEqual([here]);
+  });
+
+  it('un-stars a folder that is removed, so browsing back brings it back unpinned', async () => {
+    const { dirs, root, extra } = threeByRecency();
+    const favourites = favSet([dirs.old]);
+    const svc = service(extra, { root, hidden: hiddenSet(), favourites });
+    await svc.refresh({ force: true });
+
+    svc.remove(dirs.old);
+    expect(favourites.value.has(dirs.old)).toBe(false);
+
+    svc.add(dirs.old);
+    expect((await svc.refresh({ force: true })).map((p) => p.name)).toEqual(['new', 'mid', 'old']);
   });
 });

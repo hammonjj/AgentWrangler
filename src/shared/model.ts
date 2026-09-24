@@ -260,6 +260,8 @@ export interface ProjectDTO {
   name: string;
   /** Newest transcript activity in this folder, when anything is known. Absent = never used. */
   lastUsedAt?: number;
+  /** Starred in the dropdown, which pins it to the top. Absent = not a favourite. */
+  favourite?: boolean;
 }
 
 /**
