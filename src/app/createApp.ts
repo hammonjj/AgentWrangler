@@ -38,7 +38,9 @@ import { codexUsageReader } from '../codex/usage';
 import { CodexRunnerService } from '../codex/runner';
 import { isPidAlive, readRegistry } from '../claude/registry';
 import { endProcess } from '../claude/runner/adopt';
-import { RunnerRegistry } from '../claude/runner/runnerRegistry';
+import { SessionRegistry, type SessionRecord } from '../core/session/sessionRegistry';
+import { autoResumeCandidate } from '../core/session/recovery';
+import { checkoutFor } from '../core/checkout';
 import { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerView } from '../claude/runner/runnerView';
 import { SessionExecutors } from '../core/session/sessionExecutors';
@@ -122,7 +124,8 @@ export interface AgentWranglerApp {
   codexRunners: CodexRunnerService;
   /** Every session this process runs, Claude or Codex, by id. */
   sessions: SessionExecutors;
-  runnerRegistry: RunnerRegistry;
+  /** Every session this app runs and what became of each, across restarts. */
+  sessionRegistry: SessionRegistry;
   runnerOwnership: RunnerOwnership;
   archive: ArchiveService;
   pins: PinService;
@@ -152,6 +155,13 @@ export interface AgentWranglerApp {
   // --- the behaviours commands and menus invoke ---
   /** Start a conversation this process runs itself. No cwd: ask which folder. */
   newConversation(cwd?: string): Promise<RunnerView | undefined>;
+  /** Sessions this app is running right now (either provider), for the quit confirmation. */
+  liveSessionCount(): number;
+  /**
+   * End every session because the app is quitting: awaited, bounded by
+   * `withinMs`. They stay resumable: the next start shows them as interrupted.
+   */
+  stopAllForQuit(withinMs: number): Promise<void>;
   startCodexConversation(cwd: string): Promise<void>;
   browseForProject(): Promise<string | undefined>;
   refresh(): void;
@@ -197,7 +207,19 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const codexProvider = new CodexProvider(getConfig, log);
   const codexAppServer = new CodexAppServer(() => getConfig().codexBinaryPath, log);
   const models = new ModelCatalogService(host.globalState);
-  const codexRunners = new CodexRunnerService(codexAppServer, (list) => models.remember('openai', list));
+  // Before anything reads it or resumes anything: classify what the last run
+  // left behind (every session that was live is now interrupted). The old
+  // runner registry is imported once from the surface store.
+  const sessionRegistry = new SessionRegistry(host.sessionState, { legacy: host.workspaceState });
+  const startup = sessionRegistry.startup();
+  if (startup.interrupted.length > 0) {
+    log(`${startup.interrupted.length} session(s) were interrupted by the last restart`);
+  }
+  const locate = (cwd: string) => checkoutFor(cwd);
+  const codexRunners = new CodexRunnerService(codexAppServer, (list) => models.remember('openai', list), {
+    registry: sessionRegistry,
+    locate,
+  });
   host.subscribe(codexRunners);
   store.useLiveSessions((session) => session.provider === 'codex' ? codexRunners.get(session.sessionId)?.session : undefined);
   host.subscribe(codexRunners.onDidChange(() => void store.refresh()));
@@ -267,23 +289,35 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
   // Sessions this process runs itself, through the Agent SDK. The binary is
   // resolved per start so changing the setting does not need a restart.
-  // Surface state, not global: two windows sharing one record would both
-  // resume the same session, and two processes on one id corrupt its transcript.
-  // What the launcher's model dropdown offers: the list the last conversation
-  // reported, since the launcher has no running CLI of its own to ask.
-  const runnerRegistry = new RunnerRegistry(host.workspaceState);
+  // `rememberModels`: what the launcher's model dropdown offers is the list the
+  // last conversation reported, since the launcher has no running CLI to ask.
   const runners = new RunnerService({
     query: sdkQuery,
     binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath),
     log,
-    registry: runnerRegistry,
+    registry: sessionRegistry,
+    locate,
     rememberModels: (list) => models.remember('anthropic', list),
   });
   host.subscribe(runners);
   const sessions = new SessionExecutors([runners, codexRunners]);
+
+  /**
+   * How to start a Claude session: the way it was started before, if the
+   * registry remembers (a resume should come back on the same model, mode and
+   * effort), otherwise the current defaults.
+   */
+  const claudeLaunch = (previous?: SessionRecord) => {
+    const model = previous?.launch.model ?? (host.settings.get<string>('runner.model', '').trim() || undefined);
+    const effort = previous?.launch.effort ?? (host.settings.get<string>('runner.effort', '').trim() || undefined);
+    const permissionMode = (previous?.launch.permissionMode ??
+      host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto')) as PermissionModeName;
+    return { model, effort, permissionMode };
+  };
   const runnerOwnership: RunnerOwnership = {
     owns: (id: string | undefined) => sessions.owns(id),
-    wasRunning: (id: string) => runners.wasRunning(id),
+    // Interrupted by the last restart and not running here now, either provider.
+    wasRunning: (id: string) => !sessions.owns(id) && sessionRegistry.isInterrupted(id),
     pendingQuestion: (id: string | undefined) => {
       const question = sessions.get(id)?.pendingQuestion;
       return question ? { requestId: question.requestId, questions: question.questions } : undefined;
@@ -378,14 +412,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
     if (signal?.aborted) throw new Error('Send cancelled; your draft is preserved.');
     if (s.pid !== undefined && isPidAlive(s.pid)) throw new Error('The previous process is still alive; takeover was cancelled.');
     if (s.status !== 'ended' && s.pid === undefined) throw new Error('Cannot prove the previous process has stopped.');
-    const model = host.settings.get<string>('runner.model', '').trim();
-    const runner = runners.start({
-      cwd: s.cwd,
-      resume: s.sessionId,
-      permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto'),
-      effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
-      model: model || undefined,
-    });
+    // A session AW ran before comes back the way it was started; one from a
+    // terminal gets the current defaults.
+    const previous = sessionRegistry.get(s.sessionId);
+    const runner = runners.start({ cwd: s.cwd, resume: s.sessionId, ...claudeLaunch(previous), origin: previous?.origin });
     surface?.showSession(runner);
     log(`adopted ${s.sessionId} into this window`);
     return runner;
@@ -1388,19 +1418,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
   /**
    * Bring back the conversation this process was running before it restarted.
    *
-   * Runner sessions are children of this process, so a reload or a quit ends
-   * every one of them — but only the process. Resuming the id reads the same
-   * transcript back, so the only thing actually lost is a turn that was in
-   * flight. Bounded deliberately: the most recent session only, recorded in
-   * *this* surface's state, within a few hours, and never one something else is
-   * already running.
+   * Runner sessions are children of this process, so a restart ends every one
+   * of them — but only the process. Resuming the id reads the same transcript
+   * back, so the only thing actually lost is a turn that was in flight. Every
+   * interrupted session is offered on its row; this brings back only the
+   * newest Claude one, within a few hours, never one the orchestrator owns,
+   * and never one something else is already running.
    */
   const resumeLastRunner = async (): Promise<void> => {
     const enabled = host.settings.get<boolean>('runner.autoResumeLastOnStartup', true);
     // Cheap checks first, exactly as before the guard was pulled apart: a
     // disabled setting or nothing recent enough to resume must not cost a
     // filesystem read.
-    const record = enabled ? runnerRegistry.resumable() : undefined;
+    const candidate = enabled ? autoResumeCandidate(startup.interrupted, Date.now()) : undefined;
+    const record = candidate ? { sessionId: candidate.sessionId, cwd: candidate.cwd } : undefined;
     const cwdExists = record ? fs.existsSync(record.cwd) : false;
     const runningElsewhere =
       record && cwdExists
@@ -1436,7 +1467,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       recentWriteThresholdMs: RECENT_TRANSCRIPT_WRITE_MS,
     });
     if (!decision.resume) {
-      if (decision.reason === 'cwd-missing' && decision.sessionId) runnerRegistry.forget(decision.sessionId);
+      if (decision.reason === 'cwd-missing' && decision.sessionId) sessionRegistry.forget(decision.sessionId);
       // Someone else picked it up — another window, or a terminal. Leave it.
       if (decision.reason === 'running-elsewhere') log(`not resuming ${decision.sessionId}: it is running elsewhere`);
       if (decision.reason === 'recent-transcript-write') {
@@ -1446,13 +1477,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
       }
       return;
     }
-    const model = host.settings.get<string>('runner.model', '').trim();
     const runner = runners.start({
       cwd: decision.cwd,
       resume: decision.sessionId,
-      permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto'),
-      effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
-      model: model || undefined,
+      ...claudeLaunch(candidate),
+      origin: candidate?.origin,
     });
     log(`resumed ${decision.sessionId} after a restart`);
     // Beside the dashboard, without taking the cursor: a window that has just
@@ -1500,7 +1529,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
     runners,
     codexRunners,
     sessions,
-    runnerRegistry,
+    sessionRegistry,
+    liveSessionCount: () => sessions.list().filter((h) => h.lifecycle !== 'ended' && h.lifecycle !== 'error').length,
+    async stopAllForQuit(withinMs: number) {
+      const count = sessions.list().length;
+      if (count > 0) log(`quitting: ending ${count} session(s), waiting up to ${withinMs} ms`);
+      // Codex threads end with the app-server in `dispose`; the Claude CLIs
+      // get the graceful end sequence first, awaited and bounded.
+      await runners.endAllForQuit(withinMs);
+    },
     runnerOwnership,
     archive,
     pins,

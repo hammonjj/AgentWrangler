@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RunnerService } from '../src/claude/runner/runnerService';
+import { SessionRegistry } from '../src/core/session/sessionRegistry';
 import type { QueryFn } from '../src/claude/runner/claudeSdkSession';
 
 /**
@@ -86,21 +87,87 @@ describe('RunnerService.dispose', () => {
   });
 
   it('leaves the registry alone — a lost window is exactly what the next startup should offer back', () => {
-    const registry = fakeRegistry();
+    const registry = new SessionRegistry(memento());
+    const service = new RunnerService({ query: fakeQuery().query, binary: () => '/fake/claude', log: () => undefined, registry });
+    service.start({ cwd: '/Users/test/proj', sessionId: 'abc' });
+    expect(registry.get('abc')?.state).toBe('live');
+
+    service.dispose();
+
+    expect(registry.get('abc')?.state).toBe('live');
+  });
+});
+
+describe('RunnerService and the session registry', () => {
+  function make() {
+    const registry = new SessionRegistry(memento());
     const service = new RunnerService({
       query: fakeQuery().query,
       binary: () => '/fake/claude',
       log: () => undefined,
-      registry: registry as never,
+      registry,
+      locate: () => ({ repoRoot: '/Users/test/proj', branch: 'main' }),
     });
-    const session = service.start({ cwd: '/Users/test/proj' });
-    session.sessionId = 'abc';
-    // RunnerSession only remembers itself in the registry on a lifecycle
-    // change; simulate what `onLifecycle` would have recorded.
-    registry.remember('abc');
+    return { registry, service };
+  }
 
-    service.dispose();
+  it('records a session with how and where it was launched', () => {
+    const { registry, service } = make();
+    service.start({
+      cwd: '/Users/test/proj/sub',
+      sessionId: 's1',
+      model: 'opus',
+      effort: 'high',
+      permissionMode: 'plan',
+      origin: { kind: 'orchestration', taskId: 't1' },
+    });
+    expect(registry.get('s1')).toMatchObject({
+      provider: 'claude',
+      cwd: '/Users/test/proj/sub',
+      repoRoot: '/Users/test/proj',
+      branchAtStart: 'main',
+      launch: { model: 'opus', effort: 'high', permissionMode: 'plan', binary: '/fake/claude' },
+      origin: { kind: 'orchestration', taskId: 't1' },
+      state: 'live',
+    });
+  });
 
-    expect(registry.has('abc')).toBe(true);
+  it('marks a deliberate end as stopped, not interrupted', async () => {
+    const { registry, service } = make();
+    const session = service.start({ cwd: '/Users/test/proj', sessionId: 's1' });
+    const ending = service.end(session);
+    await Promise.race([ending, new Promise((r) => setTimeout(r, 50))]);
+    expect(registry.get('s1')?.state).toBe('stopped');
+  });
+
+  it('keeps sessions live when ending them for quit, so the next start offers them back', async () => {
+    const { registry, service } = make();
+    service.start({ cwd: '/Users/test/proj', sessionId: 's1' });
+    service.start({ cwd: '/Users/test/proj', sessionId: 's2' });
+    await service.endAllForQuit(50);
+    expect(registry.get('s1')?.state).toBe('live');
+    expect(registry.get('s2')?.state).toBe('live');
+  });
+
+  it('reports an interrupted session as was-running only while nothing here runs it', () => {
+    const store = memento();
+    const before = new SessionRegistry(store);
+    before.live({ sessionId: 's1', provider: 'claude', cwd: '/Users/test/proj' });
+    const after = new SessionRegistry(store);
+    after.startup();
+    const service = new RunnerService({ query: fakeQuery().query, binary: () => '/b', log: () => undefined, registry: after });
+    expect(service.wasRunning('s1')).toBe(true);
+    service.start({ cwd: '/Users/test/proj', resume: 's1' });
+    expect(service.wasRunning('s1')).toBe(false);
   });
 });
+
+function memento() {
+  const doc: Record<string, unknown> = {};
+  return {
+    get: <T>(key: string, fallback: T): T => (key in doc ? (doc[key] as T) : fallback),
+    update: (key: string, value: unknown) => {
+      doc[key] = value;
+    },
+  };
+}

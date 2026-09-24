@@ -17,8 +17,17 @@ export function installApplicationMenu(
   wrangler: AgentWranglerApp,
   surface: WorkbenchSurface,
   openPreferences: () => void,
+  /** The app's own quit, which is how a menu quit is told apart from every other kind. */
+  quit: () => void,
 ): void {
   const mac = process.platform === 'darwin';
+  // Not `role: 'quit'`: that bypasses the click handler, and then a ⌘Q looks
+  // exactly like a script's quit (spike S2). Same accelerator, our handler.
+  const quitItem: MenuItemConstructorOptions = {
+    label: mac ? `Quit ${app.name}` : 'Quit',
+    accelerator: 'CmdOrCtrl+Q',
+    click: quit,
+  };
 
   const appMenu: MenuItemConstructorOptions[] = mac
     ? [
@@ -45,7 +54,7 @@ export function installApplicationMenu(
             { role: 'hideOthers' },
             { role: 'unhide' },
             { type: 'separator' },
-            { role: 'quit' },
+            quitItem,
           ],
         },
       ]
@@ -74,7 +83,7 @@ export function installApplicationMenu(
               { label: 'Disconnect Discord', click: () => void wrangler.disconnectDiscord() },
               { label: 'Test Remote Control…', click: () => void wrangler.testRemoteControl() },
               { type: 'separator' },
-              { role: 'quit' },
+              quitItem,
             ] as MenuItemConstructorOptions[])),
       ],
     },

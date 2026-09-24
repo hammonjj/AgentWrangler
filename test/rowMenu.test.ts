@@ -20,6 +20,12 @@ function session(over: Partial<SessionDTO> = {}): SessionDTO {
 const actions = (s: SessionDTO) => rowMenuItems(s).map((i) => i.action);
 
 describe('rowMenuItems', () => {
+  it('offers Resume here for an interrupted session, and not otherwise', () => {
+    const interrupted = rowMenuItems(session({ status: 'ended', interrupted: true })).map((i) => i.action);
+    expect(interrupted).toContain('resumeHere');
+    expect(rowMenuItems(session({ status: 'ended' })).map((i) => i.action)).not.toContain('resumeHere');
+  });
+
   it('offers the full menu for a live session with a transcript and a pid', () => {
     expect(actions(session())).toEqual([
       'rename',

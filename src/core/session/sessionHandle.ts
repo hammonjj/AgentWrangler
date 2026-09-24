@@ -91,8 +91,11 @@ export interface LaunchRequest {
   resume?: string;
   /** Sent as the first message once the session is up. */
   initialPrompt?: string;
-  /** Who asked for it: a person, the scheduler, the orchestrator. Recorded, never interpreted. */
-  origin?: string;
+  /**
+   * Who asked for it, opaque: e.g. `{kind: 'orchestration', missionId, taskId}`.
+   * Recorded in the registry, never interpreted by the executor.
+   */
+  origin?: unknown;
   /** Codex only: blocks to show for the conversation so far when resuming. */
   initialBlocks?: ConvBlock[];
 }
@@ -103,7 +106,7 @@ export interface SessionHandle {
   readonly sessionId: string | undefined;
   readonly cwd: string;
   readonly startedAt: number;
-  readonly origin?: string;
+  readonly origin?: unknown;
 
   // ---- cached synchronous view ----
   readonly lifecycle: SessionLifecycle;

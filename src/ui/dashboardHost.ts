@@ -190,7 +190,13 @@ export class DashboardHost {
         paused: this.pause.isPaused(s.pid) || undefined,
         runnerOwned: runnerOwned || undefined,
         pendingQuestion,
-        wasRunningHere: this.runners.wasRunning?.(s.sessionId) || undefined,
+        // Only while nothing else runs it: a session a terminal picked back up
+        // is not interrupted. A Codex row reads its status from the rollout, so
+        // a cut-off thread shows as idle (waiting/done), not ended.
+        interrupted:
+          ((s.status === 'ended' || (s.provider === 'codex' && (s.status === 'waiting' || s.status === 'done'))) &&
+            this.runners.wasRunning?.(s.sessionId)) ||
+          undefined,
         openTarget: openTargetFor(),
       };
     });
@@ -248,6 +254,9 @@ export class DashboardHost {
         if (m.action === 'openInTab') this.actions.openInTab(m.key);
         else if (m.action === 'rename') this.actions.rename(m.key);
         else if (m.action === 'resume') this.actions.resume(m.key);
+        // Adopting an ended session is resuming it here; `adopt` refuses a
+        // session something else is running, so nothing ends up with two owners.
+        else if (m.action === 'resumeHere') this.actions.adopt(m.key);
         else if (m.action === 'archive') {
           this.archive.toggle(m.key);
         }

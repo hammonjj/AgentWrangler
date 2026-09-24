@@ -19,14 +19,51 @@ if [ -z "$APP" ]; then
 fi
 
 DEST="/Applications/Agent Wrangler.app"
+# The main executable, matched exactly: `pgrep -x` on the name alone would also
+# match a session host running from a clone of the bundle (spike S2).
+EXE="$DEST/Contents/MacOS/Agent Wrangler"
+RUN_DIR="$HOME/Library/Application Support/Agent Wrangler/run"
+
+# macOS `pgrep` never matches its own ancestors unless given `-a`. That tells
+# the two cases apart: `-a` finds a running copy at all, plain finds one only if
+# this script is *not* running inside it.
+running() { pgrep -f "^$EXE( |\$)" >/dev/null 2>&1; }
+running_at_all() { pgrep -a -f "^$EXE( |\$)" >/dev/null 2>&1; }
+
+if running_at_all && ! running; then
+  # Run by an agent Agent Wrangler is hosting. Quitting the app would end every
+  # session it runs, this agent's included, and CLAUDE.md forbids restarting
+  # it. The bundle is replaced in place instead: a running copy keeps working
+  # from the files it already has open (spike S2), and picks up the new build
+  # when James restarts it.
+  rm -rf "$DEST"
+  cp -R "$APP" "$DEST"
+  echo "Installed $DEST (the running copy was left running: a restart is needed to use this build)"
+  echo "Built from: $APP"
+  exit 0
+fi
 
 # Quit a running copy. It holds a single-instance lock, and replacing the bundle
 # out from under a running process gives you a half-swapped app rather than an
 # error.
-if pgrep -f "/Applications/Agent Wrangler.app/Contents/MacOS/Agent Wrangler" >/dev/null 2>&1; then
+if running; then
   echo "Quitting the running copy…"
+  # Say why, so the app treats this as an install (no dialog; it ends its
+  # sessions gracefully, and they come back as Interrupted rows) rather than
+  # guessing from an unlabelled quit.
+  mkdir -p "$RUN_DIR"
+  printf 'install' > "$RUN_DIR/quit-intent"
   osascript -e 'quit app "Agent Wrangler"' >/dev/null 2>&1 || true
-  sleep 2
+  # Wait for it to actually exit: it ends its sessions first, bounded at 10 s.
+  for _ in $(seq 1 60); do
+    running || break
+    sleep 0.5
+  done
+  if running; then
+    rm -f "$RUN_DIR/quit-intent"
+    echo "The running copy did not quit within 30 s, so it was left in place. Quit it and run this again." >&2
+    exit 1
+  fi
 fi
 
 rm -rf "$DEST"

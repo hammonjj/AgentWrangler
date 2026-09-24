@@ -88,6 +88,13 @@ export function rowMenuItems(s: SessionDTO): RowMenuItem[] {
       title: 'Open this conversation in a tab that row clicks never swap away',
     });
   }
+  if (s.interrupted) {
+    items.push({
+      action: 'resumeHere',
+      label: 'Resume here',
+      title: 'Carry this conversation on in Agent Wrangler, on the model and mode it was started with',
+    });
+  }
   if (s.paused) {
     items.push({
       action: 'unpause',

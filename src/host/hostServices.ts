@@ -34,7 +34,7 @@ import type { SessionHandle } from '../core/session/sessionHandle';
 
 /**
  * Persisted key/value, the same structural shape `ArchiveService` and
- * `RunnerRegistry` already took instead of `vscode.Memento`. VSCode supplies
+ * the runner registry took instead of `vscode.Memento`. VSCode supplied
  * `globalState`/`workspaceState`; Electron supplies a JSON file.
  */
 export interface HostStorage {
@@ -181,6 +181,8 @@ export interface HostServices {
    * and the same rule is enforced by there only being one of them.
    */
   workspaceState: HostStorage;
+  /** The session registry's document (`sessions.json`): every session AW runs and what became of it. */
+  sessionState: HostStorage;
   /** Directory for caches this host owns, e.g. the shared usage read. Must exist. */
   storageDir: string;
   dialogs: HostDialogs;

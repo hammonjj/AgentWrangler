@@ -196,7 +196,9 @@ const ICON_COLUMNS =
 
 function clickHint(s: SessionDTO): string {
   if (s.runnerOwned) return 'Click to open the conversation — this window runs it, so you can type into it';
-  return s.wasRunningHere ? 'Click to resume a session this workspace ran recently' : 'Click to open the conversation here';
+  return s.interrupted
+    ? 'Interrupted when Agent Wrangler last stopped. Click to open it; Resume here (row menu, or the pane) carries it on'
+    : 'Click to open the conversation here';
 }
 
 /**
@@ -263,6 +265,9 @@ function rowMenuHtml(): string {
  * read as something that is still happening.
  */
 function pausedChip(s: SessionDTO): string {
+  if (s.interrupted) {
+    return '<span class="chip interrupted" title="Agent Wrangler was running this when it stopped. The conversation is intact: right-click → Resume here to carry on.">interrupted</span>';
+  }
   return s.paused
     ? '<span class="chip paused" title="Stopped, and spending nothing. Right-click → Resume agent to let it run again.">paused</span>'
     : '';

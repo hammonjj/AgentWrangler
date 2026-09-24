@@ -6,8 +6,8 @@
  * draw in, and register the things that invoke it. Everything about sessions
  * is in `src/app/createApp.ts` and is shared verbatim with the extension.
  *
- * **One instance.** A second copy of the app would be a second
- * `RunnerRegistry` and therefore a second process willing to resume the same
+ * **One instance.** A second copy of the app would be a second session
+ * registry and therefore a second process willing to resume the same
  * session id — two processes on one id is the thing that corrupts a
  * transcript. The lock is taken before anything else and a second launch
  * simply raises the window that already exists.
@@ -21,6 +21,7 @@ import * as path from 'node:path';
 import { app } from 'electron';
 import { createApp } from '../app/createApp';
 import { DictationSetupError, defaultModelPath } from '../core/dictation';
+import { agentCount, quitIntentSource, quitPolicy, type QuitSource } from '../core/session/quitPolicy';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { registerBundleScheme, serveBundles } from './bundleProtocol';
 import { installContextMenuEverywhere } from './contextMenu';
@@ -173,7 +174,39 @@ void app.whenReady().then(() => {
     parentWindow: () => window?.browserWindow,
     runAction: (id) => wrangler.runSettingAction(id),
   });
-  installApplicationMenu(wrangler, window, () => preferences.open());
+  // ---- Quitting (playbook §7.2, §11.10) ----
+  //
+  // Electron gives `before-quit` no reason, so the sources the app owns label
+  // themselves: the menu's own Quit item, the SIGTERM handler below, and
+  // `install-app.sh` through a `run/quit-intent` file. Anything unlabelled is
+  // external (an `osascript` quit, Dock → Quit, logout) and never gets a dialog.
+  let quitSource: QuitSource | undefined;
+  let quitInProgress = false;
+  const requestQuit = (source: QuitSource) => {
+    quitSource = source;
+    app.quit();
+  };
+  const quitIntentFile = path.join(userDataDir, 'run', 'quit-intent');
+  const readQuitIntent = (): QuitSource | undefined => {
+    try {
+      const content = fs.readFileSync(quitIntentFile, 'utf8');
+      const age = Date.now() - fs.statSync(quitIntentFile).mtimeMs;
+      fs.rmSync(quitIntentFile, { force: true });
+      return quitIntentSource(content, age);
+    } catch {
+      return undefined; // no marker: not an announced quit
+    }
+  };
+
+  installApplicationMenu(wrangler, window, () => preferences.open(), () => requestQuit('menu'));
+
+  // Registered here, inside `whenReady`: one registered at module load is
+  // replaced by Electron's own SIGTERM handler and never runs (spike S2).
+  // Electron already turns SIGTERM into a graceful quit; this only labels it.
+  process.on('SIGTERM', () => {
+    log('SIGTERM received');
+    requestQuit('signal');
+  });
 
   app.on('second-instance', () => window?.open());
   // macOS: the dock icon after every window has been closed. The backend is
@@ -183,13 +216,51 @@ void app.whenReady().then(() => {
   window.open();
   wrangler.start();
 
-  app.on('before-quit', () => {
-    log('Agent Wrangler quitting');
+  const teardown = () => {
     preferences.dispose();
     palette?.dispose();
     window?.dispose();
     wrangler.dispose();
     host.disposeAll();
+  };
+
+  app.on('before-quit', (event) => {
+    // Held until the agents have been ended, then `app.exit` (which does not
+    // come back through here) finishes the job.
+    event.preventDefault();
+    if (quitInProgress) return;
+    quitInProgress = true;
+    const source = quitSource ?? readQuitIntent() ?? 'external';
+    quitSource = undefined;
+    void (async () => {
+      const live = wrangler.liveSessionCount();
+      const decision = quitPolicy({ source, liveSessions: live });
+      log(`Agent Wrangler quitting (${source}); ${live} live session(s)`);
+      if (decision.confirm) {
+        const choice = await host.dialogs.warn(
+          `Quit and stop ${agentCount(live)}?`,
+          {
+            modal: true,
+            detail:
+              'Agent Wrangler runs these sessions itself, so quitting ends them. Nothing is lost: each ' +
+              'conversation is kept in its transcript, and comes back as an Interrupted row you can resume.',
+          },
+          'Quit and Stop',
+        );
+        if (choice !== 'Quit and Stop') {
+          log('quit cancelled');
+          quitInProgress = false;
+          return;
+        }
+      }
+      try {
+        await wrangler.stopAllForQuit(decision.stopWithinMs);
+      } catch (err) {
+        log(`ending sessions at quit failed: ${String(err)}`);
+      }
+      teardown();
+      app.exit(0);
+    })();
   });
 });
 
