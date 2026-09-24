@@ -915,11 +915,32 @@ gets several writers, or needs fleet-level queries.
      (`daemon update may interrupt running work`), and the VS Code extension and AW can run
      **different** Codex binary versions from different extension directories, as they did
      during this investigation.
-   - Record the binary version in the manifest, and never `proxy` from a newer binary into an
-     older server.
-   - **Gating unknown (S4):** what happens to server-to-client requests (`requestApproval`,
-     `requestUserInput`) when the client connection drops. Are they re-sent after `thread/resume`
-     on a new connection, or declined?
+   - Record the server version (from `initialize.userAgent`) in the manifest. AW's client must
+     speak that server's protocol. (S4: `proxy` is a byte pipe, so the old "never proxy newer
+     into older" rule is moot.)
+   - **S4 decided (a)** (`spikes/s4-codex-restart.md`). The daemon runs the same server
+     underneath, so reconnects behave identically, and what it adds is harmful: it will not start
+     from the extension's binaries, it is shared machine-wide (the `codex` TUI attaches by
+     default), and any `daemon restart`/`update` drains ~60 s, kills pending asks, then injects
+     a "server restarted… continue" turn that can repeat actions.
+   - **The socket speaks WebSocket, not NDJSON** (one JSON-RPC message per text frame). The real
+     socket lives in `/tmp/codex-daemon-<uid>/` and the requested path is a symlink to it.
+   - **Pending requests survive a client drop.** The turn keeps running with nobody attached.
+     After `thread/resume` on a new connection, `requestApproval`/`requestUserInput` are
+     **re-sent with their original ids**, answerable there, and never time out (still pending
+     after 120 s unattended). Streamed deltas from the gap are not replayed; `item/completed`
+     carries the whole item. With two subscribers the first answer wins, and the other gets
+     `serverRequest/resolved`. Everything in flight is lost only if the server process dies.
+   - Request ids are per server process: they count across threads and restart at 0 when the
+     server restarts. Any connection can answer any pending id; the 0600 socket is the only guard.
+   - `SIGTERM` exits an idle server in ~0.1 s but waits indefinitely on a pending turn; `SIGINT`
+     exits at once and marks the turn `interrupted`.
+   - **The writer lock works across processes and versions.** `thread/resume` of a thread another
+     app-server holds fails with "already has an active writer", so there is no silent fork
+     (unlike Claude, §11.5). The lock frees only when the thread unloads, ~60 s after it goes
+     idle with no subscribers; a thread waiting on an approval never unloads.
+   - `requestUserInput` reaches the client only in plan mode, and a thread with no turns yet
+     cannot be resumed from another connection.
 9. **Claude background agents** (`claude --bg`, `claude agents --json`) are a first-party
    detached-session feature. `claude agents --json` already lists SDK sessions with pid and
    status. **S5 verdict: no, they cannot replace the AW Claude host** (`spikes/s5-bg-agents.md`).
@@ -1289,22 +1310,63 @@ Review checkpoint: CP3 (Opus Extra High) — failure-matrix review after the soa
 
 ### Stage 5: Codex execution decoupled
 
-- **Goal.** AW-run Codex threads survive core restarts.
-- **Change (per S4).**
-  - **Preferred:** the supervisor launches one detached `codex app-server --listen unix://…`
-    from the pinned binary as a shared host with a manifest, and `CodexAppServer` connects
-    through `ndjsonPeer`.
-  - **Alternative:** Codex's daemon plus `proxy`.
-  - On reconnect, `thread/resume` every registry-live Codex thread, and rebuild pending
-    approvals the way S4 found them re-delivered. If they are *declined* on disconnect, the UI
-    says Codex asks do not survive a core restart.
+- **Goal.** AW-run Codex threads, including in-flight turns and pending approvals and
+  questions, survive core restarts.
+- **Change (amended by S4, `spikes/s4-codex-restart.md`).**
+  - The supervisor launches **one** detached `codex app-server --listen unix://<path>` (it
+    creates its real socket, mode 0600, under `/tmp/codex-daemon-<uid>/`, and `<path>` becomes
+    a symlink). It launches from a **pinned copy** of the extension's `bin/<platform>/`
+    directory under `runtimes/codex-<version>/`, never from the live extension directory,
+    which VS Code prunes. The manifest holds pid, socket path, binary path and the version
+    from `initialize.userAgent`. `stdout`/`stderr` go to a log file, never to a pipe.
+  - **The transport is WebSocket over the Unix socket** (one JSON-RPC message per text frame).
+    `CodexAppServer` gets a small in-repo RFC 6455 client (about 100 lines; see
+    `spikes/s4/wsUnix.ts` on the spike branch), with no new dependency. `ndjsonPeer` is not
+    reused for this hop, and `proxy` is not used.
+  - **On reconnect:** run `thread/loaded/list`, then `thread/resume` every registry-live
+    Codex thread that is still loaded (or on disk). Rebuild pending cards from the
+    `*requestApproval` / `requestUserInput` requests the server **re-sends after each resume,
+    with their original ids.** Dedupe by `(server instance, id)`, since ids restart at 0 when
+    the server restarts. Rebuild the transcript from `thread/turns/list` or `thread/items/list`
+    (`excludeTurns: true`, since full hydration is deprecated). Expect no replay of the gap's
+    deltas: create an item's block from its `item/completed` when no `item/started` was seen.
+  - **Handle `serverRequest/resolved`**, which `runner.ts` ignores today: another subscriber
+    (a second window, Discord, or a pre-restart core) may have answered first.
+  - **`already has an active writer` on resume** means the thread is open in another
+    app-server, usually the VS Code extension. Mark it "open elsewhere", read-only, and do not
+    retry. The lock frees about 60 s after the other side goes idle with no subscribers.
+  - **Host stop:** `SIGTERM` drains without limit while a turn is pending. The supervisor sends
+    `SIGTERM` only when no thread is `active`, and otherwise uses `SIGINT` (this interrupts
+    turns; say so in the UI). A **Codex version change** means a host restart, which loses
+    in-flight turns and pending asks. Do it only when idle, or on the user's command, and never
+    automatically mid-turn.
+  - A Codex conversation with no turns yet cannot be resumed after a restart. Drop it from the
+    registry instead of showing an error.
+  - **Not** the machine-wide `codex app-server daemon`. It cannot run from the extension's
+    binaries, the `codex` TUI attaches to it by default, anyone can restart or update it, and
+    each restart injects a recovery turn.
   - Codex sessions are already in `SessionRegistry` from Stage 2.
-- **Files.** `src/codex/appServer.ts`, `runner.ts`, `codexHandle.ts`, `binary.ts` (version
-  pinning), `src/core/session/hostSupervisor.ts`, `createApp.ts`, settings.
-- **Tests.** Reconnect with an injected transport, and a thread-resume replay fixture.
-- **Manual.** Codex mid-turn → ⌘Q → relaunch → live. The VS Code extension on the same thread
-  behaves as S4 documented.
-- **Risks.** Binary version drift. The approval semantics after a disconnect.
+  - **What users are told:** Codex approvals and questions survive an Agent Wrangler restart.
+    Updating Codex restarts the host, which ends the running turn, and they re-send.
+- **Files.** `src/codex/appServer.ts` (transport seam: stdio | ws-unix), `src/codex/wsClient.ts`
+  (new), `runner.ts` (replayed requests, `serverRequest/resolved`, completed-only items),
+  `codexHandle.ts`, `binary.ts` (copy and pin, version from `initialize`),
+  `src/core/session/hostSupervisor.ts`, `createApp.ts`, settings.
+- **Tests.** Reconnect with an injected transport; a resume-replay fixture (the request re-sent
+  with the same id after resume, then answered on the new connection); `serverRequest/resolved`
+  clears a card; the writer-lock error maps to "open elsewhere"; id dedupe across a server
+  restart.
+- **Manual.**
+  - Codex mid-stream → ⌘Q → relaunch → live, with the reply completing.
+  - Codex waiting on approval → ⌘Q → relaunch → the same card, still answerable.
+  - The same thread opened in the VS Code extension while AW's host has it loaded → "open
+    elsewhere", and after about 60 s idle it is resumable in VS Code.
+- **Risks.** Protocol drift between the pinned server and AW's client; the server version is
+  recorded in the manifest. An undrainable `SIGTERM`. The same-uid socket can answer any
+  approval (§12).
+- **Open (not blocking).** Whether `thread/read` works on a thread another app-server holds;
+  whether AW's host should lower `thread_unload_delay_secs` to hand threads back to VS Code
+  sooner (a product choice).
 - **Rollback.** A setting to go back to `--stdio`.
 - **PR.** Own PR. Can run in parallel with Stages 3–4 once Stages 1–2 have landed.
 
@@ -1703,7 +1765,7 @@ The gate #11 is itself blocked by #5–#8.
 | U4 | Can a menu quit be told apart from an Apple Event quit and SIGTERM in Electron 44? | Non-blocking installs, logout | S2 | yes (for Stage 2) | **Yes, by flagging:** custom Quit item → `menu`; SIGTERM handler installed in `whenReady` → `signal`; unflagged → external; install script announces itself (§11.10). Real ⌘Q pending (M1) |
 | U5 | Does safeStorage re-prompt after an ad-hoc rebuild? | Token storage choice | S2 | no (fallback exists) | **Yes, and it blocks the main thread.** Host tokens go in 0600 files (§10, §12). The Discord token has the same problem |
 | U6 | UDS throughput and backpressure behaviour at streaming rates | Protocol sizing | S3 | no | **Go.** 4 MiB queue / 16 MiB ring / 10 s × 3 heartbeat stand; `messages` paging rules added (§9.4, §9.7, §9.8). `spikes/s3-socket-protocol.md` |
-| U7 | Codex pending approvals after a client disconnect | Codex survivability claims | S4 | for Stage 5 only | pending |
+| U7 | Codex pending approvals after a client disconnect | Codex survivability claims | S4 | for Stage 5 only | **Answered: they survive.** Held server-side with no timeout, re-sent with the same id after `thread/resume`; lost only if the server dies. Option (a) chosen; transport is WebSocket over UDS; Stage 5 amended (§11.8, §13). `spikes/s4-codex-restart.md` |
 | U8 | Can Claude bg agents be driven programmatically? | Could replace AW hosts | S5 | no | **No** (§11.9). `spikes/s5-bg-agents.md` |
 | U9 | App Nap and timers in a windowless core | Discord heartbeat reliability | S2 | for Stage 6 | **Not a blocker:** no throttling in 150 s runs; blocker only while busy (it also stops idle sleep). Long idle and battery untested |
 | U10 | How agents request resource leases | Unity and exclusive tools | F2 | no | not started |
