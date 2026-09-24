@@ -12,9 +12,9 @@ import { transcriptPathFor } from '../../claude/transcriptHistory';
 import * as path from 'node:path';
 import type { HostDialogs } from '../../host/hostServices';
 import type { RunnerService } from '../../claude/runner/runnerService';
-import type { RunnerSession } from '../../claude/runner/runnerSession';
-import type { CodexRunner, CodexRunnerService } from '../../codex/runner';
 import { DictationSetupError, type DictationService } from '../../core/dictation';
+import type { SessionHandle } from '../../core/session/sessionHandle';
+import type { SessionExecutors } from '../../core/session/sessionExecutors';
 import type { FileSuggestService } from '../../core/fileSuggest';
 import type { AgentProvider } from '../../core/provider';
 import type { SessionStore } from '../../core/sessionStore';
@@ -26,7 +26,7 @@ import { displayTitle, type AgentSession, type SessionStatus } from '../../share
 import type { SessionActions } from '../actions';
 import type { PaneChannel } from '../paneChannel';
 import { adoptActionFor } from '../openTarget';
-import { RunnerSource } from './runnerSource';
+import { LiveSessionSource } from './runnerSource';
 import { CodexTranscriptSource } from './codexTranscriptSource';
 import type { ConversationSource } from './source';
 import { TranscriptSource } from './transcriptSource';
@@ -58,10 +58,11 @@ export interface ConversationProvider extends AgentProvider {
 }
 
 /**
- * What the pane is showing: a session the store knows about, or a runner we
- * just started, whose id and store entry do not exist yet.
+ * What the pane is showing: a session the store knows about, or a live
+ * session we just started (Claude or Codex), whose id or store entry may not
+ * exist yet.
  */
-type Binding = { kind: 'store'; key: string } | { kind: 'runner'; runner: RunnerSession } | { kind: 'codex-runner'; runner: CodexRunner };
+type Binding = { kind: 'store'; key: string } | { kind: 'live'; handle: SessionHandle };
 
 export class ConversationHost {
   private subs: { dispose(): void }[] = [];
@@ -92,8 +93,9 @@ export class ConversationHost {
     private store: SessionStore,
     private provider: ConversationProvider,
     private codexProvider: AgentProvider,
-    private runners: RunnerService,
-    private codexRunners: CodexRunnerService,
+    private sessions: SessionExecutors,
+    /** Claude only: told which session the pane is showing, for restart-time resume. */
+    private runners: Pick<RunnerService, 'touch'>,
     private actions: SessionActions,
     private dictation: DictationService,
     private files: FileSuggestService,
@@ -103,10 +105,9 @@ export class ConversationHost {
     this.subs.push(
       webview.onDidReceiveMessage((m: ConversationToHost) => void this.onMessage(m)),
       this.store.onDidUpdate(() => this.onStoreUpdate()),
-      // A runner's id arriving, or its lifecycle changing, changes what the
-      // pane can offer even when the store has not moved.
-      this.runners.onDidChange(() => this.onStoreUpdate()),
-      this.codexRunners.onDidChange(() => this.onStoreUpdate()),
+      // A live session's id arriving, or its lifecycle changing, changes what
+      // the pane can offer even when the store has not moved.
+      this.sessions.onDidChange(() => this.onStoreUpdate()),
     );
   }
 
@@ -133,14 +134,10 @@ export class ConversationHost {
     this.bind({ kind: 'store', key }, session);
   }
 
-  /** Point the pane at a session we have just started, before it has an id. */
-  showRunner(runner: RunnerSession): void {
-    if (this.binding?.kind === 'runner' && this.binding.runner === runner) return;
-    this.bind({ kind: 'runner', runner }, syntheticSession(runner, this.store));
-  }
-
-  showCodexRunner(runner: CodexRunner): void {
-    this.bind({ kind: 'codex-runner', runner }, runner.session);
+  /** Point the pane at a session we are running, possibly before it has an id or a store entry. */
+  showSession(handle: SessionHandle): void {
+    if (this.binding?.kind === 'live' && this.binding.handle === handle) return;
+    this.bind({ kind: 'live', handle }, liveSessionRow(handle, this.store));
   }
 
   dispose(): void {
@@ -164,8 +161,8 @@ export class ConversationHost {
     this.boundKeys = new Set([session.key]);
     this.onTitle(displayTitle(session));
     this.swapSource(session);
-    const runner = this.source instanceof RunnerSource ? this.source.runner : undefined;
-    if (runner) this.runners.touch(runner);
+    const live = this.source instanceof LiveSessionSource ? this.source.handle : undefined;
+    if (live?.provider === 'claude') this.runners.touch(live);
     if (this.ready) void this.sendInit();
   }
 
@@ -183,14 +180,11 @@ export class ConversationHost {
 
   private swapSource(session: AgentSession): void {
     this.disposeSource();
-    const runner = this.binding?.kind === 'runner' ? this.binding.runner : this.runners.get(session.sessionId);
-    const codexRunner = this.binding?.kind === 'codex-runner' ? this.binding.runner : this.codexRunners.get(session.sessionId);
-    const source: ConversationSource = codexRunner
-      ? codexRunner
+    const live = this.binding?.kind === 'live' ? this.binding.handle : this.sessions.get(session.sessionId);
+    const source: ConversationSource = live
+      ? new LiveSessionSource(live)
       : session.provider === 'codex'
       ? new CodexTranscriptSource(session, this.codexProvider)
-      : runner
-      ? new RunnerSource(runner)
       : // Through the application action, not straight at the provider: the
         // dashboard row, this card and the palette are three renderings of one
         // interaction, and they should all answer it the same way and get the
@@ -201,9 +195,10 @@ export class ConversationHost {
             .then((outcome) => outcome === 'applied'),
         );
     this.source = source;
-    if (runner) this.sourceSubs.push(runner.onReset(() => {
-      this.binding = { kind: 'runner', runner };
-      this.session = syntheticSession(runner, this.store);
+    // `/clear` replaces the conversation in the same process: a new id, no blocks.
+    if (live) this.sourceSubs.push(live.onReset(() => {
+      this.binding = { kind: 'live', handle: live };
+      this.session = liveSessionRow(live, this.store);
       this.boundKeys.add(this.session.key);
       if (this.ready) void this.sendInit();
     }));
@@ -247,14 +242,11 @@ export class ConversationHost {
     let next: AgentSession | undefined;
     if (binding.kind === 'store') {
       next = this.store.get(binding.key);
-    } else if (binding.kind === 'runner') {
-      // A runner's real store entry appears once it has an id and a transcript;
-      // until then the synthetic one carries the pane.
-      next =
-        this.store.get(`claude:${(binding.runner.sessionId ?? '').toLowerCase()}`) ??
-        syntheticSession(binding.runner, this.store);
     } else {
-      next = this.store.get(binding.runner.session.key) ?? binding.runner.session;
+      // A live session's real store entry appears once it has an id and a
+      // transcript; until then the row built from the handle carries the pane.
+      const row = liveSessionRow(binding.handle, this.store);
+      next = this.store.get(row.key) ?? row;
     }
     if (!next) return; // aged out of the store; keep showing what we have
 
@@ -268,7 +260,7 @@ export class ConversationHost {
     // transcript it was reading becomes a live process we drive. Re-init so the
     // composer appears without the user having to reopen anything. (And the
     // reverse, when a session is released back to a terminal.)
-    const shouldBeRunner = next.provider === 'codex' ? this.codexRunners.owns(next.sessionId) : this.runners.owns(next.sessionId);
+    const shouldBeRunner = this.sessions.get(next.sessionId)?.provider === next.provider;
     const isRunner = this.source?.kind === 'runner';
     if (shouldBeRunner !== isRunner) {
       this.swapSource(next);
@@ -291,11 +283,12 @@ export class ConversationHost {
 
   private async caps(session: AgentSession): Promise<ConversationCapabilities> {
     const source = this.source;
-    const runner = source instanceof RunnerSource ? source.runner : undefined;
-    const codexRunner = session.provider === 'codex' && source?.kind === 'runner' ? source : undefined;
-    const controlled = runner !== undefined || codexRunner !== undefined;
+    const live = source instanceof LiveSessionSource ? source.handle : undefined;
+    const runner = live?.provider === 'claude' ? live : undefined;
+    const codexRunner = live?.provider === 'codex' ? live : undefined;
+    const controlled = live !== undefined;
     const adoptOnSend = !runner && session.provider === 'claude' && !!session.cwd;
-    const canSend = (runner ? runner.canSend : codexRunner?.send !== undefined) || adoptOnSend;
+    const canSend = (live ? live.canSend : false) || adoptOnSend;
 
     const adopt = session.provider === 'claude' ? adoptActionFor(session, runner !== undefined) : undefined;
     const canAdoptCodex =
@@ -603,36 +596,37 @@ export class ConversationHost {
   }
 }
 
-/** A session that exists only as a runner so far: started here, no id yet. */
 /**
- * A session for a runner the store has not registered yet — it has no
- * transcript until the first prompt, and the dashboard hides sessions that have
- * none. The nickname is looked up rather than read off a store entry for the
- * same reason: there is no entry to read it from, and a renamed session being
- * adopted here should not briefly go back to its old name.
+ * The row for a live session the store has not registered yet. A Claude
+ * runner has no transcript until the first prompt, and the dashboard hides
+ * sessions that have none. The nickname is looked up rather than read off a
+ * store entry for the same reason: there is no entry to read it from, and a
+ * renamed session being adopted here should not briefly go back to its old name.
+ * A handle that can describe itself (Codex) does.
  */
-function syntheticSession(runner: RunnerSession, store: SessionStore): AgentSession {
-  const id = runner.sessionId ?? 'pending';
-  const key = `claude:${id.toLowerCase()}`;
+function liveSessionRow(handle: SessionHandle, store: SessionStore): AgentSession {
+  if (handle.liveSession) return handle.liveSession;
+  const id = handle.sessionId ?? 'pending';
+  const key = `${handle.provider}:${id.toLowerCase()}`;
   const status: SessionStatus =
-    runner.lifecycle === 'running'
+    handle.lifecycle === 'running'
       ? 'busy'
-      : runner.lifecycle === 'ended' || runner.lifecycle === 'ending'
+      : handle.lifecycle === 'ended' || handle.lifecycle === 'ending'
         ? 'ended'
-        : runner.lifecycle === 'error'
+        : handle.lifecycle === 'error' || handle.lifecycle === 'unreachable'
           ? 'stuck'
           : 'waiting';
   return {
-    provider: 'claude',
+    provider: handle.provider,
     sessionId: id,
     key,
-    title: path.basename(runner.cwd) || 'New conversation',
+    title: path.basename(handle.cwd) || 'New conversation',
     nickname: store.nicknameOf(key),
-    cwd: runner.cwd,
-    projectName: path.basename(runner.cwd),
+    cwd: handle.cwd,
+    projectName: path.basename(handle.cwd),
     status,
     lastActivityAt: Date.now(),
-    startedAt: runner.startedAt,
+    startedAt: handle.startedAt,
   };
 }
 
@@ -647,7 +641,7 @@ function syntheticSession(runner: RunnerSession, store: SessionStore): AgentSess
  */
 function readOnlyReason(
   session: AgentSession,
-  runner: RunnerSession | undefined,
+  runner: SessionHandle | undefined,
   canAdoptCodex = false,
 ): string | undefined {
   if (runner) {

@@ -30,6 +30,7 @@
  */
 
 import type { Disposable } from '../core/events';
+import type { SessionHandle } from '../core/session/sessionHandle';
 
 /**
  * Persisted key/value, the same structural shape `ArchiveService` and
@@ -146,9 +147,8 @@ export interface WorkbenchSurface {
   open(options?: { preserveFocus?: boolean }): void;
   /** Show an existing session in the conversation half. */
   show(key: string, options?: { preserveFocus?: boolean }): void;
-  /** A session just started here, which has no id or store entry yet. */
-  showRunner(runner: unknown, options?: { preserveFocus?: boolean }): void;
-  showCodexRunner(runner: unknown): void;
+  /** A session running here (Claude or Codex), which may have no id or store entry yet. */
+  showSession(handle: SessionHandle, options?: { preserveFocus?: boolean }): void;
   /** Give this conversation a surface of its own, which row clicks never swap away. */
   openInTab(key: string): void;
 }

@@ -2,17 +2,23 @@
  * Every Claude Code session this window is running itself.
  *
  * Two jobs. It starts them, and it answers "is this session ours?" — which the
- * rest of the extension has to ask constantly, because a runner session looks
- * from the outside like any other: it is in Claude's registry, it writes a
- * transcript, and (being a child of this extension host) the process tree says
- * it lives in "a Claude Code panel in this window", which is exactly wrong.
+ * rest of the app has to ask constantly, because a runner session looks from
+ * the outside like any other: it is in Claude's registry, it writes a
+ * transcript, and (being a child of this process) the process tree says it
+ * lives in "a Claude Code panel in this window", which is exactly wrong.
  * Ownership is therefore decided here, by session id, and never by pid.
+ *
+ * It is the Claude `SessionExecutor`: callers get `SessionHandle`s, which today
+ * are `RunnerView`s over an in-process `ClaudeSdkSession`.
  */
 import { Emitter, type Disposable } from '../../core/events';
+import { createLocalClaudeHandle } from '../../core/session/localClaudeHandle';
+import type { LaunchRequest, SessionExecutor } from '../../core/session/sessionHandle';
 import type { ModelChoice, PermissionModeName } from '../../shared/conversation';
 import { loadResumeHistory, type ConversationHistory } from '../transcriptHistory';
+import type { QueryFn } from './claudeSdkSession';
 import type { RunnerRegistry } from './runnerRegistry';
-import { RunnerSession, type QueryFn, type RunnerStartOptions } from './runnerSession';
+import type { RunnerView } from './runnerView';
 
 export interface RunnerServiceDeps {
   query: QueryFn;
@@ -31,16 +37,21 @@ export interface RunnerServiceDeps {
   rememberModels?: (models: ModelChoice[] | undefined) => void;
 }
 
-export class RunnerService implements Disposable {
-  private sessions = new Set<RunnerSession>();
+/** What starting a Claude session takes. The `LaunchRequest` minus the provider. */
+export type RunnerStartOptions = Omit<LaunchRequest, 'provider' | 'initialBlocks'>;
+
+export class RunnerService implements SessionExecutor, Disposable {
+  readonly provider = 'claude' as const;
+  private sessions = new Set<RunnerView>();
   private changeEmitter = new Emitter<void>();
 
   readonly onDidChange = (listener: () => void): Disposable => this.changeEmitter.event(listener);
 
   constructor(private deps: RunnerServiceDeps) {}
 
-  start(opts: RunnerStartOptions): RunnerSession {
-    const session = new RunnerSession(opts, {
+  /** Start a session and return its handle straight away (it reports its id once the CLI does). */
+  start(opts: RunnerStartOptions): RunnerView {
+    const session = createLocalClaudeHandle(opts, {
       query: this.deps.query,
       binary: this.deps.binary(),
       log: this.deps.log,
@@ -65,10 +76,17 @@ export class RunnerService implements Disposable {
     session.start();
     this.deps.log(`runner started in ${opts.cwd}${opts.resume ? ` (resuming ${opts.resume})` : ''}`);
     this.changeEmitter.fire();
+    if (opts.initialPrompt) void session.send(opts.initialPrompt);
     return session;
   }
 
-  get(sessionId: string | undefined): RunnerSession | undefined {
+  async launch(request: LaunchRequest): Promise<RunnerView> {
+    if (request.provider !== 'claude') throw new Error(`RunnerService cannot launch a ${request.provider} session`);
+    const { provider: _provider, initialBlocks: _blocks, ...opts } = request;
+    return this.start(opts);
+  }
+
+  get(sessionId: string | undefined): RunnerView | undefined {
     if (!sessionId) return undefined;
     const id = sessionId.toLowerCase();
     for (const s of this.sessions) {
@@ -85,7 +103,7 @@ export class RunnerService implements Disposable {
     return !this.owns(sessionId) && (this.deps.registry?.wasRunning(sessionId) ?? false);
   }
 
-  list(): RunnerSession[] {
+  list(): RunnerView[] {
     return [...this.sessions];
   }
 
@@ -94,12 +112,12 @@ export class RunnerService implements Disposable {
    * decides which session a reloaded window offers to bring back, and the one
    * you were looking at is the one you meant.
    */
-  touch(session: RunnerSession): void {
+  touch(session: { sessionId: string | undefined; cwd: string }): void {
     if (session.sessionId) this.deps.registry?.remember(session.sessionId, session.cwd);
   }
 
   /** Stop one session and forget it — a deliberate end, so nothing to resume. */
-  async end(session: RunnerSession): Promise<void> {
+  async end(session: RunnerView): Promise<void> {
     if (session.sessionId) this.deps.registry?.forget(session.sessionId);
     await session.end();
     if (session.sessionId) this.deps.registry?.forget(session.sessionId);
@@ -108,14 +126,15 @@ export class RunnerService implements Disposable {
   }
 
   dispose(): void {
-    // Closing the window kills these children anyway; ending them first gives
-    // the CLI its chance to flush the transcript rather than being cut off.
-    // The registry is deliberately left alone: this is exactly the case the
-    // next startup wants to know about.
+    // Quitting kills these children anyway; ending them first gives the CLI
+    // its chance to flush the transcript rather than being cut off. Not
+    // awaited: this is the characterised behaviour until Stage 2 makes quit
+    // an awaited, bounded end. The registry is deliberately left alone: this
+    // is exactly the case the next startup wants to know about.
     for (const s of this.sessions) void s.end();
     this.sessions.clear();
     this.changeEmitter.dispose();
   }
 }
 
-export type { PermissionModeName, RunnerStartOptions };
+export type { PermissionModeName };
