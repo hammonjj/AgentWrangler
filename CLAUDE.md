@@ -87,8 +87,17 @@ Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
 
 ## Hard rules
 
-- **Never restart the app automatically.** Its window hosts live conversations, and quitting it
-  ends every session Agent Wrangler is running. Say "a restart is needed" and leave it to James.
+- **Restarting the app is allowed, when it cannot end a conversation.** With session hosts on
+  (`"experimental.sessionHosts": true` in `~/Library/Application Support/Agent Wrangler/settings.json`,
+  or the default once #15's flip lands), Claude conversations run in hosts that survive a quit
+  and reattach on relaunch. Codex threads already survive a quit. Restart with
+  `osascript -e 'quit app "Agent Wrangler"'`, wait for the process to exit, then
+  `open -a "Agent Wrangler"`, and say that you did. Don't restart if:
+  - the setting is off. In-process conversations end with the app, and you may be one of them;
+  - another agent is mid-`app:install`;
+  - a host shows as unreachable. It would stay unreachable after the restart too.
+
+  If in doubt, say "a restart is needed" and leave it to James.
   A running copy on the old build is the usual cause of "my fix didn't work".
 - **The repo is public** (`hammonjj/AgentWrangler`). No real project paths, session titles,
   prompts, transcript content or hook payloads in code, tests, fixtures, docs or commits.
@@ -125,6 +134,6 @@ panes, `common/` is shared browser-only code) · `src/shared/*` model and wire p
 
 ## Verification
 
-Typecheck and tests green, then `npm run app:install`, then tell James the app needs restarting
-and what to click to see the change. Status-hook facts that are not documented by
+Typecheck and tests green, then `npm run app:install`, then restart the app if the rule above
+allows it (otherwise tell James it needs restarting), and say what to click to see the change. Status-hook facts that are not documented by
 Anthropic are recorded in the README ("How status is detected") and in `docs/plans/`.
