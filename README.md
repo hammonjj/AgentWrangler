@@ -20,6 +20,29 @@ To install it properly:
 npm run app:install       # build, package, and put it in /Applications
 ```
 
+**Signing, once per machine.** Packaged builds are signed with a self-signed certificate,
+*Agent Wrangler Local Signing*, from your login keychain. Create it before the first
+`app:install`:
+
+```bash
+npm run app:signing-setup # create the certificate and trust it for code signing
+```
+
+macOS asks for your login password once, to trust the certificate. The first build may ask
+whether `codesign` may use the key; choose **Always Allow**. The script does nothing if the
+certificate is already there. Without the certificate, `app:package` fails; it will not fall
+back to an unsigned build.
+
+The reason is that macOS pins privacy grants (Screen Recording, Accessibility, microphone) to
+the app's signature. With an ad-hoc signature each rebuild counts as a new app, so the grants
+stopped working while System Settings still showed them on. With a fixed certificate they
+survive rebuilds. `codesign -dv "/Applications/Agent Wrangler.app"` should show
+`Authority=Agent Wrangler Local Signing`, not `Signature=adhoc`. If you are moving off an
+ad-hoc build, grants made before the switch are stale. Clear them once with
+`tccutil reset ScreenCapture com.hammonjj.agentwrangler` (and `Accessibility`), then grant
+again. This setup only covers one machine. Distributing the app needs an Apple Developer ID
+certificate and notarization (#57).
+
 Nothing restarts on its own. A running copy keeps the old build until you quit and reopen it —
 and quitting ends the conversations Agent Wrangler is running, so it is left to you.
 

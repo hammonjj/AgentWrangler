@@ -15,6 +15,7 @@
     "electron:nobuild": "env -u ELECTRON_RUN_AS_NODE electron dist/electron/main.js",
     "app:package": "npm run build && electron-builder --mac --dir",
     "app:install": "npm run app:package && bash scripts/install-app.sh",
+    "app:signing-setup": "bash scripts/setup-signing-cert.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

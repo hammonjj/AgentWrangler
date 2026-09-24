@@ -15,6 +15,8 @@ Nothing may import `vscode`, and `HostServices` has one implementation.
 - `npm run electron` — build, then open the window. `npm run electron:nobuild` skips the build.
 - `npm run app:install` — build, package, and put it in `/Applications`.
   **Run it yourself after every code change**, and say so; it replaces the copy James uses.
+  It signs with the self-signed *Agent Wrangler Local Signing* certificate and fails without
+  it; `npm run app:signing-setup` creates it (once per machine, needs James's password).
 
 ## Branches and worktrees
 

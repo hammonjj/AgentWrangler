@@ -37,14 +37,27 @@ mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
   darkModeSupport: true
-  # A local build for one machine, not something distributed: ad-hoc signed
-  # (`-` is codesign's ad-hoc identity), unnotarized. Not `identity: null` —
-  # that means "skip signing", which leaves the bundle carrying the Electron
-  # binary's own linker signature and nothing sealing the contents, and
-  # `codesign --verify` rejects it: "code has no resources but signature
-  # indicates they must be present". It launches anyway today; what it cannot
-  # do is hold a microphone permission, because TCC keys those on a signature.
-  identity: "-"
+  # A local build for one machine, not something distributed: signed with a
+  # self-signed certificate from the login keychain, unnotarized. Create it once
+  # per machine with `npm run app:signing-setup` (scripts/setup-signing-cert.sh).
+  #
+  # Why not ad-hoc (`-`): macOS privacy grants — Screen Recording,
+  # Accessibility, the microphone — are pinned to the app's designated
+  # requirement, and an ad-hoc signature's requirement is that build's code
+  # hash. Every rebuild made every earlier grant stale while System Settings
+  # still showed it switched on (#56). A certificate makes the requirement
+  # "this bundle id, signed by this certificate", which survives rebuilds.
+  #
+  # Why not `identity: null`: that means "skip signing", which leaves the
+  # bundle carrying the Electron binary's own linker signature and nothing
+  # sealing the contents, and `codesign --verify` rejects it. That is also what
+  # electron-builder quietly falls back to when a named identity is missing,
+  # hence `forceCodeSigning`: no certificate is a build error, not a warning.
+  #
+  # Distributing to other machines needs a real Apple certificate and
+  # notarization instead (#57).
+  identity: Agent Wrangler Local Signing
+  forceCodeSigning: true
   hardenedRuntime: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
