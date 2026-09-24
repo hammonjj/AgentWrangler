@@ -30,6 +30,7 @@ import { Emitter, type Disposable } from '../events';
 import { NdjsonPeer, RpcRemoteError } from '../rpc/ndjsonPeer';
 import { isSameProcessAlive } from '../procStart';
 import {
+  CAPABILITY_CONFIGURE_IDLE,
   HOST_PROTOCOL_VERSION,
   MAX_FRAME_BYTES,
   MAX_PAGE_BYTES,
@@ -73,6 +74,8 @@ export interface HostClientOptions {
   hostReady?: Promise<void>;
   build: string;
   log: (msg: string) => void;
+  /** The idle-orphan rule's hours, pushed to a host that takes `configure` on every connect. */
+  orphanIdleHours?: () => number;
   /** Heartbeat and waits, injectable for tests. */
   pingIntervalMs?: number;
   pingMisses?: number;
@@ -179,6 +182,60 @@ export class HostClient {
           // gone meanwhile
         }
       }
+    }
+  }
+
+  /**
+   * The host runs an older (or other) build than this app (§7.4). Known once
+   * connected; a host this client started is always current.
+   */
+  get outdated(): boolean {
+    return this.hello !== undefined && this.hello.hostBuild !== this.opts.build;
+  }
+
+  /** The host's build, once connected. */
+  get hostBuild(): string | undefined {
+    return this.hello?.hostBuild;
+  }
+
+  /**
+   * The machine woke up (`powerMonitor` `resume`). Pings missed across the
+   * sleep say nothing about the host: forget them and let one fresh ping
+   * decide (§8 "Machine sleeps").
+   */
+  wake(): void {
+    this.misses = 0;
+    if (this.detached || this.exitDelivered) return;
+    if (this.peer) {
+      clearTimeout(this.pingTimer);
+      void this.ping(this.opts.pingIntervalMs ?? DEFAULT_PING_MS);
+    }
+  }
+
+  /**
+   * Wait, up to `ms`, for the host process itself to be gone (checked by pid
+   * and start time). A host exits only after its agent has, so this is how a
+   * caller knows the `claude` is gone too. True if it is.
+   */
+  async waitGone(ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    const pid = this.opts.hostPid?.();
+    if (pid === undefined) return true;
+    while (isSameProcessAlive(pid, this.opts.hostStartTime?.())) {
+      if (Date.now() > deadline) return false;
+      await sleep(100);
+    }
+    return true;
+  }
+
+  /** Push the settings a host applies on its own (the idle-orphan rule), if it takes them. */
+  async configure(): Promise<void> {
+    const peer = this.peer;
+    if (!peer || !this.hello?.capabilities.includes(CAPABILITY_CONFIGURE_IDLE) || !this.opts.orphanIdleHours) return;
+    try {
+      await peer.request('configure', { orphanIdleHours: this.opts.orphanIdleHours() }, { timeoutMs: 10_000 });
+    } catch (err) {
+      this.opts.log(`host ${this.opts.hostId}: configure failed (${String(err)})`);
     }
   }
 
@@ -330,6 +387,7 @@ export class HostClient {
             this.setLink('live');
             this.wakeReady();
             this.schedulePing();
+            void this.configure();
             resolve();
           })
           .catch(fail);

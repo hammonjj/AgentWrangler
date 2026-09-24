@@ -3,7 +3,7 @@
  * in-process one, fed by a `HostClient` over the host's socket instead of by
  * a `ClaudeSdkSession` in this process (playbook §5.1, Stage 3).
  */
-import { RunnerView } from '../../claude/runner/runnerView';
+import { RunnerView, type ClaudeExecution } from '../../claude/runner/runnerView';
 import type { ConversationHistory } from '../../claude/transcriptHistory';
 import type { HostManifest } from '../../shared/sessionProtocol';
 import type { PermissionModeName } from '../../shared/conversation';
@@ -15,6 +15,12 @@ export interface RemoteClaudeDeps {
   binary: string;
   log: (msg: string) => void;
   loadHistory?: (sessionId: string, cwd: string) => Promise<ConversationHistory>;
+  /**
+   * Run before a host resumes an id that something may still hold: the
+   * orphan sweep (§7.3). Rejects when resuming is not safe. Used by version
+   * migration (§7.4); a first resume is swept by its caller.
+   */
+  beforeResume?: (sessionId: string) => Promise<void>;
 }
 
 /** Start a new host for a session. `request.sessionId` or `request.resume` must be set. Not started: call `start()`. */
@@ -40,7 +46,7 @@ export function spawnHostedClaude(request: Omit<LaunchRequest, 'provider'>, deps
       effort: request.effort,
       origin: request.origin,
     },
-    { exec: client, log: deps.log, loadHistory: deps.loadHistory },
+    { exec: client, log: deps.log, loadHistory: deps.loadHistory, migrate: migrator(sessionId, request.cwd, deps) },
   );
 }
 
@@ -64,6 +70,33 @@ export function adoptHostedClaude(
   );
   return new RunnerView(
     { cwd: manifest.cwd, sessionId: manifest.sessionId, history, ...launch },
-    { exec: client, log: deps.log },
+    {
+      exec: client,
+      log: deps.log,
+      migrate: manifest.sessionId ? migrator(manifest.sessionId, manifest.cwd, deps) : undefined,
+    },
   );
+}
+
+/**
+ * The new host a version migration moves a session to: swept first, then a
+ * fresh host of this build resuming the same id, on the view's current model,
+ * mode and effort (§7.4). The view names the id: a `/clear` inside the old
+ * host gave it a new one, and that is the one to resume.
+ */
+function migrator(initialId: string, cwd: string, deps: RemoteClaudeDeps) {
+  return async (launch: { sessionId?: string; permissionMode?: PermissionModeName; model?: string; effort?: string }): Promise<ClaudeExecution> => {
+    const sessionId = launch.sessionId ?? initialId;
+    await deps.beforeResume?.(sessionId);
+    const { client } = deps.supervisor.spawn({
+      cwd,
+      sessionId,
+      resume: true,
+      permissionMode: launch.permissionMode,
+      model: launch.model,
+      effort: launch.effort,
+      binary: deps.binary,
+    });
+    return client;
+  };
 }

@@ -12,6 +12,16 @@
 const STRIPPED_EXACT = new Set(['__CFBundleIdentifier', 'XPC_SERVICE_NAME']);
 const STRIPPED_PREFIXES = ['ELECTRON_', 'AW_'];
 
+/**
+ * Set for every agent a host runs (Stage 4, decided §22). AW's
+ * `PermissionRequest` hook script reads it: it still logs the prompt, so the
+ * row shows the session waiting, but it does not wait for a decision file. A
+ * hosted session's asks are then answerable only through its host, which only
+ * a client holding the host's token can reach; a file any local process can
+ * write is not a way in.
+ */
+export const HOSTED_ENV = 'AGENTWRANGLER_HOSTED';
+
 export function agentEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
@@ -20,5 +30,6 @@ export function agentEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     if (STRIPPED_PREFIXES.some((p) => key.startsWith(p))) continue;
     out[key] = value;
   }
+  out[HOSTED_ENV] = '1';
   return out;
 }

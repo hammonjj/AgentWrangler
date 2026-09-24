@@ -27,6 +27,7 @@ import {
   RPC_RESYNC,
   RPC_UNAUTHORIZED,
   type ClientRole,
+  type ConfigureParams,
   type ControlRequest,
   type EventsResult,
   type HelloParams,
@@ -44,6 +45,8 @@ export interface HostServerOptions {
   describe: () => Omit<HelloResult, 'protocol' | 'sessionId' | 'state' | 'seq' | 'epoch'>;
   log: (msg: string) => void;
   queueBytes?: number;
+  /** `configure` from the core (Stage 4). Absent: the method is not found. */
+  configure?: (params: ConfigureParams) => void;
 }
 
 class RpcFailure extends Error {
@@ -71,7 +74,7 @@ interface Conn {
 /** A line this close to the frame limit is replaced by a stub rather than sent (or never delivered). */
 const FRAME_HEADROOM = 4096;
 
-const MUTATING = new Set(['send', 'respondAsk', 'control', 'end']);
+const MUTATING = new Set(['send', 'respondAsk', 'control', 'end', 'configure']);
 
 export class HostServer {
   private server?: net.Server;
@@ -110,13 +113,25 @@ export class HostServer {
     return [...this.conns].filter((c) => c.events).length;
   }
 
+  /** Connected clients that got past `hello`: what the idle-orphan rule counts. */
+  get clients(): number {
+    return [...this.conns].filter((c) => c.role).length;
+  }
+
   /**
    * Whether some subscribed client has been handed everything up to `seq` and
    * its queue is empty: the exit record has reached someone who can act on it.
    */
   delivered(seq: number): boolean {
+    // A core that asked for `end` and was answered knows how it went: the
+    // answer follows the exit on the same stream. It may well have gone
+    // already (a version migration lets go of the old host at once).
+    if (this.endAnswered) return true;
     return [...this.conns].some((c) => c.events && c.lastSent >= seq && c.queue.idle);
   }
+
+  /** Some client's `end` call has been answered. */
+  private endAnswered = false;
 
   /**
    * Stop listening and let every connection go. Each socket is ended, not
@@ -239,9 +254,15 @@ export class HostServer {
       case 'end':
         this.audit('end');
         await session.end(typeof p.graceMs === 'number' ? { graceMs: p.graceMs } : {});
+        if (session.snapshot().state === 'exited') this.endAnswered = true;
         return { ok: true };
       case 'ping':
         return { seq: session.snapshot().seq, now: Date.now() };
+      case 'configure':
+        if (!this.opts.configure) throw new RpcFailure(RPC_METHOD_NOT_FOUND, 'no method configure');
+        this.audit('configure');
+        this.opts.configure(p as ConfigureParams);
+        return { ok: true };
       default:
         throw new RpcFailure(RPC_METHOD_NOT_FOUND, `no method ${req.method}`);
     }

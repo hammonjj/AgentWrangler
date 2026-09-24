@@ -50,6 +50,40 @@ export interface SessionDecorations {
   pendingQuestion?(sessionId: string | undefined): AgentSession['pendingQuestion'];
   /** The `ExitPlanMode` this window's runner is parked on, if any. */
   pendingPlan?(sessionId: string | undefined): AgentSession['pendingPlan'];
+  /** The permission a session host is holding for this session, if any (see `withHostedPermission`). */
+  pendingPermission?(sessionId: string | undefined): HostedPermission | undefined;
+}
+
+/** A permission ask held by a session host: what the row and the remote need to offer it. */
+export interface HostedPermission {
+  requestId: string;
+  toolName: string;
+  ask?: AgentSession['blockedAsk'];
+}
+
+/**
+ * Show a host-held permission as the session's pending prompt.
+ *
+ * Since Stage 4 the `PermissionRequest` hook does not wait for hosted
+ * sessions (`AGENTWRANGLER_HOSTED`), so no hook marker names their prompt and
+ * the row and the remote would offer nothing. The host holds the ask; its
+ * request id is what gets answered (`decidePermission` goes to the host for
+ * it). It wins over a hook marker and the hook's description too, so an
+ * answer always takes the host's path and approves the prompt on screen.
+ */
+export function withHostedPermission(s: AgentSession, p: HostedPermission | undefined): AgentSession {
+  if (!p || s.provider !== 'claude') return s;
+  return {
+    ...s,
+    status: 'blocked',
+    permissionRequestId: p.requestId,
+    // The host's ask decides what is shown as well as what is answered: the
+    // hook's copy may describe another prompt of the same session (two
+    // pending at once), and a button must approve exactly what it shows.
+    blockedReason: p.toolName,
+    blockedAsk: p.ask,
+    alwaysAllow: undefined,
+  };
 }
 
 /** Just enough of `SessionStore` to decorate: the list, and when it moves. */
@@ -72,7 +106,8 @@ export interface ChangeSource {
  * `AgentSession` declares them and how the dashboard has always written them —
  * an explicit `false` would change every session's JSON for no reader's benefit.
  */
-export function decorateSession(s: AgentSession, d: SessionDecorations): AgentSession {
+export function decorateSession(input: AgentSession, d: SessionDecorations): AgentSession {
+  const s = withHostedPermission(input, d.pendingPermission?.(input.sessionId));
   const archived = d.isArchived(s.key) || undefined;
   const paused = d.isPaused(s.pid) || undefined;
   const runnerOwned = d.runnerOwned?.(s.sessionId) || undefined;

@@ -79,3 +79,37 @@ describe('endProcess', () => {
     expect(await endProcess(123, ctl)).toBe('exited');
   });
 });
+
+describe('endProcess with a recorded start time (pid reuse)', () => {
+  const START = 'Thu Sep 24 21:45:08 2026';
+
+  it('never signals a pid that now belongs to another process', async () => {
+    const { ctl, signals } = fakeProcess({});
+    ctl.startTimeOf = () => 'Fri Sep 25 08:00:00 2026';
+    expect(await endProcess(123, ctl, START)).toBe('already-gone');
+    expect(signals).toEqual([]);
+  });
+
+  it('refuses, without signalling, when the start time cannot be read', async () => {
+    const { ctl, signals } = fakeProcess({});
+    ctl.startTimeOf = () => undefined;
+    expect(await endProcess(123, ctl, START)).toBe('refused');
+    expect(signals).toEqual([]);
+  });
+
+  it('ends the same process as usual', async () => {
+    const { ctl, signals } = fakeProcess({ diesAfterTermMs: 300 });
+    ctl.startTimeOf = () => START;
+    expect(await endProcess(123, ctl, START)).toBe('exited');
+    expect(signals).toEqual(['SIGTERM']);
+  });
+
+  it('does not SIGKILL a pid that was reused during the SIGTERM wait', async () => {
+    const { ctl, signals } = fakeProcess({});
+    let reads = 0;
+    // The first few reads see our process; then the pid belongs to a stranger.
+    ctl.startTimeOf = () => (reads++ < 3 ? START : 'someone else');
+    expect(await endProcess(123, ctl, START)).toBe('exited');
+    expect(signals).toEqual(['SIGTERM']);
+  });
+});

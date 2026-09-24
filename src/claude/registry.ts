@@ -35,6 +35,11 @@ export interface RegistryEntry {
   waitingFor?: string;
   /** When `liveStatus` last changed. Claude Code's clock, which is ours too. */
   statusUpdatedAtMs?: number;
+  /**
+   * When the CLI process started, as `ps -o lstart` prints it in UTC. Lets a
+   * pid be checked before it is signalled: pids are reused (spike S1).
+   */
+  procStart?: string;
 }
 
 /** Only `<pid>.json` — the sibling `<pid>.<sha256>.key` files are secrets and must never be read. */
@@ -49,6 +54,32 @@ export function isPidAlive(pid: number): boolean {
     // EPERM = alive but not ours; ESRCH (and anything else) = not alive.
     return (e as NodeJS.ErrnoException)?.code === 'EPERM';
   }
+}
+
+/**
+ * Every `<pid>.json` in the registry, live or dead: pid, session id and start
+ * time only. For the orphan sweep, which has to tell a stale file from a live
+ * process itself (and must see both).
+ */
+export async function readProcessEntries(dir: string): Promise<{ pid: number; sessionId: string; procStart?: string }[]> {
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return [];
+  }
+  const out: { pid: number; sessionId: string; procStart?: string }[] = [];
+  for (const name of names) {
+    if (!REGISTRY_FILE_RE.test(name)) continue;
+    try {
+      const e = JSON.parse(await fs.readFile(path.join(dir, name), 'utf8')) as { pid?: unknown; sessionId?: unknown; procStart?: unknown };
+      if (!Number.isInteger(e?.pid) || (e.pid as number) <= 0 || typeof e.sessionId !== 'string') continue;
+      out.push({ pid: e.pid as number, sessionId: e.sessionId, procStart: typeof e.procStart === 'string' ? e.procStart : undefined });
+    } catch {
+      // unreadable or half-written: nothing to act on
+    }
+  }
+  return out;
 }
 
 /**
@@ -99,6 +130,7 @@ export async function readRegistry(dir: string, alive: (pid: number) => boolean 
       name: typeof e.name === 'string' && e.nameSource !== 'derived' ? e.name : undefined,
       liveStatus: typeof e.status === 'string' ? e.status : undefined,
       waitingFor: typeof e.waitingFor === 'string' ? e.waitingFor : undefined,
+      procStart: typeof e.procStart === 'string' ? e.procStart : undefined,
       // Only meaningful alongside a status, and only as a number: a missing or
       // malformed stamp must read as "no opinion", never as epoch 0, which
       // would compare older than every block.

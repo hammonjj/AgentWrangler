@@ -251,10 +251,11 @@ describe('crashes of the host and the agent', () => {
     expect(fs.existsSync(path.join(h.runDir, `${m.hostId}.token`))).toBe(false);
   }, 30_000);
 
-  it.todo('orphan sweep: SIGKILL host → lost → the orphan is ended → interrupted (#15)');
-  it.todo('orphan sweep: a matching live process whose parent is not launchd is not swept (#15)');
-  it.todo('orphan sweep: a stale sessions/<pid>.json (dead pid, or a reused pid with another start time) is ignored (#15)');
-  it.todo('orphan sweep: waits for the orphan to exit before history is loaded (#15)');
+  // The orphan sweep (#15) is covered in `sessionHostRecovery.integration.test.ts`
+  // (a SIGKILLed host's real orphan swept, then one process on the resumed id)
+  // and `orphanSweep.test.ts` (non-launchd owners never swept; stale and reused
+  // pids ignored; the sweep resolves only once the orphan has exited, and
+  // `RunnerService.resume` awaits it before the history is read).
 });
 
 describe('ending agents (§7.1)', () => {

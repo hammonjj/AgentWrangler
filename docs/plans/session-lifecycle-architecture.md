@@ -732,6 +732,10 @@ summarizes it.
 | `control` | `{op: interrupt \| setModel \| setPermissionMode \| supportedModels \| supportedCommands \| getContextUsage, args}` | `{result}`. An op the host does not have → `-32601`; the ops it has are advertised as `control.<op>` capabilities |
 | `end` | `{graceMs}` | resolves after the agent has exited |
 | `ping` | `{}` | `{seq, now}` |
+| `configure` (Stage 4, additive) | `{orphanIdleHours?}` | `{ok}`. Core only. Sent only to a host advertising `configure.orphanIdleHours`; an older host answers `-32601`. Fields a host does not know are ignored |
+
+Stage 4 also added, additively, `HostExit.trigger` (`'idleTimeout'` when the idle-orphan rule
+ended the session) and `HostBoot.orphanIdleHours`.
 
 There is deliberately **no** method to spawn, exec, read files or change the binary, cwd, env or
 the `allowDangerouslySkipPermissions` option. A host drives only the session it was started
@@ -1449,6 +1453,64 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
   9. docs
   10. default flip, separately
 - **PR.** Own PR, and the default flip after the soak.
+- **Outcome (2026-09-24, #15; the soak, CP3 and the flip are still to come).**
+  - **Start-time guards.** `endProcess` takes the start time the caller knows (Claude Code's
+    `procStart`, a manifest's `hostStartTime`) and never signals a pid it cannot prove is that
+    process: a reused pid is "already gone", an unreadable start time is "refused". Take-over,
+    Close and Stop host all pass one.
+  - **Classification.** Dead hosts' exit records are read *before* the interrupted list is built
+    (`outcomesFromDeadHosts` → `classifyOnStartup`), so auto-resume can no longer pick a session
+    whose host ended, failed or was parked while the app was away. No record → `interrupted`
+    with reason `host lost`, which is offered on the row but never auto-resumed. A record the
+    app had already stopped (Close) keeps its own state. A live host this build cannot follow
+    (foreign manifest) holds its session: take-over and resume are refused and **Stop host**
+    (start-time-checked SIGTERM of the host, which ends its agent gracefully) is offered;
+    Close does the same.
+  - **The sweep** (`orphanSweep.ts`) runs, one at a time per id, at startup for every dead host
+    with no exit record (its manifest is forgotten once the id is clear), when a host is lost
+    while the core is up, and before every resume: `RunnerService.resume` is the one way to
+    resume a Claude id (take-over and Resume here, auto-resume, a migration), and a terminal
+    resume sweeps too. An entry with no `procStart`, or one whose start time cannot be read, is
+    treated as an owner: never killed, and it blocks the resume.
+  - **GC.** Besides manifests (with an exit record at once, without one once swept or after 7
+    days) and runtimes: host logs 14 days after their host has no manifest, and tokens with no
+    manifest after a day (a host that never came up). An answered `end` counts as delivery of
+    the exit, so a migrated host exits at once instead of after the 60 s drain.
+  - **Idle-orphan rule** in the host (`idleRule.ts`): `process.hrtime` (stands still in sleep),
+    checked every minute; clients are authenticated connections. The hours come from the boot
+    line and `configure`, pushed on every connect and when the setting changes.
+  - **Drift.** `RunnerView` swaps its execution in place: on an idle send (host state idle, no
+    pending ask, no background tasks in `latest`) to an outdated host it stops listening to the
+    old host, ends it (§7.1), sweeps, spawns a host of this build resuming the same id with the
+    view's current model, mode and effort, and sends there. The pane never rebinds. A failure
+    leaves a note and an ended, resumable session. No "older build" badge yet.
+  - **Power.** `powerMonitor` `resume` → every `HostClient` forgets missed pings and pings now,
+    and the Discord gateway drops its socket and resumes at once. `powerSaveBlocker` is #18's
+    (`shouldPreventAppSuspension`: working, or holding a permission ask).
+  - **Permissions.** Hook script v2 exits after logging when `AGENTWRANGLER_HOSTED=1`; the app
+    rewrites an installed older script at startup (it is AW's own file). Host-held permission
+    asks are put on the row and the remote by `withHostedPermission`, keyed by the host's
+    request id, and `decidePermission` answers that id through the host.
+  - **Tests.** `orphanSweep`, `hostRecovery` (classification, idle rule, GC, hosted
+    permissions), `adopt` (pid reuse), the hook script end to end in hosted mode, gateway wake,
+    and `sessionHostRecovery.integration`: a SIGKILLed host's real orphan swept and a resume
+    left alone on the id; a drift migration in one view; a busy session not migrated; the idle
+    rule parking only once nothing is connected, with its hours set through `configure`.
+  - **Second read (Opus, before merge).** Fixed: a hosted row now shows the host's ask, not the
+    hook's copy of another prompt; `end` and a migration wait for the old host (and so its
+    agent) to be gone before sweeping; Release sweeps before the terminal resumes; a dead host
+    older than the record's `liveSince` no longer decides it; a host SIGTERMed by Stop host gets
+    10 s (it gives its agent 5); Stop host refuses without a recorded start time; ambient tasks do not count; the script refresh never downgrades; a
+    recordless host the machine has booted since is a restart (auto-resumable), not a crash; a
+    Close or quit during a migration ends or lets go of the new host. Left for the soak/CP3:
+    `AGENTWRANGLER_HOSTED` is inherited by everything a hosted agent runs (a nested `claude`
+    loses the file path; not a way in); the sweep's ppid-1 rule would also end a deliberately
+    headless `claude` on the same id (a lost manifest's `agentPid` could prove ownership); an
+    unreachable host during an answer reads as "no longer waiting"; #18's power block counts a
+    parked permission ask, so one left overnight holds off idle sleep.
+  - **Not done here:** the §16 manual rows and the gating acceptance test (James's, during the
+    soak); M3 (logout); CP3; the default flip and removing the setting; staggering the replay of
+    several busy hosts at startup (§15.2 open item).
 
 ```text
 Recommended model: Opus

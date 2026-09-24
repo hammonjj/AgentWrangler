@@ -19,7 +19,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { app, Notification, powerSaveBlocker } from 'electron';
+import { app, Notification, powerMonitor, powerSaveBlocker } from 'electron';
 import { createApp } from '../app/createApp';
 import { DictationSetupError, defaultModelPath } from '../core/dictation';
 import { shouldPreventAppSuspension } from '../core/menuBar';
@@ -241,6 +241,13 @@ void app.whenReady().then(() => {
   // still running and still watching sessions, so this is a show, not a start.
   app.on('activate', () => window?.open());
 
+  // ---- Sleep (playbook §8 "Machine sleeps") ----
+  //
+  // On wake, links and the Discord gateway are rechecked at once rather than
+  // at their next heartbeat (spike M2: a sleep leaves no timer gap to detect
+  // it by). Idle sleep while agents work is the power block below.
+  powerMonitor.on('resume', () => wrangler.onSystemResume());
+
   const menuBar = new MenuBar({
     app: wrangler,
     surface: window,
@@ -339,7 +346,10 @@ void app.whenReady().then(() => {
       if (decision.announceRunning > 0 && Notification.isSupported()) {
         new Notification({
           title: `${agentCount(decision.announceRunning)} keep running`,
-          body: 'Agent Wrangler reconnects when you open it again. ⌥⌘Q quits and stops them.',
+          // The accepted risk of §8.1: nothing enforces the usage cap while the app is shut.
+          body:
+            'Agent Wrangler reconnects when you open it again. ⌥⌘Q quits and stops them.' +
+            (wrangler.getConfig().autoPauseEnabled ? ' Auto-pause is off until then.' : ''),
           silent: true,
         }).show();
         // A moment for the notification to be handed to the system before the process goes.

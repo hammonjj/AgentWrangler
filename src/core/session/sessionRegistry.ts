@@ -11,7 +11,7 @@
  * The core is the only writer. Stored as one JSON document (`sessions.json`):
  * fewer than a hundred records, one writer, "load all, replace one".
  */
-import { classifyOnStartup, showsInterrupted, type StartupResult } from './recovery';
+import { classifyOnStartup, showsInterrupted, type HostOutcome, type StartupResult } from './recovery';
 import type { SessionProvider } from './sessionHandle';
 
 /** The slice of a key-value store this needs. `JsonStore` and a test double both fit. */
@@ -64,6 +64,11 @@ export interface SessionRecord {
   createdAt: number;
   /** Last time the pane showed it. Decides which interrupted session comes back automatically. */
   lastShownAt: number;
+  /**
+   * When it last became `live`. A dead host's exit record only speaks for the
+   * run that started at or after this; an older host's record is history.
+   */
+  liveSince?: number;
   updatedAt: number;
 }
 
@@ -112,8 +117,8 @@ export class SessionRegistry {
    * sessions still running in a surviving host) and save the result. Call
    * once, before anything reads the registry or resumes anything.
    */
-  startup(stillRunning: ReadonlySet<string> = new Set()): StartupResult {
-    const result = classifyOnStartup(this.all(), this.now(), stillRunning);
+  startup(stillRunning: ReadonlySet<string> = new Set(), deadHosts: ReadonlyMap<string, HostOutcome> = new Map()): StartupResult {
+    const result = classifyOnStartup(this.all(), this.now(), stillRunning, deadHosts);
     this.write(result.records);
     return result;
   }
@@ -133,6 +138,8 @@ export class SessionRegistry {
       launch: { ...existing?.launch, ...input.launch },
       origin: input.origin ?? existing?.origin,
       state: 'live',
+      // Kept while it stays live (an id re-announced mid-run is the same run).
+      liveSince: existing?.state === 'live' && existing.liveSince !== undefined ? existing.liveSince : now,
       createdAt: existing?.createdAt ?? now,
       lastShownAt: now,
       updatedAt: now,

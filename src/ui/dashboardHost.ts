@@ -4,6 +4,7 @@ import type { Disposable } from '../core/events';
 import type { PauseService } from '../core/pauseService';
 import type { PinService } from '../core/pinService';
 import type { SessionStore } from '../core/sessionStore';
+import { withHostedPermission, type HostedPermission } from '../core/sessionView';
 import type { ModelCatalogService } from '../core/modelCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
@@ -52,6 +53,8 @@ export interface RunnerOwnership {
    */
   pendingPlan?(sessionId: string | undefined): { requestId: string; plan: string; more?: number } | undefined;
   decidePlan?(sessionId: string | undefined, requestId: string, approve: boolean, feedback?: string): Promise<boolean>;
+  /** The permission a session host holds for this session: the row's Allow/Deny answer it. */
+  pendingPermission?(sessionId: string | undefined): HostedPermission | undefined;
   onDidChange(listener: () => void): Disposable;
 }
 
@@ -179,7 +182,8 @@ export class DashboardHost {
     await this.pause.refresh(livePids);
     if (seq !== this.snapshotSeq) return; // superseded while we waited
 
-    const sessions = raw.map((s) => {
+    const sessions = raw.map((row) => {
+      const s = withHostedPermission(row, this.runners.pendingPermission?.(row.sessionId));
       // Ask the runner first: its child processes are descendants of this
       // extension host, so the process table would call them panel sessions.
       const runnerOwned = this.runners.owns(s.sessionId);

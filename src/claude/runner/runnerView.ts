@@ -40,6 +40,7 @@ import type {
   RespondOutcome,
   SendResult,
 } from '../../shared/sessionProtocol';
+import { backgroundTaskCount } from '../../shared/sessionProtocol';
 import { parsePermissionSuggestions, permissionDetail, suggestionLabels } from '../permissionDetail';
 import type { ConversationHistory } from '../transcriptHistory';
 import { createRunnerState, noteBlock, reduceRunnerMessage, type RunnerBlocksState } from './runnerBlocks';
@@ -63,7 +64,28 @@ export interface ClaudeExecution {
   onLink?(listener: (state: 'connecting' | 'live' | 'unreachable') => void): Disposable;
   /** Stop following without ending the agent (remote only: the app is quitting, the host lives on). */
   detach?(): void;
+  /** Remote only: the host runs an older build than this app (§7.4). */
+  readonly outdated?: boolean;
+  /** Remote only: the machine woke from sleep; recheck the link. */
+  wake?(): void;
+  /** Remote only: push settings the host applies itself. */
+  configure?(): Promise<void>;
+  /** Remote only: wait (bounded) until the host process is gone; true if it is. */
+  waitGone?(ms: number): Promise<boolean>;
 }
+
+/**
+ * How a view moves its session to a fresh host of this build (§7.4): end the
+ * old agent is done by the view; this sweeps for orphans and starts a new host
+ * resuming the same id with the given launch options. Rejects when the id is
+ * not clear to resume.
+ */
+export type MigrateExecution = (launch: {
+  sessionId?: string;
+  permissionMode?: PermissionModeName;
+  model?: string;
+  effort?: string;
+}) => Promise<ClaudeExecution>;
 
 export interface RunnerViewOptions {
   cwd: string;
@@ -93,6 +115,8 @@ export interface RunnerViewDeps {
   loadHistory?: (sessionId: string, cwd: string) => Promise<ConversationHistory>;
   /** Message uuids, injectable for tests. */
   newUuid?: () => string;
+  /** Hosted only: move an outdated host's idle session to a new host before sending. */
+  migrate?: MigrateExecution;
 }
 
 /** A local runner's lifecycle: the handle's, of which it never enters the remote-only states. */
@@ -112,6 +136,8 @@ interface PendingAsk {
 const MAX_BLOCKS = 2000;
 /** Silence after an interrupt that counts as the turn being over (see `interrupt`). */
 const INTERRUPT_GRACE_MS = 5000;
+/** How long a migration waits for the old host to exit (it gives its agent 5 s on a signal). */
+const MIGRATION_EXIT_WAIT_MS = 15_000;
 /** Attempts at the model list before giving up on a CLI that cannot answer. */
 const MAX_MODEL_ASKS = 3;
 
@@ -126,7 +152,12 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
   readonly blocks: ConvBlock[] = [];
   composer: ComposerState = { permissionMode: 'default', slashCommands: [], busy: false, queued: 0 };
 
-  private readonly exec: ClaudeExecution;
+  /** Replaced only by a version migration (§7.4), which keeps the view and its blocks. */
+  private exec: ClaudeExecution;
+  /** A migration in flight: a second send waits for it rather than starting another. */
+  private migrating?: Promise<boolean>;
+  /** Let go of for a quit: a migration finishing afterwards must not keep the new host. */
+  private detached = false;
   private blockState: RunnerBlocksState = createRunnerState();
   private pending = new Map<string, PendingAsk>();
   private truncated = false;
@@ -195,12 +226,28 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     return this.exec.detach !== undefined;
   }
 
+  /** Runs in a host of an older build, and will move to a new one on its next idle send (§7.4). */
+  get outdatedHost(): boolean {
+    return this.exec.outdated === true;
+  }
+
+  /** The machine woke from sleep. */
+  wake(): void {
+    this.exec.wake?.();
+  }
+
+  /** Settings the host applies itself changed. */
+  reconfigure(): void {
+    void this.exec.configure?.();
+  }
+
   /**
    * Stop following a hosted session without ending it: the app is quitting
    * and the agent keeps running in its host. Does nothing for an in-process one.
    */
   detach(): void {
     if (!this.exec.detach) return;
+    this.detached = true;
     clearTimeout(this.interruptTimer);
     this.exec.detach();
     this.execSub?.dispose();
@@ -262,9 +309,14 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
 
   async send(text: string, images?: ImageAttachment[]): Promise<CommandOutcome> {
     const pics = images ?? [];
+    if (this.migrating) await this.migrating;
     if (!this.canSend) return 'gone';
     // An image on its own is a real message ("what is wrong with this?").
     if (!text.trim() && pics.length === 0) return 'applied';
+    if (this.shouldMigrate()) {
+      this.migrating = this.migrateHost().finally(() => (this.migrating = undefined));
+      if (!(await this.migrating)) return 'gone';
+    }
     // Set on every send (CP0): the CLI keeps it as the transcript entry's uuid,
     // so a client reattaching later can dedupe its own sends against the file.
     const uuid = this.newUuid();
@@ -420,6 +472,9 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     if (this.lifecycle === 'ended' || this.lifecycle === 'error') return;
     this.setLifecycle('ending');
     await this.exec.end();
+    // Hosted: done means the host, and so its `claude`, has gone, so a resume
+    // or a terminal hand-over right after is never a second owner.
+    await this.exec.waitGone?.(MIGRATION_EXIT_WAIT_MS);
   }
 
   dispose(): void {
@@ -430,6 +485,80 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
   }
 
   // ---- internals ----
+
+  /**
+   * Bounded version drift (§7.4): a host on an older build moves to a fresh
+   * one on the next send, but only while nothing could be lost by ending its
+   * agent: idle, no pending ask, no background tasks (ending the CLI kills
+   * those). A busy host keeps its build until its next idle send.
+   */
+  private shouldMigrate(): boolean {
+    if (!this.deps.migrate || !this.exec.outdated) return false;
+    if (this.lifecycle !== 'idle' || this.pending.size > 0) return false;
+    const snap = this.exec.snapshot();
+    return snap.state === 'idle' && snap.pendingAsks.length === 0 && backgroundTaskCount(snap.latest) === 0;
+  }
+
+  /**
+   * End the old host's agent (the §7.1 sequence: never bare stdin EOF), then
+   * resume the same id in a new host and carry on in this view, blocks and
+   * all. The old host exits by itself once its agent has. False when the
+   * session could not be moved; it is then ended here, and resumable.
+   */
+  private async migrateHost(): Promise<boolean> {
+    const old = this.exec;
+    const launch = {
+      sessionId: this.sessionId,
+      permissionMode: this.composer.permissionMode,
+      model: this.composer.model,
+      effort: this.composer.effort,
+    };
+    this.deps.log(`runner ${this.sessionId}: its host runs an older build; moving it to a new host before sending`);
+    // The old agent's exit is this view's detour, not its end: stop listening first.
+    this.execSub?.dispose();
+    this.linkSub?.dispose();
+    try {
+      await old.end();
+    } catch (err) {
+      this.deps.log(`runner ${this.sessionId}: ending the old host failed: ${String(err)}`);
+    }
+    old.detach?.();
+    // `end` answering means the session has ended, not that its `claude` has
+    // exited; the host goes only once its agent has. Until then the sweep
+    // would (rightly) call the id held, so wait for the host itself.
+    if (old.waitGone && !(await old.waitGone(MIGRATION_EXIT_WAIT_MS))) {
+      this.deps.log(`runner ${this.sessionId}: the old host is still running after ${MIGRATION_EXIT_WAIT_MS} ms`);
+    }
+    let next: ClaudeExecution;
+    try {
+      next = await this.deps.migrate!(launch);
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      this.deps.log(`runner ${this.sessionId}: could not move to a new host: ${why}`);
+      this.append([noteBlock(this.blockState, 'error', `Not sent: this session could not be moved to the new version of Agent Wrangler (${why}). Resume it to carry on.`)]);
+      this.lastExit = { reason: 'stopped' };
+      this.setComposer({ busy: false });
+      this.setLifecycle('ended');
+      return false;
+    }
+    // Closed or let go of (the app quitting) while the new host came up: the
+    // new host must follow suit, or it would run on with nobody owning it.
+    if (this.detached) {
+      next.detach?.();
+      return false;
+    }
+    if (this.lifecycle === 'ending' || this.lifecycle === 'ended' || this.lifecycle === 'error') {
+      void next.end().catch(() => undefined);
+      this.setLifecycle('ended');
+      return false;
+    }
+    this.exec = next;
+    this.execSub = next.subscribe(0, (event) => this.onHostEvent(event));
+    this.linkSub = next.onLink?.((state) => this.onLink(state));
+    next.start();
+    this.deps.log(`runner ${this.sessionId}: moved to a new host`);
+    return true;
+  }
 
   /** Take a pending ask for answering, once. */
   private claim(requestId: string, kind?: PendingAsk['kind']): PendingAsk | undefined {
