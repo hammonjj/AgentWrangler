@@ -470,11 +470,17 @@ resume, notify or render. Everything with a "should" in it is in the core.
   hook file also still works while the core is down. `remoteAskFor` and `DecoratedSessions` keep
   reading synchronous state, now from `RemoteSessionHandle`'s cache. AW stays the middleman, and
   hosts never see Discord.
-- **Exclusive resources (Unity Editor).** A future core `LeaseService`: `acquire(resourceKey,
-  sessionId, mode)`, persisted in the registry, released when the session stops, ends or is lost,
-  and shown as a chip. How an agent *requests* one (an AW MCP tool, or a `PreToolUse` hook check)
-  is spike F2. Leases key on the registry session id, so they survive core restarts and host
-  reattach.
+- **Exclusive resources (Unity Editor, the installed app).** Decided by spike F2 (#23,
+  `spikes/f2-resource-leases.md`): the agent does not request a lease, its tool call does.
+  Resources are declared as tool-call patterns; an AW `PreToolUse` hook acquires the lease before
+  a matching call, waits a bounded time, then denies with a reason, and never prints `allow`.
+  The lock of record is an atomically created lease file next to the hook log, not a
+  `sessions.json` field, because the hook must grant and refuse while the core is down (every
+  `app:install`). The core `LeaseService` declares resources, reaps stale holders, releases on
+  registry transitions, shows chips, offers force release, and lets the orchestration scheduler
+  hold a lease before a session exists (`acquire` + `bind`). Leases key on the registry session
+  id, so they survive core restarts and host reattach. An AW MCP tool is deferred until turn
+  scope proves too short.
 - **Scheduled agents** (`docs/plans/scheduled-agents.md`). That research weighs an in-app
   scheduler against launchd and cloud routines, and marks the in-app option down because it
   "needs the app open".
@@ -1695,8 +1701,9 @@ Review checkpoint: Opus High review of the control-socket API (it is forever, li
 
 - **F1 (feature):** warn when two live sessions share one checkout. Any time, and better after
   Stage 2.
-- **F2 (spike):** how agents acquire exclusive resource leases (Unity Editor): MCP tool vs
-  `PreToolUse` check. Then a core `LeaseService`. After Stage 2.
+- **F2 (spike, done 2026-09-24, #23):** how agents acquire exclusive resource leases (Unity
+  Editor). Verdict: a `PreToolUse` hook on declared resources, lease files as the lock of
+  record, a core `LeaseService` for policy (`spikes/f2-resource-leases.md`, §6.1).
 - **F3 (bug):** the runner card stays pending when a permission is answered through the hook.
   Folded into Stage 1.
 
