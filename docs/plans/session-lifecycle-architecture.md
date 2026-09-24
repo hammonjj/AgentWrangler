@@ -56,7 +56,9 @@ used ~120–400 MB RSS each.
   core keeps running, Dock `activate` reopens the window, and there is no tray.
 - `before-quit` is the only teardown: it disposes the windows, then `wrangler.dispose()`, then
   `host.disposeAll()`. There is **no confirmation** when agents are running, no `will-quit`, and
-  no `process.on('exit' | 'SIGTERM' | 'uncaughtException')`.
+  no `process.on('exit' | 'SIGTERM' | 'uncaughtException')`. (S2: Electron already turns
+  SIGTERM into a graceful quit that runs `before-quit`, so the missing SIGTERM handler is not a
+  gap in itself; see §11.10.)
 - `RunnerService.dispose()` (`src/claude/runner/runnerService.ts`) runs `void s.end()`. That is
   **not awaited**, so the 5 s graceful-exit budget in `RunnerSession.end()` never gets its
   chance on quit. The backstop is the SDK's `process.on('exit')` handler, which SIGTERMs every
@@ -439,7 +441,7 @@ while the app is fully quit. Otherwise, never.
 | Take over / release / close / resume | buttons | ✔ | executes `end` | | registry |
 | Projects, worktree association at launch | | ✔ | | | registry |
 | Resource leases (worktree, Unity), later | chip | ✔ `LeaseService` | | | registry |
-| Secrets (Discord token, host tokens) | | ✔ (safeStorage) | receives only its own token, once | | `secrets.json` |
+| Secrets (Discord token; host tokens) | | ✔ (Discord: safeStorage; hosts: 0600 file, S2) | receives only its own token, once | | `secrets.json`; `run/<id>.token` |
 | Usage, auto-pause | cards | ✔ | | | cache |
 | Crash-recovery policy | shows it | ✔ | exits cleanly, leaves a tombstone | | registry + manifests |
 
@@ -784,7 +786,7 @@ its state. It adds `connecting` and `unreachable`, which `RunnerLifecycle` lacks
 | **Host manifest** `{v, hostId, provider, sessionId, cwd, hostPid, hostStartTime, agentPid, agentStartTime, socketPath, protocol, hostBuild, runtimeDir, sdkVersion, cliVersion, startedAt}` | `run/<hostId>.json` (0600) | host lifetime + tombstone | host (atomic tmp+rename; rewritten when the id changes) | written only after `listen` succeeds |
 | **Exit record / tombstone** `{exit:{code, signal, reason, at, lastSeq}}` | merged into the manifest | until core GC | host | how the core tells `ended` from `lost` |
 | **AW session registry** (replaces `RunnerRegistry`) `{sessionId, provider, cwd, repoRoot?, worktree?, branchAtStart?, launch:{model, permissionMode, effort, binary, cliVersion}, hostId?, state, endedReason?, createdAt, lastShownAt}` | `sessions.json` via `JsonStore` | everything | core only | the per-window scoping of `surface.json` was a VSCode-era need. Migrate once, and keep the old key readable for one release |
-| Host capability tokens | `secrets.json` via `ElectronSecrets` (safeStorage), keyed by hostId | host lifetime | core | if S2 shows ad-hoc rebuilds make Keychain re-prompt, fall back to a 0600 `hosts.json` and document that it only stops accidental access |
+| Host capability tokens | `run/<hostId>.token`, 0600, in the 0700 `run/` dir, never inside the manifest | host lifetime | core | **Decided by S2:** after every ad-hoc rebuild the first safeStorage call blocks the main thread on a Keychain dialog, during exactly the startup that readopts hosts. A same-uid reader of the file could reach the socket anyway (§12) |
 | Conversation / event history | provider transcripts | everything | the CLI | **AW does not persist event history** |
 | Terminal scrollback | — | — | — | no PTY; the transcript is the equivalent |
 | Permissions | hook markers/decisions (existing); host pending asks (snapshot) | as noted | claude hook / host | settle events record `by: ui \| discord \| hook \| cli` for the audit |
@@ -871,22 +873,40 @@ gets several writers, or needs fleet-level queries.
    - stdout and stderr go to `logs/host-<id>.log`, **never pipes to the core** (they would EPIPE
      when the core dies). Then `unref()`.
    - The SDK builds `claude`'s env from `process.env`, minus `NODE_OPTIONS`. The host **must
-     pass an explicit `env` that strips `ELECTRON_*` and `AW_*`**. Otherwise
-     `ELECTRON_RUN_AS_NODE=1` reaches `claude` and every Bash or npm command it runs. That is the
-     same bug `env -u ELECTRON_RUN_AS_NODE` in `package.json` already works around.
+     pass an explicit `env` that strips `ELECTRON_*`, `AW_*`, `__CFBundleIdentifier` and
+     `XPC_SERVICE_NAME`** (the last two come from the LaunchServices launch; S2). Otherwise
+     `ELECTRON_RUN_AS_NODE=1` reaches `claude` and every Bash or npm command it runs (S2 saw it
+     on a host spawned without an explicit env). That is the same bug `env -u ELECTRON_RUN_AS_NODE`
+     in `package.json` already works around.
    - libuv marks its fds close-on-exec, so the socket and log fds don't leak into `claude`.
-     Verify with `lsof` in S2.
+     **Confirmed by `lsof` in S2:** no leak into `claude`, and the host inherited none of the
+     core's 55 fds.
+   - A host handles SIGTERM by ending its input, waiting ≤5 s for `claude`, then exiting. S2
+     measured 0.8–1.3 s to a clean `claude` exit with no orphan (the logout proxy).
+   - **Host RSS (S2): 22–64 MB** (~60 MB after spawn and a first turn, 22–31 MB idle). `claude`
+     itself is 140–355 MB. §5.3's estimate holds.
 7. **Runtime location.**
    - At core start, **APFS-clone** the running bundle (`cp -c -R`, close to free) into
      `runtimes/<buildId>/`, rename the executable (for example "Agent Wrangler Host"), and spawn
      hosts from there.
-   - `app:install`'s `rm -rf` of `/Applications/Agent Wrangler.app` then never touches a running
-     host.
-   - `pgrep`, `killall "Agent Wrangler"` and `osascript quit app` no longer match hosts.
+   - **S2 decided: cloned runtime, but for different reasons.** (`spikes/s2-detached-host.md`.)
+     A control host running from the installed bundle itself **also survived** `rm -rf` +
+     `cp -R`, because deleted files stay open through their inodes. The clone is still right:
+     - `pgrep -f <bundle exe path>` and `pgrep -x <exe name>` (the install script's guard and the
+       `killall` pattern) matched the uncloned host and neither clone;
+     - a host lives for days, and anything it lazily opens from a deleted bundle would fail;
+     - the clone keeps the build's cdhash, which is the identity TCC uses once the core is gone.
+   - The clone takes ~89 ms. No re-sign and no `Info.plist` edit. It runs under the ad-hoc
+     signature because the Mach-O's embedded code directory is unchanged, **but it fails
+     `codesign --verify`** (CFBundleExecutable names the old executable). Nothing may verify a
+     runtime statically; compare the executable's cdhash instead.
+   - `lsappinfo` lists no host as an app, so `osascript quit app` never reaches one.
+   - **TCC:** a host and its `claude` count as the core while it lives, then as themselves (the
+     old build). `~/Documents` access kept working after the bundle was replaced. A new build's
+     own first `~/Documents` access took 13.5 s, which fits a TCC consent re-prompt per ad-hoc
+     cdhash (to confirm, S2 procedure M4).
    - GC every runtime no manifest references.
    - Record in the build config that Electron's `RunAsNode` fuse must stay enabled.
-   - S2 verifies that the renamed executable still runs with the ad-hoc signature, and checks TCC
-     (repos under the protected `~/Documents`) after the original bundle is replaced.
 8. **Codex.**
    - One `app-server` holds every AW Codex thread's in-flight turn.
    - **Preferred:** an AW-owned, detached `codex app-server --listen unix://<short path>` treated
@@ -921,9 +941,29 @@ gets several writers, or needs fleet-level queries.
     - sleep suspends everything.
 
     App Nap can throttle a *windowless* Electron core, which would delay the Discord heartbeat,
-    so use `powerSaveBlocker('prevent-app-suspension')` while agents are busy (S2 verifies).
-    `SIGTERM` to Electron main, and whether a menu quit can be told apart from an Apple Event
-    quit, are verified in S2.
+    so use `powerSaveBlocker('prevent-app-suspension')` while agents are busy. **S2 saw no
+    throttling** in 150 s runs with a window, windowless with the Dock icon hidden, or with the
+    blocker on. The blocker also shows up as a `NoIdleSleep` assertion, so it stops idle system
+    sleep too: hold it only while an agent is busy. Much longer idle periods and battery power
+    are untested.
+
+    **Survival (S2):** hosts spawned detached from the cloned runtime survived window close, a
+    menu quit, an `osascript` quit, SIGTERM, `kill -9` and a crash of the core, and a full
+    install (quit, `rm -rf`, `cp -R` of a new build). The new build reattached with the token
+    and ran turns on the same `claude`. One host survived nine core deaths across two builds.
+    Sleep/wake and logout are manual procedures M2 and M3 in the S2 write-up, still pending.
+
+    **Quit source (S2, U4).** Electron 44 gives no reason on `before-quit`/`will-quit`/`quit`.
+    - **Electron turns SIGTERM into a graceful quit itself**, so `before-quit` teardown already
+      runs on SIGTERM. A `process.on('SIGTERM')` registered at module load is overridden and
+      **never fires**. Registered inside `whenReady`, it fires and can flag the quit.
+    - A custom Quit menu item (not `role: 'quit'`, which bypasses the handler) with
+      `CmdOrCtrl+Q` flags `menu`.
+    - Anything unflagged is external: `osascript`, Dock → Quit, logout.
+    - `install-app.sh` should announce itself (a `run/quit-intent` marker, later a core-socket
+      call) rather than be inferred.
+    - Telling logout from `osascript` via `powerMonitor` `'shutdown'` is unverified (M3).
+    - With detached hosts no quit source kills a hosted session. The source only decides the UI.
 
 ---
 
@@ -958,7 +998,7 @@ State this plainly in the README.
 | Topic | Design |
 |---|---|
 | Who can connect | Owner only: `run/` is 0700, sockets 0600. The core refuses to start hosts if `run/` has the wrong owner or mode. |
-| Capability token | 256-bit, per host, generated by the core, delivered as the **first stdin line** and then stdin is destroyed. **Never argv** (`ps` shows it) and **never env** (inherited by `claude` and every Bash tool). Required by every method but `hello`. Stored in safeStorage (Keychain-backed; a same-user read triggers a visible prompt). |
+| Capability token | 256-bit, per host, generated by the core, delivered as the **first stdin line** and then stdin is destroyed. **Never argv** (`ps` shows it) and **never env** (inherited by `claude` and every Bash tool). Required by every method but `hello`. Stored in a 0600 `run/<hostId>.token` file (S2: safeStorage blocks core startup on a Keychain dialog after every ad-hoc rebuild). The host keeps its copy in memory only. |
 | Hosted sessions approvable only with the token (Stage 4; on by default, decided §22) | The host sets `AGENTWRANGLER_HOSTED=1` in `claude`'s env. The permission hook script (bump `PERMISSION_SCRIPT_VERSION`) then logs the pending marker for status but **doesn't poll for a decision** for hosted sessions. An agent can't change its parent's env. This depends on the host-first routing in §6.1. |
 | Audit | The host logs every `send`, `respondAsk` and `control` (op name, requestId, never content). Core settle events carry `by`. |
 | Arbitrary command execution | Hosts expose no spawn, exec, file, cwd, env or binary method. The core builds host argv from settings plus validated registry fields. The core socket's `start` takes `{provider, cwd, model, permissionMode, effort, resume}`, never a binary or arguments. |
@@ -1659,13 +1699,13 @@ The gate #11 is itself blocked by #5–#8.
 |---|---|---|---|---|---|
 | U1 | Does `claude` exit promptly on stdin EOF mid-tool, mid-ask, with background shells? Can it orphan? | Orphans hold the session id and corrupt resumes | S1 | yes (CP0) | **Answered: it orphans for the rest of its turn**, and the CLI allows a second owner (silent transcript fork). Sweep is sufficient with four amendments (§11.5). Follow-up: the `PermissionRequest` hook's effect on a mid-ask orphan. `spikes/s1-runner-death.md` |
 | U2 | Do SDK message `uuid`s match transcript entries? | Thin-host reattach dedupe | S1 | yes | **Yes** for `assistant`/`user`, one direction only; host sets `uuid` on sends (§11.5) |
-| U3 | Does a detached host from an APFS-cloned, renamed runtime survive bundle replacement? TCC? Code signature? | Update survivability | S2 | yes | pending |
-| U4 | Can a menu quit be told apart from an Apple Event quit and SIGTERM in Electron 44? | Non-blocking installs, logout | S2 | yes (for Stage 2) | pending |
-| U5 | Does safeStorage re-prompt after an ad-hoc rebuild? | Token storage choice | S2 | no (fallback exists) | pending |
+| U3 | Does a detached host from an APFS-cloned, renamed runtime survive bundle replacement? TCC? Code signature? | Update survivability | S2 | yes | **Go.** Survived every unattended scenario including a full install; TCC access kept; runs ad-hoc but fails static `codesign --verify` (§11.7). Sleep/wake and logout manual (M2, M3). `spikes/s2-detached-host.md` |
+| U4 | Can a menu quit be told apart from an Apple Event quit and SIGTERM in Electron 44? | Non-blocking installs, logout | S2 | yes (for Stage 2) | **Yes, by flagging:** custom Quit item → `menu`; SIGTERM handler installed in `whenReady` → `signal`; unflagged → external; install script announces itself (§11.10). Real ⌘Q pending (M1) |
+| U5 | Does safeStorage re-prompt after an ad-hoc rebuild? | Token storage choice | S2 | no (fallback exists) | **Yes, and it blocks the main thread.** Host tokens go in 0600 files (§10, §12). The Discord token has the same problem |
 | U6 | UDS throughput and backpressure behaviour at streaming rates | Protocol sizing | S3 | no | **Go.** 4 MiB queue / 16 MiB ring / 10 s × 3 heartbeat stand; `messages` paging rules added (§9.4, §9.7, §9.8). `spikes/s3-socket-protocol.md` |
 | U7 | Codex pending approvals after a client disconnect | Codex survivability claims | S4 | for Stage 5 only | pending |
 | U8 | Can Claude bg agents be driven programmatically? | Could replace AW hosts | S5 | no | **No** (§11.9). `spikes/s5-bg-agents.md` |
-| U9 | App Nap and timers in a windowless core | Discord heartbeat reliability | S2 | for Stage 6 | pending |
+| U9 | App Nap and timers in a windowless core | Discord heartbeat reliability | S2 | for Stage 6 | **Not a blocker:** no throttling in 150 s runs; blocker only while busy (it also stops idle sleep). Long idle and battery untested |
 | U10 | How agents request resource leases | Unity and exclusive tools | F2 | no | not started |
 
 **Standing risks:**
