@@ -47,6 +47,7 @@ const REFETCH_MS = 500;
 const MODES: { value: PermissionModeName; label: string }[] = [
   { value: 'default', label: 'Ask permission' },
   { value: 'acceptEdits', label: 'Auto-accept edits' },
+  { value: 'auto', label: 'Auto (classifier)' },
   { value: 'plan', label: 'Plan mode' },
 ];
 

@@ -381,7 +381,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const runner = runners.start({
       cwd: s.cwd,
       resume: s.sessionId,
-      permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
+      permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto'),
       effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
       model: model || undefined,
     });
@@ -654,7 +654,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const model = host.settings.get<string>('runner.model', '').trim();
     const runner = runners.start({
       cwd,
-      permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
+      permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto'),
       effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
       model: model || undefined,
     });
@@ -1429,7 +1429,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const runner = runners.start({
       cwd: record.cwd,
       resume: record.sessionId,
-      permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'acceptEdits'),
+      permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto'),
       effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
       model: model || undefined,
     });

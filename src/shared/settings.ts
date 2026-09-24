@@ -49,11 +49,12 @@ export const SETTINGS: SettingSpec[] = [
     label: 'Permission mode for new conversations',
     group: 'Conversations',
     type: 'string',
-    default: "acceptEdits",
-    enum: ["default", "acceptEdits", "plan"],
+    default: "auto",
+    enum: ["default", "acceptEdits", "auto", "plan"],
     enumDescriptions: [
       'Ask before every tool that needs permission.',
       'Accept file edits without asking; still ask for everything else.',
+      'A classifier model reviews each action and only asks when it blocks something risky.',
       'Plan first: no tools run until you approve a plan.',
     ],
     description:
