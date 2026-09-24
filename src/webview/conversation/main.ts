@@ -1841,7 +1841,7 @@ vscodeApi.onMessage((body) => {
         msgEl.value = ''; attachments = []; renderAttachments(); autoGrow();
         if (m.adopted) {
           note('Session taken over here. Release hands it back to a terminal.');
-          const undo = document.createElement('button'); undo.textContent = 'Undo takeover';
+          const undo = document.createElement('button'); undo.className = 'note-action'; undo.textContent = 'Undo takeover';
           undo.addEventListener('click', () => post({ type: 'release' }));
           blocksEl.lastElementChild?.appendChild(undo);
         }
