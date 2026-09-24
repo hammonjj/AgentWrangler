@@ -491,6 +491,28 @@ body,
 .blk.note.tone-warn {
   color: var(--aw-waiting);
 }
+/* A button appended to a note ("Undo takeover"). Same secondary shape as the
+   header's buttons, with room between it and the sentence it follows. */
+.blk.note .note-action {
+  margin-left: 10px;
+  padding: 2px 10px;
+  vertical-align: baseline;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  font-family: inherit;
+  font-size: 1em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.blk.note .note-action:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+.blk.note .note-action:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
 .blk.note.tone-error {
   color: var(--aw-stuck);
 }
