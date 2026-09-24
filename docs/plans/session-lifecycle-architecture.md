@@ -1506,7 +1506,8 @@ Review checkpoint: CP3 (Opus Extra High) — failure-matrix review after the soa
     background server left from before is stopped if it is idle, and otherwise left running.
   - Checked against the real `0.155.0-alpha.16.3` with an isolated `CODEX_HOME`: pinned
     launch, WebSocket `initialize`, the server surviving the client, and the exact
-    `no rollout found` text. The three manual acceptance checks are James's.
+    `no rollout found` text. **The three manual acceptance checks passed on 2026-09-24**
+    (installed build): mid-turn ⌘Q, pending approval across ⌘Q, and the VS Code writer lock.
   - Not done: lowering `thread_unload_delay_secs` (still the default 60 s), and any idle-exit
     rule for the server (it runs until stopped; it holds nothing when idle).
 
