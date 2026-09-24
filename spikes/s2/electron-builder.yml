@@ -1,0 +1,27 @@
+# Spike S2 (#6) test app. THROWAWAY. Same signing setup as the real
+# electron-builder.yml (ad-hoc, same entitlements, no hardened runtime), but a
+# different appId and productName so it can never be mistaken for, or talk to,
+# the installed Agent Wrangler. Output stays inside the worktree.
+appId: com.hammonjj.agentwrangler.spike-s2
+productName: AW Spike S2
+
+extraMetadata:
+  main: spikes/s2/dist/main.js
+  name: aw-spike-s2
+
+directories:
+  output: spikes/s2/out
+  buildResources: build
+
+files:
+  - spikes/s2/dist/**
+
+asar: true
+
+mac:
+  identity: "-"
+  hardenedRuntime: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  target:
+    - dir
