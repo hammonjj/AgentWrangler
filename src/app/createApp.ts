@@ -60,6 +60,7 @@ import { ProjectsService } from '../claude/projects';
 import { transcriptPathFor } from '../claude/transcriptHistory';
 import { fetchUsage } from '../claude/usageFetch';
 import { ArchiveService } from '../core/archive';
+import { attentionNotice } from '../core/menuBar';
 import { DecoratedSessions } from '../core/sessionView';
 import { ColumnPrefsService } from '../core/columnPrefs';
 import { readConfig, type ConfigGetter } from '../core/config';
@@ -1424,16 +1425,32 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }),
   );
 
-  // Opt-in "waiting on you" toasts, with a per-session cooldown.
+  // "Needs you" notifications, with a per-session cooldown. Opt-in while the
+  // window is open; on by default while it is closed, when the menu bar and
+  // these are the only way to hear about it (Stage 6). An OS notification
+  // where the host has one: it takes no focus, where a message box does.
   const lastToastAt = new Map<string, number>();
   host.subscribe(
     store.onDidUpdate((u) => {
-      if (u.becameWaiting.length === 0 || !getConfig().notifyOnWaiting) return;
+      if (u.becameWaiting.length === 0) return;
+      const cfg = getConfig();
+      const windowOpen = surface?.isOpen ?? false;
+      if (!(cfg.notifyOnWaiting || (!windowOpen && cfg.notifyWhenWindowClosed))) return;
       const now = Date.now();
       for (const s of u.becameWaiting) {
         if (archive.isArchived(s.key)) continue; // archived sessions stay quiet
         if (now - (lastToastAt.get(s.key) ?? 0) < 30_000) continue;
         lastToastAt.set(s.key, now);
+        if (host.notify) {
+          const notice = attentionNotice({ ...s, title: displayTitle(s) });
+          if (!notice) continue;
+          host.notify({
+            ...notice,
+            // Clicked: the user asked for it, so the window comes forward.
+            onClick: () => surface?.show(s.key, { preserveFocus: false }),
+          });
+          continue;
+        }
         const msg =
           s.status === 'blocked'
             ? `${displayTitle(s)} needs your permission${s.blockedReason ? ` for ${s.blockedReason}` : ''}`
@@ -1681,8 +1698,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
     });
     log(`resumed ${decision.sessionId} after a restart`);
     // Beside the dashboard, without taking the cursor: a window that has just
-    // come back should not start by moving your focus.
-    surface?.showSession(runner, { preserveFocus: true });
+    // come back should not start by moving your focus. And never by opening
+    // one: launched at login, the app starts in the menu bar and stays there.
+    if (surface?.isOpen) surface.showSession(runner, { preserveFocus: true });
   };
 
   /**

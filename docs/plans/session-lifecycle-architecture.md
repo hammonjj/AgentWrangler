@@ -144,7 +144,8 @@ observation.
 ### 1.9 Notifications and remote control
 
 - In-app only: `dialogs.info` message boxes for waiting, done and blocked (`notifyOnWaiting`), and
-  `flash` toasts. There is no Electron `Notification`, tray or dock badge.
+  `flash` toasts. There is no Electron `Notification`, tray or dock badge. *(Superseded by
+  Stage 6, #18: `HostServices.notify` → Electron `Notification`, and `src/electron/tray.ts`.)*
 - `RemoteControlService` (`src/remote/service.ts`) is a **reconciler** over a decorated snapshot
   (`DecoratedSessions`, `src/core/sessionView.ts`). It persists only the mirror map
   (`src/remote/mirrorStore.ts`) and an audit log. It can call only `decidePermission`,

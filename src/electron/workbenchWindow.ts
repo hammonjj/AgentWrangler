@@ -61,6 +61,9 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
   private windowSubs: Disposable[] = [];
   private readonly ipcSubs: Disposable[] = [];
   private readonly incoming = new Emitter<unknown>();
+  private readonly openChanged = new Emitter<boolean>();
+  /** True when the window is created, false once it has closed. The Dock icon follows it. */
+  readonly onDidChangeOpen = this.openChanged.event;
 
   constructor(private opts: WorkbenchWindowOptions) {
     const onToHost = (event: IpcMainEvent, message: unknown) => {
@@ -276,7 +279,9 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       this.dashboard = undefined;
       this.conversation = undefined;
       this.window = undefined;
+      this.openChanged.fire(false);
     });
+    this.openChanged.fire(true);
 
     void win.loadURL(documentUrl('workbench'));
 

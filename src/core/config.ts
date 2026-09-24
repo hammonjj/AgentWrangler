@@ -13,6 +13,8 @@ export interface WranglerConfig {
   endedWindowHours: number;
   maxEndedSessions: number;
   notifyOnWaiting: boolean;
+  /** Notify for waiting, blocked and done while the window is closed, whatever `notifyOnWaiting` says. */
+  notifyWhenWindowClosed: boolean;
   pollIntervalSeconds: number;
   /** Plan-usage cards above the table (session / weekly limits, as in Claude Code's /usage). */
   showUsage: boolean;
@@ -50,6 +52,7 @@ export const DEFAULT_CONFIG: WranglerConfig = {
   endedWindowHours: 48,
   maxEndedSessions: 50,
   notifyOnWaiting: false,
+  notifyWhenWindowClosed: true,
   pollIntervalSeconds: 5,
   showUsage: true,
   // One minute. Five was chosen when the cards only answered "am I near the
@@ -110,6 +113,7 @@ export function readConfig(settings: HostSettings): WranglerConfig {
     endedWindowHours: settings.get('endedWindowHours', d.endedWindowHours),
     maxEndedSessions: settings.get('maxEndedSessions', d.maxEndedSessions),
     notifyOnWaiting: settings.get('notifyOnWaiting', d.notifyOnWaiting),
+    notifyWhenWindowClosed: settings.get('notifyWhenWindowClosed', d.notifyWhenWindowClosed),
     pollIntervalSeconds: settings.get('pollIntervalSeconds', d.pollIntervalSeconds),
     showUsage: settings.get('showUsage', d.showUsage),
     usagePollIntervalSeconds: settings.get('usagePollIntervalSeconds', d.usagePollIntervalSeconds),

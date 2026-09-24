@@ -207,7 +207,25 @@ export const SETTINGS: SettingSpec[] = [
     type: 'boolean',
     default: false,
     description:
-      'Show a toast notification when a session flips to WAITING ON YOU.',
+      'Show a notification when a session needs permission, is waiting on you, or is done, while the window is open.',
+  },
+  {
+    key: 'notifyWhenWindowClosed',
+    label: 'Notify while the window is closed',
+    group: 'Agents and status',
+    type: 'boolean',
+    default: true,
+    description:
+      'With the window closed, Agent Wrangler keeps running in the menu bar. Show a macOS notification when a session needs permission, is waiting on you, or is done; clicking it opens that session.',
+  },
+  {
+    key: 'openAtLogin',
+    label: 'Open at login',
+    group: 'Agents and status',
+    type: 'boolean',
+    default: false,
+    description:
+      'Start Agent Wrangler in the menu bar when you log in, without opening its window. It is never restarted automatically after a quit or a crash.',
   },
   {
     key: 'showCodexSubagents',
