@@ -53,3 +53,75 @@ describe('CodexAppServer', () => {
     server.dispose();
   });
 });
+
+/**
+ * A stand-in for the `child_process` handle `spawn` would hand back, real
+ * enough for `CodexAppServer` to wire up (`stdin`/`stdout`/`stderr` are real
+ * streams so `readline` has something to listen to) but backed by no real
+ * process — `kill` just records that it was asked.
+ */
+function fakeChild() {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const emitter = new EventEmitter();
+  const killSignals: (NodeJS.Signals | number | undefined)[] = [];
+  const child = Object.assign(emitter, {
+    stdin,
+    stdout,
+    stderr,
+    kill(signal?: NodeJS.Signals | number) {
+      killSignals.push(signal);
+      return true;
+    },
+  });
+  return { child, killSignals };
+}
+
+describe('CodexAppServer.dispose', () => {
+  it('kills its child via the injected spawnProcess', async () => {
+    const { child, killSignals } = fakeChild();
+    const spawnProcess = (() => child) as unknown as typeof import('node:child_process').spawn;
+    const server = new CodexAppServer(() => '/fake/codex', () => undefined, spawnProcess);
+
+    // `start` awaits the app-server's `initialize` reply forever in this fake
+    // — nothing here answers it — so it is deliberately not awaited, only
+    // caught: `dispose` rejects it, and that rejection is expected, not a
+    // test failure. All `dispose` needs is the child to have been assigned,
+    // which happens synchronously inside `startInner` before that await.
+    const starting = server.start().catch(() => undefined);
+    await Promise.resolve();
+
+    server.dispose();
+    await starting;
+
+    expect(killSignals).toHaveLength(1);
+  });
+
+  it('does nothing when no child was ever started', () => {
+    const { killSignals } = fakeChild();
+    const spawnProcess = (() => {
+      throw new Error('must not spawn');
+    }) as unknown as typeof import('node:child_process').spawn;
+    const server = new CodexAppServer(() => '/fake/codex', () => undefined, spawnProcess);
+
+    expect(() => server.dispose()).not.toThrow();
+    expect(killSignals).toHaveLength(0);
+  });
+
+  it('rejects requests still in flight when the child is disposed', async () => {
+    const { child } = fakeChild();
+    const spawnProcess = (() => child) as unknown as typeof import('node:child_process').spawn;
+    const server = new CodexAppServer(() => '/fake/codex', () => undefined, spawnProcess);
+
+    const starting = server.start().catch(() => undefined);
+    await Promise.resolve();
+    const pending = server.request('someMethod').catch((err: Error) => err);
+
+    server.dispose();
+    await starting;
+
+    const result = await pending;
+    expect(result).toBeInstanceOf(Error);
+  });
+});

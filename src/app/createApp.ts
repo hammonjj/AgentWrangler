@@ -41,6 +41,7 @@ import { endProcess } from '../claude/runner/adopt';
 import { RunnerRegistry } from '../claude/runner/runnerRegistry';
 import { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerSession } from '../claude/runner/runnerSession';
+import { shouldAutoResume } from '../core/session/resumePolicy';
 import {
   currentState,
   installHooks as writeHooks,
@@ -1391,49 +1392,65 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * already running.
    */
   const resumeLastRunner = async (): Promise<void> => {
-    if (!host.settings.get<boolean>('runner.autoResumeLastOnStartup', true)) return;
-    const record = runnerRegistry.resumable();
-    if (!record) return;
-    if (!fs.existsSync(record.cwd)) {
-      runnerRegistry.forget(record.sessionId);
-      return;
-    }
-    const live = store.sessions.find(
-      (s) => s.sessionId.toLowerCase() === record.sessionId.toLowerCase() && s.status !== 'ended',
-    );
-    if (live) {
-      // Someone else picked it up — another window, or a terminal. Leave it.
-      log(`not resuming ${record.sessionId}: it is running elsewhere`);
-      return;
-    }
-    // The check above only sees sessions the Claude Code registry knows about,
-    // and a session driven by *another Agent Wrangler runner* — the extension
-    // in a VSCode window, or a second copy of the app — has no registry entry
-    // at all. To that check it looks dead, and resuming it puts two processes
-    // on one transcript, which is the one thing that corrupts a conversation.
+    const enabled = host.settings.get<boolean>('runner.autoResumeLastOnStartup', true);
+    // Cheap checks first, exactly as before the guard was pulled apart: a
+    // disabled setting or nothing recent enough to resume must not cost a
+    // filesystem read.
+    const record = enabled ? runnerRegistry.resumable() : undefined;
+    const cwdExists = record ? fs.existsSync(record.cwd) : false;
+    const runningElsewhere =
+      record && cwdExists
+        ? store.sessions.some(
+            (s) => s.sessionId.toLowerCase() === record.sessionId.toLowerCase() && s.status !== 'ended',
+          )
+        : false;
+    // The registry check above only sees sessions the Claude Code registry
+    // knows about, and a session driven by *another Agent Wrangler runner* —
+    // the extension in a VSCode window, or a second copy of the app — has no
+    // registry entry at all. To that check it looks dead, and resuming it puts
+    // two processes on one transcript, which is the one thing that corrupts a
+    // conversation.
     //
     // A transcript written to seconds ago is proof something is driving it, and
     // it needs no lease to observe. The converse does not hold — a model can
     // think in silence for minutes — so this only ever refuses, never confirms.
     // The real fix is an ownership lease; see the plan.
-    try {
-      const writtenMsAgo = Date.now() - fs.statSync(transcriptPathFor(record.sessionId, record.cwd)).mtimeMs;
-      if (writtenMsAgo < RECENT_TRANSCRIPT_WRITE_MS) {
-        log(`not resuming ${record.sessionId}: its transcript was written ${Math.round(writtenMsAgo / 1000)}s ago`);
-        return;
+    let transcriptWrittenMsAgo: number | undefined;
+    if (record && cwdExists && !runningElsewhere) {
+      try {
+        transcriptWrittenMsAgo = Date.now() - fs.statSync(transcriptPathFor(record.sessionId, record.cwd)).mtimeMs;
+      } catch {
+        // No transcript yet, or unreadable. Nothing is writing it either.
       }
-    } catch {
-      // No transcript yet, or unreadable. Nothing is writing it either.
+    }
+    const decision = shouldAutoResume({
+      enabled,
+      record,
+      cwdExists,
+      runningElsewhere,
+      transcriptWrittenMsAgo,
+      recentWriteThresholdMs: RECENT_TRANSCRIPT_WRITE_MS,
+    });
+    if (!decision.resume) {
+      if (decision.reason === 'cwd-missing' && decision.sessionId) runnerRegistry.forget(decision.sessionId);
+      // Someone else picked it up — another window, or a terminal. Leave it.
+      if (decision.reason === 'running-elsewhere') log(`not resuming ${decision.sessionId}: it is running elsewhere`);
+      if (decision.reason === 'recent-transcript-write') {
+        log(
+          `not resuming ${decision.sessionId}: its transcript was written ${Math.round((decision.writtenMsAgo ?? 0) / 1000)}s ago`,
+        );
+      }
+      return;
     }
     const model = host.settings.get<string>('runner.model', '').trim();
     const runner = runners.start({
-      cwd: record.cwd,
-      resume: record.sessionId,
+      cwd: decision.cwd,
+      resume: decision.sessionId,
       permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto'),
       effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
       model: model || undefined,
     });
-    log(`resumed ${record.sessionId} after a restart`);
+    log(`resumed ${decision.sessionId} after a restart`);
     // Beside the dashboard, without taking the cursor: a window that has just
     // come back should not start by moving your focus.
     surface?.showRunner(runner, { preserveFocus: true });
