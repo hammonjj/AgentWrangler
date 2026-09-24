@@ -67,7 +67,7 @@ things it uses, with their #4 playbook sections (`docs/plans/session-lifecycle-a
 | Survivable session hosts, reattach after core restart, orphan sweep, bounded version drift | #14, #15 | **The reason #4 comes first.** In this repo the app is reinstalled many times a day, and today every install kills every hosted agent. A mission of five parallel tasks that dies on every `app:install` is unusable. With hosts, in-flight attempts survive the core restarting and the orchestrator reattaches. |
 | Codex threads survive restarts | #17 | Codex is a routing target; its attempts need the same survival. |
 | Windowless core, OS notifications, menu-bar counts | #18 | Missions run for hours with the window closed; "task needs you" must reach James without the window. |
-| Exclusive resource leases (Unity Editor) | #23 (a spike) | #23 decides *how* a lease is acquired; #4 §6.1 describes the core `LeaseService` it leads to, which has no issue yet. The scheduler's exclusive-resource constraint (§13.5) needs that service. If none exists when #47 starts, #47 builds the minimal one #4 describes. |
+| Exclusive resource leases (Unity Editor) | #23 (spike, done), #68 | #23 decided it (`spikes/f2-resource-leases.md`): a `PreToolUse` hook on declared resources, lease files as the lock of record, and a core `LeaseService` with `acquire` (never waits) and `bind` for A5. #68 builds it. The scheduler's exclusive-resource constraint (§13.5) calls that service; #47 does not build its own. |
 | Checkout-sharing warning | #22 | Same `repoRoot`/worktree data the scheduler uses for contention (§13.4). |
 | Core control socket + `aw` CLI | #21 (optional) | A later `aw mission` / `aw task` surface. Not required. |
 | Host-first permission routing; hosted sessions approvable only through AW | #15 | Orchestrated attempts ask permission like any hosted session; nothing new is needed, and an agent cannot approve its own prompt. |
@@ -641,7 +641,7 @@ repeats}`, `action`, `delta {tier?, effort?, harness?}`, `blockedBy? 'cap' | 'pi
 |---|---|---|
 | Durable, orchestration | missions, tasks, dependencies, assessments, routing decisions, attempts (incl. assignment), verification results, escalations, worktree assignments, policy snapshots | MissionStore: `orchestration/missions/<id>.json` via `JsonStore` |
 | Durable, owned by #4 | session records, launch options, `origin` tags, lifecycle | `sessions.json` (`SessionRegistry`) |
-| Durable, owned by #23 | resource leases | registry |
+| Durable, owned by #68 (decided by #23) | resource leases | lease files, `~/.claude/agentwrangler/leases/` (`spikes/f2-resource-leases.md`) |
 | Durable, owned by the CLIs | conversations | transcripts |
 | Durable, append-only | telemetry, mission event history | `orchestration/telemetry/*.jsonl`, `orchestration/missions/<id>.events.jsonl` |
 | Runtime | scheduler queue and timers, handle subscriptions, running verifier processes, catalog health, capacity snapshots | core heap |
@@ -1185,7 +1185,7 @@ Git isolation separates files. It does not separate things a repository uses *ou
   repository `/Applications/Agent Wrangler.app` (CLAUDE.md: "Only one agent runs
   `npm run app:install` at a time" is an exclusive resource written as prose).
 
-Leases come from the core `LeaseService` that #23 leads to (§1.1). Orchestration acquires one
+Leases come from the core `LeaseService` that #23 decided and #68 builds (§1.1). Orchestration acquires one
 **held by the attempt** before starting it (§1.3 A5; a Codex session has no id until
 `thread/start`), binds it to the session's registry id once that exists, and releases it when the
 attempt ends or is lost.
