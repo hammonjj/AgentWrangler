@@ -53,6 +53,36 @@ directory, so each agent has a tree of its own.
 - Merge with `git merge --no-ff` from `main`, then `git worktree remove ../AgentWrangler-<topic>`
   and delete the branch.
 
+## The project board
+
+Work is tracked as issues in `hammonjj/AgentWrangler` on the **Agent Wrangler** GitHub Project
+(https://github.com/users/hammonjj/projects/4). James watches its **Board** view to see where
+each item is, so the card has to move when the work does. If your task has an issue, you own
+its card:
+
+| When | Set Status to |
+|---|---|
+| You start work on it (worktree created) | **In Progress** |
+| You cannot proceed — waiting on James, another issue, or an unknown | **Blocked**, and comment on the issue saying why and what unblocks it |
+| You pick it back up | **In Progress** |
+| Merged to `main` and pushed | close the issue (`gh issue close <n> -c "<one-line summary + commit>"`); a project workflow moves it to **Done** |
+
+Don't touch Inbox/Ready (that's backlog grooming — the `product-manager` agent and James), and
+don't move cards for issues you aren't working on. Keep comments short and public-repo safe.
+Name the issue in your branch and commit (`feat/<topic>`, "… (#<n>)").
+
+Setting Status is two commands — find the card, then set it:
+
+```bash
+gh api graphql -f query='query{repository(owner:"hammonjj",name:"AgentWrangler"){issue(number:<n>){projectItems(first:5){nodes{id project{number}}}}}}' --jq '.data.repository.issue.projectItems.nodes[] | select(.project.number==4) | .id'
+gh project item-edit --project-id PVT_kwHOAEABR84Bkgxz --field-id PVTSSF_lAHOAEABR84BkgxzzhjRHMQ --id <item-id> --single-select-option-id <option>
+```
+
+Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
+(Inbox `a802d6ef` · Ready `1d190bd3`). If the IDs stop working, re-read them with
+`gh project field-list 4 --owner hammonjj --format json`. If `gh` says the token lacks the
+`project` scope, tell James to run `gh auth refresh -s project`; don't skip the update silently.
+
 ## Hard rules
 
 - **Never restart the app automatically.** Its window hosts live conversations, and quitting it
