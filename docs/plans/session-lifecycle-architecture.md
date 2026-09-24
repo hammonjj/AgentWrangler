@@ -1,6 +1,7 @@
 # Agent Wrangler session lifecycle: architecture and migration playbook
 
-Status: proposed, 2026-09-23. Investigation only; nothing here is built.
+Status: proposed 2026-09-23; Stage 0 done and the architecture confirmed at CP0 on 2026-09-24
+(§15.1). Stage 1 onwards is not built yet.
 Scope: how AW launches, owns, loses and recovers the agent sessions it runs, and how to change
 that one stage at a time, keeping the app shippable after every stage.
 Tracking: epic [#4](https://github.com/hammonjj/AgentWrangler/issues/4) in the GitHub Project
@@ -323,19 +324,21 @@ Discord mirror              mirror file + reconciler; survives restarts         
 
 **D: thin, survivable per-session hosts that speak the provider's native protocol. The core
 (Electron main) owns all translation and policy, and learns to run windowless. Codex gets an
-AW-owned shared `app-server` listening on a Unix socket, or Codex's own daemon if Spike S4 shows
-it is safe. A separate UI/core process split is a gated Stage 7 that may never be needed.**
+AW-owned, detached, shared `app-server` listening on a Unix socket (S4 ruled out Codex's own
+daemon). A separate UI/core process split is a gated Stage 7 that may never be needed.**
+
+**Confirmed at CP0 (2026-09-24), with amendments; see §15.1.**
 
 ```text
              ┌──────────── Agent Wrangler.app — Electron main = AW Core (windowless-capable) ───────────┐
  renderer ◄─►│ SessionStore · providers · HostSupervisor · SessionRegistry · RunnerView reducers        │
  windows     │ RemoteControl/Discord · PauseService · usage · projects · notifications · leases (later)  │
  (ipcMain)   └──────┬───────────────────────┬──────────────────────────┬─────────────────────────────────┘
-                    │ UDS NDJSON JSON-RPC   │ (SDK-native messages)    │ UDS JSON-RPC (Codex-native)
+                    │ UDS NDJSON JSON-RPC   │ (SDK-native messages)    │ WebSocket over UDS, JSON-RPC (Codex-native)
                     ▼                       ▼                          ▼
           aw host (session A)      aw host (session B)       codex app-server --listen unix://…
           SDK Query + asks +        SDK Query + asks +        (all AW Codex threads; AW-owned,
-          raw message ring          raw message ring           detached; or Codex's daemon)
+          raw message ring          raw message ring           detached, pinned binary copy)
             └─ claude (stdio)         └─ claude (stdio)
   Every host is detached (own session and pgid, parent = launchd) and runs from a cloned runtime,
   not from /Applications.
@@ -364,7 +367,9 @@ it is safe. A separate UI/core process split is a gated Stage 7 that may never b
   message schema, which grows additively, not AW's fast-moving `ConvBlock`.
 - **Reattach** = transcript (`loadResumeHistory`, which the core already does) + the ring's
   messages not yet in the transcript (deduplicated by message `uuid`, which the SDK documents as
-  transcript chain-entry uuids) + the pending asks. S1 verifies the uuid correspondence.
+  transcript chain-entry uuids) + the pending asks. **S1 confirmed it** for `assistant` and `user`
+  messages; everything else on the stream is ring-only, ordered by `seq`, and the host sets
+  `uuid` on every message it sends (§11.5).
 
 ### 5.2 Why this fits this repository
 
@@ -514,9 +519,16 @@ spawning ─► ready(no client) ⇄ attached(≥1 client) ─► draining ─�
     60 s passed with the exit record written);
   - an explicit `end`;
   - the idle-orphan rule (§7.5).
-- It handles `SIGTERM`, `SIGINT` and `SIGHUP` by ending its agent gracefully (stdin close,
-  5 s grace, force) and then exiting. Node emits no `exit` event on signals, so the SDK's own
-  kill-on-exit does not cover them. Logout sends SIGTERM.
+- It handles `SIGTERM`, `SIGINT` and `SIGHUP` by **SIGTERMing its `claude` at once**, waiting
+  ≤5 s, then SIGKILL, then exiting. Node emits no `exit` event on signals, so the SDK's own
+  kill-on-exit does not cover them. Logout sends SIGTERM. (Not stdin close: S1 showed that
+  mid-turn the CLI ignores EOF until the turn ends, up to a whole long Bash command.)
+- **Ending an agent (`end`, and every stop in §7.2, decided at CP0).** If a turn is running,
+  `interrupt` first and wait up to `graceMs` (default 5 s) for its `result`; then close stdin;
+  then SIGTERM if it has not exited within ~1 s; then SIGKILL 3 s later. Interrupt-first is what
+  keeps the in-flight assistant message: S1 saw SIGTERM mid-stream drop it from the transcript.
+  SIGTERM also kills `run_in_background` shells at once, where EOF waits ~5 s and a shell
+  finishing inside that window starts a new turn.
 
 **Session id changes.** `/clear` changes the id mid-life (`runnerSession.ts` `onMessage`). The
 host rewrites its manifest atomically, and `hello` always reports the current id. For fresh
@@ -531,7 +543,7 @@ turn.
 | **Quit (⌘Q, menu)** | With hosts: quits the core, **agents keep running**. A one-line notification: "3 agents keep running. ⌥⌘Q quits and stops them." Setting `lifecycle.onQuit = leaveRunning \| ask \| stopAgents` (default `leaveRunning`, decided §22). Before hosts exist (Stage 2): if agents are live, a confirm dialog "Quit and stop N agents?". |
 | **Quit and Stop All Agents (⌥⌘Q)** | `preventDefault` → `end` every session, awaited and bounded (10 s) → exit. |
 | Non-menu quit (Apple Event from `osascript`, logout, `powerMonitor` shutdown, SIGTERM) | **Never a dialog.** Before hosts: graceful bounded stop. With hosts: leave running. The menu item sets a `quitSource` flag, and a quit without the flag is non-interactive. `install-app.sh` polls until the main process has exited instead of `sleep 2`, and matches the main executable's exact path. |
-| Stop agent / Close session | Core → host `end` (stdin close → grace → force). Registry `stopped`. Transcript kept. |
+| Stop agent / Close session | Core → host `end` (interrupt → grace → stdin close → SIGTERM → SIGKILL; §7.1). Registry `stopped`. Transcript kept. |
 | Stop all | `end` to every host, in parallel, bounded. |
 | Pause / resume | Unchanged: SIGSTOP/SIGCONT the **agent** pid the host reports, never the host. |
 | Take over (external → AW) | Unchanged kill-then-verify (`endProcess`), then spawn a host with `resume`. |
@@ -552,20 +564,41 @@ turn.
      every resume and adopt of that id.** The UI says "held by an unreachable host" and offers
      Stop host (start-time-checked `endProcess`) or Leave.
    - **Host dead, with an exit record** → `ended` / `failed`, then GC the manifest.
-   - **Host dead, no exit record** → `lost` → `interrupted`. First, **sweep for an orphan
-     `claude`**: an entry in `~/.claude/sessions/*.json` whose `sessionId` matches and whose pid
-     is alive. End it with `endProcess` before offering Resume.
+   - **Host dead, no exit record** → `lost` → `interrupted`, after the orphan sweep below.
 3. Registry `live` records with no manifest (reboot or logout) → `interrupted`.
 4. **Offer every interrupted session, not just the newest.** Rows get "Interrupted — Resume".
    Auto-resume (`runner.autoResumeLastOnStartup`) still applies to the newest only.
+
+**The orphan sweep (amended at CP0 from S1).** The CLI has no single-owner lock: a second
+process resuming a live id succeeds and silently forks the transcript. The sweep is the only
+guard, so:
+
+1. **It runs before every resume or adopt of an id**, not only at startup: a host exit the
+   supervisor sees while the core is up, `resumeLastRunner`, `adoptAndSend`, the Resume button,
+   and a §7.4 migration.
+2. **What counts as an orphan:** an entry in `~/.claude/sessions/<pid>.json` whose `sessionId`
+   matches, whose pid is alive **and** whose start time matches the entry's `procStart`, whose
+   parent is launchd (ppid 1), and which is not the `agentPid` of any live manifest. A matching
+   process with any other parent is a live owner (a terminal, another app), not an orphan: that
+   goes through the existing take-over path, with its confirmation, never a silent kill.
+3. **End it and wait:** SIGTERM, poll up to ~5 s, then SIGKILL; only then load history and
+   resume. Until it has exited it may still be writing, and its tail is legitimate conversation.
+4. **Tolerate stale entries:** a `sessions/<pid>.json` whose pid is dead, or alive with a
+   different start time, is ignored (a SIGKILLed or OOM'd CLI cannot remove its own file).
+
+Today's `resumeLastRunner` already refuses when the id is live in the Claude registry
+(`shouldAutoResume`'s `running-elsewhere`), and adopting a live external session already goes
+through take-over, so the in-process app is covered until Stage 2 adds a Resume button; that
+button must keep the same guard.
 
 ### 7.4 Bounded version drift
 
 A host runs the build it was spawned with. When a host's `hostBuild` ≠ the core's build and the
 session is **idle, with no pending ask and no background shells or tasks running**, the next
 `send` migrates it: `end` → `resume` the same id on a fresh host, carrying model, permission
-mode and effort. That reuses the adopt-on-send path (`actions.adoptAndSend`). Ending the CLI
-kills its `run_in_background` shells, which is why busy sessions are never migrated. The result
+mode and effort. That reuses the adopt-on-send path (`actions.adoptAndSend`), with the §7.1
+end sequence (never bare stdin EOF) and the §7.3 sweep before the resume. Ending the CLI kills
+its `run_in_background` shells, which is why busy sessions are never migrated. The result
 is that a live host is at most "one busy stretch" old.
 
 ### 7.5 Idle-orphan rule
@@ -629,8 +662,10 @@ notification says so when auto-pause is enabled.
   - Same-machine only, and filesystem permissions do the gatekeeping.
   - No ports.
   - Node's built-in `net`, so no dependencies.
-  - The same framing Codex `app-server` already speaks, so there is one codec (extracted from
-    `CodexAppServer` into `src/core/rpc/ndjsonPeer.ts`).
+  - The same framing Codex `app-server --stdio` already speaks, so there is one codec
+    (extracted from `CodexAppServer` into `src/core/rpc/ndjsonPeer.ts`). Codex's `--listen
+    unix://` speaks WebSocket instead (S4), so from Stage 5 the Codex hop uses a small WebSocket
+    client; `ndjsonPeer` serves the Claude hosts and the Codex `--stdio` fallback.
   - Debuggable with `nc -U` or `socat`.
   - The same `net` API takes `\\.\pipe\…` on Windows if that ever matters.
 - **Rejected alternatives.**
@@ -850,8 +885,8 @@ gets several writers, or needs fleet-level queries.
      fail instantly. The host's `AbortSignal` fires only when the child exits.
    - Transcript lines were never torn in ~35 runs. Damage is semantic: SIGTERM mid-stream drops the
      in-flight assistant message, and a killed ask leaves a `tool_use` with no `tool_result`.
-   - **§7.3's orphan sweep is mandatory and sufficient, with four amendments** (for CP0 to fold
-     into §7.3):
+   - **§7.3's orphan sweep is mandatory and sufficient, with four amendments** (folded into
+     §7.3 at CP0, which also pins down what counts as an orphan):
      1. sweep before **every** resume or adopt of an id (supervisor-seen host exit,
         `resumeLastRunner`, `adoptAndSend`), not only on startup;
      2. SIGTERM, wait ~5 s, SIGKILL, and only then load history and resume;
@@ -859,8 +894,12 @@ gets several writers, or needs fleet-level queries.
      4. the host handles SIGTERM by SIGTERMing its `claude` (the SDK installs no handler).
    - Migrations should end a CLI with `interrupt` or SIGTERM, not stdin EOF: SIGTERM kills
      background shells at once, EOF waits ~5 s first.
-   - **Open (before Stage 3):** with AW's `PermissionRequest` hook installed (1800 s timeout), a
-     mid-ask orphan may wait on the hook instead of failing at once. S1 ran with hooks isolated.
+   - **Decided at CP0, not a blocker:** with AW's `PermissionRequest` hook installed (1800 s
+     timeout), a mid-ask orphan may wait on the hook instead of failing at once (S1 ran with
+     hooks isolated). Until Stage 4 that is benign: the ask shows in AW through the hook marker
+     and can be answered there, and the sweep ends the orphan before any resume. From Stage 4,
+     `AGENTWRANGLER_HOSTED=1` makes the hook return at once for hosted sessions. Stage 3's live
+     test checks it once with the hook installed.
    - **uuid dedupe (U2) works.** SDK `assistant`/`user` uuids are the transcript uuids, and a
      `uuid` the host sets on a message it sends is kept. `stream_event`, `system/*` and `result`
      never reach the transcript, so they are ring-only, ordered by `seq`. The ring must not
@@ -881,8 +920,10 @@ gets several writers, or needs fleet-level queries.
    - libuv marks its fds close-on-exec, so the socket and log fds don't leak into `claude`.
      **Confirmed by `lsof` in S2:** no leak into `claude`, and the host inherited none of the
      core's 55 fds.
-   - A host handles SIGTERM by ending its input, waiting ≤5 s for `claude`, then exiting. S2
-     measured 0.8–1.3 s to a clean `claude` exit with no orphan (the logout proxy).
+   - A host handles SIGTERM by SIGTERMing `claude`, waiting ≤5 s, then SIGKILL, then exiting
+     (§7.1; amended at CP0). S2's host ended its input instead and measured 0.8–1.3 s to a clean
+     exit, but its agents were idle; mid-turn, S1 showed EOF is ignored until the turn ends,
+     while SIGTERM ends a busy CLI in ~2.7 s.
    - **Host RSS (S2): 22–64 MB** (~60 MB after spawn and a first turn, 22–31 MB idle). `claude`
      itself is 140–355 MB. §5.3's estimate holds.
 7. **Runtime location.**
@@ -896,10 +937,11 @@ gets several writers, or needs fleet-level queries.
        `killall` pattern) matched the uncloned host and neither clone;
      - a host lives for days, and anything it lazily opens from a deleted bundle would fail;
      - the clone keeps the build's cdhash, which is the identity TCC uses once the core is gone.
-   - The clone takes ~89 ms. No re-sign and no `Info.plist` edit. It runs under the ad-hoc
-     signature because the Mach-O's embedded code directory is unchanged, **but it fails
-     `codesign --verify`** (CFBundleExecutable names the old executable). Nothing may verify a
-     runtime statically; compare the executable's cdhash instead.
+   - The clone takes ~89 ms. As S2 ran it (no re-sign, no `Info.plist` edit) it runs under the
+     ad-hoc signature because the Mach-O's embedded code directory is unchanged, **but it fails
+     `codesign --verify`** (CFBundleExecutable names the old executable). With the stable
+     certificate the clone is re-signed instead (below), which fixes that; the unmodified clone
+     is the fallback, and for it nothing may verify a runtime statically.
    - `lsappinfo` lists no host as an app, so `osascript quit app` never reaches one.
    - **TCC:** a host and its `claude` count as the core while it lives, then as themselves (the
      old build). `~/Documents` access kept working after the bundle was replaced. A new build's
@@ -907,11 +949,24 @@ gets several writers, or needs fleet-level queries.
      cdhash (to confirm, S2 procedure M4).
    - GC every runtime no manifest references.
    - Record in the build config that Electron's `RunAsNode` fuse must stay enabled.
+   - **Signing changed after S2 (#56, CP0 amendment).** S2 measured ad-hoc builds. Builds are now
+     signed with a stable local certificate, so TCC grants and the Keychain ACL follow "this
+     bundle id, signed by this certificate" instead of each build's cdhash. That removes the
+     Keychain dialog after every rebuild and, most likely, the 13.5 s `~/Documents` re-prompt.
+     It also makes a clean clone possible: after the rename, set `CFBundleExecutable` in the
+     clone's `Info.plist` and re-sign it with the same certificate and entitlements (~0.6 s in
+     S2). Its cdhash changes but its designated requirement does not, and `codesign --verify`
+     passes. **Stage 3 does that by default** and repeats S2's install scenario (7) and a
+     `~/Documents` read once on the certificate-signed build before relying on it. If re-signing
+     fails, the unmodified clone S2 measured is the fallback. Host tokens stay in 0600 files
+     regardless (§10): keeping the Keychain off the startup path that readopts hosts costs
+     nothing, since a same-uid reader could reach the socket anyway.
 8. **Codex.**
    - One `app-server` holds every AW Codex thread's in-flight turn.
-   - **Preferred:** an AW-owned, detached `codex app-server --listen unix://<short path>` treated
-     as a shared host with a manifest. AW controls its lifetime and version.
-   - **Alternative:** Codex's machine-wide `app-server daemon`. AW does not control its restarts
+   - **Chosen (S4, confirmed at CP0):** an AW-owned, detached `codex app-server --listen
+     unix://<path>` from a pinned copy of the binary, treated as a shared host with a manifest.
+     AW controls its lifetime and version.
+   - **Rejected:** Codex's machine-wide `app-server daemon`. AW does not control its restarts
      (`daemon update may interrupt running work`), and the VS Code extension and AW can run
      **different** Codex binary versions from different extension directories, as they did
      during this investigation.
@@ -1023,7 +1078,7 @@ State this plainly in the README.
 | Hosted sessions approvable only with the token (Stage 4; on by default, decided §22) | The host sets `AGENTWRANGLER_HOSTED=1` in `claude`'s env. The permission hook script (bump `PERMISSION_SCRIPT_VERSION`) then logs the pending marker for status but **doesn't poll for a decision** for hosted sessions. An agent can't change its parent's env. This depends on the host-first routing in §6.1. |
 | Audit | The host logs every `send`, `respondAsk` and `control` (op name, requestId, never content). Core settle events carry `by`. |
 | Arbitrary command execution | Hosts expose no spawn, exec, file, cwd, env or binary method. The core builds host argv from settings plus validated registry fields. The core socket's `start` takes `{provider, cwd, model, permissionMode, effort, resume}`, never a binary or arguments. |
-| Environment | Explicit env for `claude`: the host's env minus `ELECTRON_*` and `AW_*`. The Discord token is never in env. |
+| Environment | Explicit env for `claude`: the host's env minus `ELECTRON_*`, `AW_*`, `__CFBundleIdentifier` and `XPC_SERVICE_NAME` (S2). The Discord token is never in env. |
 | Filesystem | Unchanged: agents have what the user granted Claude Code or Codex. |
 | Discord boundary | Unchanged. Only `RemoteControlService` → `PermissionActions` (three methods), in the core. Hosts never talk to Discord. The token never leaves the core. |
 | Stale endpoints | The manifest has `hostId` + pid + start time. `hello` must match `hostId`. A socket is unlinked only when its pid is dead or its start time differs. |
@@ -1085,7 +1140,8 @@ Review checkpoint: CP0 (Opus Extra High) after S1–S4 (S5 non-blocking), before
   - Split `RunnerSession` into:
     - `ClaudeSdkSession`, **the future host core**: `Query`, `InputQueue`, the raw ask records
       and their resolvers, the raw-message emitter with `seq`, the control passthrough, `end`,
-      and an idempotent send by `uuid`.
+      and an idempotent send by `uuid`. `end` implements the §7.1 sequence (interrupt first,
+      never bare stdin EOF), and every send carries a `uuid` (CP0).
     - `RunnerView`, which **stays in the core**: `reduceRunnerMessage`, blocks, composer,
       history, capping, `askBlock`, building the `PermissionResult`.
   - Introduce `SessionHandle` / `SessionExecutor` (provider-agnostic):
@@ -1150,15 +1206,22 @@ Review checkpoint: CP1 (Opus Extra High) on ClaudeSdkSession + sessionProtocol t
   - `SessionRegistry` replaces `RunnerRegistry`, covering Claude and Codex with launch options,
     repo, worktree and state (§10).
   - Previously-live records become **Interrupted** rows with Resume, for **all** of them.
-    Newest-only auto-resume stays behind its setting.
+    Newest-only auto-resume stays behind its setting. **Resume keeps today's
+    `running-elsewhere` guard:** if the id is live in the Claude registry it goes through
+    take-over, never a second process on the transcript (the CLI has no lock; S1, §7.3).
   - Quit:
-    - the menu ⌘Q item sets `quitSource = 'menu'`;
+    - the menu ⌘Q item sets `quitSource = 'menu'`. It must be a **custom item** with
+      `accelerator: 'CmdOrCtrl+Q'`, not `role: 'quit'`, which bypasses the click handler (S2);
     - with live agents it shows "Quit and stop N agents?";
     - **non-menu quits never show a dialog** and do an awaited, bounded (≤10 s) graceful end;
     - `before-quit` → `preventDefault` → end → `app.exit()`.
-  - A SIGTERM handler (non-interactive).
+  - A SIGTERM handler (non-interactive) that flags `quitSource = 'signal'`, **registered inside
+    `whenReady`**: one registered at module load is replaced by Electron's own handler and never
+    runs (S2). Electron already turns SIGTERM into a graceful quit, so the handler only labels it.
   - `render-process-gone` reloads the workbench.
-  - `install-app.sh` polls for exit (not `sleep 2`) and matches the exact main-executable path.
+  - `install-app.sh` polls for exit (not `sleep 2`), matches the exact main-executable path, and
+    writes `run/quit-intent` (`install`) before it quits the app, so the core can tell an install
+    from any other external quit.
 - **Files.**
   - New: `src/core/session/sessionRegistry.ts`, `src/core/session/recovery.ts` (pure
     classification), `src/core/session/quitPolicy.ts` (pure).
@@ -1199,10 +1262,17 @@ When to escalate: quit-source detection or SIGTERM handling misbehaves → Extra
     - wraps **`ClaudeSdkSession`** (from Stage 1) and serves protocol v1 (§9) on a UDS;
     - is spawned detached from the cloned runtime;
     - gets its token over stdin, logs to a file, writes its manifest after `listen`;
-    - handles SIGTERM/SIGINT/SIGHUP;
-    - passes an explicit env to `claude`.
+    - handles SIGTERM/SIGINT/SIGHUP by SIGTERMing `claude` at once (§7.1);
+    - passes an explicit env to `claude` (minus `ELECTRON_*`, `AW_*`, `__CFBundleIdentifier`,
+      `XPC_SERVICE_NAME`).
   - `HostSupervisor` in the core: runtime clone + GC, spawn, connect, `hello`, snapshot,
-    subscribe, reattach.
+    subscribe, reattach. The clone is re-signed with the stable certificate after the rename
+    (§11.7), and **before relying on it**, S2's install scenario (quit, `rm -rf`, `cp -R` of a new
+    build, relaunch, reattach) plus a `~/Documents` read from the host's `claude` are run once on
+    a certificate-signed build and recorded in the merge notes.
+  - Large frames: no `JSON.parse` of a multi-MiB frame on the main thread in the same tick as UI
+    work (S3: 2–3 s for 16 MiB); decide here between off-thread parsing and not inlining large
+    images.
   - `RemoteClaudeHandle` = `RunnerView` fed by the socket.
   - Manifests are scanned **before** the first provider scan (§7.3 step 1).
   - Permission routing is host-first for hosted sessions.
@@ -1226,7 +1296,9 @@ When to escalate: quit-source detection or SIGTERM handling misbehaves → Extra
     - a new supervisor reattaches from the manifest;
     - an ask is answered after reattach;
     - `end` leaves no process.
-  - A live test gated by `AW_LIVE_CLAUDE=1` (a tiny turn; output never pasted anywhere).
+  - A live test gated by `AW_LIVE_CLAUDE=1` (a tiny turn; output never pasted anywhere). Once,
+    with AW's `PermissionRequest` hook installed, it records what a mid-ask orphan does
+    (§11.5).
 - **Manual.**
   - Setting on: two conversations, one mid-turn → ⌘Q → wait → relaunch → both live, and the
     mid-turn one finished meanwhile.
@@ -1253,7 +1325,7 @@ When to escalate: quit-source detection or SIGTERM handling misbehaves → Extra
 Recommended model: Opus
 Recommended effort: Extra High
 Why: new process boundary, IPC, detached spawn, token handoff, reattach — the heart of the initiative.
-When to escalate: already max; add a second review if S2 found runtime or TCC problems.
+When to escalate: already max; add a second review if the certificate-signed clone check fails.
 Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 before the host server merges.
 ```
 
@@ -1263,7 +1335,10 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
 - **Change.**
   - §7.3 cases 2–4.
   - Start-time guards (`endProcess`, supervisor).
-  - The orphan-`claude` sweep.
+  - The orphan-`claude` sweep, as amended in §7.3: before every resume or adopt, with the
+    ppid/`procStart`/manifest identity check and wait-for-exit.
+  - S2's manual procedures M1–M3 (real ⌘Q and Dock Quit, sleep/wake, logout), run once and
+    recorded before CP3.
   - Exit records, drain and tombstone GC.
   - The idle-orphan rule.
   - Bounded-drift migration on idle send (§7.4).
@@ -1481,7 +1556,7 @@ Switch to **Opus, Extra High** for these, even when the surrounding work runs on
 
 - **CP0, Architecture gate** (after S1–S4). Confirm or amend §5. Specifically: thin-host
   feasibility (uuid dedupe), the runtime clone, the Codex host choice, orphan behaviour. Update
-  this document before Stage 1 starts.
+  this document before Stage 1 starts. **Passed 2026-09-24; see §15.1.**
 - **CP1, before Stage 1 merges.** `ClaudeSdkSession` and `sessionProtocol` types: serializable,
   provider-native, no `ConvBlock` in the host surface, seq and snapshot semantics.
 - **CP2, before the Stage 3 host server merges.** Freeze protocol v1 and manifest v1. Every
@@ -1491,6 +1566,51 @@ Switch to **Opus, Extra High** for these, even when the surrounding work runs on
 - **CP4, the Stage 7 gate.**
 - **Standing rule.** Any change to `src/shared/sessionProtocol.ts`, the manifest format, or the
   Stage 8 control-socket API gets an Opus High review (Extra High if it is a major bump).
+
+### 15.1 CP0 verdict (2026-09-24, #11)
+
+**§5 is confirmed. Stage 1 may start.** No spike result argues for a different architecture:
+thin, detached, per-session Claude hosts that speak the SDK's own protocol, a shared AW-owned
+Codex `app-server`, translation and policy in the core, and hosts that survive the core from the
+first host stage. The amendments below change how pieces behave, not what the pieces are. They
+are already written into the sections named.
+
+| Question | Evidence | Verdict |
+|---|---|---|
+| Thin host feasible? (uuid dedupe, U2) | S1: SDK `assistant`/`user` uuids are the transcript uuids; a host-set `uuid` is kept | **Yes.** Dedupe `assistant`/`user` only; the rest is ring-only by `seq`; never assume "yielded ⇒ on disk" (§5.1, §11.5) |
+| Can a new `Query` attach to a live CLI? | S1: no; `resume` succeeds and silently forks the transcript | The `Query` lives in the host (§11.3 stands). The **orphan sweep is the only double-owner guard**: before every resume or adopt, orphan = ppid 1 + `procStart` match + no live manifest (§7.3) |
+| How to stop an agent | S1: EOF is ignored mid-turn; SIGTERM drops the in-flight message; SIGTERM kills bg shells at once | **Interrupt → grace → stdin close → SIGTERM → SIGKILL** for `end`; SIGTERM `claude` at once on host signals (§7.1). Resolves a contradiction between §7.1, §11.6 and S1 |
+| Detached host survives quit, crash, install? (U3) | S2: all unattended scenarios, nine core deaths, two builds | **Yes.** Cloned runtime kept, for name matching, lazy loads and identity (§11.7) |
+| Signing, TCC, safeStorage (U5) | S2 measured ad-hoc; #56 has since moved builds to a stable certificate | **Re-sign the clone** with the stable certificate by default, and re-run S2 scenario 7 once on it in Stage 3. Host tokens stay in 0600 files (§10, §11.7) |
+| Quit source (U4) | S2: no reason in Electron 44; SIGTERM already becomes a graceful quit; a module-load SIGTERM handler never fires | Flag menu (custom Quit item, not `role: 'quit'`) and signal (handler inside `whenReady`); install announces itself; the rest is external (§11.10). Applies to Stage 2 |
+| Transport sizing (U6) | S3 | **§9 stands.** 4 MiB queue, 16 MiB ring, 10 s × 3 heartbeat; `messages` pages well under the queue, `nextSeq` = where the page stopped |
+| Codex host (U7) | S4 | **Option (a)**, WebSocket over UDS, pinned binary copy; pending asks re-sent with the same id after `thread/resume`; writer lock → "open elsewhere" (§11.8, Stage 5) |
+| Claude bg agents (U8) | S5: PTY-only, no structured channel | **No.** §5 unchanged |
+| App Nap (U9) | S2: none in 150 s | Not a blocker; `powerSaveBlocker` only while busy |
+| `PermissionRequest` hook and a mid-ask orphan (S1 open item) | not measured | **Not a blocker** (§11.5): visible and answerable until Stage 4, then `AGENTWRANGLER_HOSTED` removes it; Stage 3's live test checks it once |
+
+**Still unmeasured, and where each is due:**
+
+- S2 manual procedures M1 (real ⌘Q, Dock Quit), M2 (sleep/wake) and M3 (logout): before the
+  Stage 4 default flip (CP3). M4 (the TCC dialog) is moot on certificate-signed builds; the
+  Stage 3 re-run replaces it.
+- A certificate-signed clone surviving an install with `~/Documents` access intact: Stage 3.
+- A `thread/read` across the Codex writer lock, and `thread_unload_delay_secs`: Stage 5, non-blocking.
+
+**Stage consequences** (the issue bodies are edited to match):
+
+- **Stage 1 (#12):** `ClaudeSdkSession.end` implements the §7.1 sequence and sets `uuid` on
+  every send. The in-process app benefits at once: today `RunnerService.dispose` does
+  `void s.end()` and relies on the SDK's exit handler, which SIGTERMs mid-stream.
+- **Stage 2 (#13):** the Resume button on Interrupted rows keeps today's `running-elsewhere`
+  guard and uses take-over for a live owner; the SIGTERM handler goes inside `whenReady`; the
+  Quit item is a custom item with `CmdOrCtrl+Q`; `install-app.sh` writes `run/quit-intent`
+  before quitting.
+- **Stage 3 (#14):** host signal handling and `end` per §7.1; env strips `__CFBundleIdentifier`
+  and `XPC_SERVICE_NAME` too; clone re-signed; the signed-clone survival check; no large-frame
+  `JSON.parse` on the main thread in the same tick as UI work.
+- **Stage 4 (#15):** the sweep per §7.3, at every resume or adopt; M1–M3.
+- **Stage 5 (#17):** rewritten from S4 (it predated it).
 
 ---
 
@@ -1733,7 +1853,9 @@ mapping, which is `Providers/Runner` for almost everything.
 
 These were created up front at the maintainer's request, not held until the gate. They start
 Blocked. The gate (#11) now reviews and edits them against the spike results instead of creating
-them. Blockers are native GitHub issue dependencies, and every issue body carries its scope,
+them. **Done at CP0 (2026-09-24):** #12, #13, #14, #15, #16 and #17 were edited per §15.1 (#17
+rewritten from S4), and #12 is no longer blocked (#10 and #11 are closed); the spike blockers on
+#14 and #17 are satisfied. Blockers are native GitHub issue dependencies, and every issue body carries its scope,
 acceptance criteria, blockers, and recommended model and effort.
 
 | Issue | Title | Type | Stage | Priority · Effort · Area | Blocked by |
