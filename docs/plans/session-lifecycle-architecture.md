@@ -109,8 +109,8 @@ observation.
 - **Projects** are a derived list (`src/claude/projects.ts` `ProjectsService`). A project is not
   an entity with an owner.
 - **Worktrees:** detection only (`src/core/worktree.ts` `worktreeFor`), shown as a column. AW does
-  no git coordination. Keeping agents from committing each other's work is procedural: CLAUDE.md,
-  plus `docs/worktrees.md` and `scripts/wt.sh` on `chore/worktree-workflow`.
+  no git coordination. Keeping agents from committing each other's work is procedural: CLAUDE.md
+  ("Branches and worktrees") and `AGENTS.md`, which points non-Claude agents at it.
   `docs/product-context.md` §7 lists "cross-session awareness" as a known gap.
 - **Unity / resource leasing:** does not exist anywhere in the repo.
 
