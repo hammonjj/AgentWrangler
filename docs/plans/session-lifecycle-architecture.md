@@ -1776,6 +1776,17 @@ Levels:
   never pasted.
 - **M**: manual, recorded once per stage in the merge notes.
 
+**The I rows (#16)** are `test/sessionHost.integration.test.ts` (the Stage 3 basics) and
+`test/sessionLifecycle.integration.test.ts` (the rest), on the harness in `test/support/`. Both
+run in `npm test` (about 35 s, which is most of it) and alone as `npm run test:integration`. A
+test fails if it leaves a process behind that it did not declare, and cleanup only signals a
+pid whose start time still matches. The fake
+agent (`src/sessionHost/fakeQuery.ts`) spawns a real dummy child through the host's
+`spawnClaudeCodeProcess`. That child is what makes env hygiene, orphaning, the §7.1 escalation
+and "the agent never stalls" real. The orphan-sweep rows are `it.todo` until Stage 4 (#15)
+adds the sweep. The suite found that `snapshot.latest` never kept `result`: every result has a
+subtype, and `latestKindOf` matched only `type/subtype`. Fixed with #16.
+
 | Scenario | Level | How | Stage |
 |---|---|---|---|
 | UI closes while agent idle | U + M | executor untouched by window close; manual | 2 |

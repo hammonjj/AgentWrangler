@@ -12,7 +12,16 @@ import { agentEnv } from '../src/sessionHost/env';
 import { OutQueue } from '../src/sessionHost/outQueue';
 import { HostServer } from '../src/sessionHost/server';
 import { MAX_INLINE_IMAGE_CHARS, slimForWire } from '../src/sessionHost/wire';
-import { MAX_PAGE_BYTES, RPC_FORBIDDEN, RPC_RESYNC, type EventsResult, type HostEvent } from '../src/shared/sessionProtocol';
+import {
+  MAX_PAGE_BYTES,
+  RPC_FORBIDDEN,
+  RPC_RESYNC,
+  emptyHostState,
+  latestKindOf,
+  reduceHostSnapshot,
+  type EventsResult,
+  type HostEvent,
+} from '../src/shared/sessionProtocol';
 
 describe('agentEnv', () => {
   it('strips what the host must not pass on to claude, and keeps the rest', () => {
@@ -117,6 +126,24 @@ describe('classifyOnStartup with surviving hosts', () => {
     expect(state('odd')).toBe('live');
     expect(state('gone')).toBe('interrupted');
     expect(interrupted.map((r) => r.sessionId)).toEqual(['gone']);
+  });
+});
+
+describe('latestKindOf', () => {
+  it('keeps every result as `result`, whatever its subtype, and listed system subtypes as type/subtype', () => {
+    expect(latestKindOf({ type: 'result', subtype: 'success' })).toBe('result');
+    expect(latestKindOf({ type: 'result', subtype: 'error_during_execution' })).toBe('result');
+    expect(latestKindOf({ type: 'system', subtype: 'init' })).toBe('system/init');
+    expect(latestKindOf({ type: 'rate_limit_event' })).toBe('rate_limit_event');
+    expect(latestKindOf({ type: 'system', subtype: 'compact_boundary' })).toBeUndefined();
+    expect(latestKindOf({ type: 'assistant' })).toBeUndefined();
+  });
+
+  it('lets a snapshot answer "how did the last turn end" however long ago it was', () => {
+    let snap = emptyHostState();
+    snap = reduceHostSnapshot(snap, { seq: 1, type: 'message', msg: { type: 'result', subtype: 'success', result: 'done' } });
+    snap = reduceHostSnapshot(snap, { seq: 2, type: 'message', msg: { type: 'assistant' } });
+    expect(snap.latest?.result).toMatchObject({ result: 'done' });
   });
 });
 
