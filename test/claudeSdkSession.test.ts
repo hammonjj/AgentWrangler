@@ -341,7 +341,8 @@ describe('ClaudeSdkSession: the host protocol, in-process', () => {
       await settle();
       expect(fake.calls.close).toBe(1);
       await ended;
-      expect(events.at(-1)).toMatchObject({ type: 'exit', exit: { signal: 'SIGTERM' } });
+      // Stopped on purpose: the close() it took to get there is not the reason.
+      expect(events.at(-1)).toMatchObject({ type: 'exit', exit: { reason: 'stopped' } });
       expect((events.at(-1) as { exit: { error?: string } }).exit.error).toBeUndefined();
     });
 

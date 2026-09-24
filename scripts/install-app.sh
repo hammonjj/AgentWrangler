@@ -30,10 +30,24 @@ RUN_DIR="$HOME/Library/Application Support/Agent Wrangler/run"
 running() { pgrep -f "^$EXE( |\$)" >/dev/null 2>&1; }
 running_at_all() { pgrep -a -f "^$EXE( |\$)" >/dev/null 2>&1; }
 
-if running_at_all && ! running; then
-  # Run by an agent Agent Wrangler is hosting. Quitting the app would end every
-  # session it runs, this agent's included, and CLAUDE.md forbids restarting
-  # it. The bundle is replaced in place instead: a running copy keeps working
+# An agent in a session host is not a descendant of the app, but it is still
+# an agent Agent Wrangler runs, and quitting the app would end its in-process
+# sessions. Walk up from this script looking for a host.
+inside_session_host() {
+  local pid=$$
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+    case "$(ps -o comm= -p "$pid" 2>/dev/null)" in
+      *"Agent Wrangler Host"*) return 0 ;;
+    esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  done
+  return 1
+}
+
+if running_at_all && { ! running || inside_session_host; }; then
+  # Run by an agent Agent Wrangler is running (in-process or in a session host).
+  # Quitting the app would end its in-process sessions, perhaps this agent's
+  # own, and CLAUDE.md forbids restarting it. The bundle is replaced in place instead: a running copy keeps working
   # from the files it already has open (spike S2), and picks up the new build
   # when James restarts it.
   rm -rf "$DEST"

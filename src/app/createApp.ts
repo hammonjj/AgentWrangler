@@ -46,6 +46,7 @@ import { checkoutFor } from '../core/checkout';
 import { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerView } from '../claude/runner/runnerView';
 import { SessionExecutors } from '../core/session/sessionExecutors';
+import { HostSupervisor } from '../core/session/hostSupervisor';
 import { shouldAutoResume } from '../core/session/resumePolicy';
 import {
   currentState,
@@ -158,16 +159,19 @@ export interface AgentWranglerApp {
   /** Start a conversation this process runs itself. No cwd: ask which folder. */
   newConversation(cwd?: string): Promise<RunnerView | undefined>;
   /**
-   * Sessions quitting would end, for the quit confirmation. Codex threads on
-   * the background server are not among them: they keep running.
+   * Live sessions, for the quit decision: `hosted` Claude ones run in session
+   * hosts and survive a quit; `local` ones (in-process Claude, and Codex
+   * threads without the background server) do not. Codex threads on the
+   * background server are in neither: they keep running on their own terms.
    */
-  liveSessionCount(): number;
+  sessionCounts(): { hosted: number; local: number };
   /**
-   * End every session because the app is quitting: awaited, bounded by
-   * `withinMs`. They stay resumable: the next start shows them as interrupted.
-   * Codex threads on the background server are left running and rejoined next start.
+   * The app is quitting: end the sessions that cannot survive it (and hosted
+   * ones too with `includeHosted`), awaited and bounded by `withinMs`. Ended
+   * ones stay resumable (interrupted); hosted ones left running are adopted
+   * on the next start.
    */
-  stopAllForQuit(withinMs: number): Promise<void>;
+  stopAllForQuit(withinMs: number, opts?: { includeHosted?: boolean }): Promise<void>;
   startCodexConversation(cwd: string): Promise<void>;
   /** Restart the background Codex server (e.g. to pick up a Codex update). Asks first if it would interrupt anything. */
   restartCodexServer(): Promise<void>;
@@ -228,14 +232,56 @@ export function createApp(host: HostServices): AgentWranglerApp {
     log,
   );
   const models = new ModelCatalogService(host.globalState);
-  // Before anything reads it or resumes anything: classify what the last run
-  // left behind (every session that was live is now interrupted). The old
-  // runner registry is imported once from the surface store.
+  // Session hosts first (playbook §7.3 step 1): which sessions a previous run
+  // left running in hosts that are still alive. Nothing may classify, resume
+  // or adopt a session before this is known, or AW could end or double-resume
+  // its own surviving session.
+  const hostSupervisor = host.sessionHosts
+    ? new HostSupervisor({
+        runDir: host.sessionHosts.runDir,
+        fallbackRunDir: host.sessionHosts.fallbackRunDir,
+        logDir: host.sessionHosts.logDir,
+        runtime: host.sessionHosts.runtime,
+        log,
+        build: host.sessionHosts.runtime.buildId,
+      })
+    : undefined;
+  const hostScan = hostSupervisor?.scan() ?? { alive: [], dead: [], foreign: [] };
+  // Then classify what the last run left behind: every session that was live
+  // is interrupted, except those still running in a host (including one this
+  // build cannot talk to, which must not look ownerless). The old runner
+  // registry is imported once from the surface store.
   const sessionRegistry = new SessionRegistry(host.sessionState, { legacy: host.workspaceState });
-  const startup = sessionRegistry.startup();
+  const startup = sessionRegistry.startup(
+    new Set(
+      [...hostScan.alive, ...hostScan.foreign].map((m) => m.sessionId).filter((id): id is string => typeof id === 'string'),
+    ),
+  );
   if (startup.interrupted.length > 0) {
     log(`${startup.interrupted.length} session(s) were interrupted by the last restart`);
   }
+  for (const m of hostScan.foreign) {
+    log(`host ${m.hostId} (session ${m.sessionId}) runs a manifest version this build does not know; leaving it alone`);
+  }
+  // Hosts that died while the app was away, by their exit record. A failure
+  // is recorded as one; an agent that finished on its own ended. Anything
+  // else (a logout, Quit and Stop All) stays resumable, as classified above.
+  // A host that died silently may have left its agent running: the orphan
+  // sweep is Stage 4, and its manifest is kept for it.
+  for (const m of hostScan.dead) {
+    if (!m.sessionId) continue;
+    if (!m.exit) {
+      log(`host ${m.hostId} (session ${m.sessionId}) died without an exit record; its agent may still be running`);
+      continue;
+    }
+    const reason = m.exit.reason ?? 'ended';
+    if (reason === 'ended') sessionRegistry.setState(m.sessionId, 'ended');
+    // Stopped by a client or a signal: resumable, as startup classified it.
+    else if (reason === 'stopped' || reason === 'signal') continue;
+    // `error`, `crashed`, and (per the protocol) any reason this build does not know.
+    else sessionRegistry.setState(m.sessionId, 'failed', m.exit.error ?? `host exit: ${reason}`);
+  }
+  hostSupervisor?.collect(hostScan);
   const locate = (cwd: string) => checkoutFor(cwd);
   const codexRunners = new CodexRunnerService(codexAppServer, (list) => models.remember('openai', list), {
     registry: sessionRegistry,
@@ -320,9 +366,24 @@ export function createApp(host: HostServices): AgentWranglerApp {
     registry: sessionRegistry,
     locate,
     rememberModels: (list) => models.remember('anthropic', list),
+    // Experimental until Stage 4 hardens recovery: new sessions run in hosts
+    // only with the setting on. Surviving hosts are adopted either way.
+    hosts: hostSupervisor
+      ? { supervisor: hostSupervisor, enabled: () => host.settings.get<boolean>('experimental.sessionHosts', false) }
+      : undefined,
   });
   host.subscribe(runners);
   const sessions = new SessionExecutors([runners, codexRunners]);
+
+  // Take back every session still running in a host, before the providers'
+  // first scan: each is ours from the first snapshot, never an external
+  // session to take over or a stale one to resume.
+  for (const manifest of hostScan.alive) {
+    if (!manifest.sessionId) continue;
+    const record = sessionRegistry.get(manifest.sessionId);
+    if (!record) sessionRegistry.live({ sessionId: manifest.sessionId, provider: 'claude', cwd: manifest.cwd });
+    runners.adopt(manifest, record);
+  }
 
   /**
    * How to start a Claude session: the way it was started before, if the
@@ -1149,6 +1210,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
         dialogs.flash(`Agent Wrangler: that prompt for ${displayLabel(s)} has already been answered.`, 4000);
         return 'stale';
       }
+      // A session in a host is answered through the host first (§6.1): its ask
+      // waits for days, where the hook gives up after ~28 minutes. Only when
+      // exactly one permission is pending, so the answer cannot land on the
+      // wrong one; otherwise the hook file, as for any session.
+      const hosted = runners.get(s.sessionId);
+      if (hosted?.hosted) {
+        const pending = hosted.blocks.filter(
+          (b): b is Extract<(typeof hosted.blocks)[number], { kind: 'permission' }> => b.kind === 'permission' && b.state === 'pending',
+        );
+        if (pending.length === 1 && (await hosted.decide(pending[0].requestId, behavior)) === 'applied') {
+          log(`permission ${behavior} sent to the host running ${s.name ?? s.sessionId}`);
+          return 'applied';
+        }
+      }
       const sent = await provider.decidePermission(s.sessionId, behavior, expected);
       if (sent) {
         log(`permission ${behavior} sent to ${s.name ?? s.sessionId}`);
@@ -1650,19 +1725,23 @@ export function createApp(host: HostServices): AgentWranglerApp {
     codexRunners,
     sessions,
     sessionRegistry,
-    liveSessionCount: () =>
-      sessions
-        .list()
-        .filter((h) => h.lifecycle !== 'ended' && h.lifecycle !== 'error')
-        .filter((h) => !(codexKeepAlive && h.provider === 'codex')).length,
-    async stopAllForQuit(withinMs: number) {
-      const count = sessions.list().length;
-      if (count > 0) log(`quitting: ending ${count} session(s), waiting up to ${withinMs} ms`);
-      // The Claude CLIs get the graceful end sequence, awaited and bounded.
-      // Codex threads are left to `dispose`: with the background server that
-      // only closes the connection, and they keep running; with `--stdio`
-      // the child goes, and them with it.
-      await runners.endAllForQuit(withinMs);
+    sessionCounts: () => {
+      const claude = runners.counts();
+      const codex = codexKeepAlive
+        ? 0
+        : codexRunners.list().filter((h) => h.lifecycle !== 'ended' && h.lifecycle !== 'error').length;
+      return { hosted: claude.hosted, local: claude.local + codex };
+    },
+    async stopAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}) {
+      const { hosted, local } = runners.counts();
+      const ending = local + (opts.includeHosted ? hosted : 0);
+      if (ending > 0) log(`quitting: ending ${ending} session(s), waiting up to ${withinMs} ms`);
+      // The Claude CLIs get the graceful end sequence, awaited and bounded;
+      // hosted ones are let go of (and keep running) unless asked to stop
+      // them too. Codex threads are left to `dispose`: with the background
+      // server that only closes the connection, and they keep running; with
+      // `--stdio` the child goes, and them with it.
+      await runners.endAllForQuit(withinMs, opts);
     },
     restartCodexServer,
     runnerOwnership,

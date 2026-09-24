@@ -149,6 +149,15 @@ export const SETTINGS: SettingSpec[] = [
     description:
       'After a window reload, resume the conversation this window was running. Only the most recent one, only if it was running in the last few hours, and never one something else has picked up in the meantime.',
   },
+  {
+    key: 'experimental.sessionHosts',
+    label: 'Keep conversations running when Agent Wrangler quits (experimental)',
+    group: 'Conversations',
+    type: 'boolean',
+    default: false,
+    description:
+      'Run each new Claude conversation in its own small background process, so quitting, reinstalling or a crash of Agent Wrangler no longer ends it: it keeps working, and Agent Wrangler reconnects when it opens again. ⌘Q then leaves those conversations running; Quit and Stop All Agents (⌥⌘Q) ends them. Applies to conversations started after it is switched on.',
+  },
 
   // ---- Agents and status ----
   {

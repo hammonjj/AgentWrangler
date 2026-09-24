@@ -17,8 +17,8 @@ export function installApplicationMenu(
   wrangler: AgentWranglerApp,
   surface: WorkbenchSurface,
   openPreferences: () => void,
-  /** The app's own quit, which is how a menu quit is told apart from every other kind. */
-  quit: () => void,
+  /** The app's own quits, which is how a menu quit is told apart from every other kind. */
+  quits: { quit: () => void; quitAndStopAll: () => void },
 ): void {
   const mac = process.platform === 'darwin';
   // Not `role: 'quit'`: that bypasses the click handler, and then a ⌘Q looks
@@ -26,7 +26,14 @@ export function installApplicationMenu(
   const quitItem: MenuItemConstructorOptions = {
     label: mac ? `Quit ${app.name}` : 'Quit',
     accelerator: 'CmdOrCtrl+Q',
-    click: quit,
+    click: quits.quit,
+  };
+  // With session hosts, ⌘Q leaves hosted agents running; this is the way to
+  // stop them as well. Without hosts it is the same as Quit, minus the question.
+  const quitAndStopItem: MenuItemConstructorOptions = {
+    label: 'Quit and Stop All Agents',
+    accelerator: 'Alt+CmdOrCtrl+Q',
+    click: quits.quitAndStopAll,
   };
 
   const appMenu: MenuItemConstructorOptions[] = mac
@@ -55,6 +62,7 @@ export function installApplicationMenu(
             { role: 'unhide' },
             { type: 'separator' },
             quitItem,
+            quitAndStopItem,
           ],
         },
       ]
@@ -84,6 +92,7 @@ export function installApplicationMenu(
               { label: 'Test Remote Control…', click: () => void wrangler.testRemoteControl() },
               { type: 'separator' },
               quitItem,
+              quitAndStopItem,
             ] as MenuItemConstructorOptions[])),
       ],
     },

@@ -28,13 +28,23 @@ export interface StartupResult {
 
 /**
  * Classify every record for a fresh start: `live` becomes `interrupted` (the
- * process died with the app), everything else keeps its state; stale records
- * are dropped and the list is capped.
+ * process died with the app), unless its session is still running in a host
+ * that outlived the app (`stillRunning`, from the manifests); everything else
+ * keeps its state; stale records are dropped and the list is capped.
  */
-export function classifyOnStartup(records: SessionRecord[], now: number): StartupResult {
+export function classifyOnStartup(
+  records: SessionRecord[],
+  now: number,
+  stillRunning: ReadonlySet<string> = new Set(),
+): StartupResult {
+  const running = new Set([...stillRunning].map((id) => id.toLowerCase()));
   const interrupted: SessionRecord[] = [];
   const kept: SessionRecord[] = [];
   for (const r of records) {
+    if (running.has(r.sessionId.toLowerCase())) {
+      kept.push(r.state === 'live' ? r : { ...r, state: 'live', endedReason: undefined, updatedAt: now });
+      continue;
+    }
     if (now - r.lastShownAt > RECORD_MAX_AGE_MS) continue;
     if (r.state === 'live') {
       const next: SessionRecord = { ...r, state: 'interrupted', endedReason: 'app-restart', updatedAt: now };

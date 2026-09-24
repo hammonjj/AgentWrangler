@@ -59,6 +59,12 @@ export interface ClaudeSessionDeps {
   clearTimeout?: (handle: unknown) => void;
   /** Ring size in estimated bytes (default 16 MiB). */
   ringBytes?: number;
+  /**
+   * Extra SDK options, merged over the ones built here. The session host
+   * passes an explicit `env` and its own `spawnClaudeCodeProcess` (so it knows
+   * the agent's pid); in-process sessions pass nothing.
+   */
+  sdkOptions?: Partial<Options>;
 }
 
 /** The end sequence's timings (playbook §7.1). */
@@ -101,6 +107,15 @@ export class ClaudeSdkSession {
   /** Counts `result` messages, so the end sequence can wait for "the turn ended". */
   private results = 0;
   private endPromise?: Promise<void>;
+  /** Why the agent is going, once we started the ending (`end` → stopped, `terminate` → signal). */
+  private endReason?: HostExit;
+  /** Model and permission mode as last set through `control`: no event records them. */
+  private controls: { model?: string; permissionMode?: string } = {};
+  /**
+   * Lets the owner add what only it knows to the exit record before it is
+   * emitted: the host adds the agent process's own exit code, signal and stderr tail.
+   */
+  decorateExit?: (exit: HostExit) => HostExit;
   private exitWaiters: (() => void)[] = [];
   private turnWaiters: (() => void)[] = [];
   private readonly setT: (fn: () => void, ms: number) => unknown;
@@ -139,6 +154,7 @@ export class ClaudeSdkSession {
       pendingAsks: [...this.snap.pendingAsks],
       epoch: this.epoch,
       ring: { fromSeq: evicted, truncated: evicted > 0 },
+      ...(this.controls.model !== undefined || this.controls.permissionMode !== undefined ? { controls: { ...this.controls } } : {}),
     };
   }
 
@@ -149,6 +165,35 @@ export class ClaudeSdkSession {
    */
   subscribe(fromSeq: number, listener: (event: HostEvent) => void): Disposable {
     return this.log.subscribe(fromSeq, listener);
+  }
+
+  /**
+   * The held events after `fromSeq`, without subscribing: what a host's
+   * `messages` method pages through. Throws `ResyncNeeded` if the gap is gone.
+   */
+  eventsSince(fromSeq: number): HostEvent[] {
+    return this.log.since(fromSeq);
+  }
+
+  /**
+   * Stop now, for a signal to the host (logout, `kill`): no interrupt and no
+   * grace for the turn. Stdin closes and the SDK's `close()` terminates the
+   * child at once (playbook §7.1). Resolves true once the agent has exited,
+   * false if it had not within `waitMs` (the host then kills it outright).
+   */
+  async terminate(waitMs: number, hostSignal?: string): Promise<boolean> {
+    if (this.snap.state === 'exited') return true;
+    this.endReason = { reason: 'signal', ...(hostSignal ? { hostSignal } : {}) };
+    this.setState('ending');
+    this.settleAll('agentExited', 'The session was closed.');
+    this.input.close();
+    try {
+      this.query?.close();
+    } catch {
+      // already gone
+    }
+    if (!this.query) this.exit({});
+    return this.waitForExit(waitMs);
   }
 
   // ---- commands ----
@@ -168,11 +213,12 @@ export class ClaudeSdkSession {
       canUseTool: this.canUseTool,
       includePartialMessages: true,
       stderr: (data) => this.deps.log(`runner stderr: ${data.trim().slice(0, 400)}`),
+      ...this.deps.sdkOptions,
     };
     try {
       this.query = this.deps.query({ prompt: this.input, options });
     } catch (err) {
-      this.exit({ error: `Could not start Claude Code: ${String(err)}` });
+      this.exit({ reason: 'error', error: `Could not start Claude Code: ${String(err)}` });
       return;
     }
     void this.pump(this.query);
@@ -205,23 +251,35 @@ export class ClaudeSdkSession {
     return 'applied';
   }
 
-  /** The SDK `Query` calls a client may make. Rejects when there is no live query. */
+  /**
+   * The SDK `Query` calls a client may make. Rejects when there is no live
+   * query, and with `UnknownControlOp` for an op this build does not have, so
+   * a newer core can never mistake "not supported" for success.
+   */
   async control(req: ControlRequest): Promise<unknown> {
     const q = this.query;
     if (!q) throw new Error('No live Claude Code process.');
     switch (req.op) {
       case 'interrupt':
         return q.interrupt();
-      case 'setModel':
-        return q.setModel(req.model);
-      case 'setPermissionMode':
-        return q.setPermissionMode(req.mode as Parameters<Query['setPermissionMode']>[0]);
+      case 'setModel': {
+        const result = await q.setModel(req.model);
+        this.controls.model = req.model;
+        return result;
+      }
+      case 'setPermissionMode': {
+        const result = await q.setPermissionMode(req.mode as Parameters<Query['setPermissionMode']>[0]);
+        this.controls.permissionMode = req.mode;
+        return result;
+      }
       case 'supportedModels':
         return q.supportedModels();
       case 'supportedCommands':
         return q.supportedCommands();
       case 'getContextUsage':
         return q.getContextUsage({ detail: 'summary' });
+      default:
+        throw new UnknownControlOp((req as { op?: unknown }).op);
     }
   }
 
@@ -250,6 +308,7 @@ export class ClaudeSdkSession {
   private async runEnd(graceMs: number): Promise<void> {
     if (this.snap.state === 'exited') return;
     const busy = this.snap.state === 'running' || this.pending.size > 0;
+    this.endReason ??= { reason: 'stopped' };
     this.setState('ending');
     const q = this.query;
     if (!q) {
@@ -273,7 +332,7 @@ export class ClaudeSdkSession {
     }
     if (await this.waitForExit(END_TIMINGS.killWaitMs)) return;
     this.deps.log('runner did not confirm its exit after close(); treating it as ended');
-    this.exit({ signal: 'SIGTERM' });
+    this.exit({});
   }
 
   private canUseTool: CanUseTool = (toolName, input, options) =>
@@ -291,6 +350,8 @@ export class ClaudeSdkSession {
         suggestions: options.suggestions as unknown[] | undefined,
         title: options.title,
         description: options.description,
+        // Everything else the SDK said about the ask, as it said it (minus the signal).
+        options: Object.fromEntries(Object.entries(options).filter(([k, v]) => k !== 'signal' && typeof v !== 'function')),
       };
       this.pending.set(requestId, { ask, resolve });
       this.emit({ type: 'ask', ask });
@@ -314,7 +375,7 @@ export class ClaudeSdkSession {
     } catch (err) {
       // A forced close during `end` surfaces as the iterator throwing. That is
       // the ending we asked for, not a failure.
-      this.exit(this.snap.state === 'ending' ? { signal: 'SIGTERM' } : { error: String(err) });
+      this.exit(this.snap.state === 'ending' ? {} : { reason: 'error', error: String(err) });
     }
   }
 
@@ -394,7 +455,10 @@ export class ClaudeSdkSession {
     // Anything still parked on a human would otherwise hold the process open.
     this.settleAll('agentExited', 'The session was closed.');
     this.input.close();
-    this.emit({ type: 'exit', exit });
+    // Why, unless the caller said: the end we started (stopped, signal), or on its own.
+    const why: HostExit = { reason: 'ended', ...this.endReason, ...exit };
+    if (why.reason === undefined) why.reason = 'ended';
+    this.emit({ type: 'exit', exit: this.decorateExit?.(why) ?? why });
     flush(this.exitWaiters);
     flush(this.turnWaiters);
   }
@@ -441,6 +505,13 @@ export class ClaudeSdkSession {
       };
       waiters.push(check);
     });
+  }
+}
+
+/** A `control` op this build does not have. The host answers it with -32601. */
+export class UnknownControlOp extends Error {
+  constructor(readonly op: unknown) {
+    super(`no control op ${String(op)}`);
   }
 }
 
