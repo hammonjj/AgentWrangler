@@ -3,7 +3,8 @@
 Status: proposed, 2026-09-23. Investigation only; nothing here is built.
 Scope: how AW launches, owns, loses and recovers the agent sessions it runs, and how to change
 that one stage at a time, keeping the app shippable after every stage.
-Tracking: the GitHub Project "Agent Wrangler", epic and issues in §18.
+Tracking: epic [#4](https://github.com/hammonjj/AgentWrangler/issues/4) in the GitHub Project
+"Agent Wrangler". Stage 0 issues are #5–#11 (§17).
 
 **Read this first.** The brief assumes PTYs. **AW has no PTY anywhere.** It drives Claude Code
 over the Agent SDK's stream-json stdio protocol and Codex over `app-server` JSON-RPC stdio.
@@ -1378,31 +1379,32 @@ Levels:
 
 ## 17. GitHub Project and issue plan
 
-**Starting state (2026-09-23).** `hammonjj/AgentWrangler` had no issues, only GitHub's default
-labels, no milestones and no linked Project.
+**Conventions used.** These are the existing Project "Agent Wrangler" conventions: the
+[Project](https://github.com/users/hammonjj/projects/4) itself, its README, and
+`.claude/agents/product-manager.md`. No parallel system was invented.
 
-**Convention: mirror the maintainer's other GitHub Projects.**
-
-- Plain descriptive titles, with no "FEATURE:" prefixes.
-- Type as a **label**.
-- Body sections: *Problem or opportunity / Desired outcome / Acceptance criteria (checkboxes) /
-  Open questions*. Spikes add *Method / Timebox / Output*.
-- A closing line points at this playbook.
-
-**Setup.**
-
-1. **Labels.** `feature`, `tech-debt`, `spike`, `testing`, `epic`, `chore`, `needs-info`, plus
-   the existing `bug` and `documentation` (the name used for docs).
-2. **Project.** "Agent Wrangler" (user-owned), with the repo linked.
-3. **Fields.**
-   - **Status**: Inbox, Ready, In Progress, Blocked, Done.
-   - **Priority**: P0 — Critical, P1 — High, P2 — Medium, P3 — Low.
-   - **Effort**: XS, S, M, L, XL.
-   - **Area**: Sessions & hosts, Core, UI, Remote, Providers, Tooling & build, Docs.
-   - **Stage**: S0 … S8, Follow-up.
-4. **Epic.** One `epic` issue is the parent of every stage issue through GitHub **sub-issues**.
-5. **Grouping.** Use the **Stage** field, and create no milestones. If milestones are wanted
-   later: "Survivable sessions" (S0–S4) and "Beyond the window" (S5–S8).
+- Plain, outcome-oriented titles.
+- **Exactly one type label**: `bug`, `feature`, `improvement`, `tech-debt`, `chore`,
+  `documentation`, plus `needs-info`. This initiative added two labels the brief asked for:
+  **`spike`** (a time-boxed investigation whose output is a decision) and **`testing`** (test
+  coverage or infrastructure, with no behaviour change).
+- Body templates from the product-manager agent: *Problem or opportunity / Desired outcome /
+  Scope / Acceptance criteria / Open questions*. Spikes put *Method / Timebox / Output* under
+  Scope.
+- **Project fields:**
+  - Status: Inbox, Ready, In Progress, Blocked, Done.
+  - Priority: P0 — Critical, P1 — High, P2 — Medium, P3 — Low.
+  - Effort: XS–XL.
+  - Area: this initiative is `Providers/Runner`, apart from Stage 6, which is `Other`, and
+    Stage 8, which is `Tools/Build`.
+- **No Stage field was added.** The stage is stated in each issue body, and ordering comes from
+  the epic.
+- **The epic** is labelled `tech-debt` (architecture and migration). Every stage issue is
+  attached to it as a GitHub **sub-issue**. There is no separate epic label.
+- **No milestones.** If they are wanted later: "Survivable sessions" (S0–S4) and "Beyond the
+  window" (S5–S8).
+- **Follow-up:** the product-manager agent's classification list does not yet mention `spike`
+  and `testing`.
 
 **Order and dependencies.**
 
@@ -1416,28 +1418,43 @@ T0 (characterization tests) ─► Stage 1  ├─► Stage 6
 F3 folded into Stage 1
 ```
 
-**Created now:** the epic, S1–S5, T0 and the CP0 gate. That is 8 issues, all independent of
-unresolved assumptions.
+**Created 2026-09-24:** the epic and the seven Stage 0 issues, all independent of unresolved
+assumptions:
 
-**Deferred:** every stage issue and follow-up, until CP0 closes. They may be reworded then.
+| Key | Issue | Label | Status | Priority | Effort |
+|---|---|---|---|---|---|
+| E | [#4](https://github.com/hammonjj/AgentWrangler/issues/4) Decouple agent session lifetime from the Agent Wrangler app | `tech-debt` | Inbox | P1 | XL |
+| S1 | [#5](https://github.com/hammonjj/AgentWrangler/issues/5) Measure what happens to a Claude runner when the process holding it dies | `spike` | Ready | P1 | S |
+| S2 | [#6](https://github.com/hammonjj/AgentWrangler/issues/6) Prove a detached session host survives app quit, crash and reinstall on macOS | `spike` | Ready | P1 | M |
+| S3 | [#7](https://github.com/hammonjj/AgentWrangler/issues/7) Prototype the session-host socket protocol: throughput, backpressure, reconnect | `spike` | Ready | P2 | S |
+| S4 | [#8](https://github.com/hammonjj/AgentWrangler/issues/8) Find out whether Codex threads can survive Agent Wrangler restarts | `spike` | Ready | P2 | S |
+| S5 | [#9](https://github.com/hammonjj/AgentWrangler/issues/9) Check whether Claude background agents can be driven by Agent Wrangler | `spike` | Ready | P3 | XS |
+| T0 | [#10](https://github.com/hammonjj/AgentWrangler/issues/10) Pin today's runner lifecycle behaviour in tests | `testing` | Ready | P2 | S |
+| G0 | [#11](https://github.com/hammonjj/AgentWrangler/issues/11) Architecture gate: confirm the session-host design after the spikes | `documentation` | Inbox | P1 | XS |
+
+Issues #5–#11 are sub-issues of #4.
+
+**Deferred:** every stage issue and follow-up, until G0 (#11) closes. They may be reworded then.
 
 ---
 
 ## 18. GitHub issue creation manifest
 
-Every issue ends with: "Playbook: `docs/plans/session-lifecycle-architecture.md` §<n>."
+Every issue ends with: "Playbook: `docs/plans/session-lifecycle-architecture.md` §<n>." The
+Area values below were written before the Project's Area options were known. §17 has the actual
+mapping, which is `Providers/Runner` for almost everything.
 
-### Create now
+### Create now (done: #4–#11, see §17)
 
 **E. Decouple agent session lifetime from the Agent Wrangler app**
-- Type: `epic` · Stage: all · Priority P1 · Effort XL · Area Sessions & hosts · Status Ready
+- Type: `tech-debt` (epic, via sub-issues) · Stage: all · Priority P1 · Effort XL · Status Inbox
 - Scope: the initiative. It links the playbook and holds every other issue as a sub-issue. The
   body holds a checklist of the stages.
 - Acceptance criteria: the gating acceptance test (§8) passes with hosts on by default; the
   Stage 4 docs are updated; the Stage 7 gate is decided.
 - Depends on: — · Parallel with: — · PR boundary: none (tracking only) · **Create now**
 
-**S1. Measure what happens to a Claude runner when its host process dies**
+**S1. Measure what happens to a Claude runner when the process holding it dies**
 - Type: `spike` · Stage: S0 · P1 · Effort S · Area Sessions & hosts · Status Ready
 - Scope: using the SDK and the bundled binary in a throwaway script, kill the parent (SIGKILL,
   SIGTERM, clean exit) while the agent is idle, streaming, waiting on `canUseTool`, running a
@@ -1484,7 +1501,7 @@ Every issue ends with: "Playbook: `docs/plans/session-lifecycle-architecture.md`
 - Depends on: — (informed by S1) · Parallel with: S1, S3–S5 · PR boundary: docs commit ·
   **Create now**
 
-**S3. Prototype the host socket protocol: throughput, backpressure, reconnect**
+**S3. Prototype the session-host socket protocol: throughput, backpressure, reconnect**
 - Type: `spike` · Stage: S0 · P2 · Effort S · Area Sessions & hosts · Status Ready
 - Scope: UDS NDJSON JSON-RPC between two Node processes. Measure:
   - relay throughput of `stream_event` deltas (2k/s);
