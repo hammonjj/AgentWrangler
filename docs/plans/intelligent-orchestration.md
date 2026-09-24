@@ -240,7 +240,7 @@ volume.
 | Layered, tightening routing | one opaque decision cannot be explained or tested | Maestro: overrides → analysis → tool floor → prefs → policy → role → mode → budget → guardrails → hints | each layer adds a reason; pure functions | **Adopt** (§9.3) |
 | Heuristics first, LLM for the rest, shadow first | paying an LLM to decide whether to pay an LLM | Maestro: LLM only when heuristics are unsure; `shadow` logs agreement | AW's deterministic signals (paths, policy, configured verification) are stronger than keywords | **Adapt** (§8.3) |
 | Clamp what an LLM alone can change | an unverified signal promoting a task | Maestro: LLM alone cannot make a task `hard` (cost guard) | here the dangerous error is under-routing | **Adapt, inverted**: the model cannot lower risk below a rule floor or send a task to `basic` alone (§9.3) |
-| Four location-flavoured tiers | pick a class of model | Maestro tiers, tier = effort | conflates location and effort with capability | **Reject**; three capability tiers as data + location + effort axes (§6.3) |
+| Four location-flavoured tiers | pick a class of model | Maestro tiers, tier = effort | conflates location and effort with capability | **Reject**; capability tiers as data (three routable + an escalation-only `frontier`) + location + effort axes (§6.3) |
 | Workload roles (floors/caps by role) | structural importance not visible in prompt text | Maestro roles; Claude subagent model pinning | `kind` floors and ceilings | **Adopt** (§9.3) |
 | Named modes | a coarse user dial | Maestro `local-only`, `cheapest`, `fastest`, `best-quality`, `private` | maps to budget strategies and exclusions | **Adopt**, mostly later (§21) |
 | Budget downgrade ladder | running out of money | Maestro: cap tier as budget shrinks | would route below need; budget here is usage windows | **Adapt**: caps + admission control, never below the required tier (§12.4, §21) |
@@ -492,18 +492,40 @@ catalog, and only the harness adapters touch `SessionExecutor`.
 - **measured** from telemetry: throughput, time to first token, and later (#52) success rates.
 - **probed** from a local server (§19).
 
-**Tiers.** Default ordered tiers: `basic < standard < expert`. Three, not the brief's four
+**Tiers.** Default ordered tiers: `basic < standard < expert < frontier`. Not the brief's four
 (`local-fast`, `local-capable`, `standard`, `expert`), because two of the brief's four encode
 *location*, and location is a separate axis here (§0 point 4): a strong local coder is a
-`standard` model that happens to be local. The tier list is ordered data, so a fourth tier can be
+`standard` model that happens to be local. The tier list is ordered data, so another tier can be
 inserted later without touching task records.
 
+**`frontier` is escalation-only** (decided 2026-09-24, §34). Each tier carries a
+`reachableBy: 'route' | 'escalation'` flag; `frontier` ships as `escalation`. The router (§9.3)
+never produces it as `minTier`; the resolver (§9.4) never upgrades into it for availability. It is
+reached only by (a) the escalation ladder's "raise tier" step from `expert` (§15.2), and only when
+the mission's `maxTier` allows it, which by default it does not, or (b) an explicit pin. The
+mission creation form shows a "Frontier allowed" checkbox, off by default. Rationale: its models
+cost a multiple of `expert` per token and burn the usage window accordingly; they exist for the
+rare task that really needs them, not as a routing target.
+
 **Tier assignment is AW policy, stored in settings, not a model property.** Shipped defaults match
-model *families* (`modelName.ts` already knows `haiku`, `sonnet`, `opus`, …): e.g. Haiku-class →
-`basic`, Sonnet-class → `standard`, Opus-class → `expert`, Codex `*-mini` → `basic`. **A model no
-default matches is unassigned and cannot be routed to automatically** until the user assigns it a
-tier in Preferences. That is how a new model, or a local one, enters the pool: one setting, no
-migration, no code.
+the *resolved* model (so the `default` and `opus[1m]` aliases tier as the Opus they resolve to), by
+family (`modelName.ts` already knows `haiku`, `sonnet`, `opus`, …). Defaults as decided
+(2026-09-24, from the harness-reported catalogs of that date):
+
+| Tier | Claude Code | Codex |
+|---|---|---|
+| `basic` | Haiku-class (Haiku 4.5) | `gpt-6-luna`, `gpt-reserve` |
+| `standard` | Sonnet-class (Sonnet 5) | `gpt-6-sol` |
+| `expert` | Opus-class (Opus 5.5) | `gpt-6-astra` |
+| `frontier` (escalation-only) | Fable-class (Fable 5.1) | — |
+| unassigned | — | superseded generations (`gpt-5.6-*`, `gpt-5.5`); `codex-auto-review` is excluded outright (not a coding model) |
+
+Codex defaults follow Codex's own `model/list` descriptions ("fast and affordable" → `basic`,
+"workhorse for coding" → `standard`, "frontier intelligence" → `expert`) and only the newest
+generation is assigned: when a newer generation covers a tier, the older one is not routed to.
+**A model no default matches is unassigned and cannot be routed to automatically** until the user
+assigns it a tier in Preferences. That is how a new model, or a local one, enters the pool: one
+setting, no migration, no code.
 
 Because tasks store assessments and routing decisions store the tier *as it was* plus a catalog
 version, changing a model's tier changes future routing only.
@@ -817,6 +839,8 @@ These are **starting values**, justified by §9.2, to be calibrated against the 
 6. Ceilings: the user's caps (§10) — **a cap is never exceeded; if the floor is above the cap, the
    task goes to `needs-human` with both reasons**, instead of silently running under-powered or
    over the cap.
+7. The result is clamped to the highest tier with `reachableBy: route` (today `expert`). No rule
+   produces `frontier` (§6.3).
 
 **Effort (independent of tier).**
 
@@ -857,7 +881,7 @@ different dimensions.
    is allowed by policy (source, harness and location allow/deny lists, local on or off).
 2. **Tier fit** (under the default *balanced* strategy, §21): prefer exactly `minTier`. A higher tier is used only if no candidate at `minTier`
    is available *and* it is within `maxTier`. The decision records "upgraded: no standard model
-   available (usage window 97%)".
+   available (usage window 97%)". An availability upgrade never enters an escalation-only tier.
 3. **Availability**: source health up; capacity free (usage window below the admission threshold,
    no rate-limit backoff, a free slot for local servers).
 4. **Rank** within the fit: user preferences (preferred harness or source, prefer local), then
@@ -1124,7 +1148,12 @@ up.
 5. When every task is integrated and the mission branch verifies: mission `review`. The user
    chooses: merge into the base locally (`--no-ff`, as this repo does), push the branch and open a
    PR with `gh` (as other repos do), keep it, or discard it. Per-repo policy sets the default
-   button.
+   button. **Merge-locally is gated** (decided for this repository, §34): the merge into the base
+   is first made in the integration worktree, the repository's full check (typecheck, tests,
+   build) runs on that merged result, and the base branch moves only if it passes. The bar is
+   "the base stays usable for daily work": a mission may finish with part of a feature
+   incomplete, provided that part is behind a setting that is off by default. Finishing never
+   runs `app:install`; it reports that an install is needed.
 
 **Rebases** are never done by AW on a branch an agent is using. Keeping a task current is done by
 merging the mission branch into the task branch, and only when the task needs it (stale base or
@@ -1183,11 +1212,15 @@ One file per repository, owned by the user, holding what orchestration must not 
 }
 ```
 
-Where it lives is an open decision (§34): in the repository (`.agentwrangler/policy.json`,
-versioned with the code, visible to every agent) or on AW's side keyed by `repoRoot` (respects
-"do not write into other tools' files", but invisible to collaborators). The recommendation is
-**in the repository, optional, with an AW-side override**. It describes the user's own repo, and
-committed verification commands are reviewable. The schema is the same either way.
+**Where it lives (decided 2026-09-24, §34): on AW's side only.** Orchestration writes nothing
+into the repository. The file is `<userData>/repos/<repo-id>.json`, where `repo-id` is derived
+from the repository's git common directory (`git rev-parse --git-common-dir`), so the primary
+checkout and every worktree of a repository resolve to the same policy. It is edited in
+Preferences (a per-repository page), with the same schema as above. Rejected alternatives: a
+committed `.agentwrangler/policy.json` (modifies the repo); a gitignored or
+`.git/info/exclude`d file in the primary checkout (untracked files do not appear in new
+worktrees, so every attempt would have to reach back into the primary tree anyway). A repository
+with no policy file gets no automatic verification, which by §9.3 rule 4 keeps it off `basic`.
 
 ---
 
@@ -1282,6 +1315,9 @@ session ended with a pending question.
 | `stuck` | no progress past the attempt's wall-clock limit | interrupt, then one retry, then `needs-human` |
 | `budget` | a cap would be exceeded | stop; `needs-human` with the numbers |
 
+"Raise tier" from `expert` to `frontier` happens only when the mission allows `frontier`
+(off by default, §6.3); otherwise that step is skipped with the reason recorded ("would raise to
+frontier; not allowed for this mission"), and the task moves to the next axis or `needs-human`.
 "Raise effort" continues the session where the harness supports changing effort mid-session
 (§6.4). "Raise tier" and "switch harness" start a fresh session in a fresh worktree from the same
 base, on a new `-a<n>` branch (§13.2); the failed attempt's branch is kept for comparison.
@@ -1757,7 +1793,7 @@ orchestration adds:
 | **Arbitrary agent spawning** | AW starts agents without a click per agent | hard caps (concurrent attempts, tasks per mission, attempts per task, missions running); missions are created only by the user in the UI, or through the CLI (#21) with a confirmation in the UI; **agents cannot create missions** |
 | **Model-generated tasks** | the planner's output drives what runs | output is data, schema-validated and size-limited; it cannot set permission modes, tools, binaries, environment, commands or paths outside the repo; verification is named, never supplied; plan review is mandatory |
 | **Shell access / verification commands** | the core runs commands in worktrees | commands come only from repo policy the user wrote; run with an explicit environment and timeouts; output to logs |
-| **Permissions** | more agents means more prompts | unchanged mechanism: orchestrated sessions ask like any hosted session; never `bypassPermissions` (`allowDangerouslySkipPermissions` stays unset); the mission's permission mode is chosen at creation, defaulting to the app's default; hosted sessions are approvable only through AW (#15) |
+| **Permissions** | more agents means more prompts | the unattended-attempt posture in §24.1: `auto` mode for Claude, a worktree sandbox for Codex, one mission-scoped approval queue, and hard denies enforced in every mode; never `bypassPermissions` (`allowDangerouslySkipPermissions` stays unset); hosted sessions are approvable only through AW (#15) |
 | **Automatic escalation** | could raise cost or capability without asking | bounded (§15.3), capped, pins respected, every step recorded; escalation never changes permission mode or tools |
 | **Repository permissions** | AW writes branches and merges | only in worktrees it created; only into the mission branch; never pushes or merges into the base without a click; never removes a dirty, unmerged or in-use tree |
 | **Provider credentials** | none new for Claude or Codex | they keep their own logins; AW never reads them |
@@ -1770,6 +1806,29 @@ orchestration adds:
 triggered by a schedule): #18's notifications working, budget caps set, verification configured for
 the repository, a kill switch ("stop all missions" beside ⌥⌘Q's "stop all agents"), and at least
 one month of shadow and assisted data (§27).
+
+### 24.1 Permission posture for orchestrated attempts (decided 2026-09-24)
+
+Attempts do **not** inherit the launching session's permission mode. That mode fits a session the
+user is watching; an attempt runs unattended in a throwaway worktree, and with several running at
+once, per-command prompts become constant. The parent's mode is instead a **ceiling**: an attempt
+is never more permissive than the app's default mode.
+
+- **Claude Code attempts: `auto` mode.** Not `acceptEdits`: it still prompts for every shell
+  command, including the repository's own checks and `git`, which is the prompt volume this is
+  meant to remove. AW adds allow rules for the verification commands named in the repo policy
+  (§13.6) and for `git` subcommands that stay inside the worktree.
+- **Codex attempts: `workspace-write` sandbox** (writes confined to the worktree, no network),
+  approval policy `on-request`, so only a step outside the sandbox asks. Exact parameter names
+  are verified at the #25 gate against the app-server protocol as #4 ships it.
+- **One approval queue per mission.** Whatever still needs a human appears once in AW, grouped
+  by mission, with "allow for this mission": the answer applies to the same request from every
+  attempt in that mission and expires with it. N attempts asking the same thing is one prompt.
+- **Hard denies, enforced by AW in every mode** (a pre-tool-use check on Claude sessions, the
+  sandbox plus approval handling on Codex): `git push`; writes outside the attempt's worktree;
+  any change to the primary checkout; `npm run app:install` except through the exclusive lease
+  (§13.5). A denial is a `policy` outcome (§15.2), not a prompt.
+- **Never `bypassPermissions`**, and escalation never changes permission mode (above).
 
 ---
 
@@ -2427,22 +2486,27 @@ The brief's fifteen questions, answered against this plan.
 
 ---
 
-## 34. Open decisions for James
+## 34. Decisions (settled 2026-09-24)
 
-1. **Where does per-repo policy live?** In the repository (`.agentwrangler/policy.json`,
-   recommended, optional) or only on AW's side (§13.6).
-2. **Default finish for this repository.** `main`'s CLAUDE.md says merge locally with `--no-ff`;
-   the unmerged `chore/worktree-workflow` branch moves to PRs. The mission review's default
-   button follows whichever wins.
-3. **Tier defaults beyond the obvious families.** Which Codex models are `standard` versus
-   `expert`, and where newer Claude families sit. Until decided they ship unassigned (manual only).
-4. **Permission mode for orchestrated attempts.** The app's default (`auto`, since `95daa10`)
-   or `acceptEdits` inside the task's worktree. Never `bypassPermissions` either way.
-5. **Telemetry on by default?** Recommended yes (local, metadata only, deletable), with a
-   setting to turn it off.
-6. **Mission size caps.** Default 8 tasks, hard cap 12, three concurrent attempts.
-7. **Strictly after #4?** This plan assumes nothing starts until #4 is complete, as instructed.
-   The pure pieces (domain types, router rules, the corpus) have no code dependency on #4 and
-   could start earlier if that ever becomes useful. Doing so would need #25's gate to be
-   re-run once #4 lands.
+All seven were open when the plan was written; James decided them on 2026-09-24. The sections
+named carry the detail.
+
+1. **Per-repo policy lives on AW's side only** (§13.6): `<userData>/repos/<repo-id>.json`, keyed
+   by the git common directory, edited in Preferences. Nothing is written into the repository.
+2. **This repository finishes by merging locally** (§13.3), gated: the merged result must pass
+   typecheck, tests and build before `main` moves, so `main` stays usable for daily work;
+   unfinished parts of a feature ship behind a setting that is off by default. The PR flow on the
+   unmerged `chore/worktree-workflow` branch does not become this repo's default.
+3. **Tier defaults** (§6.3): Haiku / `gpt-6-luna`, `gpt-reserve` → `basic`; Sonnet /
+   `gpt-6-sol` → `standard`; Opus / `gpt-6-astra` → `expert`; Fable → a fourth tier,
+   `frontier`, **escalation-only** and off per mission by default (kept for the rare task that
+   really needs it). Superseded Codex generations are unassigned.
+4. **Permission posture** (§24.1): attempts do not inherit the parent's mode, which is a ceiling
+   instead. Claude `auto` plus allow rules for repo checks; Codex `workspace-write` +
+   `on-request`; one mission-scoped approval queue; hard denies in every mode; never
+   `bypassPermissions`.
+5. **Telemetry on by default** (local, metadata only, deletable), with a setting to turn it off.
+6. **Mission size caps**: default 8 tasks, hard cap 12, three concurrent attempts.
+7. **Strictly after #4.** The pure pieces could start earlier, but do not; #25's gate runs once
+   #4 lands.
 
