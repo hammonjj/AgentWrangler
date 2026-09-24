@@ -128,7 +128,8 @@ async function main(): Promise<void> {
     }, { once: true });
     return child as unknown as SpawnedProcess;
   };
-  const sdkOptions: Partial<Options> = fake ? {} : { env: agentEnv(process.env), spawnClaudeCodeProcess: spawnAgent };
+  // The fake agent spawns its dummy child through the same hook, so tests see a real agent process.
+  const sdkOptions: Partial<Options> = { env: agentEnv(process.env), spawnClaudeCodeProcess: spawnAgent };
 
   const session = new ClaudeSdkSession(
     {
