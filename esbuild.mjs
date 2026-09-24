@@ -1,6 +1,22 @@
 import esbuild from 'esbuild';
+import { readFileSync } from 'node:fs';
 
 const watch = process.argv.includes('--watch');
+
+/**
+ * Baked into the main process and the session host. The build id is what a
+ * host reports in `hello` and what names its cloned runtime, so two builds are
+ * never mistaken for each other; the SDK version is part of the host
+ * protocol's compatibility story (playbook §9.6).
+ */
+const BUILD_ID = `${Date.now().toString(36)}`;
+const SDK_VERSION = JSON.parse(
+  readFileSync(new URL('./node_modules/@anthropic-ai/claude-agent-sdk/package.json', import.meta.url), 'utf8'),
+).version;
+const buildDefines = {
+  AW_BUILD_ID: JSON.stringify(BUILD_ID),
+  AW_SDK_VERSION: JSON.stringify(SDK_VERSION),
+};
 
 // The tasks.json background problem matcher keys on these exact strings.
 const watchLogger = {
@@ -39,7 +55,26 @@ const electronMain = {
   outfile: 'dist/electron/main.js',
   sourcemap: true,
   minify: false,
-  define: { 'import.meta.url': '__aw_import_meta_url' },
+  define: { 'import.meta.url': '__aw_import_meta_url', ...buildDefines },
+  banner: { js: "var __aw_import_meta_url = require('url').pathToFileURL(__filename).href;" },
+  plugins: [watchLogger],
+};
+
+/**
+ * The session host (playbook §5, Stage 3): a plain Node program the app runs
+ * detached, from a clone of its own bundle with `ELECTRON_RUN_AS_NODE=1`. It
+ * owns one Claude session and outlives the app. No `electron` import at all.
+ */
+const sessionHost = {
+  entryPoints: ['src/sessionHost/main.ts'],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node22',
+  outfile: 'dist/sessionHost/main.js',
+  sourcemap: true,
+  minify: false,
+  define: { 'import.meta.url': '__aw_import_meta_url', ...buildDefines },
   banner: { js: "var __aw_import_meta_url = require('url').pathToFileURL(__filename).href;" },
   plugins: [watchLogger],
 };
@@ -82,7 +117,7 @@ const web = {
   plugins: [watchLogger],
 };
 
-const configs = [web, electronMain, electronPreload];
+const configs = [web, electronMain, electronPreload, sessionHost];
 
 if (watch) {
   const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));

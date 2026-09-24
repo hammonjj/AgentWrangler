@@ -59,6 +59,24 @@ conversation on startup* setting).
   by an agent inside Agent Wrangler, it replaces the bundle and leaves the running copy alone:
   quitting would end that agent too. Restart when convenient to pick up the build.
 
+**Keeping conversations running when the app quits (experimental).** Settings → Conversations →
+*Keep conversations running when Agent Wrangler quits*. With it on, each new Claude conversation
+runs in its own small background process (a *session host*), so quitting, reinstalling or a
+crash of Agent Wrangler no longer ends it: the turn in flight carries on, a permission prompt
+waits, and Agent Wrangler reconnects to it when it opens again.
+
+- **⌘Q** quits and leaves those conversations running (a notification says how many).
+  **Quit and Stop All Agents (⌥⌘Q)** ends them too.
+- Codex conversations, and Claude ones started before the setting was on, still end with the
+  app, as described above.
+- A host's files live in `~/Library/Application Support/Agent Wrangler/`: `run/` (a manifest,
+  a token and a socket per host, readable by you only), `logs/host-*.log`, and `runtimes/`, a
+  clone of the app that hosts run from so a reinstall never pulls the program out from under
+  them. A token opens its host's socket, so both are readable by your user only; a process
+  running as you could use them, which is the same limit the permission hook file already has.
+- It is experimental until crash recovery is hardened (#15): a host that crashes is reported,
+  but an agent it leaves behind is not yet cleaned up automatically.
+
 `env -u ELECTRON_RUN_AS_NODE` is applied by the scripts: VSCode sets that variable in its
 terminals and it makes the Electron binary behave as plain Node, so without it the app launches
 with every Electron API `undefined`. It reaches `open -a` too, so launching the installed app

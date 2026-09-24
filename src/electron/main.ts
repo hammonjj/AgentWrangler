@@ -17,8 +17,9 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
-import { app } from 'electron';
+import { app, Notification } from 'electron';
 import { createApp } from '../app/createApp';
 import { DictationSetupError, defaultModelPath } from '../core/dictation';
 import { agentCount, quitIntentSource, quitPolicy, type QuitSource } from '../core/session/quitPolicy';
@@ -30,6 +31,7 @@ import { installApplicationMenu } from './menu';
 import { JsonStore } from './jsonStore';
 import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
+import { createSessionHostRuntime } from './sessionHostRuntime';
 import { WorkbenchWindow } from './workbenchWindow';
 
 // Before anything reads `getPath('userData')` — which is derived from it — and
@@ -101,6 +103,12 @@ void app.whenReady().then(() => {
   const host = createElectronHost({
     userDataDir,
     log,
+    sessionHosts: {
+      runtime: createSessionHostRuntime({ userDataDir, appRoot: APP_ROOT, isPackaged: app.isPackaged, execPath: process.execPath, log }),
+      runDir: path.join(userDataDir, 'run'),
+      fallbackRunDir: path.join(os.homedir(), '.agentwrangler', 'run'),
+      logDir: path.join(userDataDir, 'logs'),
+    },
     palette: {
       pick: (items, options) => palette?.pick(items, options) ?? Promise.resolve(undefined),
       input: (options) => palette?.input(options) ?? Promise.resolve(undefined),
@@ -198,7 +206,10 @@ void app.whenReady().then(() => {
     }
   };
 
-  installApplicationMenu(wrangler, window, () => preferences.open(), () => requestQuit('menu'));
+  installApplicationMenu(wrangler, window, () => preferences.open(), {
+    quit: () => requestQuit('menu'),
+    quitAndStopAll: () => requestQuit('menuStopAll'),
+  });
 
   // Registered here, inside `whenReady`: one registered at module load is
   // replaced by Electron's own SIGTERM handler and never runs (spike S2).
@@ -233,17 +244,20 @@ void app.whenReady().then(() => {
     const source = quitSource ?? readQuitIntent() ?? 'external';
     quitSource = undefined;
     void (async () => {
-      const live = wrangler.liveSessionCount();
-      const decision = quitPolicy({ source, liveSessions: live });
-      log(`Agent Wrangler quitting (${source}); ${live} live session(s)`);
+      const counts = wrangler.sessionCounts();
+      const decision = quitPolicy({ source, ...counts });
+      log(`Agent Wrangler quitting (${source}); ${counts.local} in-process and ${counts.hosted} hosted session(s)`);
       if (decision.confirm) {
+        const keeps =
+          counts.hosted > 0 ? `\n\n${agentCount(counts.hosted)} running in session hosts keep running.` : '';
         const choice = await host.dialogs.warn(
-          `Quit and stop ${agentCount(live)}?`,
+          `Quit and stop ${agentCount(counts.local)}?`,
           {
             modal: true,
             detail:
               'Agent Wrangler runs these sessions itself, so quitting ends them. Nothing is lost: each ' +
-              'conversation is kept in its transcript, and comes back as an Interrupted row you can resume.',
+              'conversation is kept in its transcript, and comes back as an Interrupted row you can resume.' +
+              keeps,
           },
           'Quit and Stop',
         );
@@ -254,9 +268,18 @@ void app.whenReady().then(() => {
         }
       }
       try {
-        await wrangler.stopAllForQuit(decision.stopWithinMs);
+        await wrangler.stopAllForQuit(decision.stopWithinMs, { includeHosted: decision.stopHosted });
       } catch (err) {
         log(`ending sessions at quit failed: ${String(err)}`);
+      }
+      if (decision.announceRunning > 0 && Notification.isSupported()) {
+        new Notification({
+          title: `${agentCount(decision.announceRunning)} keep running`,
+          body: 'Agent Wrangler reconnects when you open it again. ⌥⌘Q quits and stops them.',
+          silent: true,
+        }).show();
+        // A moment for the notification to be handed to the system before the process goes.
+        await new Promise((r) => setTimeout(r, 300));
       }
       teardown();
       app.exit(0);

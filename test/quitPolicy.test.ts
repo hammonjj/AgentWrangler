@@ -13,15 +13,35 @@ describe('quitPolicy', () => {
   it.each<[QuitSource, number, boolean]>([
     ['menu', 3, true],
     ['menu', 0, false],
+    ['menuStopAll', 3, false],
     ['signal', 3, false],
     ['install', 3, false],
     ['external', 3, false],
-  ])('%s quit with %i live sessions: confirm = %s', (source, live, confirm) => {
-    expect(quitPolicy({ source, liveSessions: live })).toEqual({ confirm, stopWithinMs: QUIT_STOP_BOUND_MS });
+  ])('%s quit with %i in-process sessions: confirm = %s', (source, local, confirm) => {
+    expect(quitPolicy({ source, local, hosted: 0 }).confirm).toBe(confirm);
+  });
+
+  it('leaves hosted sessions running on every quit but Quit and Stop All', () => {
+    for (const source of ['menu', 'signal', 'install', 'external'] as const) {
+      expect(quitPolicy({ source, local: 0, hosted: 2 }).stopHosted).toBe(false);
+    }
+    expect(quitPolicy({ source: 'menuStopAll', local: 0, hosted: 2 }).stopHosted).toBe(true);
+  });
+
+  it('does not ask about hosted sessions: a menu quit with only hosted ones just goes', () => {
+    expect(quitPolicy({ source: 'menu', local: 0, hosted: 3 }).confirm).toBe(false);
+  });
+
+  it('says how many keep running, except when stopping them or at logout', () => {
+    expect(quitPolicy({ source: 'menu', local: 1, hosted: 2 }).announceRunning).toBe(2);
+    expect(quitPolicy({ source: 'external', local: 0, hosted: 2 }).announceRunning).toBe(2);
+    expect(quitPolicy({ source: 'menuStopAll', local: 0, hosted: 2 }).announceRunning).toBe(0);
+    expect(quitPolicy({ source: 'signal', local: 0, hosted: 2 }).announceRunning).toBe(0);
   });
 
   it('bounds the graceful stop at 10 s', () => {
     expect(QUIT_STOP_BOUND_MS).toBe(10_000);
+    expect(quitPolicy({ source: 'menu', local: 1, hosted: 0 }).stopWithinMs).toBe(QUIT_STOP_BOUND_MS);
   });
 });
 

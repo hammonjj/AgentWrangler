@@ -33,6 +33,7 @@ import { modelChoiceLabel } from '../../shared/modelName';
 import type {
   ControlRequest,
   HostEvent,
+  HostExit,
   HostSnapshot,
   RawAsk,
   RawPermissionResult,
@@ -58,13 +59,23 @@ export interface ClaudeExecution {
   respondAsk(requestId: string, result: RawPermissionResult): RespondOutcome | Promise<RespondOutcome>;
   control(req: ControlRequest): Promise<unknown>;
   end(opts?: { graceMs?: number }): Promise<void>;
+  /** A remote execution's link to its host. In-process executions have none. */
+  onLink?(listener: (state: 'connecting' | 'live' | 'unreachable') => void): Disposable;
+  /** Stop following without ending the agent (remote only: the app is quitting, the host lives on). */
+  detach?(): void;
 }
 
 export interface RunnerViewOptions {
   cwd: string;
   resume?: string;
-  /** A fresh session's id, when the launch chose one. */
+  /** A fresh session's id, when the launch chose one, or the id of an adopted hosted session. */
   sessionId?: string;
+  /**
+   * The conversation before this view, already being read: an adopted hosted
+   * session reads its transcript first (the replay dedupes against it), so the
+   * view is handed the same read rather than starting another.
+   */
+  history?: Promise<ConversationHistory>;
   permissionMode?: PermissionModeName;
   model?: string;
   effort?: string;
@@ -128,7 +139,10 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
   /** The model list has been answered, so `init` does not ask for it again. */
   private modelsLoaded = false;
   private modelAttempts = 0;
+  /** How the agent went, once it has: lets the owner tell a lost host from a clean end. */
+  lastExit?: HostExit;
   private execSub?: Disposable;
+  private linkSub?: Disposable;
   private readonly newUuid: () => string;
 
   constructor(
@@ -145,7 +159,14 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     if (opts.effort) this.composer.effort = opts.effort;
     if (opts.model) this.composer.model = opts.model;
     if (!opts.resume && opts.sessionId) this.sessionId = opts.sessionId;
-    if (opts.resume) {
+    if (opts.history) {
+      this.historyPromise = opts.history
+        .then((h) => {
+          this.historyOverflow = h.overflow;
+          return h;
+        })
+        .catch(() => ({ blocks: [], truncated: false }));
+    } else if (opts.resume) {
       this.sessionId = opts.resume;
       // Issued before `start` creates the process, so it snapshots the file as
       // it stood before this process could append to it. The new half of the
@@ -166,6 +187,24 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     }
     // Everything the execution layer has said, from the start.
     this.execSub = this.exec.subscribe(0, (event) => this.onHostEvent(event));
+    this.linkSub = this.exec.onLink?.((state) => this.onLink(state));
+  }
+
+  /** Runs in a session host rather than in this process. */
+  get hosted(): boolean {
+    return this.exec.detach !== undefined;
+  }
+
+  /**
+   * Stop following a hosted session without ending it: the app is quitting
+   * and the agent keeps running in its host. Does nothing for an in-process one.
+   */
+  detach(): void {
+    if (!this.exec.detach) return;
+    clearTimeout(this.interruptTimer);
+    this.exec.detach();
+    this.execSub?.dispose();
+    this.linkSub?.dispose();
   }
 
   // ---- reading ----
@@ -253,12 +292,21 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
           ];
     this.setComposer({ busy: true });
     this.setLifecycle('running');
-    const result = await this.exec.send({
-      type: 'user',
-      message: { role: 'user', content },
-      parent_tool_use_id: null,
-      uuid,
-    } as SDKUserMessage);
+    let result: SendResult;
+    try {
+      result = await this.exec.send({
+        type: 'user',
+        message: { role: 'user', content },
+        parent_tool_use_id: null,
+        uuid,
+      } as SDKUserMessage);
+    } catch (err) {
+      // A hosted session whose host cannot be reached right now.
+      this.deps.log(`runner send failed: ${String(err)}`);
+      this.append([noteBlock(this.blockState, 'error', 'Not sent: the session could not be reached. Try again in a moment.')]);
+      this.setComposer({ busy: false });
+      return 'gone';
+    }
     if (result.accepted || result.duplicate) return 'applied';
     this.deps.log('runner send refused: the session is ending');
     // Say so where the message was shown, and do not leave the composer busy.
@@ -442,14 +490,55 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
         return;
       }
       case 'exit':
+        this.lastExit = event.exit;
         if (event.exit.error) this.fail(event.exit.error);
         else this.setLifecycle('ended');
         return;
       case 'state':
+        this.onHostState(event.state);
+        return;
       case 'sessionId':
-        // The view derives both from the messages themselves, as it always has.
+        // Derived from the messages themselves, as it always has been.
         return;
     }
+  }
+
+  /**
+   * The host's own state, which is authoritative (CP1/CP2 reviews). The view
+   * also derives its lifecycle from the messages it reduces, and in-process
+   * the two agree, since the host emits each state change right after the
+   * message that caused it. Where they differ the host is right: a view
+   * rebuilt from a replay may have reduced an old `result` while the host is
+   * mid-turn, and a turn started by a background task's notification has no
+   * send for the view to notice. Finished (`ended`, `error`) and `ending` are
+   * the view's own and are never undone.
+   */
+  private onHostState(state: HostSnapshot['state']): void {
+    if (this.lifecycle === 'ended' || this.lifecycle === 'error' || this.lifecycle === 'ending') return;
+    if (state === 'idle') {
+      // An interrupt the CLI never answered is already idle here; nothing to do.
+      if (this.lifecycle === 'idle') return;
+      this.setLifecycle('idle');
+      this.setComposer({ busy: false });
+    } else if (state === 'running') {
+      this.setLifecycle('running');
+      this.setComposer({ busy: true });
+    } else if (state === 'ending') {
+      this.setLifecycle('ending');
+    }
+  }
+
+  private onLink(state: 'connecting' | 'live' | 'unreachable'): void {
+    if (this.lifecycle === 'ended' || this.lifecycle === 'error' || this.lifecycle === 'ending') return;
+    if (state === 'live') {
+      if (this.lifecycle === 'connecting' || this.lifecycle === 'unreachable') {
+        this.lifecycle = 'starting'; // let the host's state decide, without announcing a detour
+        this.onHostState(this.exec.snapshot().state);
+        if (this.lifecycle === 'starting') this.emitLifecycle('starting');
+      }
+      return;
+    }
+    this.setLifecycle(state);
   }
 
   private onAsk(raw: RawAsk): void {

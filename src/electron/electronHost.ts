@@ -49,6 +49,8 @@ export interface ElectronHostOptions {
     pick<T extends PickItem>(items: T[], options?: PickOptions): Promise<T | undefined>;
     input(options: InputOptions): Promise<string | undefined>;
   };
+  /** Where session hosts live and run from. Built by `main.ts`, which knows the bundle. */
+  sessionHosts?: HostServices['sessionHosts'];
 }
 
 /**
@@ -203,6 +205,7 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     // records and resuming a session that is already running.
     workspaceState: new JsonStore(path.join(userDataDir, 'surface.json')),
     sessionState: new JsonStore(path.join(userDataDir, 'sessions.json')),
+    sessionHosts: opts.sessionHosts,
     storageDir,
     dialogs: dialogsFor(opts),
     shell: shellFor(opts),

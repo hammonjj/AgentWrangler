@@ -715,17 +715,20 @@ notification says so when auto-pause is enabled.
   "capabilities":["images","control.getContextUsage"]}}
 ```
 
-### 9.4 Methods (protocol v1, frozen at CP2; about ten)
+### 9.4 Methods (protocol v1, frozen at CP2 on 2026-09-24; see §15.2)
+
+The authoritative statement is the wire comment in `src/shared/sessionProtocol.ts`; this table
+summarizes it.
 
 | Method | Params | Result |
 |---|---|---|
-| `hello` | above | above |
-| `snapshot` | `{}` | `{epoch, seq, state, sessionId, pendingAsks[], ring:{fromSeq, truncated}, exit?}`. `epoch` identifies this host instance's event stream (added in Stage 1): seqs compare only within one epoch, and a `fromSeq` ahead of the host's seq is also answered with `resync` |
-| `subscribe` | `{fromSeq}` | `{ok}`, then notifications. `fromSeq` older than the ring → error `-32010 resync` |
-| `messages` | `{fromSeq, maxBytes}` | `{messages:[{seq, msg}], nextSeq}` (paged replay of raw SDK messages). `nextSeq` is **where this page stopped**, not the host's live seq, and the client loops until caught up. `maxBytes` must be well under the per-client queue (S3 used 1 MiB against 4 MiB), or a recovery reply overflows the queue it is refilling and resyncs loop |
+| `hello` | above, plus optional `client.capabilities` | above, plus `hostPid`, `agentStartTime`. An unsupported range → `-32003 protocol mismatch` with `data: {min, max}`; a bad token → `-32001`. A role other than `core` is an observer |
+| `snapshot` | `{}` | `{epoch, seq, state, sessionId, pendingAsks[], ring:{fromSeq, truncated}, exit?, latest?, controls?}`. `epoch` identifies this host instance's event stream: seqs compare only within one epoch. `latest` is the last raw message of each level-type kind (`system/init`, `background_tasks_changed`, `session_state_changed`, …), which the ring may have evicted; `controls` are the model and permission mode last set through `control` |
+| `events` | `{fromSeq, maxBytes, epoch?}` | `{events:[HostEvent], nextSeq, done}`, a paged replay of every held event (renamed from `messages` at CP2: it returns every event type). `nextSeq` is **where this page stopped**, not the host's live seq, and the client loops until `done`. A page never exceeds 1 MiB whatever `maxBytes` asks, well under the 4 MiB client queue (S3) |
+| `subscribe` | `{fromSeq, epoch?}` | `{ok}`. The held backlog after `fromSeq` is sent **before** the response, then live events. An evicted `fromSeq`, another epoch, or a backlog that overflows the queue → `-32010 resync`, and nothing is streamed. For small gaps only: page a large one with `events` first |
 | `send` | `{message: SDKUserMessage}` (client sets `uuid`) | `{accepted, duplicate}`. **Idempotent on `uuid`**, so a core that crashed mid-send can check the snapshot |
 | `respondAsk` | `{requestId, result: PermissionResult}` | `{outcome: applied \| stale \| gone}` |
-| `control` | `{op: interrupt \| setModel \| setPermissionMode \| supportedModels \| supportedCommands \| getContextUsage, args}` | op result |
+| `control` | `{op: interrupt \| setModel \| setPermissionMode \| supportedModels \| supportedCommands \| getContextUsage, args}` | `{result}`. An op the host does not have → `-32601`; the ops it has are advertised as `control.<op>` capabilities |
 | `end` | `{graceMs}` | resolves after the agent has exited |
 | `ping` | `{}` | `{seq, now}` |
 
@@ -735,13 +738,24 @@ with.
 
 ### 9.5 Events (host → core notifications, all with `seq`)
 
-- `message {msg}`: every raw SDK message, `stream_event` partials included.
-- `ask {ask}` / `askSettled {requestId, reason: responded | aborted | agentExited}`.
-- `state {state}`: the host's minimal lifecycle (`starting | idle | running | ending`, derived
-  from `system/init` and `result`, used only for the idle rule).
+There are two notifications. **`event {event}`** carries every `HostEvent` in seq order, and
+**`resync {}`** belongs to one connection and has no seq. One `event` notification rather than
+one per type (a CP2 decision) means a new event type is additive: readers ignore types, fields,
+states and reasons they don't know. The `HostEvent` types:
+
+- `message {msg}`: every raw SDK message, `stream_event` partials included. Base64 images over
+  32 KiB are replaced by a stub on the wire (capability `wire.largeImagesOmitted`); the
+  transcript has the original. This settles S3's large-frame question: no multi-MiB frame
+  reaches the main thread. Any frame still over 16 MiB is replaced by a stub, never sent.
+- `ask {ask}` / `askSettled {requestId, reason: responded | aborted | answeredElsewhere | agentExited}`.
+  `ask` carries the SDK's `canUseTool` options as-is, minus `signal`.
+- `state {state}`: the host's minimal lifecycle (`starting | idle | running | ending | exited`).
+  **This is authoritative** for the view (the CP1 carry-over).
 - `sessionId {sessionId}`.
-- `exit {code, signal, stderrTail}`.
-- `resync {}`.
+- `exit {exit}`: `{reason: ended | stopped | signal | error | crashed, error?, code?, signal?,
+  hostSignal?, stderrTail?}`. `code` and `signal` are the agent process's own; `hostSignal` is
+  what the host was sent (logout, `kill`). An unknown reason reads as `error`. `lost` is
+  never on the wire or in a manifest: it is the core's conclusion that a host died silently.
 
 The core's `RemoteSessionHandle` feeds these to `RunnerView`, which is today's reducer, and
 answers the synchronous getters (`canSend`, `composer`, `pendingQuestion`, `pendingPlan`) from
@@ -765,7 +779,7 @@ its state. It adds `connecting` and `unreachable`, which `RunnerLifecycle` lacks
 - **The host drains the SDK iterator at full speed, always.** If it stopped, `claude`'s ~64 KB
   stdout pipe would fill and the agent would stall.
 - Per client there is a **byte-bounded** outbound queue (4 MiB). On overflow the host drops the
-  queue, sends `resync`, and the client re-snapshots and pages `messages` from the snapshot.
+  queue, sends `resync`, and the client re-snapshots and pages `events` from the snapshot.
 - Under pressure, `stream_event` deltas for the same content block are coalesced.
 - The ring is sized in bytes (default 16 MiB). The transcript covers anything older.
 - A `fromSeq` is stale only once the ring has **evicted past it** (track an `evictedThrough`
@@ -778,7 +792,7 @@ its state. It adds `connecting` and `unreachable`, which `RunnerLifecycle` lacks
   with one resync when it did not. **The 4 MiB queue and 16 MiB ring defaults stand.**
 - A 16 MiB frame round-trips intact and a larger line is rejected, but parsing one took 2–3 s. The
   core must not `JSON.parse` frames that large on the Electron main thread in the same tick as UI
-  work. Stage 3 decides between off-thread parsing and not sending large images inline.
+  work. **Stage 3 decided: don't send large images inline** (§9.5), so no off-thread parser.
 
 ### 9.8 Heartbeats and reconnects
 
@@ -1332,6 +1346,36 @@ When to escalate: quit-source detection or SIGTERM handling misbehaves → Extra
   - **Identity over the wire.** `ClaudeExecution` reads `cwd` and `startedAt` off the execution
     object. Over a socket they come from `hello` (and belong in the manifest), not from properties.
   - The in-process rings are 1 MiB (`localClaudeHandle.ts`); the host uses the 16 MiB default.
+- **Outcome of the carry-overs (2026-09-24).**
+  - Lifecycle: the host's `state` is authoritative except while the view is ending, ended or
+    failed. Every catch-up ends by reconciling with the snapshot: its state, its pending asks
+    (synthetic `ask` / `askSettled` for any that were evicted), and its exit.
+  - Identity: `cwd`, `startedAt` and the pids come from `hello` and the manifest.
+  - Rings: 1 MiB in-process, 16 MiB in the host, as planned.
+- **What else Stage 3 settled.**
+  - Adopt dedupe is **by position**: every `assistant`/`user` message up to and including the
+    last ring message whose uuid is in the transcript read is dropped. A uuid set alone missed
+    older ring messages outside the 512 KiB transcript tail (CP2 B2). Messages from another
+    `session_id` (a `/clear` inside the ring) are dropped too.
+  - Start times are read with `ps -o lstart` under `TZ=UTC LC_ALL=C`, so a time-zone or
+    locale change never makes a live host look dead (CP2).
+  - The client stops retrying on an unauthorized or protocol-mismatch `hello` and shows the
+    session unreachable. Calls wait for the link for a bounded time, and transport errors
+    propagate, so a card stays answerable. `end` falls back to a start-time-checked SIGTERM
+    of the host.
+  - A dead host with no exit record keeps its manifest for 7 days (it names the agent pid the
+    Stage 4 sweep needs). A live host whose manifest version this build does not know is
+    *foreign*: its session counts as held, it is never adopted, and its files are never
+    collected.
+  - Dead hosts at startup: `ended` → ended; `stopped` / `signal` → interrupted (resumable);
+    anything else → failed.
+  - The live test (`AW_LIVE_CLAUDE=1`) passed. A mid-ask orphan with AW's
+    `PermissionRequest` hook installed: **the agent exited within 10 s** of its host being
+    killed, so it doesn't sit waiting on the hook (§11.5).
+  - The re-signed clone verifies with `codesign --verify`, and a host runs from inside its
+    `app.asar` (manifest, `hello`, `ping`, SIGTERM exit recorded). The install-survival and
+    `~/Documents` read are in James's manual matrix below.
+  - `electron-builder.yml` records that the RunAsNode fuse must stay on (§11.7).
 - **Completion.** The manual matrix passes 3× in a row, there are no orphan processes after ⌥⌘Q,
   and typecheck and tests are green.
 - **Rollback.** Setting off means the Stage 1 in-process executor. Running hosts stay stoppable
@@ -1587,7 +1631,7 @@ Switch to **Opus, Extra High** for these, even when the surrounding work runs on
 - **CP1, before Stage 1 merges.** `ClaudeSdkSession` and `sessionProtocol` types: serializable,
   provider-native, no `ConvBlock` in the host surface, seq and snapshot semantics.
 - **CP2, before the Stage 3 host server merges.** Freeze protocol v1 and manifest v1. Every
-  method is forever.
+  method is forever. **Passed 2026-09-24 after one round of fixes; see §15.2.**
 - **CP3, after the Stage 4 soak, before the default flip.** Walk the §8 matrix against real
   behaviour, and give GC and classification a second read.
 - **CP4, the Stage 7 gate.**
@@ -1623,6 +1667,7 @@ are already written into the sections named.
   a logout misbehaves. M4 (the TCC dialog) is moot on certificate-signed builds; the
   Stage 3 re-run replaces it.
 - A certificate-signed clone surviving an install with `~/Documents` access intact: Stage 3.
+  The clone verifies and runs a host (2026-09-24); the install run is in Stage 3's manual matrix.
 - A `thread/read` across the Codex writer lock, and `thread_unload_delay_secs`: Stage 5, non-blocking.
 
 **Stage consequences** (the issue bodies are edited to match):
@@ -1640,6 +1685,38 @@ are already written into the sections named.
 - **Stage 4 (#15):** the sweep per §7.3, at every resume or adopt; M3 if a logout can be spared.
   Wake detection uses `powerMonitor` `resume` (M2: a sleep leaves no timer gap).
 - **Stage 5 (#17):** rewritten from S4 (it predated it).
+
+### 15.2 CP2 verdict (2026-09-24, #14)
+
+**Protocol v1 and manifest v1 are frozen** as stated in `src/shared/sessionProtocol.ts` (§9.4,
+§9.5). The first review found the shape sound but not ready to freeze: five surface gaps and five
+correctness bugs. All ten are fixed, and so are most of the "later" items.
+
+| Area | Finding | Resolution |
+|---|---|---|
+| Exit record | `signal` meant two things; no `reason`, `code` or `stderrTail` | `reason` enum; the agent's `code`/`signal`; `hostSignal`; a 2000-char `stderrTail` on failures |
+| Start times | `ps -o lstart` varies with TZ and locale | Pinned: `TZ=UTC LC_ALL=C` |
+| Fail-open | Unknown `control` op succeeded; unknown role was `core` | `-32601` plus `control.<op>` capabilities; unknown role is an observer |
+| Versions | Mismatch looked like bad params; foreign manifests were invisible | `-32003` with `{min, max}`. `v`, `hostId`, `hostPid`, `hostStartTime`, `sessionId` and `protocol` keep their meaning in every manifest version; an unknown `v` with a live pid means "held" |
+| `subscribe` | An overflowing backlog lost events silently | `RPC_RESYNC` and no stream; semantics pinned in the wire comment |
+| Future-proofing | `RawAsk` dropped fields; host-only state was evictable | `ask.options` passthrough; `snapshot.latest` and `snapshot.controls` |
+| Small | — | `messages` → `events`; `epoch` on `subscribe`/`events`; client capabilities; `agentStartTime`; `launch` in the manifest; `lost` off the wire |
+| B1 | Reconnect storm (~33k `hello`/s) | Link set only after the handshake; fatal errors stop retries |
+| B2 | Old turns duplicated after restart | Positional dedupe |
+| B3 | Host state not authoritative | Snapshot reconcile at the end of every catch-up |
+| B4 | Calls could hang; a transient error expired a card | Bounded wait; errors propagate; SIGTERM fallback for `end` |
+| B5 | Gaps weren't reconciled | Synthetic `ask` / `askSettled` / `state` / `exit` from the snapshot |
+
+Not frozen: `HostBoot` (a core only boots a host of its own build).
+
+The "later" items that were fixed: a host never exits with its agent alive; `close` ends sockets
+rather than destroying them; the tombstone decides `lost`; a no-exit manifest survives for the
+sweep; oversize frames are stubbed; the Codex codec is uncapped again and buffers linearly; a late
+host is killed; the exit is delivered once; the quit count excludes errored Codex sessions; the
+audit log and the fuse note are in.
+
+**Open, for Stage 4:** adopting several busy hosts replays up to 16 MiB each on the main thread
+at startup; and a fake agent that spawns a real child, to test orphan handling.
 
 ---
 

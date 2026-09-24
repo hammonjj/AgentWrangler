@@ -34,6 +34,12 @@ export interface ConversationHistory {
    * exactly as it does on what the session says next.
    */
   overflow?: Map<string, string>;
+  /**
+   * The entry uuids in the part of the transcript that was read. SDK message
+   * uuids are transcript uuids (spike S1), so a reattaching view uses these to
+   * leave out of its replay what the history already shows.
+   */
+  uuids?: Set<string>;
 }
 
 export interface TranscriptTailRead extends ConversationHistory {
@@ -92,7 +98,22 @@ export async function readTranscriptTail(filePath: string | undefined): Promise<
   }
   const truncated = readStart > 0 || blocks.length > MAX_INIT_BLOCKS;
   if (blocks.length > MAX_INIT_BLOCKS) blocks = blocks.slice(-MAX_INIT_BLOCKS);
-  return { blocks, truncated, state, byteOffset: readStart + split.endOffset };
+  return { blocks, truncated, state, byteOffset: readStart + split.endOffset, uuids: entryUuids(split.lines) };
+}
+
+/** Each line's own `uuid` (not `parentUuid`), for lines that parse. */
+export function entryUuids(lines: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const line of lines) {
+    if (!line.includes('"uuid"')) continue;
+    try {
+      const uuid = (JSON.parse(line) as { uuid?: unknown }).uuid;
+      if (typeof uuid === 'string') out.add(uuid);
+    } catch {
+      // a torn or foreign line: nothing to dedupe against
+    }
+  }
+  return out;
 }
 
 /**
@@ -103,6 +124,6 @@ export async function readTranscriptTail(filePath: string | undefined): Promise<
  * live through the runner's own blocks, and the two must never overlap.
  */
 export async function loadResumeHistory(sessionId: string, cwd: string): Promise<ConversationHistory> {
-  const { blocks, truncated, state } = await readTranscriptTail(transcriptPathFor(sessionId, cwd));
-  return { blocks, truncated, overflow: state.overflow };
+  const { blocks, truncated, state, uuids } = await readTranscriptTail(transcriptPathFor(sessionId, cwd));
+  return { blocks, truncated, overflow: state.overflow, uuids };
 }

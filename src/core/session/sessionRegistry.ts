@@ -108,11 +108,12 @@ export class SessionRegistry {
   }
 
   /**
-   * Classify every record for this start (`live` → `interrupted`) and save the
-   * result. Call once, before anything reads the registry or resumes anything.
+   * Classify every record for this start (`live` → `interrupted`, except the
+   * sessions still running in a surviving host) and save the result. Call
+   * once, before anything reads the registry or resumes anything.
    */
-  startup(): StartupResult {
-    const result = classifyOnStartup(this.all(), this.now());
+  startup(stillRunning: ReadonlySet<string> = new Set()): StartupResult {
+    const result = classifyOnStartup(this.all(), this.now(), stillRunning);
     this.write(result.records);
     return result;
   }

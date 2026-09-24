@@ -31,6 +31,7 @@
 
 import type { Disposable } from '../core/events';
 import type { SessionHandle } from '../core/session/sessionHandle';
+import type { SessionHostRuntime } from '../core/session/hostSupervisor';
 
 /**
  * Persisted key/value, the same structural shape `ArchiveService` and
@@ -183,6 +184,18 @@ export interface HostServices {
   workspaceState: HostStorage;
   /** The session registry's document (`sessions.json`): every session AW runs and what became of it. */
   sessionState: HostStorage;
+  /**
+   * Where session hosts live and run from (playbook §5, Stage 3). Absent means
+   * this front end cannot run hosts, and every session runs in-process.
+   */
+  sessionHosts?: {
+    runtime: SessionHostRuntime;
+    /** `run/`: manifests, tokens, sockets. 0700. */
+    runDir: string;
+    /** For sockets when `runDir`'s path is too long for macOS (`~/.agentwrangler/run`). */
+    fallbackRunDir: string;
+    logDir: string;
+  };
   /** Directory for caches this host owns, e.g. the shared usage read. Must exist. */
   storageDir: string;
   dialogs: HostDialogs;

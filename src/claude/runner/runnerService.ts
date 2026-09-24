@@ -1,21 +1,26 @@
 /**
- * Every Claude Code session this window is running itself.
+ * Every Claude Code session this app is running itself.
  *
  * Two jobs. It starts them, and it answers "is this session ours?" — which the
  * rest of the app has to ask constantly, because a runner session looks from
  * the outside like any other: it is in Claude's registry, it writes a
- * transcript, and (being a child of this process) the process tree says it
- * lives in "a Claude Code panel in this window", which is exactly wrong.
- * Ownership is therefore decided here, by session id, and never by pid.
+ * transcript, and (being a child of this process, or of one of its hosts) the
+ * process tree says nothing useful about who drives it. Ownership is therefore
+ * decided here, by session id, and never by pid.
  *
- * It is the Claude `SessionExecutor`: callers get `SessionHandle`s, which today
- * are `RunnerView`s over an in-process `ClaudeSdkSession`.
+ * It is the Claude `SessionExecutor`. Its handles are `RunnerView`s, over an
+ * in-process `ClaudeSdkSession` or, with session hosts on (Stage 3), over a
+ * `HostClient` talking to a detached host that outlives the app.
  */
+import { randomUUID } from 'node:crypto';
 import { Emitter, type Disposable } from '../../core/events';
+import type { HostSupervisor } from '../../core/session/hostSupervisor';
 import { createLocalClaudeHandle } from '../../core/session/localClaudeHandle';
+import { adoptHostedClaude, spawnHostedClaude } from '../../core/session/remoteClaudeHandle';
 import type { LaunchRequest, SessionExecutor } from '../../core/session/sessionHandle';
-import type { ExecutorRegistry } from '../../core/session/sessionRegistry';
+import type { ExecutorRegistry, SessionRecord } from '../../core/session/sessionRegistry';
 import type { ModelChoice, PermissionModeName } from '../../shared/conversation';
+import type { HostManifest } from '../../shared/sessionProtocol';
 import { loadResumeHistory, type ConversationHistory } from '../transcriptHistory';
 import type { QueryFn } from './claudeSdkSession';
 import type { RunnerView } from './runnerView';
@@ -37,6 +42,8 @@ export interface RunnerServiceDeps {
    * `ModelCatalogService`.
    */
   rememberModels?: (models: ModelChoice[] | undefined) => void;
+  /** Session hosts: where new sessions run when `enabled()` says so, and how surviving ones are adopted. */
+  hosts?: { supervisor: HostSupervisor; enabled: () => boolean };
 }
 
 /** What starting a Claude session takes. The `LaunchRequest` minus the provider. */
@@ -53,18 +60,19 @@ export class RunnerService implements SessionExecutor, Disposable {
 
   constructor(private deps: RunnerServiceDeps) {}
 
-  /** Start a session and return its handle straight away (it reports its id once the CLI does). */
+  /** Start a session and return its handle straight away. */
   start(opts: RunnerStartOptions): RunnerView {
     const binary = this.deps.binary();
-    const session = createLocalClaudeHandle(opts, {
-      query: this.deps.query,
-      binary,
-      log: this.deps.log,
-      loadHistory: this.deps.loadHistory ?? loadResumeHistory,
-    });
-    this.sessions.add(session);
+    const loadHistory = this.deps.loadHistory ?? loadResumeHistory;
+    const hosts = this.deps.hosts?.enabled() ? this.deps.hosts : undefined;
+    // A hosted session's id is chosen here, so its manifest, the registry and
+    // the pane all know it before the first turn.
+    const launch = hosts && !opts.resume && !opts.sessionId ? { ...opts, sessionId: randomUUID() } : opts;
+    const session = hosts
+      ? spawnHostedClaude(launch, { supervisor: hosts.supervisor, binary, log: this.deps.log, loadHistory })
+      : createLocalClaudeHandle(launch, { query: this.deps.query, binary, log: this.deps.log, loadHistory });
     const place = this.deps.locate?.(opts.cwd) ?? {};
-    const record = (id: string) =>
+    this.track(session, (id) =>
       this.deps.registry?.live({
         sessionId: id,
         provider: 'claude',
@@ -74,36 +82,33 @@ export class RunnerService implements SessionExecutor, Disposable {
         branchAtStart: place.branch,
         launch: { model: opts.model, permissionMode: opts.permissionMode, effort: opts.effort, binary },
         origin: opts.origin,
-      });
-    // The id is unknown until the CLI's first init (unless the launch chose
-    // one), and ownership answers change the moment it arrives. A new id mid-
-    // life is `/clear`: the old conversation ended here and a new one began.
-    let recordedId = session.sessionId;
-    if (recordedId) record(recordedId);
-    session.onLifecycle((lifecycle) => {
-      const id = session.sessionId;
-      if (id && id !== recordedId) {
-        if (recordedId) this.deps.registry?.setState(recordedId, 'ended', 'cleared');
-        recordedId = id;
-        record(id);
-      }
-      // Ended on its own. A deliberate `end` has already said `stopped`.
-      if (id && this.sessions.has(session) && !this.ending.has(session)) {
-        if (lifecycle === 'ended') this.deps.registry?.setState(id, 'ended');
-        if (lifecycle === 'error') this.deps.registry?.setState(id, 'failed', 'agent error');
-      }
-      this.changeEmitter.fire();
-    });
-    // The model list arrives a moment after start, and is the only place it is
-    // ever published; the launcher needs it too. See `ModelCatalogService`.
-    if (this.deps.rememberModels) {
-      const remember = this.deps.rememberModels;
-      session.onComposer((composer) => remember(composer.models));
-    }
-    session.start();
-    this.deps.log(`runner started in ${opts.cwd}${opts.resume ? ` (resuming ${opts.resume})` : ''}`);
-    this.changeEmitter.fire();
+      }),
+    );
+    this.deps.log(`runner started in ${opts.cwd}${opts.resume ? ` (resuming ${opts.resume})` : ''}${hosts ? ' in a session host' : ''}`);
     if (opts.initialPrompt) void session.send(opts.initialPrompt);
+    return session;
+  }
+
+  /**
+   * Take back a session a previous run of the app left running in a host.
+   * Its registry record is already `live` (startup left it so), and says how
+   * it was launched.
+   */
+  adopt(manifest: HostManifest, record?: SessionRecord): RunnerView | undefined {
+    const supervisor = this.deps.hosts?.supervisor;
+    if (!supervisor || !manifest.sessionId) return undefined;
+    const session = adoptHostedClaude(
+      manifest,
+      {
+        permissionMode: record?.launch.permissionMode as PermissionModeName | undefined,
+        model: record?.launch.model,
+        effort: record?.launch.effort,
+        origin: record?.origin,
+      },
+      { supervisor, binary: record?.launch.binary ?? '', log: this.deps.log, loadHistory: this.deps.loadHistory ?? loadResumeHistory },
+    );
+    this.track(session);
+    this.deps.log(`adopted session ${manifest.sessionId} from host ${manifest.hostId}`);
     return session;
   }
 
@@ -135,10 +140,22 @@ export class RunnerService implements SessionExecutor, Disposable {
     return [...this.sessions];
   }
 
+  /** Live sessions, split by whether they survive the app quitting. */
+  counts(): { hosted: number; local: number } {
+    let hosted = 0;
+    let local = 0;
+    for (const s of this.sessions) {
+      if (s.lifecycle === 'ended' || s.lifecycle === 'error') continue;
+      if (s.hosted) hosted++;
+      else local++;
+    }
+    return { hosted, local };
+  }
+
   /**
    * Note that the pane is showing this session now. `lastShownAt` is what
-   * decides which session a reloaded window offers to bring back, and the one
-   * you were looking at is the one you meant.
+   * decides which session a restarted app brings back, and the one you were
+   * looking at is the one you meant.
    */
   touch(session: { sessionId: string | undefined; cwd: string }): void {
     if (session.sessionId) this.deps.registry?.touch(session.sessionId);
@@ -156,28 +173,71 @@ export class RunnerService implements SessionExecutor, Disposable {
   }
 
   /**
-   * End every session because the app is quitting, and wait (bounded) for
-   * them to go. Unlike `end`, the registry keeps them `live`: the next start
-   * classifies them `interrupted` and offers each one back.
+   * The app is quitting. In-process sessions cannot survive it, so they are
+   * ended, awaited and bounded. Hosted ones are left running and merely let go
+   * of, unless `includeHosted` (Quit and Stop All Agents). Either way the
+   * registry keeps them `live`: a hosted one is adopted on the next start, an
+   * ended one comes back as interrupted.
    */
-  async endAllForQuit(withinMs: number): Promise<void> {
-    const all = [...this.sessions];
-    for (const s of all) this.ending.add(s);
+  async endAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}): Promise<void> {
+    const toEnd = [...this.sessions].filter((s) => !s.hosted || opts.includeHosted);
+    for (const s of toEnd) this.ending.add(s);
     await Promise.race([
-      Promise.allSettled(all.map((s) => s.end())),
+      Promise.allSettled(toEnd.map((s) => s.end())),
       new Promise<void>((resolve) => setTimeout(resolve, withinMs)),
     ]);
   }
 
   dispose(): void {
-    // Quitting kills these children anyway; ending them first gives the CLI
-    // its chance to flush the transcript rather than being cut off. Not
-    // awaited: this is the characterised behaviour until Stage 2 makes quit
-    // an awaited, bounded end. The registry is deliberately left alone: this
-    // is exactly the case the next startup wants to know about.
-    for (const s of this.sessions) void s.end();
+    // In-process sessions die with the app anyway; ending them first gives the
+    // CLI its chance to flush the transcript. Hosted ones are only let go of:
+    // they keep running and the next start adopts them. The registry is left
+    // alone either way; this is exactly what the next startup wants to know.
+    for (const s of this.sessions) {
+      if (s.hosted) s.detach();
+      else void s.end();
+    }
     this.sessions.clear();
     this.changeEmitter.dispose();
+  }
+
+  // ---- internals ----
+
+  private track(session: RunnerView, record?: (id: string) => void): void {
+    this.sessions.add(session);
+    // The id is unknown until the CLI's first init (unless the launch chose
+    // one), and ownership answers change the moment it arrives. A new id mid-
+    // life is `/clear`: the old conversation ended here and a new one began.
+    let recordedId = session.sessionId;
+    if (recordedId) record?.(recordedId);
+    session.onLifecycle((lifecycle) => {
+      const id = session.sessionId;
+      if (id && id !== recordedId) {
+        if (recordedId) this.deps.registry?.setState(recordedId, 'ended', 'cleared');
+        recordedId = id;
+        if (record) record(id);
+        else this.deps.registry?.live({ sessionId: id, provider: 'claude', cwd: session.cwd });
+      }
+      // Ended on its own. A deliberate `end` has already said `stopped`.
+      if (id && this.sessions.has(session) && !this.ending.has(session)) {
+        if (lifecycle === 'ended') this.deps.registry?.setState(id, 'ended');
+        if (lifecycle === 'error') {
+          // A host that died without an exit record may have left its agent
+          // running mid-turn: the conversation is resumable, so say interrupted.
+          if (session.lastExit?.reason === 'lost') this.deps.registry?.setState(id, 'interrupted', 'host lost');
+          else this.deps.registry?.setState(id, 'failed', 'agent error');
+        }
+      }
+      this.changeEmitter.fire();
+    });
+    // The model list arrives a moment after start, and is the only place it is
+    // ever published; the launcher needs it too. See `ModelCatalogService`.
+    if (this.deps.rememberModels) {
+      const remember = this.deps.rememberModels;
+      session.onComposer((composer) => remember(composer.models));
+    }
+    session.start();
+    this.changeEmitter.fire();
   }
 }
 

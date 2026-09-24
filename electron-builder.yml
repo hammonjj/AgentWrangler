@@ -29,6 +29,14 @@ directories:
 files:
   - dist/electron/**
   - dist/webview/**
+  # The session host. It runs from a clone of the installed bundle, straight
+  # out of app.asar (ELECTRON_RUN_AS_NODE reads asar; spike S2).
+  #
+  # That depends on the RunAsNode fuse staying on, which is Electron's default
+  # and why nothing here sets `electronFuses`. Turning it off (a common
+  # hardening step) makes every session host start as a second copy of the
+  # app instead; if fuses are ever configured, `runAsNode: true` must stay.
+  - dist/sessionHost/**
   - build/icon.png
 
 asar: true
