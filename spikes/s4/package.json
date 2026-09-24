@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Spike S4 (#8), throwaway: Codex app-server reconnect behaviour. Run files with node >= 23 (type stripping)."
+}
