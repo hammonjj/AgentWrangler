@@ -29,6 +29,7 @@ import { DashboardHost } from '../ui/dashboardHost';
 import { paneChannel, type EnvelopeTransport } from '../ui/paneChannel';
 import { documentUrl } from './bundleProtocol';
 import { STATE_GET, STATE_SET, TO_HOST, TO_WEBVIEW } from './channels';
+import { shouldReloadRenderer } from './rendererRecovery';
 
 /** What the renderer saves, so a restart comes back on the same conversation. */
 interface WorkbenchState {
@@ -43,7 +44,7 @@ export interface WorkbenchWindowOptions {
   appRoot: string;
   /**
    * The renderer's `setState` document, persisted so a restart reopens on the
-   * conversation that was showing. `RunnerRegistry` is *not* this: that is the
+   * conversation that was showing. `SessionRegistry` is *not* this: that is the
    * host's `workspaceState`, and it records what was running rather than what
    * was on screen.
    */
@@ -54,6 +55,8 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
   private window?: BrowserWindow;
   private dashboard?: DashboardHost;
   private conversation?: ConversationHost;
+  /** When the renderer was last reloaded after a crash; bounds automatic reloads. */
+  private rendererReloads: number[] = [];
   /** Torn down with the window; the IPC listeners outlive a single document. */
   private windowSubs: Disposable[] = [];
   private readonly ipcSubs: Disposable[] = [];
@@ -186,6 +189,21 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
     win.webContents.on('console-message', (details) => {
       if (details.level !== 'warning' && details.level !== 'error') return;
       host.log(`renderer ${details.level}: ${details.message} (${details.sourceId}:${details.lineNumber})`);
+    });
+
+    // A crashed renderer used to leave a blank window. Everything it showed
+    // lives here in the main process, and the panes re-initialise from it on
+    // `ready`, so a reload brings the same view back. Bounded, so a renderer
+    // that crashes on load does not reload forever.
+    win.webContents.on('render-process-gone', (_event, details) => {
+      host.log(`renderer gone: ${details.reason} (exit code ${details.exitCode})`);
+      const decision = shouldReloadRenderer(details.reason, this.rendererReloads, Date.now());
+      this.rendererReloads = decision.history;
+      if (decision.reload && !win.isDestroyed()) {
+        win.webContents.reload();
+      } else if (!decision.reload && details.reason !== 'clean-exit') {
+        host.dialogs.error('Agent Wrangler: the window keeps crashing, so it was not reloaded again. Close it and reopen it from the Dock.');
+      }
     });
 
     const transport: EnvelopeTransport = {

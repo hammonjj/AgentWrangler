@@ -3,7 +3,7 @@
  *
  * VSCode supplies `globalState`, `workspaceState` and a settings UI; a desktop
  * app has to keep its own. Both of the interfaces those satisfy were already
- * structural — `ArchiveService`, `RunnerRegistry` and the rest take a
+ * structural — `ArchiveService`, `SessionRegistry` and the rest take a
  * `{get, update}` rather than a `vscode.Memento` — so this is the whole of the
  * replacement.
  *

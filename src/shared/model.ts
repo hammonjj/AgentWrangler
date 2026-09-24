@@ -155,8 +155,12 @@ export interface AgentSession {
    * typed into rather than only read (host decorates).
    */
   runnerOwned?: boolean;
-  /** Recently interrupted in this workspace; resume from the conversation pane. */
-  wasRunningHere?: boolean;
+  /**
+   * Agent Wrangler was running this session when it last stopped, so its
+   * process was cut off; its conversation is intact. The row says so and
+   * offers Resume here (host decorates).
+   */
+  interrupted?: boolean;
   /**
    * True when `status` was inferred from the transcript rather than pushed by a
    * hook — i.e. a session started before hooks were installed. Rendered dimmed

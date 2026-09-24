@@ -917,6 +917,13 @@ button.pbtn:disabled {
   color: var(--vscode-editor-background);
 }
 
+/* Cut off by a restart, conversation intact. Outlined, not filled: it asks for
+   a decision, it is not a live state like paused. */
+.chip.interrupted {
+  border-color: var(--aw-paused);
+  color: var(--aw-paused);
+}
+
 /* The agent's own checklist — the one place a real percentage exists, so it is
    the one place that gets a bar. The fill sits behind the ratio text. */
 .chip.todo {

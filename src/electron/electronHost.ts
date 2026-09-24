@@ -202,6 +202,7 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     // what stops a future second window inheriting the first one's runner
     // records and resuming a session that is already running.
     workspaceState: new JsonStore(path.join(userDataDir, 'surface.json')),
+    sessionState: new JsonStore(path.join(userDataDir, 'sessions.json')),
     storageDir,
     dialogs: dialogsFor(opts),
     shell: shellFor(opts),

@@ -17,7 +17,7 @@ export interface ResumeRecord {
 export interface ShouldAutoResumeInput {
   /** `runner.autoResumeLastOnStartup`. */
   enabled: boolean;
-  /** `RunnerRegistry.resumable()` — undefined when there is nothing recent enough. */
+  /** The newest session the last restart interrupted (`autoResumeCandidate`), if recent enough. */
   record: ResumeRecord | undefined;
   /** Whether `record.cwd` still exists on disk. */
   cwdExists: boolean;

@@ -88,6 +88,8 @@ export type DashboardAction =
   | 'rename'
   /** Resume an *ended* session in a terminal. Not the opposite of `pause` — see `unpause`. */
   | 'resume'
+  /** Resume an interrupted session here, in this app, the way it was started. */
+  | 'resumeHere'
   | 'archive'
   | 'copyId'
   | 'close'

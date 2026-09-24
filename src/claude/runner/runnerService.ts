@@ -14,10 +14,10 @@
 import { Emitter, type Disposable } from '../../core/events';
 import { createLocalClaudeHandle } from '../../core/session/localClaudeHandle';
 import type { LaunchRequest, SessionExecutor } from '../../core/session/sessionHandle';
+import type { ExecutorRegistry } from '../../core/session/sessionRegistry';
 import type { ModelChoice, PermissionModeName } from '../../shared/conversation';
 import { loadResumeHistory, type ConversationHistory } from '../transcriptHistory';
 import type { QueryFn } from './claudeSdkSession';
-import type { RunnerRegistry } from './runnerRegistry';
 import type { RunnerView } from './runnerView';
 
 export interface RunnerServiceDeps {
@@ -25,8 +25,10 @@ export interface RunnerServiceDeps {
   /** Re-read per start, so changing the setting does not need a reload. */
   binary: () => string;
   log: (msg: string) => void;
-  /** Remembers what this window was running, so a reload can offer it back. */
-  registry?: RunnerRegistry;
+  /** Records every session and what became of it, so a restart can offer them back. */
+  registry?: ExecutorRegistry;
+  /** Where a folder's checkout is (repo root, worktree, branch), captured at launch. */
+  locate?: (cwd: string) => { repoRoot?: string; worktree?: string; branch?: string };
   /** Overridden only by tests; the default reads the session's transcript. */
   loadHistory?: (sessionId: string, cwd: string) => Promise<ConversationHistory>;
   /**
@@ -43,6 +45,8 @@ export type RunnerStartOptions = Omit<LaunchRequest, 'provider' | 'initialBlocks
 export class RunnerService implements SessionExecutor, Disposable {
   readonly provider = 'claude' as const;
   private sessions = new Set<RunnerView>();
+  /** Being ended on purpose or for quit: their exit is not "ended on its own". */
+  private ending = new Set<RunnerView>();
   private changeEmitter = new Emitter<void>();
 
   readonly onDidChange = (listener: () => void): Disposable => this.changeEmitter.event(listener);
@@ -51,20 +55,43 @@ export class RunnerService implements SessionExecutor, Disposable {
 
   /** Start a session and return its handle straight away (it reports its id once the CLI does). */
   start(opts: RunnerStartOptions): RunnerView {
+    const binary = this.deps.binary();
     const session = createLocalClaudeHandle(opts, {
       query: this.deps.query,
-      binary: this.deps.binary(),
+      binary,
       log: this.deps.log,
       loadHistory: this.deps.loadHistory ?? loadResumeHistory,
     });
     this.sessions.add(session);
-    // The id is unknown until the CLI's first init, and ownership answers
-    // change the moment it arrives — as does what is worth remembering.
-    let rememberedId = session.sessionId;
-    session.onLifecycle(() => {
-      if (rememberedId && rememberedId !== session.sessionId) this.deps.registry?.forget(rememberedId);
-      rememberedId = session.sessionId;
-      if (session.sessionId) this.deps.registry?.remember(session.sessionId, session.cwd);
+    const place = this.deps.locate?.(opts.cwd) ?? {};
+    const record = (id: string) =>
+      this.deps.registry?.live({
+        sessionId: id,
+        provider: 'claude',
+        cwd: opts.cwd,
+        repoRoot: place.repoRoot,
+        worktree: place.worktree,
+        branchAtStart: place.branch,
+        launch: { model: opts.model, permissionMode: opts.permissionMode, effort: opts.effort, binary },
+        origin: opts.origin,
+      });
+    // The id is unknown until the CLI's first init (unless the launch chose
+    // one), and ownership answers change the moment it arrives. A new id mid-
+    // life is `/clear`: the old conversation ended here and a new one began.
+    let recordedId = session.sessionId;
+    if (recordedId) record(recordedId);
+    session.onLifecycle((lifecycle) => {
+      const id = session.sessionId;
+      if (id && id !== recordedId) {
+        if (recordedId) this.deps.registry?.setState(recordedId, 'ended', 'cleared');
+        recordedId = id;
+        record(id);
+      }
+      // Ended on its own. A deliberate `end` has already said `stopped`.
+      if (id && this.sessions.has(session) && !this.ending.has(session)) {
+        if (lifecycle === 'ended') this.deps.registry?.setState(id, 'ended');
+        if (lifecycle === 'error') this.deps.registry?.setState(id, 'failed', 'agent error');
+      }
       this.changeEmitter.fire();
     });
     // The model list arrives a moment after start, and is the only place it is
@@ -99,8 +126,9 @@ export class RunnerService implements SessionExecutor, Disposable {
     return this.get(sessionId) !== undefined;
   }
 
+  /** Interrupted by the last restart, and not running here now: its row offers Resume. */
   wasRunning(sessionId: string): boolean {
-    return !this.owns(sessionId) && (this.deps.registry?.wasRunning(sessionId) ?? false);
+    return !this.owns(sessionId) && (this.deps.registry?.isInterrupted(sessionId) ?? false);
   }
 
   list(): RunnerView[] {
@@ -113,16 +141,32 @@ export class RunnerService implements SessionExecutor, Disposable {
    * you were looking at is the one you meant.
    */
   touch(session: { sessionId: string | undefined; cwd: string }): void {
-    if (session.sessionId) this.deps.registry?.remember(session.sessionId, session.cwd);
+    if (session.sessionId) this.deps.registry?.touch(session.sessionId);
   }
 
-  /** Stop one session and forget it — a deliberate end, so nothing to resume. */
+  /** Stop one session on purpose — Close, Release — so it is `stopped`, not interrupted. */
   async end(session: RunnerView): Promise<void> {
-    if (session.sessionId) this.deps.registry?.forget(session.sessionId);
+    this.ending.add(session);
+    if (session.sessionId) this.deps.registry?.setState(session.sessionId, 'stopped');
     await session.end();
-    if (session.sessionId) this.deps.registry?.forget(session.sessionId);
+    if (session.sessionId) this.deps.registry?.setState(session.sessionId, 'stopped');
+    this.ending.delete(session);
     this.sessions.delete(session);
     this.changeEmitter.fire();
+  }
+
+  /**
+   * End every session because the app is quitting, and wait (bounded) for
+   * them to go. Unlike `end`, the registry keeps them `live`: the next start
+   * classifies them `interrupted` and offers each one back.
+   */
+  async endAllForQuit(withinMs: number): Promise<void> {
+    const all = [...this.sessions];
+    for (const s of all) this.ending.add(s);
+    await Promise.race([
+      Promise.allSettled(all.map((s) => s.end())),
+      new Promise<void>((resolve) => setTimeout(resolve, withinMs)),
+    ]);
   }
 
   dispose(): void {

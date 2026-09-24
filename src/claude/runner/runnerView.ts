@@ -68,7 +68,7 @@ export interface RunnerViewOptions {
   permissionMode?: PermissionModeName;
   model?: string;
   effort?: string;
-  origin?: string;
+  origin?: unknown;
 }
 
 export interface RunnerViewDeps {
@@ -108,7 +108,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
   readonly provider = 'claude' as const;
   readonly cwd: string;
   readonly startedAt: number;
-  readonly origin?: string;
+  readonly origin?: unknown;
   sessionId: string | undefined = undefined;
   lifecycle: RunnerLifecycle = 'starting';
 

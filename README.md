@@ -46,6 +46,19 @@ certificate and notarization (#57).
 Nothing restarts on its own. A running copy keeps the old build until you quit and reopen it —
 and quitting ends the conversations Agent Wrangler is running, so it is left to you.
 
+**Quitting and coming back.** Agent Wrangler runs its conversations itself, so quitting ends
+them — gracefully, waiting up to ten seconds for each to finish its turn. Nothing is lost:
+each conversation is its transcript. On the next start, every session that was running shows
+an **interrupted** chip, and right-click → **Resume here** carries it on with the model, mode
+and effort it was started with. The newest one resumes by itself (the *Resume the last
+conversation on startup* setting).
+
+- **⌘Q** asks first when conversations are running ("Quit and stop N agents?").
+- Any other quit never asks: Dock → Quit, a script's `osascript` quit, logout, `kill` (SIGTERM).
+- `npm run app:install` run from a terminal quits the app the same way before replacing it. Run
+  by an agent inside Agent Wrangler, it replaces the bundle and leaves the running copy alone:
+  quitting would end that agent too. Restart when convenient to pick up the build.
+
 `env -u ELECTRON_RUN_AS_NODE` is applied by the scripts: VSCode sets that variable in its
 terminals and it makes the Electron binary behave as plain Node, so without it the app launches
 with every Electron API `undefined`. It reaches `open -a` too, so launching the installed app

@@ -16,6 +16,7 @@ import type {
   SessionLifecycle,
 } from '../core/session/sessionHandle';
 import { SessionViewBase } from '../core/session/sessionView';
+import type { ExecutorRegistry } from '../core/session/sessionRegistry';
 import type { ConversationHistory } from '../claude/transcriptHistory';
 import { capText, type ComposerState, type ConvBlock, type ImageAttachment } from '../shared/conversation';
 import type { AgentSession } from '../shared/model';
@@ -65,7 +66,7 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
     model?: string,
     initialBlocks: ConvBlock[] = [],
     private stateChanged: () => void = () => undefined,
-    readonly origin?: string,
+    readonly origin?: unknown,
   ) {
     super();
     this.blocks.push(...initialBlocks);
@@ -371,6 +372,11 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
   constructor(
     private server: CodexAppServer,
     private rememberModels?: (models: ComposerState['models']) => void,
+    private record: {
+      /** Records every thread and what became of it, so a restart can offer them back. */
+      registry?: ExecutorRegistry;
+      locate?: (cwd: string) => { repoRoot?: string; worktree?: string; branch?: string };
+    } = {},
   ) {}
   onDidChange = (listener: () => void): Disposable => this.change.event(listener);
   owns(id: string | undefined): boolean { return !!id && this.runners.has(id.toLowerCase()); }
@@ -387,7 +393,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     return runner;
   }
 
-  async start(cwd: string, model?: string, effort?: string, origin?: string): Promise<CodexRunner> {
+  async start(cwd: string, model?: string, effort?: string, origin?: unknown): Promise<CodexRunner> {
     const result = await this.server.request<any>('thread/start', {
       cwd,
       ...(model ? { model } : {}),
@@ -396,7 +402,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     const threadId = result?.thread?.id;
     if (typeof threadId !== 'string') throw new Error('Codex App Server returned no thread id');
     const runner = new CodexRunner(this.server, threadId, cwd, result?.model ?? model, [], () => this.change.fire(), origin);
-    return this.track(runner);
+    return this.track(runner, { effort });
   }
   async resume(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string): Promise<CodexRunner> {
     const key = threadId.toLowerCase();
@@ -418,9 +424,20 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     );
     return this.track(runner);
   }
-  private track(runner: CodexRunner): CodexRunner {
+  private track(runner: CodexRunner, launch: { effort?: string } = {}): CodexRunner {
     this.runners.set(runner.threadId.toLowerCase(), runner);
     runner.endHook = () => this.release(runner.threadId);
+    const place = this.record.locate?.(runner.cwd) ?? {};
+    this.record.registry?.live({
+      sessionId: runner.threadId,
+      provider: 'codex',
+      cwd: runner.cwd,
+      repoRoot: place.repoRoot,
+      worktree: place.worktree,
+      branchAtStart: place.branch,
+      launch: { model: runner.composer.model, effort: launch.effort },
+      origin: runner.origin,
+    });
     this.change.fire();
     this.loadModels(runner);
     return runner;
@@ -431,6 +448,8 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     if (!runner) return;
     this.runners.delete(key);
     runner.shutdown();
+    // Released on purpose (Close, Release): stopped here, not interrupted.
+    this.record.registry?.setState(runner.threadId, 'stopped');
     void this.server.request('thread/unsubscribe', { threadId }).catch(() => undefined);
     this.change.fire();
   }
