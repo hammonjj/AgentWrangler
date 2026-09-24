@@ -5,6 +5,7 @@ import { Emitter, type Disposable } from '../core/events';
 import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import type { TurnStats } from '../core/turnStats';
 import { clearWorktreeCache, worktreeFor } from '../core/worktree';
+import { clearCheckoutRootCache } from '../core/checkout';
 import type { AgentSession, HookHealth, TurnProgress } from '../shared/model';
 import { settleBlockAt, statusFromHookState, turnBlockedMsAt, type HookSessionState } from './hookEvents';
 import { currentState, type InstallState } from './hookInstall';
@@ -99,6 +100,7 @@ export class ClaudeProvider implements AgentProvider {
     // The one place worktrees are re-checked: a `git worktree add` between polls
     // would otherwise keep reporting the answer from before it existed.
     clearWorktreeCache();
+    clearCheckoutRootCache();
     await this.refreshRegistry();
     await this.fullScan();
     await this.refreshHookHealth();
