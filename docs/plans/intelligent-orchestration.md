@@ -119,7 +119,7 @@ references are to `main` at `7948980`.
 | **Providers / harnesses** | `AgentProvider` (`src/core/provider.ts:13`) is monitoring only (`scan`, `start`, `refresh`). No execution interface; `RunnerOwnership` (`src/app/createApp.ts:279`) is a hand-built facade. `AgentSession.provider` is a bare `string`. | `SessionExecutor` + `SessionHandle`, provider-agnostic. | An `AgentHarness` descriptor on top: what a harness can do, which models it can reach (§6). |
 | **Models** | `ModelChoice {provider: 'anthropic'\|'openai', value, label, resolved?, effortLevels?}` (`src/shared/conversation.ts:262`). Claude asks `supportedModels()`, Codex asks `model/list`; `ModelCatalogService` (`src/core/modelCatalog.ts`) remembers the last list so the launcher can offer it. Transcript model shown via `modelLabel` (`src/shared/modelName.ts`). | Registry records launch model. | The catalog grows into a `CapabilityCatalog`: descriptors, tiers, effort maps, health (§6.3). The discovery half already exists. |
 | **Reasoning effort** | Launcher and composer dropdowns; `runner.effort` / `codexRunner.effort` settings read ad hoc from `HostSettings` in `createApp.ts` (`:385, :658, :676`), not through `WranglerConfig` (`src/core/config.ts`). Claude: the SDK `effort` option at start only; later changes send the CLI's `/effort <level>` (`runnerSession.ts:338`). Codex: `config.model_reasoning_effort` on `thread/start` (`src/codex/runner.ts:293`). Levels are per model (`supportedEffortLevels`, `supportedReasoningEfforts`). | Registry records launch effort. | Effort as an AW-level ordinal mapped per model (§6.4); requested/native/applied recorded separately. |
-| **Worktrees / branches** | Detection only: `worktreeFor` (`src/core/worktree.ts:86`) reads `.git` files; `gitBranch` is whatever the CLI wrote into its transcript. The only `git` subprocess is `git ls-files` for `@`-mentions (`src/core/fileSuggest.ts:83`). Keeping agents apart is procedure (CLAUDE.md; `docs/worktrees.md` + `scripts/wt.sh` on the unmerged `chore/worktree-workflow` branch). | Registry records `repoRoot`, worktree, branch at start; #22 warns on shared checkouts. | Real git plumbing: create, set up, merge and remove worktrees and branches (§13). None exists. |
+| **Worktrees / branches** | Detection only: `worktreeFor` (`src/core/worktree.ts:86`) reads `.git` files; `gitBranch` is whatever the CLI wrote into its transcript. The only `git` subprocess is `git ls-files` for `@`-mentions (`src/core/fileSuggest.ts:83`). Keeping agents apart is procedure (CLAUDE.md, "Branches and worktrees"). | Registry records `repoRoot`, worktree, branch at start; #22 warns on shared checkouts. | Real git plumbing: create, set up, merge and remove worktrees and branches (§13). None exists. |
 | **Tasks / jobs** | None. `docs/plans/scheduled-agents.md` is a research spike; `adoptQueue.ts` and `InputQueue` are unrelated plumbing. | — | Everything in §7. |
 | **Repository ownership** | None. Projects are a derived list (`ProjectsService`). | `repoRoot` in the registry. | Per-repo policy (§13.6) and contention (§13.4), still without a project entity. |
 | **Persistence** | Flat JSON with atomic writes: `settings.json`, `state.json` (archive, pins, nicknames, columns, turn stats, model catalog), `surface.json` (runner resume hint), `window.json`, `secrets.json` (safeStorage), `cache/usage*.json`; remote mirrors and audit log under `~/.cache/agent-wrangler/remote/`. `HostStorage`/`HostSettings` are the seam. | `sessions.json`, host manifests under `run/`. | A mission store beside `sessions.json`, plus append-only telemetry logs (§23). |
@@ -629,7 +629,7 @@ machine down), whether that is seen live or by recovery at startup.
 **WorktreeAssignment**: `id`, `purpose: 'task' | 'integration'`, `taskId?`, `path`, `branch`,
 `baseCommit`, `state: creating | ready | in-use | retained | removed | missing`, `createdAt`,
 `removedAt?`. Invariant: AW only ever removes worktrees it created, and never one that is dirty,
-unmerged or in use (the same rules as `scripts/wt.sh remove` on `chore/worktree-workflow`).
+unmerged or in use, and never forces a removal.
 
 **EscalationDecision**: `id`, `taskId`, `afterAttemptId`, `evidence {category, signature,
 repeats}`, `action`, `delta {tier?, effort?, harness?}`, `blockedBy? 'cap' | 'pin' | 'limit'`,
@@ -1118,7 +1118,7 @@ is also a directory of branches.) A fresh retry gets its own branch and worktree
 failed attempt's branch and tree are kept, unchanged, for comparison until the mission is cleaned
 up.
 
-- Siblings of the repository, as `docs/worktrees.md` recommends, grouped under one `<repo>.aw/`
+- Siblings of the repository, as CLAUDE.md does by hand, grouped under one `<repo>.aw/`
   directory so they are easy to find and never inside the primary checkout's file watchers.
   Configurable per repository.
 - The mission branch is cut from `base.commit` (recorded when the mission starts). A task branch
@@ -1142,7 +1142,7 @@ up.
    by the task's attempt limit.
 4. After each merge, run the mission-level verification on the mission branch (by default the
    repository's full check). This is what catches two changes that pass alone and break together
-   (the "semantic conflicts" `docs/worktrees.md` warns about). A failure there blames the last
+   (semantic conflicts: no textual conflict, but the combination is broken). A failure there blames the last
    merge, reverts it on the mission branch (a new revert commit, never a history rewrite), and
    sends that task back with the evidence.
 5. When every task is integrated and the mission branch verifies: mission `review`. The user
@@ -2495,8 +2495,8 @@ named carry the detail.
    by the git common directory, edited in Preferences. Nothing is written into the repository.
 2. **This repository finishes by merging locally** (§13.3), gated: the merged result must pass
    typecheck, tests and build before `main` moves, so `main` stays usable for daily work;
-   unfinished parts of a feature ship behind a setting that is off by default. The PR flow on the
-   unmerged `chore/worktree-workflow` branch does not become this repo's default.
+   unfinished parts of a feature ship behind a setting that is off by default. The PR-based workflow
+   once proposed on a `chore/worktree-workflow` branch was dropped (branch deleted 2026-09-24).
 3. **Tier defaults** (§6.3): Haiku / `gpt-6-luna`, `gpt-reserve` → `basic`; Sonnet /
    `gpt-6-sol` → `standard`; Opus / `gpt-6-astra` → `expert`; Fable → a fourth tier,
    `frontier`, **escalation-only** and off per mission by default (kept for the rare task that
