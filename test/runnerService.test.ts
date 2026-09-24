@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RunnerService } from '../src/claude/runner/runnerService';
-import type { QueryFn } from '../src/claude/runner/runnerSession';
+import type { QueryFn } from '../src/claude/runner/claudeSdkSession';
 
 /**
  * A stand-in for the SDK's `query`, minimal enough to start a session and

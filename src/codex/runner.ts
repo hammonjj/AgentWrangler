@@ -1,23 +1,39 @@
+/**
+ * A Codex thread Agent Wrangler drives, and its `SessionHandle`.
+ *
+ * Codex already has the split Claude is being given: `CodexAppServer` is
+ * execution and transport, and this class is translation, turning the server's
+ * notifications and requests for one thread into blocks and a composer.
+ */
 import * as path from 'node:path';
 import { Emitter, type Disposable } from '../core/events';
 import { finishedTurnStatus } from '../core/needsReply';
-import { capText, type BlockPatch, type ComposerState, type ConvBlock, type ImageAttachment } from '../shared/conversation';
+import type {
+  CommandOutcome,
+  LaunchRequest,
+  SessionExecutor,
+  SessionHandle,
+  SessionLifecycle,
+} from '../core/session/sessionHandle';
+import { SessionViewBase } from '../core/session/sessionView';
+import type { ConversationHistory } from '../claude/transcriptHistory';
+import { capText, type ComposerState, type ConvBlock, type ImageAttachment } from '../shared/conversation';
 import type { AgentSession } from '../shared/model';
-import type { ConversationInit, ConversationSource } from '../ui/conversation/source';
 import { CodexAppServer, type RpcNotification, type RpcServerRequest } from './appServer';
 
 function threadIdOf(params: any): string | undefined {
   return params?.threadId ?? params?.thread?.id ?? params?.turn?.threadId;
 }
 
-export class CodexRunner implements ConversationSource {
-  readonly kind = 'runner' as const;
+export class CodexRunner extends SessionViewBase implements SessionHandle {
+  readonly provider = 'codex' as const;
   readonly startedAt = Date.now();
   readonly composer: ComposerState = { permissionMode: 'default', slashCommands: [], busy: false, queued: 0 };
-  private blocks: ConvBlock[] = [];
-  private append = new Emitter<ConvBlock[]>();
-  private patch = new Emitter<BlockPatch>();
-  private composerEvents = new Emitter<ComposerState>();
+  readonly blocks: ConvBlock[] = [];
+  readonly pendingPlan = undefined;
+  private ended = false;
+  /** Set by the service: how this thread is released when it is ended. */
+  endHook?: () => void;
   private subs: Disposable[] = [];
   private activeTurnId?: string;
   private pendingApprovals = new Map<string, string | number>();
@@ -49,8 +65,10 @@ export class CodexRunner implements ConversationSource {
     model?: string,
     initialBlocks: ConvBlock[] = [],
     private stateChanged: () => void = () => undefined,
+    readonly origin?: string,
   ) {
-    this.blocks = [...initialBlocks];
+    super();
+    this.blocks.push(...initialBlocks);
     const lastAssistant = [...initialBlocks].reverse().find((block) => block.kind === 'assistant');
     this.idleStatus = lastAssistant?.kind === 'assistant' ? finishedTurnStatus(lastAssistant.text) : 'waiting';
     this.currentModel = model;
@@ -72,14 +90,44 @@ export class CodexRunner implements ConversationSource {
     };
   }
 
-  onAppend = (listener: (blocks: ConvBlock[]) => void): Disposable => this.append.event(listener);
-  onPatch = (listener: (patch: BlockPatch) => void): Disposable => this.patch.event(listener);
-  onComposer = (listener: (composer: ComposerState) => void): Disposable => this.composerEvents.event(listener);
-  async init(): Promise<ConversationInit> { return { blocks: [...this.blocks], truncated: false }; }
-  setSession(): void {}
+  // ---- SessionHandle: the cached view ----
 
-  async send(text: string, images: ImageAttachment[] = []): Promise<void> {
-    if (!text.trim() && images.length === 0) return;
+  get sessionId(): string {
+    return this.threadId;
+  }
+
+  get lifecycle(): SessionLifecycle {
+    if (this.ended) return 'ended';
+    return this.composer.busy ? 'running' : 'idle';
+  }
+
+  get canSend(): boolean {
+    return !this.ended;
+  }
+
+  /** The row this thread shows as until the store has one of its own. */
+  get liveSession(): AgentSession {
+    return this.session;
+  }
+
+  protected get truncatedView(): boolean {
+    return false;
+  }
+
+  /** Codex history arrives as the initial blocks, so there is nothing separate to load. */
+  async history(): Promise<ConversationHistory> {
+    return { blocks: [], truncated: false };
+  }
+
+  fullBlockText(): string | undefined {
+    return undefined;
+  }
+
+  // ---- commands ----
+
+  async send(text: string, images: ImageAttachment[] = []): Promise<CommandOutcome> {
+    if (this.ended) return 'gone';
+    if (!text.trim() && images.length === 0) return 'applied';
     const content: any[] = [];
     if (text.trim()) content.push({ type: 'text', text: text.trim(), text_elements: [] });
     for (const image of images) content.push({ type: 'image', url: `data:${image.mediaType};base64,${image.data}` });
@@ -89,47 +137,72 @@ export class CodexRunner implements ConversationSource {
     const result = await this.server.request<any>('turn/start', { threadId: this.threadId, input: content, ...(this.currentModel ? { model: this.currentModel } : {}) });
     this.activeTurnId = result?.turn?.id;
     this.setBusy(true);
+    return 'applied';
   }
 
-  async interrupt(): Promise<void> {
-    if (!this.activeTurnId) return;
+  async interrupt(): Promise<CommandOutcome> {
+    if (!this.activeTurnId) return 'stale';
     await this.server.request('turn/interrupt', { threadId: this.threadId, turnId: this.activeTurnId });
+    return 'applied';
   }
 
-  async setModel(model?: string): Promise<void> {
+  async setModel(model?: string): Promise<CommandOutcome> {
     this.currentModel = model;
     this.composer.model = model;
     if (this.activeTurnId) {
       await this.server.request('turn/settings/update', { threadId: this.threadId, turnId: this.activeTurnId, model: model ?? null });
     }
-    this.composerEvents.fire({ ...this.composer });
+    this.emitComposer(this.composer);
+    return 'applied';
+  }
+
+  /** Codex takes its permission policy per thread at start; there is no live switch here. */
+  async setPermissionMode(): Promise<CommandOutcome> {
+    return 'unsupported';
+  }
+
+  /** Effort is start-time only for Codex threads started here. */
+  async setEffort(): Promise<CommandOutcome> {
+    return 'unsupported';
   }
 
   setModels(models: ComposerState['models']): void {
     this.composer.models = models;
-    this.composerEvents.fire({ ...this.composer });
+    this.emitComposer(this.composer);
   }
 
-  async decide(requestId: string, decision: 'allow' | 'always' | 'deny'): Promise<boolean> {
+  async decide(requestId: string, decision: 'allow' | 'always' | 'deny'): Promise<CommandOutcome> {
     const rpcId = this.pendingApprovals.get(requestId);
-    if (rpcId === undefined) return false;
+    if (rpcId === undefined) return 'stale';
     this.pendingApprovals.delete(requestId);
     this.server.respond(rpcId, { decision: decision === 'deny' ? 'decline' : 'accept' });
-    this.patch.fire({ id: requestId, block: { state: decision === 'deny' ? 'denied' : 'allowed' } });
+    this.emitPatchAndStore({ id: requestId, block: { state: decision === 'deny' ? 'denied' : 'allowed' } });
     this.touch();
-    return true;
+    return 'applied';
   }
 
-  async answer(requestId: string, answers: Record<string, string>): Promise<boolean> {
+  async answer(requestId: string, answers: Record<string, string>): Promise<CommandOutcome> {
     const rpcId = this.pendingQuestions.get(requestId);
-    if (rpcId === undefined) return false;
+    if (rpcId === undefined) return 'stale';
     this.pendingQuestions.delete(requestId);
     this.server.respond(rpcId, {
       answers: Object.fromEntries(Object.entries(answers).map(([id, answer]) => [id, { answers: [answer] }])),
     });
-    this.patch.fire({ id: requestId, block: { state: 'allowed', answers } });
+    this.emitPatchAndStore({ id: requestId, block: { state: 'allowed', answers } });
     this.touch();
-    return true;
+    return 'applied';
+  }
+
+  /** Codex has no plan mode, so there is never a plan to decide. */
+  async decidePlan(): Promise<CommandOutcome> {
+    return 'unsupported';
+  }
+
+  /** Release the thread: this client stops driving it. The thread itself lives on in Codex. */
+  async end(): Promise<void> {
+    if (this.ended) return;
+    if (this.endHook) this.endHook();
+    else this.shutdown();
   }
 
   private onNotification(event: RpcNotification): void {
@@ -157,6 +230,8 @@ export class CodexRunner implements ConversationSource {
       this.pendingQuestions.clear();
       this.setBusy(false);
       if (params.turn?.error?.message) this.add({ kind: 'note', id: this.id(), tone: 'error', text: capText(params.turn.error.message) });
+      // Codex's own turn-completion payload, untranslated (token usage, status).
+      this.emitTurnEnd(params);
       return;
     }
     if (event.method === 'item/agentMessage/delta') {
@@ -171,7 +246,7 @@ export class CodexRunner implements ConversationSource {
       }
       this.streamingText += delta;
       if (this.streamingKind === 'assistant') this.turnAssistantText += delta;
-      this.patch.fire({ id: this.streamingId, block: { text: capText(this.streamingText), streaming: true } });
+      this.emitPatchAndStore({ id: this.streamingId, block: { text: capText(this.streamingText), streaming: true } });
       return;
     }
     if (event.method === 'item/started') {
@@ -187,7 +262,7 @@ export class CodexRunner implements ConversationSource {
     if (event.method === 'item/completed' && params.item?.type === 'agentMessage') {
       const text = String(params.item.text ?? this.streamingText);
       this.turnAssistantText = text;
-      if (this.streamingId) this.patch.fire({ id: this.streamingId, block: { text: capText(text), streaming: false } });
+      if (this.streamingId) this.emitPatchAndStore({ id: this.streamingId, block: { text: capText(text), streaming: false } });
       this.streamingId = undefined;
       this.streamingText = '';
       this.streamingKind = 'assistant';
@@ -203,7 +278,7 @@ export class CodexRunner implements ConversationSource {
       if (!blockId) return;
       const failed = item.status === 'failed' || item.status === 'declined' || !!item.error;
       const output = item.aggregatedOutput ?? item.result ?? item.error?.message;
-      this.patch.fire({
+      this.emitPatchAndStore({
         id: blockId,
         block: {
           state: failed ? 'error' : 'done',
@@ -259,24 +334,38 @@ export class CodexRunner implements ConversationSource {
   private add(block: ConvBlock): void {
     this.blocks.push(block);
     this.lastActivityAt = Date.now();
-    this.append.fire([block]);
+    this.emitAppend([block]);
+  }
+  /** Patch the stored block too, so `snapshot()` and `blocks` show what the pane shows. */
+  private emitPatchAndStore(patch: { id: string; block: Partial<ConvBlock> }): void {
+    const at = this.blocks.findIndex((b) => b.id === patch.id);
+    if (at >= 0) this.blocks[at] = { ...this.blocks[at], ...patch.block } as ConvBlock;
+    this.emitPatch(patch);
   }
   private touch(): void {
     this.lastActivityAt = Date.now();
     this.stateChanged();
   }
   private setBusy(busy: boolean): void {
+    const was = this.lifecycle;
     this.composer.busy = busy;
     this.lastActivityAt = Date.now();
-    this.composerEvents.fire({ ...this.composer });
+    this.emitComposer(this.composer);
+    if (this.lifecycle !== was) this.emitLifecycle(this.lifecycle);
     this.stateChanged();
   }
-  /** A pane releases only its listeners; the service owns runner lifetime. */
-  dispose(): void {}
-  shutdown(): void { for (const sub of this.subs) sub.dispose(); this.subs = []; this.append.dispose(); this.patch.dispose(); this.composerEvents.dispose(); }
+  shutdown(): void {
+    if (this.ended) return;
+    this.ended = true;
+    for (const sub of this.subs) sub.dispose();
+    this.subs = [];
+    this.emitLifecycle('ended');
+    this.disposeView();
+  }
 }
 
-export class CodexRunnerService implements Disposable {
+export class CodexRunnerService implements SessionExecutor, Disposable {
+  readonly provider = 'codex' as const;
   private runners = new Map<string, CodexRunner>();
   private change = new Emitter<void>();
   constructor(
@@ -286,7 +375,19 @@ export class CodexRunnerService implements Disposable {
   onDidChange = (listener: () => void): Disposable => this.change.event(listener);
   owns(id: string | undefined): boolean { return !!id && this.runners.has(id.toLowerCase()); }
   get(id: string | undefined): CodexRunner | undefined { return id ? this.runners.get(id.toLowerCase()) : undefined; }
-  async start(cwd: string, model?: string, effort?: string): Promise<CodexRunner> {
+  list(): CodexRunner[] { return [...this.runners.values()]; }
+
+  /** Start a thread, or rejoin one with `resume`. The one-object form of `start` / `resume`. */
+  async launch(request: LaunchRequest): Promise<CodexRunner> {
+    if (request.provider !== 'codex') throw new Error(`CodexRunnerService cannot launch a ${request.provider} session`);
+    const runner = request.resume
+      ? await this.resume(request.resume, request.cwd, request.initialBlocks ?? [], request.model)
+      : await this.start(request.cwd, request.model, request.effort, request.origin);
+    if (request.initialPrompt) await runner.send(request.initialPrompt);
+    return runner;
+  }
+
+  async start(cwd: string, model?: string, effort?: string, origin?: string): Promise<CodexRunner> {
     const result = await this.server.request<any>('thread/start', {
       cwd,
       ...(model ? { model } : {}),
@@ -294,11 +395,8 @@ export class CodexRunnerService implements Disposable {
     });
     const threadId = result?.thread?.id;
     if (typeof threadId !== 'string') throw new Error('Codex App Server returned no thread id');
-    const runner = new CodexRunner(this.server, threadId, cwd, result?.model ?? model, [], () => this.change.fire());
-    this.runners.set(threadId.toLowerCase(), runner);
-    this.change.fire();
-    this.loadModels(runner);
-    return runner;
+    const runner = new CodexRunner(this.server, threadId, cwd, result?.model ?? model, [], () => this.change.fire(), origin);
+    return this.track(runner);
   }
   async resume(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string): Promise<CodexRunner> {
     const key = threadId.toLowerCase();
@@ -309,10 +407,7 @@ export class CodexRunnerService implements Disposable {
     const runner = new CodexRunner(
       this.server, resumedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(),
     );
-    this.runners.set(resumedId.toLowerCase(), runner);
-    this.change.fire();
-    this.loadModels(runner);
-    return runner;
+    return this.track(runner);
   }
   async fork(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string): Promise<CodexRunner> {
     const result = await this.server.request<any>('thread/fork', { threadId });
@@ -321,7 +416,11 @@ export class CodexRunnerService implements Disposable {
     const runner = new CodexRunner(
       this.server, forkedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(),
     );
-    this.runners.set(forkedId.toLowerCase(), runner);
+    return this.track(runner);
+  }
+  private track(runner: CodexRunner): CodexRunner {
+    this.runners.set(runner.threadId.toLowerCase(), runner);
+    runner.endHook = () => this.release(runner.threadId);
     this.change.fire();
     this.loadModels(runner);
     return runner;

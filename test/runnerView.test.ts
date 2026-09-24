@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { RunnerSession, type QueryFn, type RunnerDeps } from '../src/claude/runner/runnerSession';
+import { ClaudeSdkSession, type QueryFn } from '../src/claude/runner/claudeSdkSession';
+import { RunnerView, type ClaudeExecution } from '../src/claude/runner/runnerView';
+import { createLocalClaudeHandle, type LocalClaudeDeps } from '../src/core/session/localClaudeHandle';
 import { MAX_BLOCK_CHARS, type ConvBlock, type ImageAttachment } from '../src/shared/conversation';
 
 /**
+ * These are the old `RunnerSession` expectations, unchanged in intent, run
+ * against what replaced it: `RunnerView` (translation) over an in-process
+ * `ClaudeSdkSession` (execution). The execution layer's own contract is in
+ * `claudeSdkSession.test.ts`.
+ *
  * A stand-in for the SDK's `query`: it hands the session a stream we push
  * messages into, records what the session sends back, and lets a test call the
  * `canUseTool` callback the way the CLI would. No process is ever spawned.
@@ -19,7 +26,7 @@ const MODELS: unknown = [
   { value: 'haiku', displayName: '', description: 'x' },
 ];
 
-function fakeQuery(models: unknown = MODELS, commands?: { name: string }[]) {
+function fakeQuery(models: unknown = MODELS, commands?: { name: string }[], opts: { interruptEndsTurn?: boolean } = {}) {
   let emit!: (msg: unknown) => void;
   let finish!: () => void;
   let fail!: (err: unknown) => void;
@@ -74,6 +81,8 @@ function fakeQuery(models: unknown = MODELS, commands?: { name: string }[]) {
     const q = Object.assign(stream, {
       interrupt: async () => {
         calls.interrupt++;
+        // What a real CLI does: the interrupted turn reports its end.
+        if (opts.interruptEndsTurn) emit({ type: 'result', subtype: 'success', is_error: false, result: '', queued_turn_count: 0 });
         return undefined;
       },
       setPermissionMode: async (mode: string) => {
@@ -104,12 +113,12 @@ function fakeQuery(models: unknown = MODELS, commands?: { name: string }[]) {
 function makeSession(
   cwd = '/Users/test/proj',
   models?: unknown,
-  extra?: { commands?: { name: string }[]; effort?: string },
+  extra?: { commands?: { name: string }[]; effort?: string; interruptEndsTurn?: boolean },
 ) {
-  const fake = fakeQuery(models === undefined ? MODELS : models, extra?.commands);
+  const fake = fakeQuery(models === undefined ? MODELS : models, extra?.commands, { interruptEndsTurn: extra?.interruptEndsTurn });
   const appended: ConvBlock[] = [];
   const patches: { id: string; block: Record<string, unknown> }[] = [];
-  const session = new RunnerSession(
+  const session = createLocalClaudeHandle(
     { cwd, effort: extra?.effort },
     { query: fake.query, binary: '/fake/claude', log: () => undefined },
   );
@@ -132,7 +141,7 @@ function askOptions(over: Record<string, unknown> = {}) {
   } as never;
 }
 
-describe('RunnerSession', () => {
+describe('RunnerView over ClaudeSdkSession', () => {
   it('passes the resolved binary and cwd to the SDK, and never an API key', async () => {
     const { fake } = makeSession();
     expect(fake.calls.options.pathToClaudeCodeExecutable).toBe('/fake/claude');
@@ -219,7 +228,7 @@ describe('RunnerSession', () => {
       const card = appended.find((b) => b.kind === 'permission');
       expect(card).toMatchObject({ kind: 'permission', toolName: 'Bash', state: 'pending' });
 
-      expect(session.decide('req_1', 'allow')).toBe(true);
+      expect(await session.decide('req_1', 'allow')).toBe('applied');
       await expect(decision).resolves.toMatchObject({ behavior: 'allow', updatedInput: { command: 'npm test' } });
       expect(patches.at(-1)).toMatchObject({ block: { state: 'allowed' } });
     });
@@ -268,13 +277,66 @@ describe('RunnerSession', () => {
       const { session, fake } = makeSession();
       void fake.calls.options.canUseTool('Bash', { command: 'ls' }, askOptions());
       await settle();
-      expect(session.decide('req_1', 'allow')).toBe(true);
-      expect(session.decide('req_1', 'deny')).toBe(false);
+      expect(await session.decide('req_1', 'allow')).toBe('applied');
+      expect(await session.decide('req_1', 'deny')).toBe('stale');
     });
 
-    it('refuses an answer to an ask that never existed', () => {
+    it('refuses a second answer while the first is still in flight', async () => {
+      const { session, fake } = makeSession();
+      void fake.calls.options.canUseTool('Bash', { command: 'ls' }, askOptions());
+      await settle();
+      const first = session.decide('req_1', 'allow');
+      const second = session.decide('req_1', 'deny');
+      expect(await first).toBe('applied');
+      expect(await second).toBe('stale');
+    });
+
+    it('refuses an answer to an ask that never existed', async () => {
       const { session } = makeSession();
-      expect(session.decide('nope', 'allow')).toBe(false);
+      expect(await session.decide('nope', 'allow')).toBe('stale');
+    });
+
+    it('settles its card when another client answered first, not leaving it pending', async () => {
+      // Stage 3 shape: an async execution layer where a second client (another
+      // core, Discord through it) wins the race while our answer is in flight.
+      const fake = fakeQuery(MODELS);
+      const inner = new ClaudeSdkSession({ cwd: '/Users/test/proj' }, { query: fake.query, binary: '/b', log: () => undefined });
+      const exec: ClaudeExecution = {
+        cwd: inner.cwd,
+        startedAt: inner.startedAt,
+        snapshot: () => inner.snapshot(),
+        subscribe: (from, l) => inner.subscribe(from, l),
+        start: () => inner.start(),
+        send: (m) => inner.send(m),
+        control: (r) => inner.control(r),
+        end: (o) => inner.end(o),
+        respondAsk: async (id) => {
+          inner.respondAsk(id, { behavior: 'deny', message: 'someone else' });
+          return 'stale' as const;
+        },
+      };
+      const view = new RunnerView({ cwd: '/Users/test/proj' }, { exec, log: () => undefined });
+      view.start();
+      void fake.calls.options.canUseTool('Bash', { command: 'ls' }, askOptions());
+      await settle();
+      expect(await view.decide('req_1', 'allow')).toBe('stale');
+      expect(view.blocks.find((b) => b.kind === 'permission')).toMatchObject({ state: 'expired' });
+    });
+
+    it('settles a card the permission hook answered, when the tool runs anyway', async () => {
+      // AW's PermissionRequest hook races canUseTool and can win
+      // (remote-agent-control §0.1). The tool then runs and the SDK promise is
+      // left hanging; its tool_result is how the card learns it is over.
+      const { fake, patches } = makeSession();
+      void fake.calls.options.canUseTool('Write', { file_path: '/Users/test/proj/a.txt' }, askOptions({ toolUseID: 'toolu_9' }));
+      await settle();
+      fake.emit({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_9', content: 'ok' }] },
+        parent_tool_use_id: null,
+      });
+      await settle();
+      expect(patches.find((p) => p.id === 'a:req_1')).toMatchObject({ block: { state: 'allowed' } });
     });
   });
 
@@ -299,7 +361,7 @@ describe('RunnerSession', () => {
       questions: [{ question: 'Alpha or Beta?', options: [{ label: 'Alpha' }, { label: 'Beta' }] }],
     });
 
-    expect(session.answer('req_1', { 'Alpha or Beta?': 'Alpha' })).toBe(true);
+    expect(await session.answer('req_1', { 'Alpha or Beta?': 'Alpha' })).toBe('applied');
     await expect(decision).resolves.toMatchObject({
       behavior: 'allow',
       updatedInput: { answers: { 'Alpha or Beta?': 'Alpha' } },
@@ -333,7 +395,7 @@ describe('RunnerSession', () => {
     await settle();
     expect(session.pendingPlan).toMatchObject({ requestId: 'req_1', plan: '# Plan\n\ndo the thing' });
 
-    session.decidePlan('req_1', true);
+    await session.decidePlan('req_1', true);
     expect(session.pendingPlan).toBeUndefined();
   });
 
@@ -511,15 +573,49 @@ describe('RunnerSession', () => {
     expect(fake.calls.supportedModels).toBe(3);
   });
 
-  it('ends by closing stdin, and settles anything still parked on a human', async () => {
-    const { session, fake } = makeSession();
+  it('ends by interrupting the turn first, and settles anything still parked on a human', async () => {
+    const { session, fake, patches } = makeSession('/Users/test/proj', undefined, { interruptEndsTurn: true });
     const decision = fake.calls.options.canUseTool('Bash', { command: 'ls' }, askOptions());
     await settle();
     const ended = session.end();
     await expect(decision).resolves.toMatchObject({ behavior: 'deny' });
+    expect(fake.calls.interrupt).toBe(1);
+    expect(patches.at(-1)).toMatchObject({ block: { state: 'expired' } });
     fake.finish();
     await ended;
     expect(session.lifecycle).toBe('ended');
+  });
+
+  it('does not interrupt an idle session it ends', async () => {
+    const { session, fake } = makeSession();
+    fake.emit({ type: 'system', subtype: 'init', session_id: 's1', permissionMode: 'default' });
+    await settle();
+    const ended = session.end();
+    fake.finish();
+    await ended;
+    expect(fake.calls.interrupt).toBe(0);
+    expect(session.lifecycle).toBe('ended');
+  });
+
+  it('carries a uuid on every message it sends, so the transcript can dedupe it later', async () => {
+    const { session, fake } = makeSession();
+    await session.send('one');
+    await session.send('two');
+    await settle();
+    const uuids = (fake.calls.sent as { uuid?: string }[]).map((m) => m.uuid);
+    expect(uuids).toHaveLength(2);
+    expect(uuids.every((u) => typeof u === 'string' && u.length > 0)).toBe(true);
+    expect(new Set(uuids).size).toBe(2);
+  });
+
+  it('publishes the SDK result, untranslated, when a turn ends', async () => {
+    const { session, fake } = makeSession();
+    const ends: unknown[] = [];
+    session.onTurnEnd((raw) => ends.push(raw));
+    const result = { type: 'result', subtype: 'success', is_error: false, result: 'hi', queued_turn_count: 0, total_cost_usd: 0.01 };
+    fake.emit(result);
+    await settle();
+    expect(ends).toEqual([result]);
   });
 
   it('reports a stream that throws instead of going quiet', async () => {
@@ -598,7 +694,7 @@ describe('RunnerSession', () => {
   });
 });
 
-describe('RunnerSession block history', () => {
+describe('RunnerView block history', () => {
   it('keeps the blocks so reopening the pane does not re-read anything', async () => {
     const { session, fake } = makeSession();
     fake.emit({
@@ -619,7 +715,7 @@ describe('RunnerSession block history', () => {
  * conversation. These cover the seam, not the file reading (see
  * `transcriptHistory.test.ts`).
  */
-describe('RunnerSession resumed history', () => {
+describe('RunnerView resumed history', () => {
   const PAST: ConvBlock[] = [
     { kind: 'user', id: 't:a', ts: '2026-08-24T17:00:00.000Z', text: 'where were we' },
     { kind: 'assistant', id: 't:b', ts: '2026-08-24T17:00:01.000Z', text: 'step three' },
@@ -629,10 +725,10 @@ describe('RunnerSession resumed history', () => {
   const texts = (blocks: ConvBlock[]): (string | undefined)[] =>
     blocks.map((b) => ('text' in b ? b.text : undefined));
 
-  function makeResumed(over: { resume?: string; load?: RunnerDeps['loadHistory'] } = {}) {
+  function makeResumed(over: { resume?: string; load?: LocalClaudeDeps['loadHistory'] } = {}) {
     const fake = fakeQuery(MODELS);
     const asked: { id: string; cwd: string }[] = [];
-    const session = new RunnerSession(
+    const session = createLocalClaudeHandle(
       { cwd: '/Users/test/proj', resume: over.resume },
       {
         query: fake.query,
@@ -640,7 +736,7 @@ describe('RunnerSession resumed history', () => {
         log: () => undefined,
         loadHistory:
           over.load ??
-          (async (id, cwd) => {
+          (async (id: string, cwd: string) => {
             asked.push({ id, cwd });
             return { blocks: PAST, truncated: false };
           }),

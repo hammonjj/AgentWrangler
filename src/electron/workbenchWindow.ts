@@ -20,8 +20,7 @@
 
 import * as path from 'node:path';
 import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
-import type { CodexRunner } from '../codex/runner';
-import type { RunnerSession } from '../claude/runner/runnerSession';
+import type { SessionHandle } from '../core/session/sessionHandle';
 import { Emitter, type Disposable } from '../core/events';
 import type { AgentWranglerApp } from '../app/createApp';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
@@ -117,14 +116,9 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
     this.conversation?.show(key);
   }
 
-  showRunner(runner: unknown, options?: { preserveFocus?: boolean }): void {
+  showSession(handle: SessionHandle, options?: { preserveFocus?: boolean }): void {
     this.open({ preserveFocus: options?.preserveFocus ?? false });
-    this.conversation?.showRunner(runner as RunnerSession);
-  }
-
-  showCodexRunner(runner: unknown): void {
-    this.open();
-    this.conversation?.showCodexRunner(runner as CodexRunner);
+    this.conversation?.showSession(handle);
   }
 
   openInTab(key: string): void {
@@ -241,8 +235,8 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       app.store,
       app.provider,
       app.codexProvider,
+      app.sessions,
       app.runners,
-      app.codexRunners,
       app.actions,
       app.dictation,
       app.files,

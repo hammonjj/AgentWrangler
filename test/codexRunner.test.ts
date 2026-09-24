@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Emitter } from '../src/core/events';
 import { CodexRunner, CodexRunnerService } from '../src/codex/runner';
+import { LiveSessionSource } from '../src/ui/conversation/runnerSource';
 
 class FakeServer {
   notifications = new Emitter<any>();
@@ -42,7 +43,7 @@ describe('CodexRunner', () => {
     const runner = await service.resume('thread-existing', '/Users/test/proj', history);
 
     expect(server.calls[0]).toEqual({ method: 'thread/resume', params: { threadId: 'thread-existing' } });
-    expect((await runner.init()).blocks).toEqual(history);
+    expect((await new LiveSessionSource(runner).init()).blocks).toEqual(history);
     expect(runner.composer.model).toBe('gpt-resumed');
     expect(runner.session.status).toBe('done');
     expect(service.owns('THREAD-EXISTING')).toBe(true);
@@ -62,7 +63,7 @@ describe('CodexRunner', () => {
 
     expect(server.calls[0]).toEqual({ method: 'thread/fork', params: { threadId: 'thread-external' } });
     expect(runner.threadId).toBe('thread-forked');
-    expect((await runner.init()).blocks).toEqual(history);
+    expect((await new LiveSessionSource(runner).init()).blocks).toEqual(history);
     expect(runner.composer.model).toBe('gpt-forked');
     expect(service.owns('thread-forked')).toBe(true);
     service.dispose();
@@ -136,7 +137,7 @@ describe('CodexRunner', () => {
     });
     expect(appended[0]).toMatchObject({ kind: 'permission', body: 'npm test', state: 'pending' });
     expect(runner.session).toMatchObject({ status: 'blocked', blockedReason: 'Approval' });
-    expect(await runner.decide(appended[0].requestId, 'allow')).toBe(true);
+    expect(await runner.decide(appended[0].requestId, 'allow')).toBe('applied');
     expect(server.responses).toEqual([{ id: 9, result: { decision: 'accept' } }]);
     expect(runner.session.status).toBe('waiting');
   });
@@ -152,7 +153,42 @@ describe('CodexRunner', () => {
       params: { threadId: 'thread-1', questions: [{ id: 'choice', header: 'Choice', question: 'Pick one', options: [] }] },
     });
     expect(runner.session).toMatchObject({ status: 'blocked', blockedReason: 'Question' });
-    expect(await runner.answer(appended[0].requestId, { choice: 'One' })).toBe(true);
+    expect(await runner.answer(appended[0].requestId, { choice: 'One' })).toBe('applied');
     expect(runner.session.status).toBe('waiting');
+  });
+
+  it('is a session handle: lifecycle follows turns, patches land in the snapshot, turn ends carry the raw payload', async () => {
+    const server = new FakeServer();
+    const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj');
+    const lifecycles: string[] = [];
+    const ends: unknown[] = [];
+    runner.onLifecycle((l) => lifecycles.push(l));
+    runner.onTurnEnd((raw) => ends.push(raw));
+    expect(runner.provider).toBe('codex');
+    expect(runner.sessionId).toBe('thread-1');
+    expect(runner.lifecycle).toBe('idle');
+
+    await runner.send('hello');
+    server.notifications.fire({ method: 'item/agentMessage/delta', params: { threadId: 'thread-1', delta: 'Hi' } });
+    const completed = { threadId: 'thread-1', turn: { status: 'completed' } };
+    server.notifications.fire({ method: 'turn/completed', params: completed });
+
+    expect(lifecycles).toEqual(['running', 'idle']);
+    expect(ends).toEqual([completed]);
+    const snap = runner.snapshot();
+    expect(snap.blocks.find((b) => b.kind === 'assistant')).toMatchObject({ text: 'Hi' });
+    expect(await runner.decidePlan()).toBe('unsupported');
+  });
+
+  it('ends by releasing the thread through its service', async () => {
+    const server = new FakeServer();
+    const service = new CodexRunnerService(server as any);
+    const runner = await service.launch({ provider: 'codex', cwd: '/Users/test/proj' });
+    await runner.end();
+    expect(runner.lifecycle).toBe('ended');
+    expect(service.owns('thread-1')).toBe(false);
+    expect(server.calls).toContainEqual({ method: 'thread/unsubscribe', params: { threadId: 'thread-1' } });
+    expect(await runner.send('too late')).toBe('gone');
+    service.dispose();
   });
 });

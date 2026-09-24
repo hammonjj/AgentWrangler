@@ -40,7 +40,8 @@ import { isPidAlive, readRegistry } from '../claude/registry';
 import { endProcess } from '../claude/runner/adopt';
 import { RunnerRegistry } from '../claude/runner/runnerRegistry';
 import { RunnerService } from '../claude/runner/runnerService';
-import type { RunnerSession } from '../claude/runner/runnerSession';
+import type { RunnerView } from '../claude/runner/runnerView';
+import { SessionExecutors } from '../core/session/sessionExecutors';
 import { shouldAutoResume } from '../core/session/resumePolicy';
 import {
   currentState,
@@ -119,6 +120,8 @@ export interface AgentWranglerApp {
   codexProvider: CodexProvider;
   runners: RunnerService;
   codexRunners: CodexRunnerService;
+  /** Every session this process runs, Claude or Codex, by id. */
+  sessions: SessionExecutors;
   runnerRegistry: RunnerRegistry;
   runnerOwnership: RunnerOwnership;
   archive: ArchiveService;
@@ -148,7 +151,7 @@ export interface AgentWranglerApp {
 
   // --- the behaviours commands and menus invoke ---
   /** Start a conversation this process runs itself. No cwd: ask which folder. */
-  newConversation(cwd?: string): Promise<RunnerSession | undefined>;
+  newConversation(cwd?: string): Promise<RunnerView | undefined>;
   startCodexConversation(cwd: string): Promise<void>;
   browseForProject(): Promise<string | undefined>;
   refresh(): void;
@@ -277,32 +280,29 @@ export function createApp(host: HostServices): AgentWranglerApp {
     rememberModels: (list) => models.remember('anthropic', list),
   });
   host.subscribe(runners);
+  const sessions = new SessionExecutors([runners, codexRunners]);
   const runnerOwnership: RunnerOwnership = {
-    owns: (id: string | undefined) => runners.owns(id) || codexRunners.owns(id),
+    owns: (id: string | undefined) => sessions.owns(id),
     wasRunning: (id: string) => runners.wasRunning(id),
     pendingQuestion: (id: string | undefined) => {
-      const question = runners.get(id)?.pendingQuestion ?? codexRunners.get(id)?.pendingQuestion;
+      const question = sessions.get(id)?.pendingQuestion;
       return question ? { requestId: question.requestId, questions: question.questions } : undefined;
     },
     answer: async (id: string | undefined, requestId: string, answers: Record<string, string>) => {
-      const runner = runners.get(id) ?? codexRunners.get(id);
-      return runner ? runner.answer(requestId, answers) : false;
+      const handle = sessions.get(id);
+      return handle ? (await handle.answer(requestId, answers)) === 'applied' : false;
     },
-    // Claude only: Codex has no plan-mode concept, so there is nothing to ask
-    // it and nothing it could be told.
+    // Only Claude has plans: Codex has no plan-mode concept, and its handle
+    // never reports one.
     pendingPlan: (id: string | undefined) => {
-      const plan = runners.get(id)?.pendingPlan;
+      const plan = sessions.get(id)?.pendingPlan;
       return plan ? { requestId: plan.requestId, plan: plan.plan, more: plan.more } : undefined;
     },
     decidePlan: async (id: string | undefined, requestId: string, approve: boolean, feedback?: string) => {
-      const runner = runners.get(id);
-      return runner ? runner.decidePlan(requestId, approve, feedback) : false;
+      const handle = sessions.get(id);
+      return handle ? (await handle.decidePlan(requestId, approve, feedback)) === 'applied' : false;
     },
-    onDidChange: (listener: () => void) => {
-      const claude = runners.onDidChange(listener);
-      const codex = codexRunners.onDidChange(listener);
-      return { dispose: () => { claude.dispose(); codex.dispose(); } };
-    },
+    onDidChange: (listener: () => void) => sessions.onDidChange(listener),
   };
 
   /**
@@ -386,7 +386,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
       model: model || undefined,
     });
-    surface?.showRunner(runner);
+    surface?.showSession(runner);
     log(`adopted ${s.sessionId} into this window`);
     return runner;
   };
@@ -445,6 +445,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
       codexRunners.release(now.sessionId);
       log(`closed ${now.sessionId}: released the Codex thread this window was running`);
     } else if (runner) {
+      // A SIGSTOPped CLI can answer neither the interrupt nor SIGTERM that
+      // ending it sends. Let it run first, as adopting one does.
+      if (now.pid !== undefined && pause.isPaused(now.pid)) pause.resume(now.pid);
       await runners.end(runner);
       log(`closed ${now.sessionId}: ended the runner in this window`);
     } else if (now.pid !== undefined) {
@@ -641,7 +644,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   /** Spawn and show. The only path that starts a runner, so the cwd check lives here. */
-  const startConversation = (requested: string): RunnerSession | undefined => {
+  const startConversation = (requested: string): RunnerView | undefined => {
     const resolved = resolveLaunchDir(requested);
     if (!resolved) return undefined;
     const { dir: cwd, remember } = resolved;
@@ -659,7 +662,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
       model: model || undefined,
     });
-    surface?.showRunner(runner);
+    surface?.showSession(runner);
     return runner;
   };
 
@@ -676,7 +679,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const model = host.settings.get<string>('codexRunner.model', '').trim() || undefined;
       const effort = host.settings.get<string>('codexRunner.effort', '').trim() || undefined;
       const runner = await codexRunners.start(cwd, model, effort);
-      surface?.showCodexRunner(runner);
+      surface?.showSession(runner);
     } catch (error) {
       log(`starting Codex conversation failed: ${String(error)}`);
       dialogs.error(`Agent Wrangler: could not start Codex — ${(error as Error).message}`);
@@ -693,7 +696,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * straight to the session. Without one (the palette, the title-bar button)
    * the same folders arrive as a picker instead.
    */
-  const newConversation = async (cwd?: string): Promise<RunnerSession | undefined> => {
+  const newConversation = async (cwd?: string): Promise<RunnerView | undefined> => {
     if (cwd) return startConversation(cwd);
 
     // Newest first, the same order and the same list the dashboard dropdown shows.
@@ -919,7 +922,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }
     const existing = codexRunners.get(session.sessionId);
     if (existing) {
-      surface?.showCodexRunner(existing);
+      surface?.showSession(existing);
       return;
     }
     const history = session.transcriptPath
@@ -951,7 +954,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         break;
       }
     }
-    surface?.showCodexRunner(runner);
+    surface?.showSession(runner);
     log(`controlling Codex conversation ${runner.threadId} here`);
   };
   const actions: SessionActions = {
@@ -968,7 +971,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         if (!runner) throw new Error('Takeover cancelled; your draft is preserved.');
         if (signal.aborted) throw new Error('Send cancelled; session was resumed here but no message was sent.');
         if (!runner.canSend) throw new Error('The runner failed to start; your draft is preserved.');
-        runner.send(text, images);
+        if ((await runner.send(text, images)) !== 'applied') throw new Error('The runner stopped; your draft is preserved.');
       } finally { adopting.delete(key); }
     },
     smartOpen(key) {
@@ -1031,6 +1034,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
           'Release',
         );
         if (choice !== 'Release') return;
+        if (s.pid !== undefined && pause.isPaused(s.pid)) pause.resume(s.pid);
         await runners.end(runner);
         resumeInTerminal(s, getConfig, host.shell, dialogs);
         log(`released ${s.sessionId} to a terminal`);
@@ -1453,7 +1457,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     log(`resumed ${decision.sessionId} after a restart`);
     // Beside the dashboard, without taking the cursor: a window that has just
     // come back should not start by moving your focus.
-    surface?.showRunner(runner, { preserveFocus: true });
+    surface?.showSession(runner, { preserveFocus: true });
   };
 
   /**
@@ -1495,6 +1499,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     codexProvider,
     runners,
     codexRunners,
+    sessions,
     runnerRegistry,
     runnerOwnership,
     archive,
