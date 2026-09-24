@@ -46,6 +46,17 @@ certificate and notarization (#57).
 Nothing restarts on its own. A running copy keeps the old build until you quit and reopen it —
 and quitting ends the conversations Agent Wrangler is running, so it is left to you.
 
+**Closing the window is not quitting.** Agent Wrangler carries on as a menu-bar app: the Dock
+icon goes, and the menu-bar item (a ring with a dot) shows how many agents need you beside it.
+Its menu lists every live agent — needing you first — with **Open** and **Stop…**, and has
+**Open Agent Wrangler**, **Settings…** and both quits. While the window is closed, a session
+that needs permission, is waiting on you, or is done raises a macOS notification; clicking it
+opens that session (*Notify while the window is closed*, on by default; *Notify when an agent
+needs you* does the same while the window is open). Discord keeps answering throughout.
+**Open at login** (off by default) starts it in the menu bar without a window; it is a login
+item only, and nothing relaunches the app after a quit or a crash. While an agent the app runs
+is working or asking permission, it holds an App Nap assertion, which also defers idle sleep.
+
 **Quitting and coming back.** Agent Wrangler runs its conversations itself, so quitting ends
 them — gracefully, waiting up to ten seconds for each to finish its turn. Nothing is lost:
 each conversation is its transcript. On the next start, every session that was running shows
