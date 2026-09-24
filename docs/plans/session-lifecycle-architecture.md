@@ -61,6 +61,8 @@ used ~120–400 MB RSS each.
   **not awaited**, so the 5 s graceful-exit budget in `RunnerSession.end()` never gets its
   chance on quit. The backstop is the SDK's `process.on('exit')` handler, which SIGTERMs every
   tracked child (verified in the SDK bundle), plus stdin EOF when the parent's pipe ends close.
+  **S1 correction:** stdin EOF is a backstop only at idle. Mid-turn the CLI finishes the turn
+  first, so a crash or SIGKILL of Electron main leaves the current turn running headless (§11.5).
 - `CodexRunnerService.dispose()` runs `CodexAppServer.dispose()`, which is `child.kill()`. That
   ends every Codex thread AW runs.
 - `scripts/install-app.sh`, which CLAUDE.md says to run after **every** code change, does three
@@ -586,7 +588,7 @@ Each row gives the target semantics once Stage 4 is done. [Brackets] show today'
 | **⌘Q (leave running)** | continue in hosts [killed] | held in hosts, indefinitely | **down** until relaunch; the channel's buttons are dead, the mirror file persists | relaunch → reattach → reconciler re-converges | quit notification; everything live on relaunch; `claude agents --json` also lists them |
 | **⌥⌘Q (stop all)** | graceful `end`, awaited, ≤10 s [`void end()`] | expired ("session closed") | cards closed as cancelled | Resume later (same id) | explicit |
 | **Core crashes** | continue [killed] | held | down until relaunch | manual relaunch (never auto-restart) → reattach | banner: "reconnected to N agents after an unexpected exit" |
-| **Host crashes** (SIGKILL, OOM) | `claude` gets stdin EOF. It *may* not exit promptly mid-tool or mid-ask (S1), and could be reparented to launchd | lost (heap gone) | card expires | core sees socket close + host dead, no exit record → `lost` → **orphan-claude sweep** → `interrupted`; one-click Resume, **no auto-resume** (crash loops) | "Interrupted — host exited unexpectedly" |
+| **Host crashes** (SIGKILL, OOM) | `claude` gets stdin EOF and is reparented to launchd. It exits at once if idle, otherwise **after finishing its current turn** (S1, §11.5) | lost (heap gone) | card expires | core sees socket close + host dead, no exit record → `lost` → **orphan-claude sweep** → `interrupted`; one-click Resume, **no auto-resume** (crash loops) | "Interrupted — host exited unexpectedly" |
 | **Agent process dies** | — | host settles them as expired | closed | host emits `exit {code, signal, stderrTail}`, writes an exit record, drains, exits; registry `ended`/`failed` | "Ended" or "Failed: <reason>" + Resume |
 | **Machine sleeps** | suspended; on wake, API streams may error → CLI retries or the turn fails as an error note [same] | held | new `powerMonitor` `resume` handler reconnects the Discord gateway at once (today it waits for the ~41 s heartbeat) | heartbeat miss counters reset on resume; one fresh ping decides | nothing, or an error note |
 | **Logout** | launchd SIGTERM → hosts end their agents gracefully (their SIGTERM handler) → transcripts flushed | lost | lost | next login: manifests dead, no live pid → `interrupted`; **all** offered | "Interrupted" rows; newest auto-resumed if enabled |
@@ -646,6 +648,10 @@ notification says so when auto-pause is enabled.
     exceed macOS's 104-byte `sun_path`.
   - The supervisor checks the length and falls back to `~/.agentwrangler/run/` (0700). It does
     **not** fall back to `$TMPDIR`, which macOS cleans while hosts may live for days.
+  - **Confirmed in S3:** a 104-byte path bound and 105 failed with `EINVAL`. With a 60-char
+    username the primary path is 128 bytes and the fallback 100, so the fallback is necessary and
+    sufficient. Check `Buffer.byteLength(path) <= 103` **before** `bind()`; `EINVAL` is not
+    specific enough to catch and retry on.
   - The same limit applies to Codex's `--listen unix://`.
 
 ### 9.2 Framing
@@ -679,7 +685,7 @@ notification says so when auto-pause is enabled.
 | `hello` | above | above |
 | `snapshot` | `{}` | `{seq, state, sessionId, pendingAsks[], ring:{fromSeq, truncated}, exit?}` |
 | `subscribe` | `{fromSeq}` | `{ok}`, then notifications. `fromSeq` older than the ring → error `-32010 resync` |
-| `messages` | `{fromSeq, maxBytes}` | `{messages:[{seq, msg}], nextSeq}` (paged replay of raw SDK messages) |
+| `messages` | `{fromSeq, maxBytes}` | `{messages:[{seq, msg}], nextSeq}` (paged replay of raw SDK messages). `nextSeq` is **where this page stopped**, not the host's live seq, and the client loops until caught up. `maxBytes` must be well under the per-client queue (S3 used 1 MiB against 4 MiB), or a recovery reply overflows the queue it is refilling and resyncs loop |
 | `send` | `{message: SDKUserMessage}` (client sets `uuid`) | `{accepted, duplicate}`. **Idempotent on `uuid`**, so a core that crashed mid-send can check the snapshot |
 | `respondAsk` | `{requestId, result: PermissionResult}` | `{outcome: applied \| stale \| gone}` |
 | `control` | `{op: interrupt \| setModel \| setPermissionMode \| supportedModels \| supportedCommands \| getContextUsage, args}` | op result |
@@ -725,6 +731,17 @@ its state. It adds `connecting` and `unreachable`, which `RunnerLifecycle` lacks
   queue, sends `resync`, and the client re-snapshots and pages `messages` from the snapshot.
 - Under pressure, `stream_event` deltas for the same content block are coalesced.
 - The ring is sized in bytes (default 16 MiB). The transcript covers anything older.
+- A `fromSeq` is stale only once the ring has **evicted past it** (track an `evictedThrough`
+  mark). "Older than the oldest entry held" is not enough: early in a host's life that gives a
+  false `resync`.
+- **Measured in S3** (`spikes/s3-socket-protocol.md`, synthetic SDK-shaped traffic over a real
+  UDS): 2,000 deltas/s delivered at p50 0 ms / p99 28 ms, and one client tops out at ~33–40k/s.
+  A reader paused 5 s never stalled the producer. The 4 MiB queue overflowed once, and one resync
+  plus seven 1 MiB pages caught up. Resume from `seq` was gap-free when the ring covered the gap,
+  with one resync when it did not. **The 4 MiB queue and 16 MiB ring defaults stand.**
+- A 16 MiB frame round-trips intact and a larger line is rejected, but parsing one took 2–3 s. The
+  core must not `JSON.parse` frames that large on the Electron main thread in the same tick as UI
+  work. Stage 3 decides between off-thread parsing and not sending large images inline.
 
 ### 9.8 Heartbeats and reconnects
 
@@ -733,6 +750,11 @@ its state. It adds `connecting` and `unreachable`, which `RunnerLifecycle` lacks
 - Reconnect uses exponential backoff up to 30 s while the host pid is alive. After the host dies,
   §7.3 classification takes over.
 - Hosts don't ping; a socket close is enough for them.
+- **Measured in S3:** freezing the core, the host, or both with SIGSTOP for 4 s was always read as a
+  resume, with zero misses counted. A killed host was declared unreachable after exactly 3 misses.
+  Schedule pings with a recursive `setTimeout`, not `setInterval`, so a wake doesn't fire a burst
+  of missed ticks. The elapsed-time check (`gap > interval × 3` ⇒ resume) is a useful cross-check
+  alongside `powerMonitor` `resume`.
 
 ### 9.9 Multiple clients
 
@@ -809,11 +831,40 @@ gets several writers, or needs fleet-level queries.
 5. **Child death today, and after a host crash.**
    - The SDK spawns without `detached` and SIGTERMs its children on `process.on('exit')`, which
      does not run on signals, SIGKILL or OOM.
-   - The CLI exits on stdin EOF at idle (verified, `conversation-pane.md` §2.1). Behaviour
-     **mid-tool, mid-ask and with background shells is unmeasured.**
-   - An EPIPE on stdout does not guarantee an exit.
-   - So a `claude` can plausibly survive its host as an orphan still holding the session id.
-     §7.3's orphan sweep (via `~/.claude/sessions`) is mandatory, and S1 measures it.
+   - The CLI exits on stdin EOF **only at idle** (about 0.7 s). **Measured in S1**
+     (`spikes/s1-runner-death.md`): mid-turn, EOF lets the turn run to its end: about 19 s for a
+     streamed reply, the whole of a 120 s Bash command plus another model call, 6–14 s after a
+     pending ask fails. So the SDK exit handler is the only prompt path, and any death that skips
+     it (SIGKILL, crash, OOM, Node's default SIGTERM) leaves `claude` as a launchd orphan
+     (ppid 1 within ~55 ms) **for the rest of its turn**.
+   - The orphan is not wedged on EPIPE. It keeps working: it holds the session id, writes the
+     transcript, spends tokens, runs every auto-allowed tool, and a background task finishing
+     inside the ~5 s shell grace starts a new turn. It always exited cleanly on its own once the
+     turn was over (`sessions/<pid>.json` removed, `SessionEnd` run).
+   - **The CLI has no single-owner lock.** A second `Query` with `resume: <id>` succeeds while the
+     first CLI is alive, and the transcript silently forks (two entries share a `parentUuid`).
+   - stdin EOF during a pending `can_use_tool` resolves within ~5 ms as a tool error ("Tool
+     permission stream closed before response"). The turn continues and later permission checks
+     fail instantly. The host's `AbortSignal` fires only when the child exits.
+   - Transcript lines were never torn in ~35 runs. Damage is semantic: SIGTERM mid-stream drops the
+     in-flight assistant message, and a killed ask leaves a `tool_use` with no `tool_result`.
+   - **§7.3's orphan sweep is mandatory and sufficient, with four amendments** (for CP0 to fold
+     into §7.3):
+     1. sweep before **every** resume or adopt of an id (supervisor-seen host exit,
+        `resumeLastRunner`, `adoptAndSend`), not only on startup;
+     2. SIGTERM, wait ~5 s, SIGKILL, and only then load history and resume;
+     3. check pid identity against `procStart` in `sessions/<pid>.json`, and tolerate a stale file;
+     4. the host handles SIGTERM by SIGTERMing its `claude` (the SDK installs no handler).
+   - Migrations should end a CLI with `interrupt` or SIGTERM, not stdin EOF: SIGTERM kills
+     background shells at once, EOF waits ~5 s first.
+   - **Open (before Stage 3):** with AW's `PermissionRequest` hook installed (1800 s timeout), a
+     mid-ask orphan may wait on the hook instead of failing at once. S1 ran with hooks isolated.
+   - **uuid dedupe (U2) works.** SDK `assistant`/`user` uuids are the transcript uuids, and a
+     `uuid` the host sets on a message it sends is kept. `stream_event`, `system/*` and `result`
+     never reach the transcript, so they are ring-only, ordered by `seq`. The ring must not
+     assume "yielded ⇒ on disk", and the host sets `uuid` on every send.
+   - The SDK `sessionId` option works for fresh ids; an id that already has a transcript is
+     refused ("already in use") even with no live process. Continuing an id is always `resume`.
 6. **The host process.**
    - `spawn(runtimeExe, [hostJs], {detached: true, stdio: ['pipe', logFd, logFd]})`. The token
      is the first stdin line, then stdin is destroyed.
@@ -851,9 +902,17 @@ gets several writers, or needs fleet-level queries.
      on a new connection, or declined?
 9. **Claude background agents** (`claude --bg`, `claude agents --json`) are a first-party
    detached-session feature. `claude agents --json` already lists SDK sessions with pid and
-   status. Whether a bg agent can be driven with stream-json + `canUseTool` is unknown, so S5 is
-   a timeboxed look. If it can, it could replace the AW Claude host later, and the
-   provider-shaped host keeps that door open.
+   status. **S5 verdict: no, they cannot replace the AW Claude host** (`spikes/s5-bg-agents.md`).
+   - `--bg` and `--print`/stream-json are mutually exclusive at the CLI's argument parser.
+   - A bg agent is hosted by a per-user `claude daemon run` → `claude bg-pty-host` →
+     `claude --bg-spare` tree that AW does not own. It does survive its launcher.
+   - `claude logs` and `claude attach` replay raw terminal bytes. The agent's private sockets
+     answer nothing documented.
+   - Permission prompts really block, and resolve only through the existing
+     `PermissionRequest` hook or a PTY attach. There is no `canUseTool` equivalent.
+
+   The stdio + stream-json thin host in §5 stands. The provider-shaped host keeps the door open
+   if Anthropic ever adds a structured channel to bg agents.
 10. **macOS facts relied on:**
     - no parent-death signal;
     - orphans reparent to launchd;
@@ -1596,18 +1655,18 @@ The gate #11 is itself blocked by #5–#8.
 
 ## 19. Risks, unknowns and required spikes
 
-| # | Unknown | Why it matters | Spike | Blocking? |
-|---|---|---|---|---|
-| U1 | Does `claude` exit promptly on stdin EOF mid-tool, mid-ask, with background shells? Can it orphan? | Orphans hold the session id and corrupt resumes | S1 | yes (CP0) |
-| U2 | Do SDK message `uuid`s match transcript entries? | Thin-host reattach dedupe | S1 | yes |
-| U3 | Does a detached host from an APFS-cloned, renamed runtime survive bundle replacement? TCC? Code signature? | Update survivability | S2 | yes |
-| U4 | Can a menu quit be told apart from an Apple Event quit and SIGTERM in Electron 44? | Non-blocking installs, logout | S2 | yes (for Stage 2) |
-| U5 | Does safeStorage re-prompt after an ad-hoc rebuild? | Token storage choice | S2 | no (fallback exists) |
-| U6 | UDS throughput and backpressure behaviour at streaming rates | Protocol sizing | S3 | no |
-| U7 | Codex pending approvals after a client disconnect | Codex survivability claims | S4 | for Stage 5 only |
-| U8 | Can Claude bg agents be driven programmatically? | Could replace AW hosts | S5 | no |
-| U9 | App Nap and timers in a windowless core | Discord heartbeat reliability | S2 | for Stage 6 |
-| U10 | How agents request resource leases | Unity and exclusive tools | F2 | no |
+| # | Unknown | Why it matters | Spike | Blocking? | Result (2026-09-24) |
+|---|---|---|---|---|---|
+| U1 | Does `claude` exit promptly on stdin EOF mid-tool, mid-ask, with background shells? Can it orphan? | Orphans hold the session id and corrupt resumes | S1 | yes (CP0) | **Answered: it orphans for the rest of its turn**, and the CLI allows a second owner (silent transcript fork). Sweep is sufficient with four amendments (§11.5). Follow-up: the `PermissionRequest` hook's effect on a mid-ask orphan. `spikes/s1-runner-death.md` |
+| U2 | Do SDK message `uuid`s match transcript entries? | Thin-host reattach dedupe | S1 | yes | **Yes** for `assistant`/`user`, one direction only; host sets `uuid` on sends (§11.5) |
+| U3 | Does a detached host from an APFS-cloned, renamed runtime survive bundle replacement? TCC? Code signature? | Update survivability | S2 | yes | pending |
+| U4 | Can a menu quit be told apart from an Apple Event quit and SIGTERM in Electron 44? | Non-blocking installs, logout | S2 | yes (for Stage 2) | pending |
+| U5 | Does safeStorage re-prompt after an ad-hoc rebuild? | Token storage choice | S2 | no (fallback exists) | pending |
+| U6 | UDS throughput and backpressure behaviour at streaming rates | Protocol sizing | S3 | no | **Go.** 4 MiB queue / 16 MiB ring / 10 s × 3 heartbeat stand; `messages` paging rules added (§9.4, §9.7, §9.8). `spikes/s3-socket-protocol.md` |
+| U7 | Codex pending approvals after a client disconnect | Codex survivability claims | S4 | for Stage 5 only | pending |
+| U8 | Can Claude bg agents be driven programmatically? | Could replace AW hosts | S5 | no | **No** (§11.9). `spikes/s5-bg-agents.md` |
+| U9 | App Nap and timers in a windowless core | Discord heartbeat reliability | S2 | for Stage 6 | pending |
+| U10 | How agents request resource leases | Unity and exclusive tools | F2 | no | not started |
 
 **Standing risks:**
 
