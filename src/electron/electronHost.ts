@@ -207,6 +207,7 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     sessionState: new JsonStore(path.join(userDataDir, 'sessions.json')),
     sessionHosts: opts.sessionHosts,
     storageDir,
+    dataDir: userDataDir,
     dialogs: dialogsFor(opts),
     shell: shellFor(opts),
     clipboard: { writeText: async (text) => clipboard.writeText(text) },

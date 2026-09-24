@@ -71,6 +71,9 @@ export function createSessionHostRuntime(opts: RuntimeOptions): SessionHostRunti
       for (const name of names) {
         const dir = path.join(runtimesDir, name);
         if (name === BUILD_ID || inUse.has(dir)) continue;
+        // `runtimes/` is shared: the Codex server's pinned binary (`codex-*`) lives
+        // here too. Only ever remove what is recognisably a session host clone.
+        if (name.startsWith('codex-') || !fs.existsSync(path.join(dir, HOST_APP))) continue;
         fs.rmSync(dir, { recursive: true, force: true });
         opts.log(`removed the unused session host runtime ${name}`);
       }

@@ -1376,6 +1376,9 @@ When to escalate: quit-source detection or SIGTERM handling misbehaves → Extra
     `app.asar` (manifest, `hello`, `ping`, SIGTERM exit recorded). The install-survival and
     `~/Documents` read are in James's manual matrix below.
   - `electron-builder.yml` records that the RunAsNode fuse must stay on (§11.7).
+  - `runtimes/` and `run/` are shared with the Codex server (Stage 5). Runtime GC removes only
+    directories holding `Agent Wrangler Host.app`, never `codex-*`, and the manifest scan
+    ignores `codex-host.json` (it has no `hostId`).
 - **Completion.** The manual matrix passes 3× in a row, there are no orphan processes after ⌥⌘Q,
   and typecheck and tests are green.
 - **Rollback.** Setting off means the Stage 1 in-process executor. Running hosts stay stoppable
@@ -1515,6 +1518,45 @@ Review checkpoint: CP3 (Opus Extra High) — failure-matrix review after the soa
   sooner (a product choice).
 - **Rollback.** A setting to go back to `--stdio`.
 - **PR.** Own PR. Can run in parallel with Stages 3–4 once Stages 1–2 have landed.
+- **As built (#17, 2026-09-24).**
+  - The supervisor is `src/codex/codexHost.ts` (`CodexHost`), not
+    `src/core/session/hostSupervisor.ts`. It is Codex-specific, and keeping it apart keeps it
+    out of Stage 3's way. The manifest is `run/codex-host.json` and the socket path is
+    `run/codex-app-server.sock`, both under the app's data directory (`HostServices.dataDir`,
+    new). A reused pid is caught by comparing `ps -o lstart=`.
+  - Only a binary inside an `openai.chatgpt-*/bin/<platform>/` bundle is pinned (APFS clone,
+    `fs.cpSync` with `COPYFILE_FICLONE`). An explicit path elsewhere (Homebrew) runs in place,
+    since copying its directory would copy `/opt/homebrew/bin`. Old `runtimes/codex-*` are
+    removed at the next launch.
+  - The transport seam is `CodexConnector` (`stdioConnector` | `hostConnector`) in
+    `appServer.ts`. Every connection after the first fires `onReconnect {restarted}`, with
+    `restarted` meaning a different server process. The stdio child now gets this too: a
+    crashed child is relaunched on the next request, and its threads are resumed.
+  - At startup every Codex record the restart interrupted is resumed, not only the loaded
+    ones. An idle thread unloads about 60 s after the last client leaves, so after a quit
+    `thread/loaded/list` holds only the threads that were running or waiting. Loading the rest
+    again from disk costs nothing, and none of them had anything in flight.
+  - Card ids carry the server instance (`codex-approval:<pid>@<startedAt>:<id>`). A re-sent
+    request whose card exists keeps that card. One this side answered but whose answer never
+    arrived goes back to pending.
+  - Requests that arrive before their runner exists are held by the service and handed over
+    when the runner is tracked. The server sends re-sent asks in the same breath as the resume
+    response.
+  - The history after a reconnect is re-read from the rollout at `thread.path`
+    (`readRolloutBlocks`), not from `thread/turns/list`. It is the reader adoption already
+    uses. The pane re-reads on `reset`.
+  - Version change: `CodexHost.outdated()` compares the resolved binary's `--version` with
+    the server's. At startup, an outdated server with no active thread is sent `SIGTERM`, and
+    the connection relaunches it on the new binary. **Agents → Restart Codex Server…** does it on
+    demand, and asks first when it would interrupt anything (`SIGINT`).
+  - Setting `codexRunner.keepAcrossRestarts` (default on; read at startup). When it is off, a
+    background server left from before is stopped if it is idle, and otherwise left running.
+  - Checked against the real `0.155.0-alpha.16.3` with an isolated `CODEX_HOME`: pinned
+    launch, WebSocket `initialize`, the server surviving the client, and the exact
+    `no rollout found` text. **The three manual acceptance checks passed on 2026-09-24**
+    (installed build): mid-turn ⌘Q, pending approval across ⌘Q, and the VS Code writer lock.
+  - Not done: lowering `thread_unload_delay_secs` (still the default 60 s), and any idle-exit
+    rule for the server (it runs until stopped; it holds nothing when idle).
 
 ```text
 Recommended model: Opus
@@ -1711,7 +1753,8 @@ Not frozen: `HostBoot` (a core only boots a host of its own build).
 
 The "later" items that were fixed: a host never exits with its agent alive; `close` ends sockets
 rather than destroying them; the tombstone decides `lost`; a no-exit manifest survives for the
-sweep; oversize frames are stubbed; the Codex codec is uncapped again and buffers linearly; a late
+sweep; oversize frames are stubbed; the peer buffers linearly (and Codex no longer uses it: Stage 5
+gave `CodexAppServer` its own transports, so the Codex refactor was dropped at merge); a late
 host is killed; the exit is delivered once; the quit count excludes errored Codex sessions; the
 audit log and the fuse note are in.
 

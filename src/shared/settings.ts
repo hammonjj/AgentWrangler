@@ -123,6 +123,15 @@ export const SETTINGS: SettingSpec[] = [
     description: 'Reasoning effort for Codex conversations started from Agent Wrangler. Empty uses the model default.',
   },
   {
+    key: 'codexRunner.keepAcrossRestarts',
+    label: 'Keep Codex conversations running across restarts',
+    group: 'Conversations',
+    type: 'boolean',
+    default: true,
+    description:
+      'Run Codex conversations in a background Codex server that keeps going when Agent Wrangler quits or is reinstalled, so a running turn finishes and an approval or question is still waiting when the app comes back. Updating Codex restarts that server, which ends a running turn; Agent Wrangler only does that when nothing is running, or when you choose Agents → Restart Codex Server. Off runs Codex as a child of the app, which ends with it. Takes effect after a restart.',
+  },
+  {
     key: 'runner.confirmTakeoverOnSend',
     label: 'Confirm before taking a session over',
     group: 'Conversations',

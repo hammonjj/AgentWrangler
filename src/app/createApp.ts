@@ -32,7 +32,9 @@ import { globalConversationDir, sessionsDir } from '../claude/paths';
 import { resolveClaudeBinary } from '../claude/binary';
 import { ClaudeProvider } from '../claude/claudeProvider';
 import { CodexProvider } from '../codex/codexProvider';
-import { CodexAppServer } from '../codex/appServer';
+import { CodexAppServer, hostConnector } from '../codex/appServer';
+import { CodexHost, stopSignalFor } from '../codex/codexHost';
+import { resolveCodexBinary } from '../codex/binary';
 import { readRolloutBlocks } from '../codex/rollout';
 import { codexUsageReader } from '../codex/usage';
 import { CodexRunnerService } from '../codex/runner';
@@ -157,9 +159,10 @@ export interface AgentWranglerApp {
   /** Start a conversation this process runs itself. No cwd: ask which folder. */
   newConversation(cwd?: string): Promise<RunnerView | undefined>;
   /**
-   * Live sessions, for the quit decision: `hosted` ones run in session hosts
-   * and survive a quit; `local` ones (in-process Claude, and every Codex
-   * thread) do not.
+   * Live sessions, for the quit decision: `hosted` Claude ones run in session
+   * hosts and survive a quit; `local` ones (in-process Claude, and Codex
+   * threads without the background server) do not. Codex threads on the
+   * background server are in neither: they keep running on their own terms.
    */
   sessionCounts(): { hosted: number; local: number };
   /**
@@ -170,6 +173,8 @@ export interface AgentWranglerApp {
    */
   stopAllForQuit(withinMs: number, opts?: { includeHosted?: boolean }): Promise<void>;
   startCodexConversation(cwd: string): Promise<void>;
+  /** Restart the background Codex server (e.g. to pick up a Codex update). Asks first if it would interrupt anything. */
+  restartCodexServer(): Promise<void>;
   browseForProject(): Promise<string | undefined>;
   refresh(): void;
   pauseAll(wanted: boolean): void;
@@ -212,7 +217,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const turnStats = new TurnStats(host.globalState);
   const provider = new ClaudeProvider(getConfig, log, turnStats);
   const codexProvider = new CodexProvider(getConfig, log);
-  const codexAppServer = new CodexAppServer(() => getConfig().codexBinaryPath, log);
+  // Codex threads run in one AW-owned app-server. By default it is detached
+  // (`CodexHost`), so a quit, crash or reinstall of the app leaves its turns
+  // and pending asks running; the fallback is a `--stdio` child that ends with
+  // the app. Read once: switching needs a restart.
+  const codexKeepAlive = host.settings.get<boolean>('codexRunner.keepAcrossRestarts', true);
+  const codexHost = new CodexHost({
+    baseDir: host.dataDir,
+    binary: () => resolveCodexBinary(getConfig().codexBinaryPath),
+    log,
+  });
+  const codexAppServer = new CodexAppServer(
+    codexKeepAlive ? hostConnector(codexHost) : () => getConfig().codexBinaryPath,
+    log,
+  );
   const models = new ModelCatalogService(host.globalState);
   // Session hosts first (playbook §7.3 step 1): which sessions a previous run
   // left running in hosts that are still alive. Nothing may classify, resume
@@ -268,6 +286,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const codexRunners = new CodexRunnerService(codexAppServer, (list) => models.remember('openai', list), {
     registry: sessionRegistry,
     locate,
+    log,
   });
   host.subscribe(codexRunners);
   store.useLiveSessions((session) => session.provider === 'codex' ? codexRunners.get(session.sessionId)?.session : undefined);
@@ -1015,7 +1034,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
       throw new Error('Agent Wrangler: wait for the current Codex turn to finish before taking over here.');
     }
     const existing = codexRunners.get(session.sessionId);
-    if (existing) {
+    // Shown read-only because another app held it: taking over tries again.
+    if (existing?.openElsewhere) codexRunners.drop(existing.threadId);
+    else if (existing) {
       surface?.showSession(existing);
       return;
     }
@@ -1503,6 +1524,102 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * newest Claude one, within a few hours, never one the orchestrator owns,
    * and never one something else is already running.
    */
+  /**
+   * Stage 5: the Codex threads the last run was driving are, with the
+   * background server, most likely still running there. Rejoin each; a
+   * running turn carries on, and pending approvals and questions come back as
+   * the same cards. If the server itself went (a reboot), the threads load
+   * from disk, and what was in flight is recorded in them as interrupted.
+   */
+  const rejoinCodexThreads = async (): Promise<void> => {
+    if (!codexKeepAlive) {
+      await retireCodexHost();
+      return;
+    }
+    const records = startup.interrupted.filter((r) => r.provider === 'codex' && r.endedReason === 'app-restart');
+    if (records.length > 0) {
+      const result = await codexRunners.reattach(records);
+      log(
+        `codex: rejoined ${result.reattached.length} thread(s)` +
+          (result.elsewhere.length ? `, ${result.elsewhere.length} open elsewhere` : '') +
+          (result.dropped.length ? `, dropped ${result.dropped.length} with no turns` : '') +
+          (result.failed.length ? `, ${result.failed.length} failed` : ''),
+      );
+    }
+    await updateCodexHostIfIdle();
+  };
+
+  /**
+   * A newer Codex means a server restart, which ends in-flight turns and
+   * pending asks, so it happens only when nothing is running (or when the
+   * user asks: `restartCodexServer`). Never mid-turn.
+   */
+  const updateCodexHostIfIdle = async (): Promise<void> => {
+    const outdated = codexHost.outdated();
+    if (!outdated) return;
+    const active = await codexRunners.activeThreads();
+    if (active > 0) {
+      log(`codex: ${outdated.available} is available (server runs ${outdated.running ?? 'unknown'}); not restarting with ${active} active thread(s)`);
+      return;
+    }
+    log(`codex: restarting the idle server for ${outdated.available} (was ${outdated.running ?? 'unknown'})`);
+    // The connection drops, reconnects, and the connector launches the new binary.
+    await codexHost.stop('SIGTERM');
+  };
+
+  /** The setting is off: a background server left from before would hold its threads' writer locks. */
+  const retireCodexHost = async (): Promise<void> => {
+    if (!codexHost.running()) return;
+    const probe = new CodexAppServer(hostConnector(codexHost), log);
+    const probeRunners = new CodexRunnerService(probe);
+    let active = 0;
+    try {
+      active = await probeRunners.activeThreads();
+    } finally {
+      // Before stopping: a live probe would reconnect, and relaunch it.
+      probeRunners.dispose();
+    }
+    if (active > 0) {
+      log(`codex: leaving the background server running: ${active} thread(s) active in it`);
+      return;
+    }
+    await codexHost.stop('SIGTERM');
+    log('codex: stopped the background server (setting off)');
+  };
+
+  const restartCodexServer = async (): Promise<void> => {
+    if (!codexKeepAlive) {
+      void dialogs.info('Agent Wrangler: Codex runs as a child of the app (Keep Codex conversations running across restarts is off). Nothing to restart.');
+      return;
+    }
+    if (!codexHost.running()) {
+      void dialogs.info('Agent Wrangler: the Codex server is not running. It starts with the next Codex conversation.');
+      return;
+    }
+    const active = await codexRunners.activeThreads().catch(() => 0);
+    const signal = stopSignalFor(active);
+    const choice = await dialogs.warn(
+      active > 0 ? `Restart the Codex server and interrupt ${active} running conversation${active === 1 ? '' : 's'}?` : 'Restart the Codex server?',
+      {
+        modal: true,
+        detail:
+          (active > 0
+            ? 'Turns in progress are interrupted and their pending approvals and questions are dropped; send again to continue. '
+            : '') + 'The server comes back on the newest Codex installed, and every conversation reconnects.',
+      },
+      'Restart',
+    );
+    if (choice !== 'Restart') return;
+    const stopped = await codexHost.stop(signal);
+    if (!stopped) {
+      dialogs.error('Agent Wrangler: the Codex server did not stop. See the log.');
+      return;
+    }
+    log(`codex: server restarted on request (${signal})`);
+    // A connection that was up reconnects by itself; otherwise the next request starts one.
+    void codexAppServer.start().catch((err) => log(`codex: reconnect after restart failed: ${String(err)}`));
+  };
+
   const resumeLastRunner = async (): Promise<void> => {
     const enabled = host.settings.get<boolean>('runner.autoResumeLastOnStartup', true);
     // Cheap checks first, exactly as before the guard was pulled apart: a
@@ -1610,15 +1727,23 @@ export function createApp(host: HostServices): AgentWranglerApp {
     sessionRegistry,
     sessionCounts: () => {
       const claude = runners.counts();
-      const codex = codexRunners.list().filter((h) => h.lifecycle !== 'ended' && h.lifecycle !== 'error').length;
+      const codex = codexKeepAlive
+        ? 0
+        : codexRunners.list().filter((h) => h.lifecycle !== 'ended' && h.lifecycle !== 'error').length;
       return { hosted: claude.hosted, local: claude.local + codex };
     },
     async stopAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}) {
-      // Codex threads end with the app-server in `dispose`; the Claude CLIs
-      // get the graceful end sequence first, awaited and bounded. Hosted ones
-      // are let go of (and keep running) unless asked to stop them too.
+      const { hosted, local } = runners.counts();
+      const ending = local + (opts.includeHosted ? hosted : 0);
+      if (ending > 0) log(`quitting: ending ${ending} session(s), waiting up to ${withinMs} ms`);
+      // The Claude CLIs get the graceful end sequence, awaited and bounded;
+      // hosted ones are let go of (and keep running) unless asked to stop
+      // them too. Codex threads are left to `dispose`: with the background
+      // server that only closes the connection, and they keep running; with
+      // `--stdio` the child goes, and them with it.
       await runners.endAllForQuit(withinMs, opts);
     },
+    restartCodexServer,
     runnerOwnership,
     archive,
     pins,
@@ -1670,6 +1795,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       void syncRemoteTransport();
       // After the store's first scan, so "is it running elsewhere?" has an answer.
       setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), 2000);
+      void rejoinCodexThreads().catch((err) => log(`rejoining Codex threads failed: ${String(err)}`));
     },
 
     dispose() {

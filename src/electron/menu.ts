@@ -138,6 +138,10 @@ export function installApplicationMenu(
         // see the header of `setPausedAll` in createApp.
         { label: 'Pause All Agents', click: () => wrangler.pauseAll(true) },
         { label: 'Resume All Paused Agents', click: () => wrangler.pauseAll(false) },
+        { type: 'separator' },
+        // Codex threads outlive the app in a background server; this is how
+        // a Codex update reaches it while something is running (Stage 5).
+        { label: 'Restart Codex Server…', click: () => void wrangler.restartCodexServer() },
       ],
     },
     {

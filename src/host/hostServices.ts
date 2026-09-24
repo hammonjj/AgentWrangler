@@ -198,6 +198,12 @@ export interface HostServices {
   };
   /** Directory for caches this host owns, e.g. the shared usage read. Must exist. */
   storageDir: string;
+  /**
+   * The app's own data directory (the parent of `storageDir`): `run/` for
+   * manifests and sockets of processes that outlive the app, `runtimes/` for
+   * the binaries they run from. Not a cache: deleting it orphans them.
+   */
+  dataDir: string;
   dialogs: HostDialogs;
   shell: HostShell;
   clipboard: { writeText(text: string): Promise<void> };

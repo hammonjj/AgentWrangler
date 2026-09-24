@@ -4,9 +4,9 @@
  *
  * Transport-free on purpose. The owner feeds it whatever bytes arrive
  * (`feed`) and gives it a way to write one line (`write`), so the same codec
- * serves a child's stdio (Codex's `app-server --stdio`), a Unix socket (a
- * session host and the core's client for it), and a test's in-memory pipe.
- * Extracted from `CodexAppServer` for Stage 3 of the session-lifecycle plan.
+ * serves a Unix socket (a session host and the core's client for it) and a
+ * test's in-memory pipe. Written for Stage 3 of the session-lifecycle plan;
+ * Codex's client has its own message transports (`CodexAppServer`).
  *
  * Framing: a line longer than `maxLineBytes` is rejected whole and reported,
  * never partially applied (§9.2). A line that is not JSON is logged and dropped.

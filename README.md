@@ -59,7 +59,7 @@ conversation on startup* setting).
   by an agent inside Agent Wrangler, it replaces the bundle and leaves the running copy alone:
   quitting would end that agent too. Restart when convenient to pick up the build.
 
-**Keeping conversations running when the app quits (experimental).** Settings → Conversations →
+**Keeping Claude conversations running when the app quits (experimental).** Settings → Conversations →
 *Keep conversations running when Agent Wrangler quits*. With it on, each new Claude conversation
 runs in its own small background process (a *session host*), so quitting, reinstalling or a
 crash of Agent Wrangler no longer ends it: the turn in flight carries on, a permission prompt
@@ -67,8 +67,8 @@ waits, and Agent Wrangler reconnects to it when it opens again.
 
 - **⌘Q** quits and leaves those conversations running (a notification says how many).
   **Quit and Stop All Agents (⌥⌘Q)** ends them too.
-- Codex conversations, and Claude ones started before the setting was on, still end with the
-  app, as described above.
+- Claude conversations started before the setting was on still end with the app, as described
+  above. Codex has its own background server (below).
 - A host's files live in `~/Library/Application Support/Agent Wrangler/`: `run/` (a manifest,
   a token and a socket per host, readable by you only), `logs/host-*.log`, and `runtimes/`, a
   clone of the app that hosts run from so a reinstall never pulls the program out from under
@@ -76,6 +76,26 @@ waits, and Agent Wrangler reconnects to it when it opens again.
   running as you could use them, which is the same limit the permission hook file already has.
 - It is experimental until crash recovery is hardened (#15): a host that crashes is reported,
   but an agent it leaves behind is not yet cleaned up automatically.
+
+**Codex conversations survive a quit.** Agent Wrangler runs every Codex thread in one
+background `codex app-server` of its own, detached from the app, so quitting, a crash or a
+reinstall leaves it running: a turn in progress finishes, and an approval or question it is
+waiting on is still there, on the same card, when the app comes back. Quitting does not count
+them as agents it would stop. The server runs from a copy of the Codex binary kept under the
+app's data directory (`runtimes/`), because VS Code deletes old extension versions; its
+manifest, socket and log are in `run/`. It is not Codex's machine-wide `app-server daemon`,
+which the `codex` command line would attach to.
+
+- **Updating Codex restarts that server**, which ends a running turn and drops its pending
+  approvals and questions (you send again). Agent Wrangler does it by itself only at startup,
+  and only when nothing is running; otherwise **Agents → Restart Codex Server…** does it and
+  says what it would interrupt.
+- A thread can have only one writer. One Agent Wrangler's server holds is refused by the VS Code
+  extension until about a minute after it goes idle with nobody attached, and the reverse:
+  a thread VS Code holds shows in Agent Wrangler as *open in another app*, read-only, until you
+  take it over again.
+- *Keep Codex conversations running across restarts* (on by default) turns this off; Codex then
+  runs as a child of the app and ends with it.
 
 `env -u ELECTRON_RUN_AS_NODE` is applied by the scripts: VSCode sets that variable in its
 terminals and it makes the Electron binary behave as plain Node, so without it the app launches
