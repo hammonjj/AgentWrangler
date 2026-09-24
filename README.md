@@ -59,6 +59,26 @@ conversation on startup* setting).
   by an agent inside Agent Wrangler, it replaces the bundle and leaves the running copy alone:
   quitting would end that agent too. Restart when convenient to pick up the build.
 
+**Codex conversations survive a quit.** Agent Wrangler runs every Codex thread in one
+background `codex app-server` of its own, detached from the app, so quitting, a crash or a
+reinstall leaves it running: a turn in progress finishes, and an approval or question it is
+waiting on is still there, on the same card, when the app comes back. Quitting does not count
+them as agents it would stop. The server runs from a copy of the Codex binary kept under the
+app's data directory (`runtimes/`), because VS Code deletes old extension versions; its
+manifest, socket and log are in `run/`. It is not Codex's machine-wide `app-server daemon`,
+which the `codex` command line would attach to.
+
+- **Updating Codex restarts that server**, which ends a running turn and drops its pending
+  approvals and questions (you send again). Agent Wrangler does it by itself only at startup,
+  and only when nothing is running; otherwise **Agents → Restart Codex Server…** does it and
+  says what it would interrupt.
+- A thread can have only one writer. One Agent Wrangler's server holds is refused by the VS Code
+  extension until about a minute after it goes idle with nobody attached, and the reverse:
+  a thread VS Code holds shows in Agent Wrangler as *open in another app*, read-only, until you
+  take it over again.
+- *Keep Codex conversations running across restarts* (on by default) turns this off; Codex then
+  runs as a child of the app and ends with it.
+
 `env -u ELECTRON_RUN_AS_NODE` is applied by the scripts: VSCode sets that variable in its
 terminals and it makes the Electron binary behave as plain Node, so without it the app launches
 with every Electron API `undefined`. It reaches `open -a` too, so launching the installed app
