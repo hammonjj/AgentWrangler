@@ -720,7 +720,7 @@ notification says so when auto-pause is enabled.
 | Method | Params | Result |
 |---|---|---|
 | `hello` | above | above |
-| `snapshot` | `{}` | `{seq, state, sessionId, pendingAsks[], ring:{fromSeq, truncated}, exit?}` |
+| `snapshot` | `{}` | `{epoch, seq, state, sessionId, pendingAsks[], ring:{fromSeq, truncated}, exit?}`. `epoch` identifies this host instance's event stream (added in Stage 1): seqs compare only within one epoch, and a `fromSeq` ahead of the host's seq is also answered with `resync` |
 | `subscribe` | `{fromSeq}` | `{ok}`, then notifications. `fromSeq` older than the ring → error `-32010 resync` |
 | `messages` | `{fromSeq, maxBytes}` | `{messages:[{seq, msg}], nextSeq}` (paged replay of raw SDK messages). `nextSeq` is **where this page stopped**, not the host's live seq, and the client loops until caught up. `maxBytes` must be well under the per-client queue (S3 used 1 MiB against 4 MiB), or a recovery reply overflows the queue it is refilling and resyncs loop |
 | `send` | `{message: SDKUserMessage}` (client sets `uuid`) | `{accepted, duplicate}`. **Idempotent on `uuid`**, so a core that crashed mid-send can check the snapshot |
@@ -1323,6 +1323,15 @@ When to escalate: quit-source detection or SIGTERM handling misbehaves → Extra
   - `app:install` mid-turn → reattach.
 - **Risks.** Token-handoff races. Runtime clone correctness. Env leakage. The history/ring uuid
   dedupe.
+- **Carried from the Stage 1 CP1 review, to settle before CP2 freezes v1:**
+  - **One source of lifecycle.** `RunnerView` derives its lifecycle from the SDK messages it
+    reduces and ignores the host's `state` events. In-process they agree; a view rebuilt from a
+    snapshot after a `resync` has no messages to derive from and would sit in `starting`. Make the
+    host's `state` (which already counts queued turns) authoritative and seed the view from
+    `snapshot().state`.
+  - **Identity over the wire.** `ClaudeExecution` reads `cwd` and `startedAt` off the execution
+    object. Over a socket they come from `hello` (and belong in the manifest), not from properties.
+  - The in-process rings are 1 MiB (`localClaudeHandle.ts`); the host uses the 16 MiB default.
 - **Completion.** The manual matrix passes 3× in a row, there are no orphan processes after ⌥⌘Q,
   and typecheck and tests are green.
 - **Rollback.** Setting off means the Stage 1 in-process executor. Running hosts stay stoppable
