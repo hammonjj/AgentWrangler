@@ -89,6 +89,8 @@ export interface AttemptRecord extends RecordBase {
   attemptId: string;
   n: number;
   mode: RoutingMode;
+  /** The repository policy the attempt ran under (`LoadedRepoPolicy.version`, #32); `default` when it had none. */
+  repoPolicyVersion?: string;
   routingConfidence?: string;
   assessment?: { dimensions: Record<string, { value: string; confidence: string }>; assessorVersion: string };
   requirement?: { tier: TierName; effort: EffortLevel };

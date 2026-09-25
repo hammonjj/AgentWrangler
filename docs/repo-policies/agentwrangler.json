@@ -1,0 +1,35 @@
+{
+  "v": 1,
+  "worktrees": {
+    "root": "../<repo>.aw",
+    "setup": [{ "link": "node_modules" }]
+  },
+  "verification": {
+    "typecheck": { "run": ["npm", "run", "typecheck"], "timeoutSec": 300 },
+    "unit": { "run": ["npm", "test"], "timeoutSec": 900 },
+    "build": { "run": ["npm", "run", "build"], "timeoutSec": 300 },
+    "missionDefault": ["typecheck", "unit"]
+  },
+  "risk": [
+    {
+      "paths": ["src/shared/sessionProtocol.ts", "src/shared/messages.ts", "src/shared/webviewBridge.ts"],
+      "level": "critical",
+      "why": "wire protocol between the core, session hosts and the webviews"
+    },
+    {
+      "paths": ["src/claude/hookInstall.ts"],
+      "level": "high",
+      "why": "writes into ~/.claude/settings.json"
+    },
+    {
+      "paths": ["src/orchestration/store/**", "src/core/session/sessionRegistry.ts", "src/shared/settings.ts"],
+      "level": "high",
+      "why": "persisted formats read back after an upgrade"
+    }
+  ],
+  "exclusive": [],
+  "finish": {
+    "default": "merge-local",
+    "gate": ["typecheck", "unit", "build"]
+  }
+}

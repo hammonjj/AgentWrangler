@@ -422,6 +422,8 @@ export interface ExecutionAttempt {
   taskId: string;
   n: number;
   routingDecisionId?: string;
+  /** The repository policy it ran under, frozen at launch (`LoadedRepoPolicy.version`, §13.6). */
+  repoPolicyVersion?: string;
   assignment: AgentAssignment;
   worktreeId?: string;
   state: AttemptState;

@@ -269,6 +269,25 @@ nothing, not zeroes.
 
   Codex's per-thread usage estimate (`account/usage/read`) is not used yet: it is unverified.
 
+## Repository policies (orchestration, not yet used)
+
+Orchestration (off by default, `orchestration.enabled`) reads what it must not guess about a
+repository from `repos/<repo-id>.json` under the app's support folder: where worktrees go and how
+they are set up, the verification commands, risky paths, exclusive resources and how a mission
+finishes. Nothing is written into the repository. `repo-id` is the primary checkout's folder name
+plus a hash of its git common directory, so every worktree of a repository shares one policy.
+
+- Commands are argv arrays (`["npm", "test"]`), never shell strings. A model can name a command
+  (`command:unit`) but never add one.
+- A file is laid over the defaults field by field. With no file: no verification commands (results
+  are `unverified`), no risk paths, worktrees in `../<repo>.aw`, finish by merging locally.
+- A file with any error is ignored whole, with each error's path in the log, never half-applied.
+- Each attempt records the policy version it ran under (`default`, or `v1-<hash>` of the
+  effective policy).
+
+The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy is
+`docs/repo-policies/agentwrangler.json`. Until the Preferences page for it exists, edit the JSON file by hand.
+
 ## From a terminal: `aw`
 
 `npm run cli:install` puts an `aw` command on your `PATH` (a copy of `bin/aw`, so it keeps working if the checkout goes). It runs the CLI bundled inside the installed app, using the app's own runtime, so it needs no Node and always matches the installed build.
