@@ -98,6 +98,11 @@ export class HostClient {
   readonly startedAt: number;
   hello?: HelloResult;
 
+  /** A host runs one `Query` for its whole life, across core restarts: its id names the execution. */
+  get executionId(): string {
+    return this.opts.hostId;
+  }
+
   private peer?: NdjsonPeer;
   private socket?: net.Socket;
   /** The host's state as this client knows it: the last snapshot, plus every event since. */

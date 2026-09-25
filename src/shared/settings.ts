@@ -249,6 +249,17 @@ export const SETTINGS: SettingSpec[] = [
       'Show internal and subagent Codex sessions as separate rows for debugging. Main conversations always summarize linked workers in the Subagents column.',
   },
 
+  // ---- Telemetry ----
+  {
+    key: 'telemetry.enabled',
+    label: 'Record per-turn usage',
+    group: 'Telemetry',
+    type: 'boolean',
+    default: true,
+    description:
+      'Keep a local record of each turn in the conversations Agent Wrangler runs: models used, tokens, estimated cost, effort, durations, tool counts and time spent waiting on you. Metadata only, never what was said. It stays on this machine, in the app\'s data folder under orchestration/telemetry, and nothing is sent anywhere. Delete the folder to remove it. Off records nothing.',
+  },
+
   // ---- Plan usage ----
   {
     key: 'showUsage',

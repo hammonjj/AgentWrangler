@@ -53,6 +53,11 @@ import { createRunnerState, noteBlock, reduceRunnerMessage, type RunnerBlocksSta
 export interface ClaudeExecution {
   readonly cwd: string;
   readonly startedAt: number;
+  /**
+   * Which `Query` this is: the host id for a hosted session, a random id for
+   * an in-process one. Cumulative usage totals belong to one execution.
+   */
+  readonly executionId?: string;
   snapshot(): HostSnapshot;
   subscribe(fromSeq: number, listener: (event: HostEvent) => void): Disposable;
   start(): void;
@@ -756,8 +761,9 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
       this.interruptTimer = undefined;
       this.setLifecycle(turnEnd.queued > 0 ? 'running' : 'idle');
       this.setComposer({ busy: turnEnd.queued > 0, queued: turnEnd.queued });
-      // The SDK's `result`, untranslated: usage, cost, turns, timings, stop reason.
-      this.emitTurnEnd(msg);
+      // The SDK's `result`, untranslated: usage, cost, turns, timings, stop
+      // reason. Its totals are cumulative for this execution only.
+      this.emitTurnEnd(msg, this.exec.executionId);
     }
   }
 

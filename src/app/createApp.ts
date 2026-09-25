@@ -52,6 +52,9 @@ import { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import { LaunchDefaults } from '../core/launchDefaults';
 import { createOrchestration } from '../orchestration';
+import { TelemetryLog } from '../core/telemetry/telemetryLog';
+import { TELEMETRY_ENABLED_KEY, TELEMETRY_PRICES_KEY, TurnTelemetry } from '../core/telemetry/turnTelemetry';
+import type { PriceTable } from '../core/telemetry/turnUsage';
 import { HostSupervisor } from '../core/session/hostSupervisor';
 import { shouldAutoResume } from '../core/session/resumePolicy';
 import {
@@ -476,6 +479,22 @@ export function createApp(host: HostServices): AgentWranglerApp {
     log,
   });
   host.subscribe(orchestration);
+
+  // Per-turn usage for every session AW runs (#27): local JSONL, metadata only,
+  // on by default and switched off by `telemetry.enabled`.
+  const turnTelemetry = new TurnTelemetry({
+    sessions,
+    log: new TelemetryLog(path.join(host.dataDir, 'orchestration', 'telemetry')),
+    enabled: () => host.settings.get<boolean>(TELEMETRY_ENABLED_KEY, true) !== false,
+    prices: () => {
+      const table = host.settings.get<unknown>(TELEMETRY_PRICES_KEY, undefined);
+      return table && typeof table === 'object' ? (table as PriceTable) : undefined;
+    },
+    appliedEffort: (id) => provider.appliedEffort(id),
+    registry: sessionRegistry,
+    logLine: log,
+  });
+  host.subscribe(turnTelemetry);
   /** The permission cards a runner shows as still pending, oldest first. */
   const hostedPermissions = (handle: RunnerView) =>
     handle.blocks.filter(

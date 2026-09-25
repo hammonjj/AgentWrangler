@@ -216,6 +216,46 @@ including streaming replies, interruption, and approval decisions.
   - **Every provider, not just Claude.** It used to be Claude-only, which left *Archive* — a hide, not a stop — as the only thing you could do to a Codex row you were finished with. The two real conditions are the ones above and they answer for any provider: a Codex thread this window runs has no pid of its own (one app-server serves every thread) and is closed by releasing it, and a Codex conversation running somewhere else has neither a pid nor a handle and correctly does not offer the item.
 - The menu carries the same actions (refresh, new conversation, open conversation, open a conversation in its own tab, rename a conversation, go to where a session runs, resume, copy id, reveal transcript, pause all agents, resume all paused agents, pause or resume one agent, install/remove status hooks, connect or disconnect Discord).
 
+## Usage records (telemetry)
+
+Every conversation Agent Wrangler runs, Claude or Codex, gets one line per finished turn in
+`orchestration/telemetry/YYYY-MM.jsonl` under the app's support folder. Each line records:
+
+- the models used, and tokens per model (input, output, cache read and write, thinking);
+- the estimated cost and what it is based on;
+- the effort requested and the effort applied;
+- the permission mode;
+- durations;
+- tool calls, counted by name;
+- how many permission asks there were, and how long the turn waited on you.
+
+**Metadata only.** Nothing you or the agent wrote is recorded: no prompts, no replies, no tool
+inputs, no file contents. Nothing leaves the machine. The *Record per-turn usage* setting
+(`telemetry.enabled`, on by default) switches it off. Delete the folder to remove what was
+recorded.
+
+- **How the numbers are worked out.** Claude reports usage as running totals for the process
+  that runs the conversation, so a turn's figure is the difference from the previous turn.
+  - **Totals restart.** A resume or a move to a new session host starts a new set of totals.
+    `/clear` resets them.
+  - **Zeroes are no data.** A crashed session's last report can be all zeroes. That turn
+    records no usage, and nothing is subtracted.
+  - **A turn is recorded once.** A reattach replays the last turn; that turn is not recorded
+    twice.
+  - **Turns while Agent Wrangler was quit** are covered by the next recorded turn, which is
+    marked `coversGap`.
+- **Where each agent falls short** (a missing figure is left out, never written as 0):
+
+  | | Claude Code | Codex |
+  |---|---|---|
+  | Tokens | per model, including subagents and compaction | per thread (`thread/tokenUsage/updated`); input includes the cached part |
+  | Thinking tokens | where the CLI records them | reasoning tokens |
+  | Cost | Claude Code's own estimate (`costBasis: harness-estimate`). On a subscription this is what the tokens would have cost through the API, not a bill | none reported. Optional per-model prices in the `telemetry.prices` setting give `costBasis: price-table`; otherwise the cost is left out |
+  | Applied effort | from the status hooks (`effort.level`), once hooks are installed | not reported |
+  | Time to first token | reported | not reported |
+
+  Codex's per-thread usage estimate (`account/usage/read`) is not used yet: it is unverified.
+
 ## From a terminal: `aw`
 
 `npm run cli:install` puts an `aw` command on your `PATH` (a copy of `bin/aw`, so it keeps working if the checkout goes). It runs the CLI bundled inside the installed app, using the app's own runtime, so it needs no Node and always matches the installed build.

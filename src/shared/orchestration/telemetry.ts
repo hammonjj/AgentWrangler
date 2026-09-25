@@ -51,7 +51,12 @@ export interface TurnRecord extends RecordBase {
   sessionId: string;
   harness: HarnessId;
   source: ModelSourceId;
+  /** Empty, with `usageUnknown` set, when the turn's usage could not be worked out. */
   modelsUsed: Record<string, ModelTurnUsage>;
+  /** Why this turn has no usage (zeroed totals, totals that went down, nothing reported). */
+  usageUnknown?: string;
+  /** The turn's estimated cost, when there is one (`costBasis` says from what). */
+  costUsd?: number;
   effort: { requested?: string; applied?: string };
   permissionMode?: string;
   durationMs?: number;

@@ -63,8 +63,8 @@ export abstract class SessionViewBase {
     return this.live((e) => e.type === 'reset' && listener());
   }
 
-  onTurnEnd(listener: (raw: unknown) => void): Disposable {
-    return this.live((e) => e.type === 'turnEnd' && listener(e.raw));
+  onTurnEnd(listener: (raw: unknown, segment?: string) => void): Disposable {
+    return this.live((e) => e.type === 'turnEnd' && listener(e.raw, e.segment));
   }
 
   protected emitAppend(blocks: ConvBlock[]): void {
@@ -87,8 +87,8 @@ export abstract class SessionViewBase {
     this.viewLog.push({ type: 'reset' });
   }
 
-  protected emitTurnEnd(raw: unknown): void {
-    this.viewLog.push({ type: 'turnEnd', raw });
+  protected emitTurnEnd(raw: unknown, segment?: string): void {
+    this.viewLog.push(segment === undefined ? { type: 'turnEnd', raw } : { type: 'turnEnd', raw, segment });
   }
 
   protected disposeView(): void {

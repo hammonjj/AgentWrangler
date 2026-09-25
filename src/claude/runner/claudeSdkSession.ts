@@ -94,6 +94,8 @@ const SENT_MEMORY = 500;
 export class ClaudeSdkSession {
   readonly cwd: string;
   readonly startedAt = Date.now();
+  /** This `Query`'s identity: usage totals on its `result`s are cumulative within it. */
+  readonly executionId = randomUUID();
 
   private readonly log: SeqLog<HostEvent>;
   private snap: HostReplayState = emptyHostState();
