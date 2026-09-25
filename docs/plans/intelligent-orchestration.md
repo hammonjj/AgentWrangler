@@ -1967,6 +1967,64 @@ is handed that promise), never before step 2, so it sees true session states. Th
    acquire again.
 7. Rebuild the reconstructible state (§7.3), then let the scheduler take one step.
 
+**As built (#33, `src/orchestration/engine/`).**
+
+- **One table, two readers.** `sessionVerdict` is the table above as a pure function over
+  (registry record, handle). The `TaskRunner` reads it live, on every handle event and every
+  executor change, and at start-up. The only difference is `turnEnded`. Live, an idle session
+  counts as finished only once a turn of the attempt has been seen to end. At recovery that is
+  assumed, since the turn may have ended while the core was away. A finished-looking session
+  must also stay finished for `settleMs` (2 s): a background task or a follow-up can start
+  another turn straight after one ends.
+- **A8 is on the handle.** `SessionHandle.backgroundTasks` (Claude: from the host snapshot's
+  `background_tasks_changed`; Codex: undefined, read as none). #60 can use the same field.
+- **Write-ahead.** The attempt is saved `launching` before `harness.launch`, with the task
+  already `running`, its worktree `in-use` and, for Claude, its pre-assigned session id. That
+  makes `running → needs-human` the path out of a crash, which `queued` has no edge for. If
+  launch throws, the attempt becomes `failed` (`launch-failed`).
+- **Allow and deny rules.** An allow rule approves every argument after its prefix. So the
+  worktree `git` list leaves out `grep` (`-O<cmd>` runs a program) and `diff`, `log` and `show`
+  (`--output=<file>` writes anywhere); those are left to the mode. Denies match by prefix too,
+  so `env git push` is not caught by `Bash(git push:*)`. It is not approved either, and falls to
+  the mode. For Claude the rules are a strong guard, not a sandbox.
+- **Finishing.** The core commits whatever the attempt left (`WorktreeManager.commitAll`), for
+  both harnesses. It stages everything and then unstages intact setup artifacts: an exclude
+  pathspec naming an ignored path fails the whole `git add`. The commit runs with no hooks at
+  all (`core.hooksPath=/dev/null`, since `--no-verify` skips only two, and a relative hooks
+  path such as Husky's points into the tree the agent wrote) and without signing. Then it
+  records git numbers
+  (`diffStats`). With no verification until #35, `succeeded` means "finished, unverified". The
+  attempt passes `finishing → verifying → succeeded`, and the task goes
+  `running → verifying → needs-human` for the user to accept. Accepting commits anything done
+  after the attempt (flagged `userEditedBranch`), moves the task to `done` with
+  `acceptedBy: 'user'` and the mission to `review`, and ends the session. An attempt with no
+  changed files fails as `empty`. One whose last seen turn was an error result fails with
+  §15.1's category (`capacity`, `budget`, `context` or `infra`).
+- **Resume and Retry.** Resume creates attempt n+1 with `assignment.mode: 'continue'`, the same
+  session id (`resume`, so #4's orphan sweep runs first), the same worktree and `resumeOf`. The
+  interrupted attempt is never reopened. Retry fresh ends the old session, retains its tree,
+  and cuts `t1-a<n>` from the mission base. `autoRecover` resumes at most once per interrupted
+  attempt (`autoResumed`), and never after `host lost` or `open-elsewhere`.
+- **`userIntervened`.** Every send the orchestrator makes carries a client message id
+  (`AttemptLaunch.promptId`; the Claude adapter now sends the prompt itself). A Claude turn
+  whose `user_message_uuid(s)` name another id was the user's. Codex echoes no id, so there a
+  turn beyond the number of sends is the tell. An answered ask counts too (§16.3). `tookOver`
+  is set when the session is stopped by anyone but the orchestrator.
+- **A prompt lost to an early quit.** The first send is not awaited, as `initialPrompt` never
+  was. So a core that quits within a moment of launching can let go of the session before the
+  prompt reached its host, and the reattached session then waits in `starting` with nothing to
+  do. A reattached watcher checks once, after the handle leaves `connecting`. If the session is
+  still `starting` with no turn seen, it sends the prompt again under its original client
+  message id. A host that already has the message answers `duplicate`.
+- **Origin write-back.** A record found without its `origin` gets it back through
+  `SessionRegistry.restoreOrigin`, which only fills an absent one.
+- **G1 and G2.** #15 was closed without flipping `experimental.sessionHosts`. So a Claude
+  attempt is refused while it is off (`HOSTS_REQUIRED`), rather than launched hosted regardless.
+  Codex attempts are not affected. `npm run app:install` is a hard deny (G2 as proposed).
+- **Launcher.** A *Tasks* button beside *+ New* (only with `orchestration.enabled`) opens quick
+  picks: run a new task on the launcher's route, or act on one (`TaskRunner.actions`). #34
+  replaces these with the missions view and task strip.
+
 ### 23.4 Versioning
 
 Mission files carry `v` and are migrated on load by pure functions with fixture tests. Routing

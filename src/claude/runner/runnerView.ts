@@ -235,6 +235,11 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     this.linkSub = this.exec.onLink?.((state) => this.onLink(state));
   }
 
+  /** Background tasks the session last reported (A8): a turn that ended with any running is not the end of the work. */
+  get backgroundTasks(): number {
+    return backgroundTaskCount(this.exec.snapshot().latest);
+  }
+
   /** Runs in a session host rather than in this process. */
   get hosted(): boolean {
     return this.exec.detach !== undefined;

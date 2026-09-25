@@ -147,6 +147,13 @@ export interface SessionHandle {
   readonly pendingQuestion: Extract<ConvBlock, { kind: 'question' }> | undefined;
   readonly pendingPlan: Extract<ConvBlock, { kind: 'plan' }> | undefined;
   /**
+   * Background work the agent still has running (`run_in_background` shells,
+   * subagents), which can start another turn after this one ends. "The turn is
+   * over" is not "the work is done" while this is above zero (orchestration
+   * plan §7.5, ask A8). Undefined: this kind of session does not report it.
+   */
+  readonly backgroundTasks?: number;
+  /**
    * The row this session shows as before the store has one of its own, when
    * the handle can describe itself (Codex). Undefined means the caller builds it.
    */

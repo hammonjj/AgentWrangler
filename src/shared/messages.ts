@@ -48,6 +48,8 @@ export type HostToDashboard =
        * "whatever Claude Code picks".
        */
       launcher?: {
+        /** Orchestration is on: show the Tasks button (#33). */
+        tasks?: boolean;
         models: ModelChoice[];
         provider: 'anthropic' | 'openai';
         anthropic: { model: string; effort: string };
@@ -125,6 +127,8 @@ export type DashboardToHost =
   | { type: 'setDiscordNotifications'; value: boolean }
   /** Start a Claude Code conversation in `cwd`, this window running it, and show the pane. */
   | { type: 'newConversation'; cwd: string; provider?: 'claude' | 'codex' }
+  /** The Tasks button: run a task in `cwd` on the launcher's route, or act on a running one (#33). */
+  | { type: 'taskMenu'; cwd: string; provider?: 'claude' | 'codex' }
   /** The launcher's dropdowns: the default a *new* conversation starts on. */
   | { type: 'setRunnerModel'; provider: 'anthropic' | 'openai'; model: string }
   | { type: 'setRunnerEffort'; provider: 'anthropic' | 'openai'; effort: string }

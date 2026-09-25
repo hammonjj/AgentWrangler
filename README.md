@@ -269,7 +269,38 @@ nothing, not zeroes.
 
   Codex's per-thread usage estimate (`account/usage/read`) is not used yet: it is unverified.
 
-## Repository policies (orchestration, not yet used)
+## Tasks (experimental)
+
+With *Run tasks in worktrees of their own* on (`orchestration.enabled`, off by default, read at
+start), the launcher has a **Tasks** button beside **+ New**. *Run a new task…* asks for an
+objective and acceptance criteria, then runs one agent on the launcher's model and effort in a
+new worktree and branch of the chosen folder's repository:
+
+- **Where.** `../<repo>.aw/<task-slug>/t1` on branch `aw/<task-slug>/t1`, set up from the
+  repository policy (below). The checkout you work in is never touched. A fresh retry gets
+  `t1-a2`, and the earlier tree is kept for comparison.
+- **How it may work.** A Claude task runs in `auto` mode, or your default mode if that is
+  stricter, never `bypassPermissions`. It may run the policy's verification commands and `git`
+  inside its worktree without asking. It is always denied `git push`, `git worktree`,
+  `git checkout`/`switch`/`rebase`, `npm run app:install`, and edits to the primary checkout.
+  A Codex task runs sandboxed to its worktree (`workspace-write`, `on-request`) and does not
+  commit.
+- **How it ends.** When the agent's turn is over, it is idle, nothing is pending and nothing
+  runs in the background. Agent Wrangler then commits anything left uncommitted on the task's
+  branch and shows a notification. Click it (or *Tasks → the task → Open the diff*) to read
+  the diff. There is no verification yet, so the task waits for you: *Accept the result*,
+  *Retry fresh* or *Cancel*. Accepting keeps the branch for you to merge. An attempt that
+  changed nothing, or whose last turn ended in an error, fails and waits the same way.
+- **Restarts.** A task's conversation is an ordinary row in the table. It survives quitting and
+  reinstalling (Claude tasks need *Keep conversations running when Agent Wrangler quits*, and
+  are refused without it). On relaunch the task is picked up where it is. If its session was
+  lost (its host was killed, say), the task offers *Resume the attempt*, which continues the
+  same session id, and *Retry fresh*. It never resumes by itself.
+- **Records.** Missions are `orchestration/missions/<id>.json` under the app's support folder.
+  Each attempt adds one `attempt` line to the usage records, with its route, timings, usage
+  summed from its turns, git numbers and flags. Like the turn lines, it holds metadata only.
+
+## Repository policies (orchestration)
 
 Orchestration (off by default, `orchestration.enabled`) reads what it must not guess about a
 repository from `repos/<repo-id>.json` under the app's support folder: where worktrees go and how

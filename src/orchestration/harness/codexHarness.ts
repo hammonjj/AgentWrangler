@@ -61,7 +61,7 @@ export class CodexHarness implements AgentHarness {
       ...(req.policy ? { policy: req.policy } : {}),
     });
     if (req.resume && effort) await handle.setEffort(effort);
-    await handle.send(req.prompt);
+    await handle.send(req.prompt, undefined, req.promptId ? { clientMessageId: req.promptId } : undefined);
     return handle;
   }
 }

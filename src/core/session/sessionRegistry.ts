@@ -182,6 +182,17 @@ export class SessionRegistry {
     this.patch(sessionId, { launch: { ...r.launch, applied: { ...r.launch.applied, ...applied } } });
   }
 
+  /**
+   * Give a record back the `origin` it lost (a record re-created at adoption,
+   * #72). Only fills an absent one: an origin is never replaced, so this
+   * cannot move a session from one owner to another.
+   */
+  restoreOrigin(sessionId: string, origin: unknown): void {
+    const r = this.get(sessionId);
+    if (!r || r.origin !== undefined || origin === undefined) return;
+    this.patch(sessionId, { origin });
+  }
+
   forget(sessionId: string): void {
     const id = sessionId.toLowerCase();
     this.write(this.all().filter((r) => r.sessionId.toLowerCase() !== id));

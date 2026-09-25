@@ -81,6 +81,8 @@ export interface ConversationLauncher {
   newConversation(cwd: string, provider?: 'claude' | 'codex'): Promise<unknown>;
   /** Run the folder dialog. `undefined` = cancelled, and the dropdown keeps what it had. */
   browseForProject(): Promise<string | undefined>;
+  /** "Run as task" and the running tasks (#33). Absent while orchestration is off, and then there is no Tasks button. */
+  taskMenu?(cwd: string, provider: 'claude' | 'codex'): Promise<void>;
 }
 
 export class DashboardHost {
@@ -240,6 +242,7 @@ export class DashboardHost {
       },
       conversationSections: this.pins.names,
       launcher: {
+        tasks: this.launcher.taskMenu !== undefined,
         models: this.models.value,
         provider: this.settings.get<'anthropic' | 'openai'>('runner.provider', 'anthropic'),
         anthropic: {
@@ -341,6 +344,9 @@ export class DashboardHost {
         break;
       case 'newConversation':
         void this.launcher.newConversation(m.cwd, m.provider);
+        break;
+      case 'taskMenu':
+        void this.launcher.taskMenu?.(m.cwd, m.provider === 'codex' ? 'codex' : 'claude');
         break;
       case 'browseProject':
         void this.browseProject();

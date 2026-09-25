@@ -47,6 +47,12 @@ export interface AttemptLaunch {
   /** The first message: the attempt's prompt. */
   prompt: string;
   /**
+   * The prompt's client message id (a fresh UUID), so the attempt can tell
+   * the turns its own sends caused from the user's (§16.3, ask A9).
+   * Minted by the handle when absent.
+   */
+  promptId?: string;
+  /**
    * What runs it, from the routing decision. `harness` must be this harness;
    * `effortNative` is sent as is, and `none` means "send no effort".
    */
