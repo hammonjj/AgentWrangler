@@ -458,20 +458,6 @@ export interface WorktreeAssignment {
   removedAt?: Millis;
 }
 
-/**
- * One setup step applied to a new worktree, from repository policy (§13.2,
- * §13.6). Paths are relative to the checkout; a link or copy takes its source
- * from the primary checkout. Steps run again when a half-created tree is
- * finished, so each must be safe to repeat.
- */
-export type WorktreeSetupStep =
-  /** Symlink `<tree>/<link>` to `<primary>/<link>` (e.g. `node_modules`). */
-  | { link: string }
-  /** Copy the file `<primary>/<copy>` into the tree, unless it is already there (e.g. an ignored `.env`). */
-  | { copy: string }
-  /** Run a command in the tree. Only an argv that repository policy allowlists exactly. Never a shell. */
-  | { run: string[]; timeoutSec?: number };
-
 // ---------------------------------------------------------------------------
 // Verification (§14)
 // ---------------------------------------------------------------------------

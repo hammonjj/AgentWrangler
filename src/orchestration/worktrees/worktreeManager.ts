@@ -19,7 +19,8 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Millis, WorktreeAssignment, WorktreeSetupStep, WorktreeState } from '../../shared/orchestration/types';
+import type { SetupStep as WorktreeSetupStep } from '../../shared/orchestration/repoPolicy';
+import type { Millis, WorktreeAssignment, WorktreeState } from '../../shared/orchestration/types';
 import { transitionWorktree } from '../domain/lifecycles';
 import { lsofProcessesUsing, nodeExec, type Exec, type ExecResult } from './exec';
 import {
@@ -118,9 +119,13 @@ export interface WorktreeManagerOptions {
   repoRoot: string;
   /** Repo policy's `worktrees.root`; default `../<repo>.aw`. */
   root?: string;
-  /** Repo policy's `worktrees.setup`. */
+  /** Repo policy's `worktrees.setup`. Steps re-run when a half-created tree is finished, so each must be safe to repeat. */
   setup?: WorktreeSetupStep[];
-  /** Commands a `run` step may use, as exact argv. */
+  /**
+   * Commands a `run` step may use, as exact argv. The caller derives it from
+   * the user's own repo policy; anything else (a policy changed mid-mission,
+   * a planner's suggestion) is refused.
+   */
   allowedCommands?: string[][];
 }
 

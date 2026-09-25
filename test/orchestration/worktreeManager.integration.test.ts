@@ -7,7 +7,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { WorktreeAssignment, WorktreeSetupStep } from '../../src/shared/orchestration/types';
+import type { SetupStep as WorktreeSetupStep } from '../../src/shared/orchestration/repoPolicy';
+import type { WorktreeAssignment } from '../../src/shared/orchestration/types';
 import { nodeExec, type Exec } from '../../src/orchestration/worktrees/exec';
 import { WorktreeError, WorktreeManager, canonicalPath, type WorktreeFailureCategory } from '../../src/orchestration/worktrees/worktreeManager';
 
