@@ -1215,6 +1215,24 @@ up.
   would link `node_modules`, as CLAUDE.md does by hand.
 - A single-task mission has no mission branch; its task branch is the result.
 
+**As built (#31, `src/orchestration/worktrees/`).** `WorktreeManager.open` accepts only a primary
+checkout, and only a root that is neither inside the checkout nor contains it. `plan` returns an
+assignment in `creating`, then `create` records it before any git work and returns it `ready`.
+Running `create` again on the same assignment finishes whatever was left: nothing yet made, a
+branch made but no tree, a tree git left locked `initializing` (its partial checkout is deleted
+and redone, since nothing ran in it), or a tree without setup. `reconcile` is §23.3 step 5. It
+also reports **commits made outside any attempt**: each assignment carries `lastKnownHead` (its
+base, then the head each time an attempt lets go, or `noteHead` after a merge), and in `ready` or
+`retained` a branch that has moved past it, or rewritten it, is flagged.
+`remove(a, { mergedInto })` checks everything before it acts, and refuses if any check fails:
+an attempt holds the tree, a process has its working directory there (`lsof`; "cannot tell"
+counts as in use), dirty, locked, not ours, or not reachable from `mergedInto`. The branch goes
+by `update-ref -d <branch> <checked-head>`, not `branch -d`, because `-d` compares with the
+primary checkout's HEAD rather than the mission branch. Setup links are absolute symlinks. A
+`node_modules/` ignore rule (trailing slash) does not match a symlink, so in such repos the link
+shows as untracked and an agent's `git add -A` would commit it. `remove` treats intact setup
+artifacts as clean. #32 may want to warn about that rule.
+
 ### 13.3 Integration
 
 1. Verification passes (§14) on the task branch.

@@ -19,6 +19,7 @@ import { ClaudeStructuredCompletion, type CompletionQueryFn, type StructuredComp
 import { ClaudeCodeHarness } from './harness/claudeCodeHarness';
 import { CodexHarness } from './harness/codexHarness';
 import type { AgentHarness } from './harness/types';
+import { RepoPolicyStore, repoPoliciesDir } from './policy/repoPolicyStore';
 import { MissionStore } from './store/missionStore';
 
 /** The setting that switches orchestration on. Not in Preferences until it does something (#33). */
@@ -51,6 +52,8 @@ export interface Orchestration extends Disposable {
   readonly harnesses?: ReadonlyMap<HarnessId, AgentHarness>;
   /** One-shot structured calls (§6.1), when enabled and given a way to reach Claude. */
   readonly completion?: StructuredCompletion;
+  /** Per-repository policies (§13.6), when enabled. Read by the task runner (#33) at each launch. */
+  readonly repoPolicies?: RepoPolicyStore;
   /** Resolves when the startup pass is over (immediately when disabled). */
   readonly ready: Promise<void>;
 }
@@ -81,5 +84,6 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
   const completion = deps.completion
     ? new ClaudeStructuredCompletion({ ...deps.completion, log: (m) => deps.log(`orchestration: ${m}`) })
     : undefined;
-  return { enabled: true, store, harnesses, completion, ready, dispose: () => undefined };
+  const repoPolicies = new RepoPolicyStore(repoPoliciesDir(deps.dataDir), { log: (m) => deps.log(`orchestration: ${m}`) });
+  return { enabled: true, store, harnesses, completion, repoPolicies, ready, dispose: () => undefined };
 }

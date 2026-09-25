@@ -1,4 +1,4 @@
-import type { UsageError, UsageSnapshot, UsageState } from '../shared/usage';
+import { carryMissingWindows, type UsageError, type UsageSnapshot, type UsageState } from '../shared/usage';
 import { maxUsagePercent, usageIntervalSeconds } from './autoPause';
 import type { ConfigGetter } from './config';
 import { Emitter, type Disposable, type Listener } from './events';
@@ -38,6 +38,7 @@ export class UsageService implements Disposable {
   private inFlight = false;
   private disposed = false;
   private jitter: () => Promise<void>;
+  private carriedLogged = '';
 
   constructor(
     private read: UsageReader,
@@ -132,7 +133,10 @@ export class UsageService implements Disposable {
       if (this.disposed) return;
       if (res.ok) {
         this.failures = 0;
-        const snapshot = this.withCarriedSpend(res.snapshot);
+        // Straight after launch nothing is held yet, but the cache remembers the last session.
+        const prev = this.state.last ?? (await this.cache.read());
+        if (this.disposed) return;
+        const snapshot = this.withCarriedWindows(prev, this.withCarriedSpend(res.snapshot));
         this.state = { last: snapshot };
         await this.cache.write(snapshot);
       } else {
@@ -175,6 +179,22 @@ export class UsageService implements Disposable {
     if (!carried) return snapshot;
     this.log('usage: response did not report extra usage; keeping the last figure');
     return { ...snapshot, spend: carried };
+  }
+
+  /**
+   * Keep the cards a read left out, the same way `withCarriedSpend` keeps the
+   * credits: a response that lists only the model-scoped week says nothing
+   * about the session or the whole week, so they keep their last figure until
+   * their reset (see `carryMissingWindows`). Auto-pause reads the carried
+   * numbers too, which is right: until a window resets its percent only climbs.
+   */
+  private withCarriedWindows(prev: UsageSnapshot | undefined, snapshot: UsageSnapshot): UsageSnapshot {
+    const out = carryMissingWindows(prev, snapshot, Date.now());
+    const kept = out.windows.filter((w) => w.readAtMs !== undefined).map((w) => w.id).join(', ');
+    // Once per change, not once per poll.
+    if (kept && kept !== this.carriedLogged) this.log(`usage: response did not report ${kept}; keeping the last figures`);
+    this.carriedLogged = kept;
+    return out;
   }
 
   /** Use the shared cache when it is fresher than the poll interval. True when it was. */
