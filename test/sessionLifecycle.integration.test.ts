@@ -27,7 +27,7 @@ import { HostHarness, alive, argsOf, ppidOf, sessionId, sleep, texts, until, unt
  * covers. The Stage 3 basics (survive a detach, reattach, ask after reattach,
  * token, file modes) are in `sessionHost.integration.test.ts`.
  *
- * The orphan sweep rows are `todo` until Stage 4 (#15) adds the sweep.
+ * The orphan sweep rows are in `sessionHostRecovery.integration.test.ts`.
  */
 
 const h = new HostHarness();
@@ -223,7 +223,7 @@ describe('crashes of the host and the agent', () => {
     await until(() => view.lifecycle === 'error');
     await until(() => ppidOf(m.agentPid!) === 1, 5000, 'the agent to be reparented');
     expect(alive(m.agentPid)).toBe(true);
-    h.leaveRunning(m.agentPid!); // until the sweep exists (#15), cleanup ends it
+    h.leaveRunning(m.agentPid!); // no sweep here (see below); cleanup ends it
     // Its manifest names it, with the start time the sweep's identity check needs.
     expect(h.manifest(id)).toMatchObject({ agentPid: m.agentPid });
     expect(h.manifest(id)?.agentStartTime).toBeTruthy();
@@ -251,11 +251,12 @@ describe('crashes of the host and the agent', () => {
     expect(fs.existsSync(path.join(h.runDir, `${m.hostId}.token`))).toBe(false);
   }, 30_000);
 
-  // The orphan sweep (#15) is covered in `sessionHostRecovery.integration.test.ts`
-  // (a SIGKILLed host's real orphan swept, then one process on the resumed id)
-  // and `orphanSweep.test.ts` (non-launchd owners never swept; stale and reused
-  // pids ignored; the sweep resolves only once the orphan has exited, and
-  // `RunnerService.resume` awaits it before the history is read).
+  // The orphan sweep (#15) is covered with real processes in
+  // `sessionHostRecovery.integration.test.ts`: a SIGKILLed host's orphan swept,
+  // then one process on the resumed id; a non-launchd owner never signalled and
+  // its resume refused; dead and reused pids ignored; a slow orphan waited for
+  // before `RunnerService.resume` reads the history. `orphanSweep.test.ts`
+  // covers the same branches with fakes, plus SIGKILL escalation.
 });
 
 describe('ending agents (§7.1)', () => {

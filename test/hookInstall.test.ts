@@ -121,6 +121,16 @@ describe('refreshPermissionScript', () => {
   });
 });
 
+/**
+ * This process's environment minus `AGENTWRANGLER_HOSTED`. An agent running
+ * `npm test` from inside a session host inherits it, and the script would take
+ * its hosted path; the unhosted cases must not depend on who runs them.
+ */
+function unhostedEnv(): NodeJS.ProcessEnv {
+  const { AGENTWRANGLER_HOSTED: _hosted, ...env } = process.env;
+  return env;
+}
+
 describe('permissionScript', () => {
   const script = permissionScript();
 
@@ -168,7 +178,7 @@ describe('permissionScript', () => {
         tool_input: { command: 'ls' },
       });
 
-      const child = cp.spawn('/bin/sh', [file], { cwd: dir });
+      const child = cp.spawn('/bin/sh', [file], { cwd: dir, env: unhostedEnv() });
       let stdout = '';
       child.stdout.on('data', (d) => (stdout += String(d)));
       child.stdin.end(`${payload}\n`);
@@ -246,7 +256,7 @@ describe('permissionScript', () => {
     try {
       const file = path.join(dir, 'permission-hook.sh');
       await fsp.writeFile(file, script, { encoding: 'utf8', mode: 0o755 });
-      const child = cp.spawn('/bin/sh', [file], { cwd: dir });
+      const child = cp.spawn('/bin/sh', [file], { cwd: dir, env: unhostedEnv() });
       let stdout = '';
       child.stdout.on('data', (d) => (stdout += String(d)));
       child.stdin.end(`${JSON.stringify({ session_id: 'bbbbbbbb-2222-3333-4444-555555555555', hook_event_name: 'PermissionRequest' })}\n`);
