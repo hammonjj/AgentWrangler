@@ -13,6 +13,7 @@ import type { Disposable } from '../core/events';
 import type { LaunchDefaults } from '../core/launchDefaults';
 import type { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionRegistry } from '../core/session/sessionRegistry';
+import { RepoPolicyStore, repoPoliciesDir } from './policy/repoPolicyStore';
 import { MissionStore } from './store/missionStore';
 
 /** The setting that switches orchestration on. Not in Preferences until it does something (#33). */
@@ -37,6 +38,8 @@ export interface Orchestration extends Disposable {
   readonly enabled: boolean;
   /** The mission store, when enabled. */
   readonly store?: MissionStore;
+  /** Per-repository policies (§13.6), when enabled. Read by the task runner (#33) at each launch. */
+  readonly repoPolicies?: RepoPolicyStore;
   /** Resolves when the startup pass is over (immediately when disabled). */
   readonly ready: Promise<void>;
 }
@@ -58,5 +61,6 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
       // #33 reconciles these with the registry. Until then, say they exist.
       if (active.length > 0) deps.log(`orchestration: ${active.length} unfinished mission(s) on disk; nothing resumes them yet`);
     });
-  return { enabled: true, store, ready, dispose: () => undefined };
+  const repoPolicies = new RepoPolicyStore(repoPoliciesDir(deps.dataDir), { log: (m) => deps.log(`orchestration: ${m}`) });
+  return { enabled: true, store, repoPolicies, ready, dispose: () => undefined };
 }
