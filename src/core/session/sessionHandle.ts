@@ -22,8 +22,10 @@ import type { Disposable } from '../events';
 import type { ConversationHistory } from '../../claude/transcriptHistory';
 import type { BlockPatch, ComposerState, ConvBlock, ImageAttachment, PermissionModeName } from '../../shared/conversation';
 import type { AgentSession } from '../../shared/model';
+import type { SessionProvider } from '../../shared/harness';
 
-export type SessionProvider = 'claude' | 'codex';
+/** The harness a session runs in. Declared in `shared/harness.ts`, beside the model source it is not. */
+export type { SessionProvider };
 
 /**
  * `starting` until the agent is ready, then `idle`/`running` per turn; `ending`

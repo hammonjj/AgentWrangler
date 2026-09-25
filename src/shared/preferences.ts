@@ -8,6 +8,9 @@
  * only one thing in this window and nothing to address a message to.
  */
 
+import type { CapabilityCatalogView, ModelPolicyChange } from './orchestration/catalog';
+import type { SourceStatus } from './orchestration/sourceHealth';
+
 export type PreferencesToHost =
   /** The window has rendered and wants the current values. */
   | { type: 'ready' }
@@ -22,7 +25,37 @@ export type PreferencesToHost =
    * rather than only in a menu.
    */
   | { type: 'action'; id: SettingActionId }
+  /** A change to one model's tier or enabled flag, from Orchestration → tier map. */
+  | { type: 'modelPolicy'; change: ModelPolicyChange }
   | { type: 'close' };
+
+/** What Preferences → Orchestration shows: the catalog and each source's health. */
+export interface OrchestrationPrefsView {
+  catalog: CapabilityCatalogView;
+  sources: SourceStatus[];
+}
+
+/**
+ * A `modelPolicy` message's change, or nothing if it is not well formed. The
+ * host still checks the key and tier against the catalog; this only refuses
+ * shapes no Preferences window sends.
+ */
+export function modelPolicyChange(message: unknown): ModelPolicyChange | undefined {
+  if (!message || typeof message !== 'object') return undefined;
+  const m = message as { type?: unknown; change?: unknown };
+  if (m.type !== 'modelPolicy' || !m.change || typeof m.change !== 'object') return undefined;
+  const c = m.change as Record<string, unknown>;
+  if (typeof c.key !== 'string' || c.key === '') return undefined;
+  const out: ModelPolicyChange = { key: c.key };
+  if (c.tier === null || (typeof c.tier === 'string' && c.tier !== '')) out.tier = c.tier as string | null;
+  else if (c.tier !== undefined) return undefined;
+  if (typeof c.enabled === 'boolean') out.enabled = c.enabled;
+  else if (c.enabled !== undefined) return undefined;
+  if (c.reset === 'tier' || c.reset === 'enabled' || c.reset === 'all') out.reset = c.reset;
+  else if (c.reset !== undefined) return undefined;
+  if (out.tier === undefined && out.enabled === undefined && out.reset === undefined) return undefined;
+  return out;
+}
 
 /** The actions Preferences can invoke. A closed set: the host switches on it. */
 export type SettingActionId = 'connectDiscord' | 'testRemote' | 'disconnectDiscord';
@@ -46,7 +79,9 @@ export type HostToPreferences =
    */
   | { type: 'actionResult'; id: SettingActionId; ok: boolean; lines: string[]; busy?: false }
   /** The action has started; the button says so and cannot be pressed twice. */
-  | { type: 'actionBusy'; id: SettingActionId };
+  | { type: 'actionBusy'; id: SettingActionId }
+  /** The model catalog changed, or the window just opened. */
+  | { type: 'orchestration'; view: OrchestrationPrefsView };
 
 /**
  * What a `set` or `reset` should actually write, or nothing.

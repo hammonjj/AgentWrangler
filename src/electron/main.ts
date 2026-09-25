@@ -27,6 +27,7 @@ import { ControlServer, ensurePrivateDir, writeControlToken } from '../core/cont
 import { DictationSetupError, defaultModelPath } from '../core/dictation';
 import { shouldPreventAppSuspension } from '../core/menuBar';
 import { agentCount, quitIntentSource, quitPolicy, type QuitSource } from '../core/session/quitPolicy';
+import { sourceStatus } from '../shared/orchestration/sourceHealth';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { registerBundleScheme, serveBundles } from './bundleProtocol';
 import { installContextMenuEverywhere } from './contextMenu';
@@ -187,6 +188,22 @@ void app.whenReady().then(() => {
     parentWindow: () => window?.browserWindow,
     runAction: (id) => wrangler.runSettingAction(id),
     onDidChangeOpen: () => syncDock(),
+    // Orchestration → tier map (#29): the catalog, and each source's health
+    // from the same usage reads the dashboard cards use.
+    orchestration: {
+      view: () => ({
+        catalog: wrangler.models.catalog,
+        sources: [
+          sourceStatus('anthropic', wrangler.usage.usage, Date.now()),
+          sourceStatus('openai', wrangler.codexUsage.usage, Date.now()),
+        ],
+      }),
+      onDidChange: (listener) => {
+        const subs = [wrangler.models.onDidChange(listener), wrangler.usage.onDidChange(listener), wrangler.codexUsage.onDidChange(listener)];
+        return { dispose: () => subs.forEach((s) => s.dispose()) };
+      },
+      setPolicy: (change) => wrangler.models.setPolicy(change),
+    },
   });
 
   // ---- Windowless (playbook Stage 6) ----

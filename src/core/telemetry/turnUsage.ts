@@ -19,6 +19,7 @@
  * last `result`) records nothing.
  */
 import type { ModelTurnUsage } from '../../shared/orchestration/telemetry';
+import type { PriceTable } from '../../shared/orchestration/catalog';
 
 /** Running totals: per model, plus the overall cost where the agent reports one. */
 export interface UsageTotals {
@@ -194,8 +195,31 @@ function nonEmpty(model: string, u: ModelTurnUsage): Record<string, ModelTurnUsa
   return FIELDS.some((f) => (u[f] ?? 0) !== 0) ? { [model]: u } : {};
 }
 
-/** Per-million-token prices for models whose harness reports no cost (§16.4). User-supplied. */
-export type PriceTable = Record<string, { inPerMTok: number; outPerMTok: number; cacheReadPerMTok?: number }>;
+/** Per-million-token prices for models whose harness reports no cost (§16.4). User-supplied. Declared with the catalog. */
+export type { PriceTable };
+
+/**
+ * The limits a Claude `result` reports per model (`modelUsage[*].contextWindow`
+ * and `maxOutputTokens`), for the capability catalog. Empty when it reports none.
+ */
+export function claudeModelLimits(result: unknown): Record<string, { contextWindow?: number; maxOutputTokens?: number }> {
+  const out: Record<string, { contextWindow?: number; maxOutputTokens?: number }> = {};
+  const usage = (result as { modelUsage?: unknown } | null)?.modelUsage;
+  if (!usage || typeof usage !== 'object') return out;
+  for (const [model, raw] of Object.entries(usage as Record<string, unknown>)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const u = raw as Record<string, unknown>;
+    const contextWindow = num(u.contextWindow);
+    const maxOutputTokens = num(u.maxOutputTokens);
+    // A zero is "not reported", not a model that holds nothing.
+    const limits = {
+      ...(contextWindow ? { contextWindow } : {}),
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    };
+    if (Object.keys(limits).length > 0) out[model] = limits;
+  }
+  return out;
+}
 
 /**
  * An estimated cost from a price table, or undefined when a model used has no

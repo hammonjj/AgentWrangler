@@ -78,7 +78,7 @@ import { readConfig, type ConfigGetter } from '../core/config';
 import { DictationService } from '../core/dictation';
 import { FavouriteProjectsService } from '../core/favouriteProjects';
 import { HiddenProjectsService } from '../core/hiddenProjects';
-import { ModelCatalogService } from '../core/modelCatalog';
+import { CapabilityCatalog } from '../core/capabilityCatalog';
 import { MAX_NICKNAME_LENGTH, NicknameService } from '../core/nicknameService';
 import { PinService } from '../core/pinService';
 import { autoPauseDecision, maxUsagePercent } from '../core/autoPause';
@@ -147,7 +147,8 @@ export interface AgentWranglerApp {
   pins: PinService;
   nicknames: NicknameService;
   columns: ColumnPrefsService;
-  models: ModelCatalogService;
+  /** Every model the CLIs report, by capability, with AW's tier for each (#29). */
+  models: CapabilityCatalog;
   pause: PauseService;
   usage: UsageSource;
   codexUsage: UsageSource;
@@ -258,7 +259,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     codexKeepAlive ? hostConnector(codexHost) : () => getConfig().codexBinaryPath,
     log,
   );
-  const models = new ModelCatalogService(host.globalState);
+  const models = new CapabilityCatalog(host.globalState, host.settings);
+  host.subscribe(models);
   // Session hosts first (playbook §7.3 step 1): which sessions a previous run
   // left running in hosts that are still alive. Nothing may classify, resume
   // or adopt a session before this is known, or AW could end or double-resume
@@ -497,6 +499,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     sessions,
     log: new TelemetryLog(telemetryDir),
     onRecord: (record) => sessionUsage.add(record),
+    onModelLimits: (model, limits) => models.observe('anthropic', model, limits),
     enabled: () => host.settings.get<boolean>(TELEMETRY_ENABLED_KEY, true) !== false,
     prices: () => {
       const table = host.settings.get<unknown>(TELEMETRY_PRICES_KEY, undefined);

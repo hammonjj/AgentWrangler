@@ -460,10 +460,11 @@ describe('RunnerView over ClaudeSdkSession', () => {
     expect(fake.calls.supportedModels).toBe(1);
     // The valueless row is dropped, a blank display name falls back to the id,
     // and the CLI's "(recommended)" is replaced by the model it resolves to.
+    // The description rides along for the capability catalog.
     expect(session.composer.models).toEqual([
-      { value: 'default', label: 'Default (Sonnet 4.5)', resolved: 'claude-sonnet-4-5-20250929' },
-      { value: 'opus', label: 'Opus', resolved: undefined },
-      { value: 'haiku', label: 'haiku', resolved: undefined },
+      { value: 'default', label: 'Default (Sonnet 4.5)', resolved: 'claude-sonnet-4-5-20250929', description: 'x' },
+      { value: 'opus', label: 'Opus', resolved: undefined, description: 'x' },
+      { value: 'haiku', label: 'haiku', resolved: undefined, description: 'x' },
     ]);
 
     // init is only a retry point: answered once, it must not ask again.

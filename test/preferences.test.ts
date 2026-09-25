@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { settingUpdate, type PreferencesToHost } from '../src/shared/preferences';
+import { modelPolicyChange, settingUpdate, type PreferencesToHost } from '../src/shared/preferences';
 import { SETTINGS } from '../src/shared/settings';
 
 /**
@@ -73,5 +73,24 @@ describe('settingUpdate', () => {
         value: spec.default,
       });
     }
+  });
+});
+
+describe('modelPolicyChange', () => {
+  it('accepts the three shapes the tier map sends', () => {
+    expect(modelPolicyChange({ type: 'modelPolicy', change: { key: 'anthropic:x', tier: 'basic' } })).toEqual({ key: 'anthropic:x', tier: 'basic' });
+    expect(modelPolicyChange({ type: 'modelPolicy', change: { key: 'anthropic:x', tier: null } })).toEqual({ key: 'anthropic:x', tier: null });
+    expect(modelPolicyChange({ type: 'modelPolicy', change: { key: 'k', enabled: false } })).toEqual({ key: 'k', enabled: false });
+    expect(modelPolicyChange({ type: 'modelPolicy', change: { key: 'k', reset: 'all' } })).toEqual({ key: 'k', reset: 'all' });
+  });
+
+  it('refuses anything else', () => {
+    expect(modelPolicyChange({ type: 'set', change: { key: 'k', tier: 'basic' } })).toBeUndefined();
+    expect(modelPolicyChange({ type: 'modelPolicy', change: { key: '', tier: 'basic' } })).toBeUndefined();
+    expect(modelPolicyChange({ type: 'modelPolicy', change: { key: 'k' } })).toBeUndefined();
+    expect(modelPolicyChange({ type: 'modelPolicy', change: { key: 'k', tier: 3 } })).toBeUndefined();
+    expect(modelPolicyChange({ type: 'modelPolicy', change: { key: 'k', enabled: 'yes' } })).toBeUndefined();
+    expect(modelPolicyChange({ type: 'modelPolicy', change: { key: 'k', reset: 'everything' } })).toBeUndefined();
+    expect(modelPolicyChange(null)).toBeUndefined();
   });
 });
