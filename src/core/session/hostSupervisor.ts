@@ -53,6 +53,8 @@ export interface HostLaunch {
   model?: string;
   effort?: string;
   binary: string;
+  /** The registry's `origin`, written into the manifest (#72). */
+  origin?: unknown;
 }
 
 export interface ScanResult {
@@ -303,6 +305,7 @@ export class HostSupervisor {
         model: launch.model,
         effort: launch.effort,
         binary: launch.binary,
+        origin: launch.origin,
       },
     };
     let exited: string | undefined;

@@ -130,9 +130,12 @@ export class HostHarness {
   }
 
   /** A new hosted session, started. `resume` starts it as a resume of `id`. */
-  spawn(id: string, o: { cwd?: string; resume?: boolean; supervisor?: HostSupervisor; log?: (m: string) => void } = {}): RunnerView {
+  spawn(
+    id: string,
+    o: { cwd?: string; resume?: boolean; supervisor?: HostSupervisor; log?: (m: string) => void; model?: string; effort?: string; origin?: unknown } = {},
+  ): RunnerView {
     const view = spawnHostedClaude(
-      { cwd: o.cwd ?? this.root, ...(o.resume ? { resume: id } : { sessionId: id }) },
+      { cwd: o.cwd ?? this.root, ...(o.resume ? { resume: id } : { sessionId: id }), model: o.model, effort: o.effort, origin: o.origin },
       { supervisor: o.supervisor ?? this.supervisor(), binary: '/fake', log: o.log ?? (() => undefined), loadHistory: noHistory },
     );
     view.start();

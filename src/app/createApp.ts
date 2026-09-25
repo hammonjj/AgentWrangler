@@ -43,7 +43,7 @@ import { bootTimeMs, parentPidOf, startTimeOf } from '../core/procStart';
 import { sweepOrphans, sweepRefusal, type SweepResult } from '../core/session/orphanSweep';
 import { endProcess } from '../claude/runner/adopt';
 import { SessionRegistry, type SessionRecord } from '../core/session/sessionRegistry';
-import { autoResumeCandidate, outcomesFromDeadHosts } from '../core/session/recovery';
+import { autoResumeCandidate, outcomesFromDeadHosts, recordFromManifest } from '../core/session/recovery';
 import { checkoutFor } from '../core/checkout';
 import { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerView } from '../claude/runner/runnerView';
@@ -451,11 +451,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // Take back every session still running in a host, before the providers'
   // first scan: each is ours from the first snapshot, never an external
   // session to take over or a stale one to resume.
+  // A host with no record gets one rebuilt from its manifest, so it comes back
+  // the way it was launched rather than on the defaults (#72).
   for (const manifest of hostScan.alive) {
-    if (!manifest.sessionId) continue;
-    const record = sessionRegistry.get(manifest.sessionId);
-    if (!record) sessionRegistry.live({ sessionId: manifest.sessionId, provider: 'claude', cwd: manifest.cwd });
-    runners.adopt(manifest, record);
+    const rebuilt = manifest.sessionId && !sessionRegistry.get(manifest.sessionId) ? recordFromManifest(manifest) : undefined;
+    if (rebuilt) {
+      const place = locate(manifest.cwd);
+      sessionRegistry.live({ ...rebuilt, repoRoot: place.repoRoot, worktree: place.worktree, branchAtStart: place.branch });
+      log(`session ${manifest.sessionId}: no record for its host ${manifest.hostId}; rebuilt from the manifest`);
+    }
+    runners.adopt(manifest, sessionRegistry.get(manifest.sessionId));
   }
 
   // One typed reader for launch settings (#26), instead of ad hoc reads here.

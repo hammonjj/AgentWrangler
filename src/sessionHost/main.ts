@@ -93,6 +93,7 @@ async function main(): Promise<void> {
       effort: boot.launch.effort,
       binary: boot.launch.binary,
     },
+    origin: boot.launch.origin,
   };
   const writeManifest = () => {
     try {
