@@ -113,8 +113,8 @@ work and keeps model choice in policy and the catalog.
   `effort` overrides. AW already passes `config.model_reasoning_effort` on `thread/start`.
 - **Local and custom providers**: `[model_providers.<id>]` with `base_url`, `wire_api`, `env_key`,
   headers, retries; built-in `ollama` and `lmstudio` providers; `--oss` runs against a local
-  provider. One source says `wire_api = "responses"` is the only supported wire protocol
-  (**unverified**; it matters for which local servers work, §19).
+  provider. `wire_api = "responses"` is the only supported wire protocol (**verified** in
+  0.155 by #50: `"chat"` is rejected; plan §19.6).
 - **Usage**: `thread/tokenUsage/updated` per model response, **cumulative per thread**, so
   consumers must difference it (a known pitfall on resumed threads). Rate limits via
   `account/rateLimits/read` and `/updated` (5-hour and weekly windows as percentages; AW already
@@ -176,7 +176,10 @@ scope-overlap check (§13.4) is a gap in the field, and it is a heuristic here t
 | **llama.cpp server** | `GET /v1/models` (id = file path or `--alias`) | `/props` (`default_generation_settings`) | `/props` → `modalities`, `chat_template_caps` (tool support only indirectly) | `--json-schema`, GBNF grammar | `--reasoning`, `reasoning_format` | `GET /health` (503 while loading); `/props` `total_slots`; `/slots` live state | `timings`: `prompt_n`, `prompt_per_second`, `predicted_n`, `predicted_per_second`, `cache_n` |
 | **vLLM** | `GET /v1/models` | `--max-model-len` (whether the listing reports it is **unverified**) | model-dependent | guided decoding (`guided_json`) | `reasoning_effort` (OpenAI-style) | server flags | usage in responses |
 | **LM Studio** | `/v1/models` (OpenAI shape, no metadata); native `/api/v0/models` | `max_context_length` | `type: llm \| vlm`; no documented tool flag (**unverified**) | JSON schema | `reasoning.effort` for reasoning models | `state: loaded \| not-loaded` | — |
-| **MLX** (`mlx_lm.server`; mlx-omni-server; mlx-openai-server) | `/v1/models` (ids only) | launch flag only | tool calling in `mlx_lm.server` was an open PR (**unverified** status); mlx-omni-server also serves an **Anthropic-compatible** endpoint | varies | varies | — | — |
+| **MLX** (`mlx_lm.server`; mlx-omni-server; mlx-openai-server) | `/v1/models` (ids only) | launch flag only | `mlx_lm.server` 0.31.3 parses tool calls from the chat template (**measured** by #50; it depends on the model); mlx-omni-server also serves an **Anthropic-compatible** endpoint | `mlx_lm.server`: none, `response_format` ignored (measured) | `mlx_lm.server`: `enable_thinking` on/off only | `mlx_lm.server`: `/health` | `mlx_lm.server`: none |
+
+Measured facts for `mlx_lm.server`, and the harness paths, are in plan §19.6 (#50, 2026-09-25).
+Codex 0.155 requires `wire_api = "responses"` (**verified**: `"chat"` is rejected).
 
 **Consequences for the design** (§19):
 
