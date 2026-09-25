@@ -49,6 +49,9 @@ import { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerView } from '../claude/runner/runnerView';
 import type { HostManifest } from '../shared/sessionProtocol';
 import { SessionExecutors } from '../core/session/sessionExecutors';
+import type { SessionHandle } from '../core/session/sessionHandle';
+import { LaunchDefaults } from '../core/launchDefaults';
+import { createOrchestration } from '../orchestration';
 import { HostSupervisor } from '../core/session/hostSupervisor';
 import { shouldAutoResume } from '../core/session/resumePolicy';
 import {
@@ -90,7 +93,6 @@ import { RemoteControlService } from '../remote/service';
 import type { RemoteTransport } from '../remote/transport';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
-import type { PermissionModeName } from '../shared/conversation';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
 import type { SessionActions } from '../ui/actions';
 import type { RunBy, StopOutcome } from '../core/control/protocol';
@@ -164,7 +166,7 @@ export interface AgentWranglerApp {
 
   // --- the behaviours commands and menus invoke ---
   /** Start a conversation this process runs itself. No cwd: ask which folder. */
-  newConversation(cwd?: string): Promise<RunnerView | undefined>;
+  newConversation(cwd?: string): Promise<SessionHandle | undefined>;
   /**
    * Live sessions, for the quit decision: `hosted` Claude ones run in session
    * hosts and survive a quit; `local` ones (in-process Claude, and Codex
@@ -450,18 +452,30 @@ export function createApp(host: HostServices): AgentWranglerApp {
     runners.adopt(manifest, record);
   }
 
+  // One typed reader for launch settings (#26), instead of ad hoc reads here.
+  const launchDefaults = new LaunchDefaults(host.settings);
   /**
    * How to start a Claude session: the way it was started before, if the
    * registry remembers (a resume should come back on the same model, mode and
    * effort), otherwise the current defaults.
    */
-  const claudeLaunch = (previous?: SessionRecord) => {
-    const model = previous?.launch.model ?? (host.settings.get<string>('runner.model', '').trim() || undefined);
-    const effort = previous?.launch.effort ?? (host.settings.get<string>('runner.effort', '').trim() || undefined);
-    const permissionMode = (previous?.launch.permissionMode ??
-      host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto')) as PermissionModeName;
-    return { model, effort, permissionMode };
-  };
+  const claudeLaunch = (previous?: SessionRecord) => launchDefaults.resumed('claude', previous?.launch);
+
+  // #4's startup is settled once hosts are adopted (above, synchronously) and
+  // Codex threads are rejoined (in `start()`). Orchestration's recovery waits for it.
+  let settleStartup: () => void = () => undefined;
+  const startupSettled = new Promise<void>((resolve) => (settleStartup = resolve));
+  // Inert behind `orchestration.enabled` (off by default) until #33.
+  const orchestration = createOrchestration({
+    settings: host.settings,
+    dataDir: host.dataDir,
+    sessions,
+    registry: sessionRegistry,
+    launchDefaults,
+    startupSettled,
+    log,
+  });
+  host.subscribe(orchestration);
   /** The permission cards a runner shows as still pending, oldest first. */
   const hostedPermissions = (handle: RunnerView) =>
     handle.blocks.filter(
@@ -912,7 +926,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   /** Spawn and show. The only path that starts a runner, so the cwd check lives here. */
-  const startConversation = (requested: string): RunnerView | undefined => {
+  const startConversation = async (requested: string): Promise<SessionHandle | undefined> => {
     const resolved = resolveLaunchDir(requested);
     if (!resolved) return undefined;
     const { dir: cwd, remember } = resolved;
@@ -923,13 +937,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // Working in a folder is the strongest possible statement that it belongs
     // in the list, so it also undoes a removal — the same rule as browsing.
     if (remember) projects.add(cwd);
-    const model = host.settings.get<string>('runner.model', '').trim();
-    const runner = runners.start({
-      cwd,
-      permissionMode: host.settings.get<PermissionModeName>('runner.defaultPermissionMode', 'auto'),
-      effort: host.settings.get<string>('runner.effort', '').trim() || undefined,
-      model: model || undefined,
-    });
+    const runner = await sessions.launch(launchDefaults.request('claude', cwd));
     surface?.showSession(runner);
     return runner;
   };
@@ -944,9 +952,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }
     if (remember) projects.add(cwd);
     try {
-      const model = host.settings.get<string>('codexRunner.model', '').trim() || undefined;
-      const effort = host.settings.get<string>('codexRunner.effort', '').trim() || undefined;
-      const runner = await codexRunners.start(cwd, model, effort);
+      const runner = await sessions.launch(launchDefaults.request('codex', cwd));
       surface?.showSession(runner);
     } catch (error) {
       log(`starting Codex conversation failed: ${String(error)}`);
@@ -964,7 +970,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * straight to the session. Without one (the palette, the title-bar button)
    * the same folders arrive as a picker instead.
    */
-  const newConversation = async (cwd?: string): Promise<RunnerView | undefined> => {
+  const newConversation = async (cwd?: string): Promise<SessionHandle | undefined> => {
     if (cwd) return startConversation(cwd);
 
     // Newest first, the same order and the same list the dashboard dropdown shows.
@@ -2023,7 +2029,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
       void syncRemoteTransport();
       // After the store's first scan, so "is it running elsewhere?" has an answer.
       setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), 2000);
-      void rejoinCodexThreads().catch((err) => log(`rejoining Codex threads failed: ${String(err)}`));
+      void rejoinCodexThreads()
+        .catch((err) => log(`rejoining Codex threads failed: ${String(err)}`))
+        .finally(settleStartup);
     },
 
     dispose() {
