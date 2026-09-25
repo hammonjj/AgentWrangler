@@ -25,10 +25,17 @@
  *   host must drain the pipe at full speed however slow its clients are, so
  *   the flood finishes whether or not anyone is reading;
  * - `big:<bytes>`: a tool result of `bytes` characters, then `big done`.
+ *
+ * A first message that starts with a simulation script (`<aw-sim>…</aw-sim>`,
+ * the simulated harness's, #30) turns all of that off: every turn of the
+ * session is played from the script by `simulatedAgent.ts`, and `crash` in
+ * the script kills the dummy child, as above.
  */
 import { randomUUID } from 'node:crypto';
 import type { ChildProcess } from 'node:child_process';
 import type { CanUseTool, Options, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { readSimDirective, type SimAttempt } from '../shared/orchestration/simulation';
+import { emptyTotals, playSimStep, simStepFor } from './simulatedAgent';
 
 /** The dummy agent, run as `node -e`. Plain JS: it is a string. */
 const DUMMY_AGENT = `
@@ -170,10 +177,41 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<SDKUserMe
 
   void (async () => {
     let turn = 0;
+    let sim: SimAttempt | undefined;
+    const simTotals = emptyTotals();
     for await (const msg of messages()) {
       const content = (msg as { message?: { content?: unknown } }).message?.content;
       const text = typeof content === 'string' ? content : JSON.stringify(content ?? '');
-      if (turn++ === 0) push({ type: 'system', subtype: 'init', session_id: sessionId, model: 'fake', permissionMode: 'default' });
+      if (turn++ === 0) {
+        push({ type: 'system', subtype: 'init', session_id: sessionId, model: 'fake', permissionMode: 'default' });
+        sim = readSimDirective(text)?.attempt;
+      }
+      // A scripted attempt (the simulated harness, #30): the scenario decides
+      // every turn, and none of the keyword commands below apply.
+      if (sim) {
+        toChild({ cmd: 'hold' });
+        const how = await playSimStep(
+          simStepFor(sim, turn - 1),
+          {
+            cwd: options.cwd ?? process.cwd(),
+            sessionId,
+            model: options.model ?? 'claude-simulated',
+            totals: simTotals,
+            push,
+            canUseTool: options.canUseTool as CanUseTool | undefined,
+            interrupted: interrupted().then(() => undefined),
+            crash: async () => {
+              toChild({ cmd: 'crash' });
+              await childGone();
+            },
+          },
+          turn - 1,
+        );
+        onInterrupt = undefined;
+        if (how === 'crashed') break;
+        toChild({ cmd: 'release' });
+        continue;
+      }
       let reply = `echo: ${text}`;
       const flood = /flood:(\d+):(\d+)/.exec(text);
       const big = /big:(\d+)/.exec(text);

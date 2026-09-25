@@ -79,6 +79,12 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
   private seq = 0;
 
   private currentModel?: string;
+  /**
+   * Effort sent on the next `turn/start`. Codex takes effort per turn, and it
+   * sticks for the turns after (orchestration plan §6.4). Undefined sends
+   * nothing, which leaves the thread on whatever it last had.
+   */
+  private currentEffort?: string;
 
   /** The question currently waiting on this runner, if any. */
   get pendingQuestion(): Extract<ConvBlock, { kind: 'question' }> | undefined {
@@ -174,7 +180,12 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
     this.add({ kind: 'user', id: this.id(), text: text.trim(), imageCount: images.length || undefined });
     this.turnAssistantText = '';
     this.turnOutcome = 'completed';
-    const result = await this.server.request<any>('turn/start', { threadId: this.threadId, input: content, ...(this.currentModel ? { model: this.currentModel } : {}) });
+    const result = await this.server.request<any>('turn/start', {
+      threadId: this.threadId,
+      input: content,
+      ...(this.currentModel ? { model: this.currentModel } : {}),
+      ...(this.currentEffort ? { effort: this.currentEffort } : {}),
+    });
     this.activeTurnId = result?.turn?.id;
     this.setBusy(true);
     return 'applied';
@@ -201,9 +212,24 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
     return 'unsupported';
   }
 
-  /** Effort is start-time only for Codex threads started here. */
-  async setEffort(): Promise<CommandOutcome> {
-    return 'unsupported';
+  /**
+   * Change how hard the thread thinks from the next turn on: Codex takes
+   * `effort` on `turn/start` (plan §6.4). A turn already running keeps its
+   * effort. Empty means "no override", so the next turn sends none and the
+   * thread keeps the level it last ran at.
+   */
+  async setEffort(effort: string): Promise<CommandOutcome> {
+    if (this.ended) return 'gone';
+    const level = effort.trim() || undefined;
+    this.currentEffort = level;
+    this.composer.effort = level;
+    this.emitComposer(this.composer);
+    return 'applied';
+  }
+
+  /** The effort the thread was started with, so the composer shows it. Not re-sent: the thread already has it. */
+  startedWithEffort(effort: string | undefined): void {
+    if (effort) this.composer.effort = effort;
   }
 
   setModels(models: ComposerState['models']): void {
@@ -627,7 +653,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
   async launch(request: LaunchRequest): Promise<CodexRunner> {
     if (request.provider !== 'codex') throw new Error(`CodexRunnerService cannot launch a ${request.provider} session`);
     const runner = request.resume
-      ? await this.resume(request.resume, request.cwd, request.initialBlocks ?? [], request.model)
+      ? await this.resume(request.resume, request.cwd, request.initialBlocks ?? [], request.model, { origin: request.origin })
       : await this.start(request.cwd, request.model, request.effort, request.origin);
     if (request.initialPrompt) await runner.send(request.initialPrompt);
     return runner;
@@ -642,6 +668,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     const threadId = result?.thread?.id;
     if (typeof threadId !== 'string') throw new Error('Codex App Server returned no thread id');
     const runner = new CodexRunner(this.server, threadId, cwd, result?.model ?? model, [], () => this.change.fire(), origin);
+    runner.startedWithEffort(effort);
     return this.track(runner, { effort });
   }
   async resume(

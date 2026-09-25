@@ -1,0 +1,29 @@
+{
+  "tasks": {
+    "edit": [
+      {
+        "behaviour": "edit",
+        "files": { "src/a.ts": "export const a = 1;\n", "notes/readme.md": "hello\n" },
+        "turns": 3,
+        "usage": { "in": 12000, "out": 900, "cacheRead": 4000 },
+        "costUsd": 0.05
+      }
+    ],
+    "fail": [{ "behaviour": "fail", "signature": "build: cannot find module" }],
+    "timeout": [{ "behaviour": "timeout" }],
+    "rate-limit": [{ "behaviour": "rate-limit", "status": 429, "retryAfterSec": 30 }],
+    "bad-structured-output": [{ "behaviour": "bad-structured-output", "raw": "sure! {\"tier\":" }],
+    "slow": [{ "behaviour": "slow", "text": "slowly, slowly", "usage": { "in": 100, "out": 20 }, "outTokPerSec": 100 }],
+    "context-overflow": [{ "behaviour": "context-overflow" }],
+    "tool-failure": [{ "behaviour": "tool-failure", "tool": { "name": "Bash", "input": { "command": "npm test" } }, "signature": "exit 1" }],
+    "fail-verification": [
+      { "behaviour": "fail-verification", "files": { "src/parser.ts": "export const parse = (s: string) => s.length - 1;\n" }, "signature": "test:parser off-by-one" }
+    ],
+    "no-diff": [{ "behaviour": "no-diff" }],
+    "crash": [{ "behaviour": "crash", "files": { "src/half.ts": "export const half =" } }],
+    "question": [{ "behaviour": "question", "question": { "question": "Which parser?", "header": "Parser", "options": ["hand-written", "generated"] } }],
+    "permission": [
+      { "behaviour": "permission", "tool": { "name": "Bash", "input": { "command": "npm run build" } }, "files": { "dist/out.js": "built\n" } }
+    ]
+  }
+}
