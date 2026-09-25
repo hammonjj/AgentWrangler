@@ -447,9 +447,30 @@ export interface WorktreeAssignment {
   branch: string;
   baseCommit: string;
   state: WorktreeState;
+  /**
+   * The branch head AW last saw while no attempt held the tree: the base when
+   * it was created, then its head each time an attempt let it go. A branch
+   * that has moved past this while nobody was working in it has commits made
+   * outside any attempt (#31).
+   */
+  lastKnownHead?: string;
   createdAt: Millis;
   removedAt?: Millis;
 }
+
+/**
+ * One setup step applied to a new worktree, from repository policy (§13.2,
+ * §13.6). Paths are relative to the checkout; a link or copy takes its source
+ * from the primary checkout. Steps run again when a half-created tree is
+ * finished, so each must be safe to repeat.
+ */
+export type WorktreeSetupStep =
+  /** Symlink `<tree>/<link>` to `<primary>/<link>` (e.g. `node_modules`). */
+  | { link: string }
+  /** Copy the file `<primary>/<copy>` into the tree, unless it is already there (e.g. an ignored `.env`). */
+  | { copy: string }
+  /** Run a command in the tree. Only an argv that repository policy allowlists exactly. Never a shell. */
+  | { run: string[]; timeoutSec?: number };
 
 // ---------------------------------------------------------------------------
 // Verification (§14)
