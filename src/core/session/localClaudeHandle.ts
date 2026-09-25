@@ -27,6 +27,7 @@ export function createLocalClaudeHandle(request: Omit<LaunchRequest, 'provider'>
       permissionMode: request.permissionMode,
       model: request.model,
       effort: request.effort,
+      policy: request.policy?.claude,
     },
     // In-process, the view subscribes from the first event and nothing joins
     // late, so the replay ring only has to exist, not to be deep. The 16 MiB
@@ -42,6 +43,7 @@ export function createLocalClaudeHandle(request: Omit<LaunchRequest, 'provider'>
       model: request.model,
       effort: request.effort,
       origin: request.origin,
+      policy: request.policy,
     },
     { exec, log: deps.log, loadHistory: deps.loadHistory },
   );

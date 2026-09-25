@@ -19,8 +19,9 @@ import { createLocalClaudeHandle } from '../../core/session/localClaudeHandle';
 import { HOST_LOST } from '../../core/session/recovery';
 import { adoptHostedClaude, spawnHostedClaude } from '../../core/session/remoteClaudeHandle';
 import type { LaunchRequest, SessionExecutor } from '../../core/session/sessionHandle';
-import type { ExecutorRegistry, SessionRecord } from '../../core/session/sessionRegistry';
+import { resumePolicy, type ExecutorRegistry, type SessionRecord } from '../../core/session/sessionRegistry';
 import type { ModelChoice, PermissionModeName } from '../../shared/conversation';
+import { parseLaunchPolicy } from '../../shared/launchPolicy';
 import type { HostManifest } from '../../shared/sessionProtocol';
 import { loadResumeHistory, type ConversationHistory } from '../transcriptHistory';
 import type { QueryFn } from './claudeSdkSession';
@@ -89,7 +90,7 @@ export class RunnerService implements SessionExecutor, Disposable {
         repoRoot: place.repoRoot,
         worktree: place.worktree,
         branchAtStart: place.branch,
-        launch: { model: opts.model, permissionMode: opts.permissionMode, effort: opts.effort, binary },
+        launch: { model: opts.model, permissionMode: opts.permissionMode, effort: opts.effort, binary, policy: opts.policy },
         origin: opts.origin,
       }),
     );
@@ -113,6 +114,8 @@ export class RunnerService implements SessionExecutor, Disposable {
         model: record?.launch.model,
         effort: record?.launch.effort,
         origin: record?.origin,
+        // The registry's, or the host's own copy when the registry lost the record.
+        policy: record?.launch.policy ?? parseLaunchPolicy(manifest.launch?.policy),
       },
       {
         supervisor,
@@ -137,7 +140,8 @@ export class RunnerService implements SessionExecutor, Disposable {
         repoRoot: record?.repoRoot,
         worktree: record?.worktree,
         branchAtStart: record?.branchAtStart,
-        launch,
+        // The view's policy: the record's, or the manifest's copy (#71).
+        launch: { ...launch, ...(session.policy ? { policy: session.policy } : {}) },
         origin,
       });
     });
@@ -153,7 +157,7 @@ export class RunnerService implements SessionExecutor, Disposable {
    */
   async resume(opts: RunnerStartOptions & { resume: string }): Promise<RunnerView> {
     await this.deps.beforeResume?.(opts.resume);
-    return this.start(opts);
+    return this.start({ ...opts, policy: resumePolicy(this.deps.registry, opts.resume, opts.policy) });
   }
 
   /** The machine woke from sleep: every hosted session rechecks its link. */
@@ -271,7 +275,16 @@ export class RunnerService implements SessionExecutor, Disposable {
         if (recordedId) this.deps.registry?.setState(recordedId, 'ended', 'cleared');
         recordedId = id;
         if (record) record(id);
-        else this.deps.registry?.live({ sessionId: id, provider: 'claude', cwd: session.cwd });
+        // Adopted: the new id inherits the policy and origin, or a Resume of it would run without them.
+        else {
+          this.deps.registry?.live({
+            sessionId: id,
+            provider: 'claude',
+            cwd: session.cwd,
+            ...(session.policy ? { launch: { policy: session.policy } } : {}),
+            origin: session.origin,
+          });
+        }
       }
       // Ended on its own. A deliberate `end` has already said `stopped`.
       if (id && this.sessions.has(session) && !this.ending.has(session)) {

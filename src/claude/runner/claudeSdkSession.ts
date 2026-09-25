@@ -18,6 +18,7 @@ import type { CanUseTool, Options, PermissionResult, Query, SDKUserMessage } fro
 import type { Disposable } from '../../core/events';
 import { InputQueue } from '../../core/runner/inputQueue';
 import { SeqLog } from '../../core/session/seqLog';
+import { parseLaunchPolicy, type ClaudeLaunchPolicy } from '../../shared/launchPolicy';
 import {
   emptyHostState,
   reduceHostSnapshot,
@@ -47,6 +48,32 @@ export interface ClaudeSessionOptions {
   model?: string;
   /** `low` | `medium` | `high` | `xhigh` | `max`, or absent for the CLI's default. Start-time only. */
   effort?: string;
+  /**
+   * Tool rules and limits (`LaunchPolicy.claude`), applied as SDK options at
+   * start. `maxTurns` and `maxBudgetUsd` count from each start: a Resume or a
+   * §7.4 migration starts them again, so they cap a run, not a session.
+   */
+  policy?: ClaudeLaunchPolicy;
+}
+
+/**
+ * The SDK options a launch policy sets, and only those: nothing here can
+ * change the permission mode, `canUseTool`, or turn on
+ * `allowDangerouslySkipPermissions`. Empty for no policy.
+ */
+export function claudePolicyOptions(raw: ClaudeLaunchPolicy | undefined, model?: string): Partial<Options> {
+  const policy = parseLaunchPolicy({ claude: raw })?.claude;
+  if (!policy) return {};
+  const out: Partial<Options> = {};
+  if (policy.allowedTools?.length) out.allowedTools = [...policy.allowedTools];
+  if (policy.disallowedTools?.length) out.disallowedTools = [...policy.disallowedTools];
+  if (policy.maxTurns !== undefined) out.maxTurns = policy.maxTurns;
+  if (policy.maxBudgetUsd !== undefined) out.maxBudgetUsd = policy.maxBudgetUsd;
+  // The SDK refuses to start when the fallback is the model itself, which a
+  // model switch (and the migration after it) can make it: then there is none.
+  if (policy.fallbackModel && policy.fallbackModel !== model) out.fallbackModel = policy.fallbackModel;
+  if (policy.outputFormat) out.outputFormat = policy.outputFormat;
+  return out;
 }
 
 export interface ClaudeSessionDeps {
@@ -216,6 +243,8 @@ export class ClaudeSdkSession {
       includePartialMessages: true,
       stderr: (data) => this.deps.log(`runner stderr: ${data.trim().slice(0, 400)}`),
       ...this.deps.sdkOptions,
+      // Last, so nothing merged above can loosen a rule the launch asked for.
+      ...claudePolicyOptions(this.opts.policy, this.opts.model),
     };
     try {
       this.query = this.deps.query({ prompt: this.input, options });

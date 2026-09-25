@@ -17,7 +17,8 @@
 import { randomUUID } from 'node:crypto';
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Disposable } from '../../core/events';
-import type { CommandOutcome, SessionHandle, SessionLifecycle } from '../../core/session/sessionHandle';
+import type { CommandOutcome, SendOptions, SessionHandle, SessionLifecycle } from '../../core/session/sessionHandle';
+import type { LaunchPolicy } from '../../shared/launchPolicy';
 import { SessionViewBase } from '../../core/session/sessionView';
 import type {
   BlockPatch,
@@ -90,6 +91,8 @@ export type MigrateExecution = (launch: {
   permissionMode?: PermissionModeName;
   model?: string;
   effort?: string;
+  /** The session's launch policy: a new host must come up under the same rules. */
+  policy?: LaunchPolicy;
 }) => Promise<ClaudeExecution>;
 
 export interface RunnerViewOptions {
@@ -107,6 +110,8 @@ export interface RunnerViewOptions {
   model?: string;
   effort?: string;
   origin?: unknown;
+  /** How the session was launched; carried into a version migration. The view never reads it otherwise. */
+  policy?: LaunchPolicy;
 }
 
 export interface RunnerViewDeps {
@@ -143,6 +148,7 @@ const MAX_BLOCKS = 2000;
 const INTERRUPT_GRACE_MS = 5000;
 /** How long a migration waits for the old host to exit (it gives its agent 5 s on a signal). */
 const MIGRATION_EXIT_WAIT_MS = 15_000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Attempts at the model list before giving up on a CLI that cannot answer. */
 const MAX_MODEL_ASKS = 3;
 
@@ -151,6 +157,8 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
   readonly cwd: string;
   readonly startedAt: number;
   readonly origin?: unknown;
+  /** The launch policy, re-applied by a version migration (§7.4). */
+  readonly policy?: LaunchPolicy;
   sessionId: string | undefined = undefined;
   lifecycle: RunnerLifecycle = 'starting';
 
@@ -190,6 +198,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     this.cwd = opts.cwd;
     this.startedAt = deps.exec.startedAt;
     this.origin = opts.origin;
+    this.policy = opts.policy;
     this.newUuid = deps.newUuid ?? randomUUID;
     if (opts.permissionMode) this.composer.permissionMode = opts.permissionMode;
     if (opts.effort) this.composer.effort = opts.effort;
@@ -312,10 +321,12 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     void this.loadCommands();
   }
 
-  async send(text: string, images?: ImageAttachment[]): Promise<CommandOutcome> {
+  async send(text: string, images?: ImageAttachment[], opts: SendOptions = {}): Promise<CommandOutcome> {
     const pics = images ?? [];
     if (this.migrating) await this.migrating;
     if (!this.canSend) return 'gone';
+    // It becomes the transcript entry's uuid, so it must be one.
+    if (opts.clientMessageId !== undefined && !UUID.test(opts.clientMessageId)) return 'unsupported';
     // An image on its own is a real message ("what is wrong with this?").
     if (!text.trim() && pics.length === 0) return 'applied';
     if (this.shouldMigrate()) {
@@ -324,7 +335,9 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     }
     // Set on every send (CP0): the CLI keeps it as the transcript entry's uuid,
     // so a client reattaching later can dedupe its own sends against the file.
-    const uuid = this.newUuid();
+    // A caller's own id is used as is: the CLI echoes it on the turn's
+    // `result.user_message_uuid(s)`, which is how it finds its turns.
+    const uuid = opts.clientMessageId ?? this.newUuid();
     // The CLI does not echo our own sends back, so the pane has to show them.
     const userId = `u:${Date.now()}:${this.blocks.length}`;
     this.append([
@@ -517,6 +530,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
       permissionMode: this.composer.permissionMode,
       model: this.composer.model,
       effort: this.composer.effort,
+      policy: this.policy,
     };
     this.deps.log(`runner ${this.sessionId}: its host runs an older build; moving it to a new host before sending`);
     // The old agent's exit is this view's detour, not its end: stop listening first.

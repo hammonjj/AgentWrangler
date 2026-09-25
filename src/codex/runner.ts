@@ -11,20 +11,51 @@ import { finishedTurnStatus } from '../core/needsReply';
 import type {
   CommandOutcome,
   LaunchRequest,
+  SendOptions,
   SessionExecutor,
   SessionHandle,
   SessionLifecycle,
 } from '../core/session/sessionHandle';
 import { SessionViewBase } from '../core/session/sessionView';
-import type { ExecutorRegistry } from '../core/session/sessionRegistry';
+import { resumePolicy, type ExecutorRegistry } from '../core/session/sessionRegistry';
 import type { ConversationHistory } from '../claude/transcriptHistory';
-import { capText, type ComposerState, type ConvBlock, type ImageAttachment } from '../shared/conversation';
+import { capText, type ComposerState, type ConvBlock, type ImageAttachment, type PermissionModeName } from '../shared/conversation';
+import { parseLaunchPolicy, type LaunchPolicy } from '../shared/launchPolicy';
 import type { AgentSession } from '../shared/model';
 import { CodexAppServer, type ReconnectEvent, type RpcNotification, type RpcServerRequest } from './appServer';
 import { readRolloutBlocks } from './rollout';
 
 function threadIdOf(params: any): string | undefined {
   return params?.threadId ?? params?.thread?.id ?? params?.turn?.threadId;
+}
+
+/**
+ * The `thread/start` / `thread/resume` / `thread/fork` params a launch policy
+ * sets (app-server 0.155.0-alpha.16.3: `sandbox`, `approvalPolicy`,
+ * `developerInstructions`). Empty for no policy, so the thread runs on the
+ * user's `~/.codex/config.toml` defaults exactly as before. Sent on every
+ * `thread/resume`, rejoin and reattach included: whether a resumed thread
+ * keeps what it was started with is the server's business, and not a thing a
+ * deny rule should depend on.
+ */
+export function codexPolicyParams(policy: LaunchPolicy | undefined): Record<string, string> {
+  // Through the parser, so a policy built in code obeys the same rules as one read from disk.
+  const codex = parseLaunchPolicy(policy)?.codex;
+  if (!codex) return {};
+  return {
+    ...(codex.sandbox ? { sandbox: codex.sandbox } : {}),
+    ...(codex.approvalPolicy ? { approvalPolicy: codex.approvalPolicy } : {}),
+    ...(codex.developerInstructions ? { developerInstructions: codex.developerInstructions } : {}),
+  };
+}
+
+/** How a thread was launched, beyond its model: kept by its runner, recorded, and re-sent on every rejoin. */
+export interface CodexLaunch {
+  effort?: string;
+  /** Recorded and shown; Codex itself takes its permissions from `policy.codex`, not from a mode. */
+  permissionMode?: PermissionModeName;
+  origin?: unknown;
+  policy?: LaunchPolicy;
 }
 
 /**
@@ -102,6 +133,8 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
     initialBlocks: ConvBlock[] = [],
     private stateChanged: () => void = () => undefined,
     readonly origin?: unknown,
+    /** The launch policy, re-sent on every `thread/resume` of this thread. */
+    readonly policy?: LaunchPolicy,
   ) {
     super();
     this.blocks.push(...initialBlocks);
@@ -170,7 +203,7 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
 
   // ---- commands ----
 
-  async send(text: string, images: ImageAttachment[] = []): Promise<CommandOutcome> {
+  async send(text: string, images: ImageAttachment[] = [], opts: SendOptions = {}): Promise<CommandOutcome> {
     if (this.ended) return 'gone';
     if (this.elsewhere) return 'unsupported';
     if (!text.trim() && images.length === 0) return 'applied';
@@ -183,6 +216,7 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
     const result = await this.server.request<any>('turn/start', {
       threadId: this.threadId,
       input: content,
+      ...(opts.clientMessageId ? { clientUserMessageId: opts.clientMessageId } : {}),
       ...(this.currentModel ? { model: this.currentModel } : {}),
       ...(this.currentEffort ? { effort: this.currentEffort } : {}),
     });
@@ -231,7 +265,6 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
   startedWithEffort(effort: string | undefined): void {
     if (effort) this.composer.effort = effort;
   }
-
   setModels(models: ComposerState['models']): void {
     this.composer.models = models;
     this.emitComposer(this.composer);
@@ -652,42 +685,65 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
   /** Start a thread, or rejoin one with `resume`. The one-object form of `start` / `resume`. */
   async launch(request: LaunchRequest): Promise<CodexRunner> {
     if (request.provider !== 'codex') throw new Error(`CodexRunnerService cannot launch a ${request.provider} session`);
+    const launch: CodexLaunch = {
+      effort: request.effort,
+      permissionMode: request.permissionMode,
+      origin: request.origin,
+      policy: resumePolicy(this.record.registry, request.resume, request.policy),
+    };
     const runner = request.resume
-      ? await this.resume(request.resume, request.cwd, request.initialBlocks ?? [], request.model, { origin: request.origin })
-      : await this.start(request.cwd, request.model, request.effort, request.origin);
+      ? await this.resume(request.resume, request.cwd, request.initialBlocks ?? [], request.model, launch)
+      : await this.start(request.cwd, request.model, launch);
     if (request.initialPrompt) await runner.send(request.initialPrompt);
     return runner;
   }
 
-  async start(cwd: string, model?: string, effort?: string, origin?: unknown): Promise<CodexRunner> {
+  async start(cwd: string, model?: string, launch: CodexLaunch = {}): Promise<CodexRunner> {
+    const { effort } = launch;
     const result = await this.server.request<any>('thread/start', {
       cwd,
       ...(model ? { model } : {}),
       ...(effort ? { config: { model_reasoning_effort: effort } } : {}),
+      ...codexPolicyParams(launch.policy),
     });
     const threadId = result?.thread?.id;
     if (typeof threadId !== 'string') throw new Error('Codex App Server returned no thread id');
-    const runner = new CodexRunner(this.server, threadId, cwd, result?.model ?? model, [], () => this.change.fire(), origin);
+    const runner = new CodexRunner(
+      this.server, threadId, cwd, result?.model ?? model, [], () => this.change.fire(), launch.origin, launch.policy,
+    );
     runner.startedWithEffort(effort);
-    return this.track(runner, { effort });
+    return this.track(runner, launch);
   }
+
+  /**
+   * Rejoin a thread. `launch` is how it was started (from its registry record
+   * on a Resume or a reattach): its policy is sent again, and its effort, if
+   * given, becomes the thread's from here.
+   */
   async resume(
     threadId: string,
     cwd: string,
     initialBlocks: ConvBlock[] = [],
     model?: string,
-    options: { historyFromServer?: boolean; origin?: unknown } = {},
+    options: CodexLaunch & { historyFromServer?: boolean } = {},
   ): Promise<CodexRunner> {
     const key = threadId.toLowerCase();
     const existing = this.runners.get(key);
     if (existing) return existing;
-    const result = await this.server.request<any>('thread/resume', { threadId });
+    options = { ...options, policy: resumePolicy(this.record.registry, threadId, options.policy) };
+    const result = await this.server.request<any>('thread/resume', {
+      threadId,
+      ...(options.effort ? { config: { model_reasoning_effort: options.effort } } : {}),
+      ...codexPolicyParams(options.policy),
+    });
     const resumedId = result?.thread?.id ?? threadId;
     const runner = new CodexRunner(
-      this.server, resumedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(), options.origin,
+      this.server, resumedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(),
+      options.origin, options.policy,
     );
+    runner.startedWithEffort(options.effort);
     const mark = runner.blockCount;
-    this.track(runner);
+    this.track(runner, options);
     runner.resumed(result);
     if (options.historyFromServer) await this.reloadHistory(runner, result, mark);
     return runner;
@@ -702,7 +758,12 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
    * every idle thread after a quit) is loaded again from disk; nothing of it
    * was in flight. A thread with no turns cannot be, and is dropped.
    */
-  async reattach(records: { sessionId: string; cwd: string; launch?: { model?: string }; origin?: unknown }[]): Promise<{
+  async reattach(records: {
+    sessionId: string;
+    cwd: string;
+    launch?: { model?: string; effort?: string; permissionMode?: string; policy?: LaunchPolicy };
+    origin?: unknown;
+  }[]): Promise<{
     reattached: string[];
     elsewhere: string[];
     dropped: string[];
@@ -711,7 +772,13 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     const out = { reattached: [] as string[], elsewhere: [] as string[], dropped: [] as string[], failed: [] as string[] };
     for (const record of records) {
       try {
-        await this.resume(record.sessionId, record.cwd, [], record.launch?.model, { historyFromServer: true, origin: record.origin });
+        await this.resume(record.sessionId, record.cwd, [], record.launch?.model, {
+          historyFromServer: true,
+          origin: record.origin,
+          // The thread already has its effort; only the policy is sent again, and recorded as it was.
+          permissionMode: record.launch?.permissionMode as PermissionModeName | undefined,
+          policy: record.launch?.policy,
+        });
         out.reattached.push(record.sessionId);
       } catch (error) {
         const kind = classifyResumeError(error);
@@ -776,7 +843,8 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
   private async rejoin(runner: CodexRunner, mark: number): Promise<void> {
     let result: any;
     try {
-      result = await this.server.request<any>('thread/resume', { threadId: runner.threadId });
+      // A new connection (or a new server) must not get a looser thread than the one it lost.
+      result = await this.server.request<any>('thread/resume', { threadId: runner.threadId, ...codexPolicyParams(runner.policy) });
     } catch (error) {
       const kind = classifyResumeError(error);
       if (kind === 'open-elsewhere') {
@@ -817,16 +885,17 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     runner.shutdown();
     this.change.fire();
   }
-  async fork(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string): Promise<CodexRunner> {
-    const result = await this.server.request<any>('thread/fork', { threadId });
+  /** A new thread with this one's history. A policy the original had comes with it. */
+  async fork(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string, policy?: LaunchPolicy): Promise<CodexRunner> {
+    const result = await this.server.request<any>('thread/fork', { threadId, ...codexPolicyParams(policy) });
     const forkedId = result?.thread?.id;
     if (typeof forkedId !== 'string') throw new Error('Codex App Server returned no forked thread id');
     const runner = new CodexRunner(
-      this.server, forkedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(),
+      this.server, forkedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(), undefined, policy,
     );
-    return this.track(runner);
+    return this.track(runner, { policy });
   }
-  private track(runner: CodexRunner, launch: { effort?: string } = {}): CodexRunner {
+  private track(runner: CodexRunner, launch: CodexLaunch = {}): CodexRunner {
     this.runners.set(runner.threadId.toLowerCase(), runner);
     runner.endHook = () => this.release(runner.threadId);
     const place = this.record.locate?.(runner.cwd) ?? {};
@@ -837,7 +906,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
       repoRoot: place.repoRoot,
       worktree: place.worktree,
       branchAtStart: place.branch,
-      launch: { model: runner.composer.model, effort: launch.effort },
+      launch: { model: runner.composer.model, effort: launch.effort, permissionMode: launch.permissionMode, policy: runner.policy },
       origin: runner.origin,
     });
     this.change.fire();

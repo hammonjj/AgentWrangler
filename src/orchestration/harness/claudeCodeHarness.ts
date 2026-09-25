@@ -58,6 +58,7 @@ export class ClaudeCodeHarness implements AgentHarness {
       ...(req.resume ? { resume: req.resume } : { sessionId: req.sessionId ?? randomUUID() }),
       initialPrompt: req.prompt,
       origin: req.origin,
+      ...(req.policy ? { policy: req.policy } : {}),
     });
   }
 }

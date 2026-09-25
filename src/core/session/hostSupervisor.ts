@@ -13,6 +13,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { endProcess, type EndOutcome } from '../../claude/runner/adopt';
 import { isSameProcessAlive, startTimeOf } from '../procStart';
+import type { LaunchPolicy } from '../../shared/launchPolicy';
 import type { HostBoot, HostManifest } from '../../shared/sessionProtocol';
 import { HostClient } from './hostClient';
 import { readManifest, readManifests, removeHostFiles } from './manifestFile';
@@ -53,6 +54,8 @@ export interface HostLaunch {
   model?: string;
   effort?: string;
   binary: string;
+  /** Handed to the host as is; it applies the `claude` half. */
+  policy?: LaunchPolicy;
   /** The registry's `origin`, written into the manifest (#72). */
   origin?: unknown;
 }
@@ -305,6 +308,7 @@ export class HostSupervisor {
         model: launch.model,
         effort: launch.effort,
         binary: launch.binary,
+        ...(launch.policy ? { policy: launch.policy } : {}),
         origin: launch.origin,
       },
     };

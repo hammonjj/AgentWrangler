@@ -9,6 +9,7 @@
  * transcript), which is why every interrupted session is offered for Resume,
  * not just the newest.
  */
+import { parseLaunchPolicy } from '../../shared/launchPolicy';
 import type { HostManifest } from '../../shared/sessionProtocol';
 import type { LiveRecordInput, SessionRecord, SessionRecordState } from './sessionRegistry';
 
@@ -172,7 +173,8 @@ export function recordFromManifest(
     sessionId: manifest.sessionId,
     provider: 'claude',
     cwd: manifest.cwd,
-    launch: prune({ model: l.model, permissionMode: l.permissionMode, effort: l.effort, binary: l.binary }),
+    // And under its policy (#71): a Resume of the rebuilt record must not drop the rules.
+    launch: prune({ model: l.model, permissionMode: l.permissionMode, effort: l.effort, binary: l.binary, policy: parseLaunchPolicy(l.policy) }),
     origin: manifest.origin,
     // The run began when the host did, not now: otherwise that host's exit
     // record would read as old news at the next start, and a crash or a

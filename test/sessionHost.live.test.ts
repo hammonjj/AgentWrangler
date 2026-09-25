@@ -98,6 +98,39 @@ d('session host with the real claude', () => {
     await until(() => !alive(m.hostPid) && !alive(m.agentPid), 20_000);
   }, 240_000);
 
+  it('holds a launch-policy deny rule under auto mode, and again after Resume (#71, plan §24.1)', async () => {
+    const binary = resolveClaudeBinary('');
+    const id = crypto.randomUUID();
+    const policy = { claude: { disallowedTools: ['Bash(touch:*)'] } };
+    const marker = (n: number) => path.join(cwd, `deny-check-${n}.txt`);
+    const attempt = async (view: RunnerView, n: number) => {
+      const denials: unknown[] = [];
+      view.onTurnEnd((raw) => denials.push(...((raw as { permission_denials?: unknown[] }).permission_denials ?? [])));
+      view.start();
+      await view.send(`Run this exact shell command with the Bash tool: touch ${marker(n)} . Do not use any other tool. If it is refused, reply "refused".`);
+      await until(() => view.lifecycle === 'idle' && denials.length + (fs.existsSync(marker(n)) ? 1 : 0) > 0, 120_000).catch(() => undefined);
+      const held = !fs.existsSync(marker(n));
+      // Facts only, never conversation content.
+      // eslint-disable-next-line no-console
+      console.log(`deny rule under auto (start ${n}): ${held ? 'held' : 'NOT held'}; permission_denials: ${denials.length}; asks shown: ${view.blocks.filter((b) => b.kind === 'permission').length}`);
+      expect(held).toBe(true);
+      // Denied by the rule, not by a prompt nobody answered.
+      expect(view.blocks.filter((b) => b.kind === 'permission' && b.state === 'pending')).toHaveLength(0);
+    };
+
+    const first = spawnHostedClaude({ cwd, sessionId: id, model: 'sonnet', permissionMode: 'auto', policy }, { supervisor: supervisor(), binary, log: () => undefined, loadHistory: noHistory });
+    await attempt(first, 1);
+    const m1 = readManifests(runDir).find((x) => x.manifest.sessionId === id)!.manifest;
+    await first.end();
+    await until(() => !alive(m1.hostPid), 20_000);
+
+    const again = spawnHostedClaude({ cwd, resume: id, model: 'sonnet', permissionMode: 'auto', policy }, { supervisor: supervisor(), binary, log: () => undefined, loadHistory: noHistory });
+    await attempt(again, 2);
+    const m2 = readManifests(runDir).filter((x) => x.manifest.sessionId === id).map((x) => x.manifest).sort((a, b) => b.startedAt - a.startedAt)[0];
+    await again.end();
+    await until(() => !alive(m2.hostPid), 20_000);
+  }, 360_000);
+
   it('records what a mid-ask orphan does with the PermissionRequest hook installed (playbook §11.5)', async () => {
     const binary = resolveClaudeBinary('');
     const id = crypto.randomUUID();
