@@ -89,6 +89,30 @@ describe('CodexRunner', () => {
     expect(runner.session.status).toBe('done');
   });
 
+  it('changes effort per turn: sent on the next turn/start, and kept for the turns after (#30)', async () => {
+    const server = new FakeServer();
+    const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj', 'gpt-test');
+    const composers: any[] = [];
+    runner.onComposer((c) => composers.push({ ...c }));
+
+    await runner.send('first');
+    expect(server.calls[0].params.effort).toBeUndefined();
+
+    expect(await runner.setEffort('high')).toBe('applied');
+    expect(composers.at(-1)?.effort).toBe('high');
+    await runner.send('second');
+    await runner.send('third');
+    expect(server.calls.slice(1).map((c) => c.params.effort)).toEqual(['high', 'high']);
+
+    expect(await runner.setEffort('')).toBe('applied');
+    await runner.send('fourth');
+    expect(server.calls[3].params.effort).toBeUndefined();
+    expect(runner.composer.effort).toBeUndefined();
+
+    runner.shutdown();
+    expect(await runner.setEffort('low')).toBe('gone');
+  });
+
   it('carries the latest token usage and the model on its turn end (#27)', async () => {
     const server = new FakeServer();
     const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj', 'gpt-test');
