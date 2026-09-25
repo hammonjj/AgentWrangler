@@ -234,6 +234,19 @@ inputs, no file contents. Nothing leaves the machine. The *Record per-turn usage
 (`telemetry.enabled`, on by default) switches it off. Delete the folder to remove what was
 recorded.
 
+**Where it shows.** The table's *Usage* column shows each session's tokens and estimated
+cost, with the cost's basis:
+
+- `est`: the agent's own estimate;
+- `priced`: from `telemetry.prices`;
+- `cost not reported`: no cost is known;
+- a trailing `+`: some turns had no cost, so the total is a lower bound.
+
+In a narrow table the figures move to the row's second line. The conversation header shows
+the models used, the effort (requested → applied, "unknown" where the agent did not say),
+tokens and cost. Hover either one for the full breakdown. A session with no records shows
+nothing, not zeroes.
+
 - **How the numbers are worked out.** Claude reports usage as running totals for the process
   that runs the conversation, so a turn's figure is the difference from the previous turn.
   - **Totals restart.** A resume or a move to a new session host starts a new set of totals.

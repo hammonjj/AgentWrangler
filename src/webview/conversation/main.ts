@@ -15,6 +15,8 @@ import { describeDictation, spliceDictation } from '../../shared/dictationText';
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { displayTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
+import { modelLabel } from '../../shared/modelName';
+import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { paneApi } from '../common/paneApi';
 
 // See `common/paneApi.ts`: one acquire, one message envelope and one state slot
@@ -57,6 +59,7 @@ app.innerHTML = `
   <span id="pill" class="pill"></span>
   <span id="ttl"></span>
   <span id="meta"></span>
+  <span id="usage" hidden></span>
   <span id="spacer"></span>
   <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
   <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
@@ -104,6 +107,7 @@ app.innerHTML = `
 const pill = document.getElementById('pill')!;
 const ttl = document.getElementById('ttl')!;
 const meta = document.getElementById('meta')!;
+const usageEl = document.getElementById('usage')!;
 const banner = document.getElementById('banner')!;
 const scroller = document.getElementById('scroll')!;
 const notch = document.getElementById('notch')!;
@@ -969,6 +973,11 @@ function setMeta(session: SessionDTO): void {
   meta.textContent = [session.projectName, session.gitBranch !== 'HEAD' ? session.gitBranch : undefined, session.name]
     .filter(Boolean)
     .join(' · ');
+  // Models, effort (requested → applied, "unknown" where not reported), tokens
+  // and cost with its basis. Nothing at all for a session with no records (#28).
+  usageEl.hidden = !session.usage;
+  usageEl.textContent = session.usage ? usageHeaderText(session.usage, (id) => modelLabel(id) ?? id) : '';
+  usageEl.title = session.usage ? usageTitle(session.usage) : '';
 }
 
 function setCaps(next: ConversationCapabilities): void {

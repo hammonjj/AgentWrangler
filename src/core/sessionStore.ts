@@ -59,6 +59,8 @@ function materialFingerprint(s: AgentSession): string {
     s.progress?.todo ? `${s.progress.todo.completed}/${s.progress.todo.total}` : '',
     s.progress?.todo?.active ?? '',
     s.progress?.pace?.band ?? '',
+    // Usage grows with every turn record, which a provider scan never sees.
+    s.usage ? `${s.usage.turns}:${s.usage.lastAt}` : '',
   ].join('\u0000');
 }
 
@@ -84,6 +86,7 @@ export class SessionStore implements Disposable {
    */
   private nicknameFor: (key: string) => string | undefined = () => undefined;
   private liveSessionFor: (session: AgentSession) => AgentSession | undefined = () => undefined;
+  private usageFor: (sessionId: string) => AgentSession['usage'] = () => undefined;
 
   readonly onDidUpdate = (listener: Listener<StoreUpdate>): Disposable => this.emitter.event(listener);
 
@@ -98,6 +101,14 @@ export class SessionStore implements Disposable {
   /** Overlay exact in-process runner state on provider discovery for every consumer, not only the dashboard. */
   useLiveSessions(lookup: (session: AgentSession) => AgentSession | undefined): void {
     this.liveSessionFor = lookup;
+  }
+
+  /**
+   * Per-session usage from telemetry (#28), applied here for the same reason
+   * nicknames are: every surface reads the store.
+   */
+  useUsage(lookup: (sessionId: string) => AgentSession['usage']): void {
+    this.usageFor = lookup;
   }
 
   /**
@@ -122,7 +133,25 @@ export class SessionStore implements Disposable {
         }
       : s;
     const nickname = this.nicknameFor(s.key);
-    return nickname === undefined ? current : { ...current, nickname };
+    const usage = this.usageFor(s.sessionId);
+    if (nickname === undefined && usage === undefined) return current;
+    return { ...current, ...(nickname === undefined ? {} : { nickname }), ...(usage === undefined ? {} : { usage }) };
+  }
+
+  /**
+   * Re-apply usage to what is already held and fire for the rows it changed. A
+   * turn record touches nothing a provider scan would notice.
+   */
+  usageApplied(): void {
+    const changed: AgentSession[] = [];
+    for (const [key, prev] of this.byKey) {
+      const next = this.decorate({ ...prev, usage: undefined });
+      if (materialFingerprint(next) === materialFingerprint(prev)) continue;
+      this.byKey.set(key, next);
+      changed.push(next);
+    }
+    if (changed.length === 0) return;
+    this.emitter.fire({ sessions: this.sessions, upserted: changed, removedKeys: [], becameWaiting: [] });
   }
 
   /**

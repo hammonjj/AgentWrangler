@@ -11,7 +11,7 @@
  * dragging and the picker menu.
  */
 
-export type ColumnId = 'proj' | 'worktree' | 'branch' | 'model' | 'pr' | 'eta' | 'age' | 'subagents';
+export type ColumnId = 'proj' | 'worktree' | 'branch' | 'model' | 'usage' | 'pr' | 'eta' | 'age' | 'subagents';
 
 export interface ColumnDef {
   id: ColumnId;
@@ -48,6 +48,15 @@ export const COLUMNS: readonly ColumnDef[] = [
     title: 'The model that wrote the most recent reply in this session.',
     defaultWidth: 86,
     minWidth: 48,
+    foldsWhenNarrow: true,
+  },
+  {
+    id: 'usage',
+    label: 'Usage',
+    title:
+      'Tokens and estimated cost for sessions Agent Wrangler runs, from its local usage records. "est" is the agent\'s own estimate; blank means no records yet.',
+    defaultWidth: 128,
+    minWidth: 60,
     foldsWhenNarrow: true,
   },
   { id: 'subagents', label: 'Subagents', title: 'Estimated worker activity, including nested workers. Internal guardian reviews are excluded.', defaultWidth: 132, minWidth: 80, foldsWhenNarrow: true },
