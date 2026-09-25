@@ -383,6 +383,12 @@ export interface HostManifest {
   agentStartTime?: string;
   /** How the session was launched, so it can be described even if the core's registry lost it. */
   launch?: { resume?: boolean; permissionMode?: string; model?: string; effort?: string; binary?: string };
+  /**
+   * Who started the session (the registry's `origin`), opaque, for the same
+   * reason: an orchestrated attempt adopted without its record is still found
+   * as one. Absent in manifests written before #72.
+   */
+  origin?: unknown;
   socketPath: string;
   protocol: number;
   hostBuild: string;
@@ -418,5 +424,7 @@ export interface HostBoot {
     effort?: string;
     /** Absolute path of the `claude` to spawn. */
     binary: string;
+    /** Copied into the manifest as is; the host never reads it. */
+    origin?: unknown;
   };
 }

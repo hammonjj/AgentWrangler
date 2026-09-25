@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { RpcRemoteError } from '../src/core/rpc/ndjsonPeer';
+import { recordFromManifest } from '../src/core/session/recovery';
 import { RPC_UNAUTHORIZED } from '../src/shared/sessionProtocol';
 import { HostHarness, alive, sessionId, sleep, texts, until } from './support/hostHarness';
 
@@ -78,6 +79,16 @@ describe('session host, end to end', () => {
     expect(view.lifecycle).toBe('ended');
     await until(() => !alive(m.hostPid) && !alive(m.agentPid));
     expect(h.manifest(id)?.exit).toMatchObject({ reason: 'stopped' });
+  }, 30_000);
+
+  it('writes the launch options and origin into the manifest, for a core that lost the record (#72)', async () => {
+    const id = sessionId(8);
+    const origin = { kind: 'orchestration', missionId: 'm1', attemptId: 'a1' };
+    const view = h.spawn(id, { model: 'opus', effort: 'high', origin });
+    await until(() => h.manifest(id) !== undefined);
+    expect(h.manifest(id)).toMatchObject({ launch: { model: 'opus', effort: 'high', resume: false }, origin });
+    expect(recordFromManifest(h.manifest(id)!)).toMatchObject({ sessionId: id, launch: { model: 'opus', effort: 'high' }, origin });
+    await view.end();
   }, 30_000);
 
   it('refuses a client without the token', async () => {

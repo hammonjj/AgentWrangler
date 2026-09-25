@@ -35,6 +35,7 @@ export function spawnHostedClaude(request: Omit<LaunchRequest, 'provider'>, deps
     model: request.model,
     effort: request.effort,
     binary: deps.binary,
+    origin: request.origin,
   });
   return new RunnerView(
     {
@@ -46,7 +47,7 @@ export function spawnHostedClaude(request: Omit<LaunchRequest, 'provider'>, deps
       effort: request.effort,
       origin: request.origin,
     },
-    { exec: client, log: deps.log, loadHistory: deps.loadHistory, migrate: migrator(sessionId, request.cwd, deps) },
+    { exec: client, log: deps.log, loadHistory: deps.loadHistory, migrate: migrator(sessionId, request.cwd, request.origin, deps) },
   );
 }
 
@@ -73,7 +74,7 @@ export function adoptHostedClaude(
     {
       exec: client,
       log: deps.log,
-      migrate: manifest.sessionId ? migrator(manifest.sessionId, manifest.cwd, deps) : undefined,
+      migrate: manifest.sessionId ? migrator(manifest.sessionId, manifest.cwd, launch.origin ?? manifest.origin, deps) : undefined,
     },
   );
 }
@@ -82,9 +83,10 @@ export function adoptHostedClaude(
  * The new host a version migration moves a session to: swept first, then a
  * fresh host of this build resuming the same id, on the view's current model,
  * mode and effort (§7.4). The view names the id: a `/clear` inside the old
- * host gave it a new one, and that is the one to resume.
+ * host gave it a new one, and that is the one to resume. `origin` does not
+ * change over a session's life, so the new manifest carries the old one's.
  */
-function migrator(initialId: string, cwd: string, deps: RemoteClaudeDeps) {
+function migrator(initialId: string, cwd: string, origin: unknown, deps: RemoteClaudeDeps) {
   return async (launch: { sessionId?: string; permissionMode?: PermissionModeName; model?: string; effort?: string }): Promise<ClaudeExecution> => {
     const sessionId = launch.sessionId ?? initialId;
     await deps.beforeResume?.(sessionId);
@@ -96,6 +98,7 @@ function migrator(initialId: string, cwd: string, deps: RemoteClaudeDeps) {
       model: launch.model,
       effort: launch.effort,
       binary: deps.binary,
+      origin,
     });
     return client;
   };
