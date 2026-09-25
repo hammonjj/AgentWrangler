@@ -21,6 +21,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { app, Notification, powerMonitor, powerSaveBlocker } from 'electron';
 import { createApp } from '../app/createApp';
+import { createControlBackend } from '../app/controlBackend';
+import { controlSocketPath, controlTokenPath } from '../core/control/paths';
+import { ControlServer, ensurePrivateDir, writeControlToken } from '../core/control/server';
 import { DictationSetupError, defaultModelPath } from '../core/dictation';
 import { shouldPreventAppSuspension } from '../core/menuBar';
 import { agentCount, quitIntentSource, quitPolicy, type QuitSource } from '../core/session/quitPolicy';
@@ -32,7 +35,7 @@ import { installApplicationMenu } from './menu';
 import { JsonStore } from './jsonStore';
 import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
-import { createSessionHostRuntime } from './sessionHostRuntime';
+import { BUILD_ID, createSessionHostRuntime } from './sessionHostRuntime';
 import { MenuBar, menuBarSessions } from './tray';
 import { WorkbenchWindow } from './workbenchWindow';
 
@@ -296,7 +299,33 @@ void app.whenReady().then(() => {
   }
   wrangler.start();
 
+  // The `aw` command-line client's way in (#21). Nothing depends on it, so a
+  // failure to serve it is logged and the app carries on.
+  const runDirs = { runDir: path.join(userDataDir, 'run'), fallbackRunDir: path.join(os.homedir(), '.agentwrangler', 'run') };
+  let control: ControlServer | undefined;
+  try {
+    const socketPath = controlSocketPath(runDirs);
+    ensurePrivateDir(path.dirname(socketPath));
+    control = new ControlServer({
+      token: writeControlToken(controlTokenPath(runDirs)),
+      log,
+      backend: createControlBackend(wrangler, {
+        build: BUILD_ID,
+        appPid: process.pid,
+        startedAt: Date.now(),
+        flash: (message) => host.dialogs.flash(message, 4000),
+      }),
+    });
+    control.listen(socketPath).then(
+      () => log(`control socket: listening on ${socketPath}`),
+      (err) => log(`control socket: not serving: ${String(err)}`),
+    );
+  } catch (err) {
+    log(`control socket: not serving: ${String(err)}`);
+  }
+
   const teardown = () => {
+    control?.dispose();
     menuBar.dispose();
     if (powerBlockId !== undefined) powerSaveBlocker.stop(powerBlockId);
     preferences.dispose();
@@ -338,6 +367,8 @@ void app.whenReady().then(() => {
           return;
         }
       }
+      // Committed to quitting: `aw send`/`aw stop` must not race the ending below.
+      control?.stopMutations();
       try {
         await wrangler.stopAllForQuit(decision.stopWithinMs, { includeHosted: decision.stopHosted });
       } catch (err) {

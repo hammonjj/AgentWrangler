@@ -37,6 +37,8 @@ files:
   # hardening step) makes every session host start as a second copy of the
   # app instead; if fuses are ever configured, `runAsNode: true` must stay.
   - dist/sessionHost/**
+  # The `aw` CLI (#21), run by bin/aw the same way: app binary as Node, from the asar.
+  - dist/cli/**
   - build/icon.png
 
 asar: true

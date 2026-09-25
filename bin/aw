@@ -1,0 +1,37 @@
+#!/bin/bash
+#
+# aw: Agent Wrangler from a terminal (#21). `aw help` lists the commands.
+#
+# Runs the CLI bundled inside the installed app, with the app's own binary as
+# Node (ELECTRON_RUN_AS_NODE reads straight out of app.asar, as session hosts
+# do), so it needs no Node of its own and always matches the installed build.
+#
+# `exec -a aw` matters: scripts/install-app.sh finds "the running app" by
+# matching the app executable's path at the start of a command line, and a
+# long `aw attach` must not be mistaken for it.
+#
+# Install with `npm run cli:install`, which copies this file onto your PATH;
+# the copy does not depend on the repo. For a development build instead, set
+# AW_DEV_ROOT to a checkout that has been built (`npm run build`).
+set -euo pipefail
+
+APP="${AW_APP:-/Applications/Agent Wrangler.app}"
+EXE="$APP/Contents/MacOS/Agent Wrangler"
+ENTRY="$APP/Contents/Resources/app.asar/dist/cli/main.js"
+
+if [ -n "${AW_DEV_ROOT:-}" ]; then
+  exec node "$AW_DEV_ROOT/dist/cli/main.js" "$@"
+fi
+
+if [ -x "$EXE" ]; then
+  ELECTRON_RUN_AS_NODE=1 exec -a aw "$EXE" "$ENTRY" "$@"
+fi
+
+# Not installed: a checkout this script sits in, if it has been built.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$HERE/../dist/cli/main.js" ]; then
+  exec node "$HERE/../dist/cli/main.js" "$@"
+fi
+
+echo "aw: Agent Wrangler is not installed at $APP (set AW_APP, or AW_DEV_ROOT for a checkout)." >&2
+exit 1

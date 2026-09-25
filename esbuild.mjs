@@ -79,6 +79,24 @@ const sessionHost = {
   plugins: [watchLogger],
 };
 
+/**
+ * The `aw` command-line client (#21). Plain Node, no `electron`: `bin/aw` runs
+ * it with the installed app's own binary under ELECTRON_RUN_AS_NODE, straight
+ * out of app.asar, the way session hosts run.
+ */
+const cli = {
+  entryPoints: ['src/cli/main.ts'],
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  target: 'node22',
+  outfile: 'dist/cli/main.js',
+  sourcemap: true,
+  minify: false,
+  define: buildDefines,
+  plugins: [watchLogger],
+};
+
 const electronPreload = {
   entryPoints: ['src/electron/preload.ts'],
   bundle: true,
@@ -117,7 +135,7 @@ const web = {
   plugins: [watchLogger],
 };
 
-const configs = [web, electronMain, electronPreload, sessionHost];
+const configs = [web, electronMain, electronPreload, sessionHost, cli];
 
 if (watch) {
   const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));
