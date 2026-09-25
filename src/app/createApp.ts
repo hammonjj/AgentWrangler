@@ -480,6 +480,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     launchDefaults,
     startupSettled,
     log,
+    models: () => models.value,
+    completion: { query: sdkQuery, binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath) },
   });
   host.subscribe(orchestration);
 

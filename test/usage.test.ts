@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  carryMissingWindows,
   parseUsage,
   resetsInText,
   spendText,
@@ -98,6 +99,16 @@ describe('parseUsage', () => {
     ]);
   });
 
+  it('fills in the session and whole week from the top level when `limits` lists only the scoped week', () => {
+    const body = { ...LIVE_BODY, limits: [LIVE_BODY.limits[2]] };
+    const snap = parseUsage(body, NOW)!;
+    expect(snap.windows.map((w) => [w.id, w.percent, w.active])).toEqual([
+      ['session', 54, false],
+      ['weekly_all', 49, false],
+      ['weekly_scoped:Fable', 55, true],
+    ]);
+  });
+
   it('clamps nonsense percents and tolerates a missing reset time', () => {
     const body = { limits: [{ kind: 'session', percent: 140, resets_at: null }, { kind: 'weekly_all', percent: -3 }] };
     const snap = parseUsage(body, NOW)!;
@@ -110,6 +121,31 @@ describe('parseUsage', () => {
     expect(parseUsage('nope', NOW)).toBeUndefined();
     expect(parseUsage({}, NOW)).toBeUndefined();
     expect(parseUsage({ limits: [] }, NOW)).toBeUndefined();
+  });
+});
+
+describe('carryMissingWindows', () => {
+  const w = (id: string, percent: number, resetsAtMs?: number) => ({ id, label: id, percent, resetsAtMs, active: true });
+  const prev = { fetchedAtMs: 100, windows: [w('session', 40, 5_000), w('weekly_all', 20), w('weekly_scoped:X', 30, 9_000)], spendKnown: true };
+
+  it('keeps what the new read omits, inactive and stamped, in card order', () => {
+    const next = { fetchedAtMs: 200, windows: [w('weekly_scoped:X', 31, 9_000)], spendKnown: true };
+    const out = carryMissingWindows(prev, next, 1_000);
+    expect(out.windows.map((x) => [x.id, x.percent, x.active, x.readAtMs])).toEqual([
+      ['session', 40, false, 100],
+      ['weekly_all', 20, false, 100],
+      ['weekly_scoped:X', 31, true, undefined],
+    ]);
+  });
+
+  it('drops a carried window once its reset has passed', () => {
+    const next = { fetchedAtMs: 200, windows: [w('weekly_scoped:X', 31, 9_000)], spendKnown: true };
+    expect(carryMissingWindows(prev, next, 6_000).windows.map((x) => x.id)).toEqual(['weekly_all', 'weekly_scoped:X']);
+  });
+
+  it('changes nothing when the new read is complete or there is nothing before it', () => {
+    expect(carryMissingWindows(prev, prev, 1_000)).toBe(prev);
+    expect(carryMissingWindows(undefined, prev, 1_000)).toBe(prev);
   });
 });
 

@@ -282,6 +282,58 @@ describe('UsageService', () => {
     });
   });
 
+  /** A read that lists only the model-scoped week used to blank the Session and Weekly cards for a poll. */
+  describe('windows across reads', () => {
+    const FUTURE = 1_000_000_000 + 3_600_000;
+    const all = (at: number): UsageSnapshot => ({
+      fetchedAtMs: at,
+      windows: [
+        { id: 'session', label: 'Session (5hr)', percent: 40, resetsAtMs: FUTURE, active: false },
+        { id: 'weekly_all', label: 'Weekly (7 day)', percent: 20, resetsAtMs: FUTURE, active: false },
+        { id: 'weekly_scoped:Fable', label: 'Weekly Fable', percent: 30, resetsAtMs: FUTURE, active: true },
+      ],
+      spendKnown: true,
+    });
+    const scopedOnly = (at: number): UsageSnapshot => ({
+      fetchedAtMs: at,
+      windows: [{ id: 'weekly_scoped:Fable', label: 'Weekly Fable', percent: 31, resetsAtMs: FUTURE, active: true }],
+      spendKnown: true,
+    });
+
+    it('keeps the cards a later read leaves out, marked with when they were read', async () => {
+      let i = 0;
+      const read = vi.fn<UsageReader>(async (now) => ({ ok: true, snapshot: i++ === 0 ? all(now) : scopedOnly(now) }));
+      const log = vi.fn();
+      const svc = new UsageService(read, new MemoryUsageCache(), () => cfg, log, noJitter);
+      svc.start();
+      await flush();
+      const firstAt = svc.usage.last!.fetchedAtMs;
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      const w = svc.usage.last!.windows;
+      expect(w.map((x) => [x.id, x.percent, x.readAtMs])).toEqual([
+        ['session', 40, firstAt],
+        ['weekly_all', 20, firstAt],
+        ['weekly_scoped:Fable', 31, undefined],
+      ]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(svc.usage.last!.windows[0].readAtMs).toBe(firstAt); // still the original read, not re-stamped
+      expect(log.mock.calls.filter(([m]) => String(m).includes('did not report'))).toHaveLength(1);
+      svc.dispose();
+    });
+
+    it('carries from the cache straight after launch', async () => {
+      const cache = new MemoryUsageCache();
+      await cache.write(all(1_000_000_000 - 10 * 60_000));
+      const read = vi.fn<UsageReader>(async (now) => ({ ok: true, snapshot: scopedOnly(now) }));
+      const svc = new UsageService(read, cache, () => cfg, undefined, noJitter);
+      svc.start();
+      await flush();
+      expect(svc.usage.last!.windows.map((x) => x.id)).toEqual(['session', 'weekly_all', 'weekly_scoped:Fable']);
+      svc.dispose();
+    });
+  });
+
   it('stops after dispose', async () => {
     const read = okReader(1);
     const svc = new UsageService(read, new MemoryUsageCache(), () => cfg, undefined, noJitter);

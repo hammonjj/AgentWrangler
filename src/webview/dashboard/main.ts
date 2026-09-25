@@ -696,7 +696,11 @@ function usageCardTitle(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' 
     lines.push(`Resets ${resetsAtClock(w.resetsAtMs)} (${resetsInText(Date.now(), w.resetsAtMs).toLowerCase()}).`);
   }
   if (w.active) lines.push('This is the window currently constraining requests.');
-  lines.push(`Read ${formatAge(Date.now(), snap.fetchedAtMs)} ago from ${provider}.`);
+  if (w.readAtMs !== undefined) {
+    lines.push(`Read ${formatAge(Date.now(), w.readAtMs)} ago from ${provider}; the latest read did not include this window.`);
+  } else {
+    lines.push(`Read ${formatAge(Date.now(), snap.fetchedAtMs)} ago from ${provider}.`);
+  }
   return lines.join('\n');
 }
 

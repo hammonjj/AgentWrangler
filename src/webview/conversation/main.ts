@@ -59,7 +59,7 @@ app.innerHTML = `
   <span id="pill" class="pill"></span>
   <span id="ttl"></span>
   <span id="meta"></span>
-  <span id="usage" hidden></span>
+  <span id="convUsage" hidden></span>
   <span id="spacer"></span>
   <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
   <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
@@ -107,7 +107,9 @@ app.innerHTML = `
 const pill = document.getElementById('pill')!;
 const ttl = document.getElementById('ttl')!;
 const meta = document.getElementById('meta')!;
-const usageEl = document.getElementById('usage')!;
+// Not `#usage`: that is the table pane's plan-usage strip, in the same
+// document. Sharing the id made this line overwrite the plan cards.
+const usageEl = document.getElementById('convUsage')!;
 const banner = document.getElementById('banner')!;
 const scroller = document.getElementById('scroll')!;
 const notch = document.getElementById('notch')!;

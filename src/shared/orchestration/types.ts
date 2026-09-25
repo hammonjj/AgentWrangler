@@ -422,6 +422,8 @@ export interface ExecutionAttempt {
   taskId: string;
   n: number;
   routingDecisionId?: string;
+  /** The repository policy it ran under, frozen at launch (`LoadedRepoPolicy.version`, §13.6). */
+  repoPolicyVersion?: string;
   assignment: AgentAssignment;
   worktreeId?: string;
   state: AttemptState;
@@ -445,6 +447,13 @@ export interface WorktreeAssignment {
   branch: string;
   baseCommit: string;
   state: WorktreeState;
+  /**
+   * The branch head AW last saw while no attempt held the tree: the base when
+   * it was created, then its head each time an attempt let it go. A branch
+   * that has moved past this while nobody was working in it has commits made
+   * outside any attempt (#31).
+   */
+  lastKnownHead?: string;
   createdAt: Millis;
   removedAt?: Millis;
 }

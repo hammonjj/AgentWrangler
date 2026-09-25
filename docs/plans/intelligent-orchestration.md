@@ -524,6 +524,24 @@ interface StructuredCompletion {
 The router never sees any of these; it produces a `RouteRequirement`. Only the resolver reads the
 catalog, and only the harness adapters touch `SessionExecutor`.
 
+**As built (#30, `src/orchestration/harness/`, `src/orchestration/completion/`).** Four
+differences from the sketch above:
+
+- `AgentHarness.models()` returns the `ModelChoice[]` the CLI last reported. Turning those into
+  `ModelDescriptor`s with provenance is #29's catalog's job.
+- `HarnessCapabilities` describes what the **adapter** can do, not the agent. Claude's
+  `outputFormat`, `maxTurns`/`maxBudgetUsd` and fork, and Codex's `outputSchema` and
+  `thread/fork`, all exist, but `LaunchRequest` cannot carry them yet, so they read `false` or
+  empty. Codex reads `permissionModes: []` until #71 sends its sandbox and approval policy.
+- `AttemptLaunch` carries `target: {harness, model, effortNative}`, where `effortNative: 'none'`
+  means "send no effort". The Claude adapter pre-assigns the session id. The Codex adapter
+  sends the prompt itself, after `setEffort` on a resumed thread.
+- `StructuredCompletion.complete` takes `model`/`effort` directly, defaulting to `haiku`.
+  `requirement` is accepted, but it goes unused until #38 routes completions. Options:
+  `tools: []`, `maxTurns: 1`, `outputFormat`, `persistSession: false` (no transcript), and
+  `settingSources: []`, so AW's own status hooks do not fire and no `CLAUDE.md` loads. The call
+  runs in the temp dir. `maxTurns: 1` was confirmed live on `haiku` (2026-09-25).
+
 ### 6.3 The capability catalog, and why tiers are data
 
 `ModelCatalogService` grows into `CapabilityCatalog`. Each field has a source:
@@ -1229,6 +1247,24 @@ up.
   the primary checkout, copy an ignored file, run an allowlisted command). This repo's policy
   would link `node_modules`, as CLAUDE.md does by hand.
 - A single-task mission has no mission branch; its task branch is the result.
+
+**As built (#31, `src/orchestration/worktrees/`).** `WorktreeManager.open` accepts only a primary
+checkout, and only a root that is neither inside the checkout nor contains it. `plan` returns an
+assignment in `creating`, then `create` records it before any git work and returns it `ready`.
+Running `create` again on the same assignment finishes whatever was left: nothing yet made, a
+branch made but no tree, a tree git left locked `initializing` (its partial checkout is deleted
+and redone, since nothing ran in it), or a tree without setup. `reconcile` is §23.3 step 5. It
+also reports **commits made outside any attempt**: each assignment carries `lastKnownHead` (its
+base, then the head each time an attempt lets go, or `noteHead` after a merge), and in `ready` or
+`retained` a branch that has moved past it, or rewritten it, is flagged.
+`remove(a, { mergedInto })` checks everything before it acts, and refuses if any check fails:
+an attempt holds the tree, a process has its working directory there (`lsof`; "cannot tell"
+counts as in use), dirty, locked, not ours, or not reachable from `mergedInto`. The branch goes
+by `update-ref -d <branch> <checked-head>`, not `branch -d`, because `-d` compares with the
+primary checkout's HEAD rather than the mission branch. Setup links are absolute symlinks. A
+`node_modules/` ignore rule (trailing slash) does not match a symlink, so in such repos the link
+shows as untracked and an agent's `git add -A` would commit it. `remove` treats intact setup
+artifacts as clean. #32 may want to warn about that rule.
 
 ### 13.3 Integration
 
@@ -2115,6 +2151,19 @@ starts before its dependencies are integrated; attempts never exceed caps; two o
 never run at once; every escalation has an event; no escalation passes a cap. A seeded random
 generator (random DAGs × random failure injection) runs the same invariants over hundreds of
 missions in one test file, without a new dependency.
+
+**As built (#30).** A scenario (`src/shared/orchestration/simulation.ts`) has a list of attempts
+for each task id, plus a `default`. Each attempt is one step, and its `followUps` handle later
+messages. The `SimulatedHarness` is the Claude Code adapter with one addition: it puts the script
+at the head of the first prompt (`<aw-sim>…</aw-sim>`), so the script travels down the ordinary
+launch path. Either of two players reads it back. In tests, `simulatedQuery` runs in-process
+under a real `RunnerService` (`createSimulatedExecutors`). In a real host, `fakeQuery` under
+`AW_SESSION_HOST_FAKE=1` plays it (`test/simulatedHarness.integration.test.ts`), and a scripted
+`crash` kills the dummy agent process. Both use the same `playSimStep`. A `result` carries running
+`modelUsage` totals, so #27's telemetry records simulated turns as it records real ones.
+`SimulatedCompletion` is the real `ClaudeStructuredCompletion` over a scripted `query`, so
+validation and the retry are exercised as well. The fake clock and the seeded mission generator
+arrive with the scheduler (#45).
 
 This is what answers "can we test orchestration without spending API credits" (yes) and "can we
 simulate provider failures" (yes, all of them in the brief's list).
