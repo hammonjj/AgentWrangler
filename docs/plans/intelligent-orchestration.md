@@ -639,6 +639,8 @@ Nothing in routing ever infers effort from tier or tier from effort.
   (pin only), so AW `max` maps to `xhigh` on both harnesses. `none` and `minimal` are pin only.
 - **Provenance.** `contextWindow` and `maxOutputTokens` are `reported` from Claude's `modelUsage`
   after first use (via `TurnTelemetry.onModelLimits`, whether or not telemetry recording is on).
+  That holds for hosted models only. For a model Claude Code does not recognise, it reports a
+  200,000 window and a hosted-priced cost that are both false (#50, §19.6).
   `vision` is `reported` from Codex's `inputModalities`. `nativeEffort` is `reported` by both.
   Tool calling, structured output, streaming, throughput and concurrency stay `unknown` for hosted
   models.
@@ -1688,9 +1690,10 @@ and, later, local endpoints.
 
 ## 19. Local models: supported by design, not implemented
 
-There is no local inference on this machine, and nothing in this plan installs or configures
-any. What the plan does is make sure a local model can join later as configuration plus an
-adapter, with no change to tasks, assessments, rules or stores.
+Nothing in this plan installs or configures local inference. What it does is make sure a local
+model can join later as configuration plus an adapter, with no change to tasks, assessments, rules
+or stores. The #50 spike (2026-09-25, §19.6) tried that against real runtimes and both harnesses.
+The door fits, with the gaps and the recommendation for #51 recorded there.
 
 ### 19.1 Two ways a local model does work
 
@@ -1700,10 +1703,13 @@ adapter, with no change to tasks, assessments, rules or stores.
    - **Codex** with a model provider pointing at a local OpenAI-compatible server
      (`model_providers`, `--oss`, built-in `ollama` and `lmstudio` providers). AW already drives
      Codex through `app-server`, so a local model becomes a Codex thread with a different
-     provider configuration. Open question for #50: which wire protocol Codex requires of the
-     server (one source says the Responses API only).
-   - **Claude Code** against an Anthropic-compatible endpoint (`ANTHROPIC_BASE_URL`). Some local
-     servers offer one (e.g. mlx-omni-server). Whether tool use holds up is the open question.
+     provider configuration. **Settled by #50:** Codex 0.155 requires the Responses API
+     (`wire_api = "chat"` is rejected with "no longer supported"), so the server must serve
+     `/v1/responses`.
+   - **Claude Code** against an Anthropic-compatible endpoint (`ANTHROPIC_BASE_URL`), so the
+     server must serve `/v1/messages`. **Settled by #50:** tool use holds up. A 4B model passed 5/5
+     of the qualification task, but at about 13× Codex's per-call latency on this hardware, and
+     Claude Code invents a USD cost for the unknown model (§19.6).
 2. **Directly, for structured completions** (assessment, plan repair, review verdicts): an
    OpenAI-compatible `chat/completions` call with JSON-schema or grammar-constrained output,
    behind `StructuredCompletion`. No tools, no files, no agent loop.
@@ -1716,15 +1722,16 @@ stays unknown:
 
 | Field | Ollama | llama.cpp server | vLLM | LM Studio | MLX servers |
 |---|---|---|---|---|---|
-| model id | `/api/tags` | `/v1/models` | `/v1/models` | `/api/v0/models` | `/v1/models` |
-| context size | `/api/show` `model_info[<arch>.context_length]` | `/props` | launch flag (probe unverified) | `max_context_length` | declared |
-| tool calling | `capabilities` includes `tools` | template caps (indirect) | per model | declared | declared |
-| structured output | JSON schema format | JSON schema / grammar | guided JSON | JSON schema | declared |
+| model id | `/api/tags` | `/v1/models` | `/v1/models` | `/api/v0/models` | `/v1/models` (`mlx_lm.server`: id = the weights path, no metadata; measured) |
+| context size | `/api/show` `model_info[<arch>.context_length]` | `/props` | launch flag (probe unverified) | `max_context_length` | declared (the server does not say; `config.json` has `max_position_embeddings`) |
+| tool calling | `capabilities` includes `tools` | template caps (indirect) | per model | declared | declared, then measured: depends on the model's template (§19.6) |
+| structured output | JSON schema format | JSON schema / grammar | guided JSON | JSON schema | `mlx_lm.server`: none (`response_format` ignored; measured) |
 | vision | `capabilities` includes `vision` | `modalities` | per model | `type: vlm` | declared |
-| reasoning control | `think` | `--reasoning` | `reasoning_effort` | `reasoning.effort` | declared |
-| max concurrency | declared (`OLLAMA_NUM_PARALLEL` not queryable) | `total_slots` | declared | declared | declared |
-| health | listing responds | `/health` | listing responds | `state` | listing responds |
-| throughput | `eval_count` / `eval_duration` | `timings.predicted_per_second` | response usage | — | — |
+| reasoning control | `think` | `--reasoning` | `reasoning_effort` | `reasoning.effort` | `mlx_lm.server`: on/off only, `chat_template_kwargs.enable_thinking` |
+| max concurrency | declared (`OLLAMA_NUM_PARALLEL` not queryable) | `total_slots` | declared | declared | declared (it batches, but does not say how many) |
+| health | listing responds | `/health` | listing responds | `state` | `mlx_lm.server`: `/health` |
+| throughput | `eval_count` / `eval_duration` | `timings.predicted_per_second` | response usage | — | client-measured only |
+| harness endpoints | (research: unverified) | `/v1/responses` and `/v1/messages` (present in 0.4.0; not exercised) | — | — | `mlx_lm.server`: neither (404) |
 
 "Declared" means the user states it in Preferences, and the descriptor records `from: declared`.
 The resolver trusts `reported`/`probed` over `declared`, and treats `unknown` as "cannot satisfy
@@ -1741,13 +1748,14 @@ metrics.
    as **unassigned** (§6.3).
 2. Optionally, the model runs a small **qualification set** of verifiable tasks on scratch
    repositories (a subset of the corpus with real checks), and the result is shown next to the
-   tier choice.
+   tier choice. The shape #50 proposes is in §19.6.
 3. The user assigns a tier. From then on the resolver can pick it like any other candidate,
    under the same caps, and "prefer local" or "disable local" steer it.
 
 ### 19.4 Local observability
 
-Recorded per attempt and aggregated in the analytics view (#49): executions; tokens in and out;
+Recorded per attempt and aggregated in the analytics view (#49). §19.6 says which of these a
+real runtime and harness actually report. Executions; tokens in and out;
 tokens per second and time to first token (from server timings, when reported); total runtime;
 context size used; machine/device; queue delay (waiting for a slot); success rate;
 **escalation-from-local rate**; RAM/VRAM only if the server reports it. Cost is shown as `$0 API
@@ -1765,9 +1773,110 @@ Local
 ### 19.5 Where local-model work sits
 
 Phase 2 (#29) gets the abstraction right: the harness vs source split, `Known<>` provenance,
-unassigned-until-tiered, and `location` as an axis. Everything else waits for the gate in #50:
-a local server exists and James wants it used. #51 then builds endpoint registry, probing,
-health, completions and routing on top.
+unassigned-until-tiered, and `location` as an axis. The #50 gate is met: local weights and
+runtimes exist on this machine, and James asked for them to be used (2026-09-25). #51 then
+builds the endpoint registry, probing, health, completions and routing on top, in the order
+§19.6 recommends.
+
+### 19.6 Spike findings (#50, 2026-09-25)
+
+**Setup.** Apple M5 Pro with 24 GB. `mlx-lm` 0.31.3 ran in a throwaway venv (James chose
+MLX-only, so no GGUF was downloaded), serving two MLX 4-bit models on `127.0.0.1`:
+Qwen3.5-4B and Qwen2.5-Coder-7B-Instruct. The harnesses were Claude Code 2.1.236 and Codex CLI
+0.155.0-alpha.16.3, each with an isolated config dir so nothing reached `~/.claude` or
+`~/.codex`. `mlx_lm.server` speaks neither harness's protocol, so a throwaway loopback
+translator sat between them (`/v1/messages` and `/v1/responses` → `chat/completions`). It lives
+on the unmerged `spike/local-models` branch, with the probes. The qualification task, in a
+scratch repo: fix four seeded bugs in a two-function module until `node test.js` prints `ok`,
+without touching the test. Everything was deleted afterwards. llama.cpp's `llama-server` 0.4.0
+is installed, but its routes were only read from the binary, not exercised.
+
+**Per runtime (measured unless marked).**
+
+| Fact | `mlx_lm.server` 0.31.3 | `llama-server` 0.4.0 (routes only) |
+|---|---|---|
+| listing / health | `/v1/models` gives the weights path as id, no metadata; `/health` gives `{"status":"ok"}` | `/v1/models`, `/health`, `/props`, `/slots`, `/metrics` |
+| context length | not exposed; `config.json` `max_position_embeddings` (262,144 and 32,768 here) | `/props` |
+| tool calling | parsed only when the output matches the template's tool-call tokens. Qwen3.5-4B: 10/10 calls, 10/10 tool-result round trips. Qwen2.5-Coder-7B: **0/10**. It writes the right call as `<tools>…</tools>` text, and `<\|im_end\|>` leaks into `content` | template-dependent (research §4) |
+| structured output | `response_format: json_schema` **ignored** (0/10 JSON). Instruction-only JSON, validated: **20/20** on Qwen3.5-4B, 0.7 s median | `json_schema`, GBNF |
+| reasoning | on/off via `chat_template_kwargs.enable_thinking`. Text returned in `message.reasoning`. No effort levels; reasoning tokens not split out in `usage` | `--reasoning`, `reasoning_format` |
+| streaming / usage | SSE; `stream_options.include_usage` honoured; `usage.prompt_tokens_details.cached_tokens` reported | `timings` block |
+| concurrency | batches concurrent requests; slot count not reported. 4 parallel streams: ×3.2 throughput (4B), ×2.2 (7B) | `total_slots`, `/slots` |
+| server-side timing | none; TTFT and tokens/s are client-measured only | `timings.*_per_second` |
+| throughput | 4B: ~54 tok/s decode, 0.7 s TTFT on a short prompt; prefill of a 16k-token harness prompt 16–24 s cold, ~4 s on a prefix-cache hit. 7B: ~25 tok/s | — |
+| harness endpoints | `/v1/responses` 404, `/v1/messages` 404 | `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens` |
+
+**Per harness path (Qwen3.5-4B, thinking off, through the translator).**
+
+| Fact | Claude Code → `/v1/messages` | Codex → `/v1/responses` |
+|---|---|---|
+| configuration | per-process env: `ANTHROPIC_BASE_URL`, a dummy `ANTHROPIC_API_KEY`, `--model <id>`; `CLAUDE_CODE_MAX_CONTEXT_TOKENS` sets the window | `model_provider` + `model_providers.<id>` (`base_url`, `wire_api = "responses"`). `thread/start` takes `modelProvider` and free-form `config` in the pinned schema. Model metadata comes from `model_catalog_json` |
+| prompt size | ~15.7k tokens on turn 1 (26 tools, 6.5k-char system prompt) | ~7.1k tokens on turn 1 (9–10 tools) |
+| per-call latency | median 21 s, p90 30 s | median 1.6 s, p90 7 s |
+| prefix-cache hits | 4 of 33 calls (cause not isolated; the translator folds a mid-conversation `system` message into the prefix) | 98% of calls |
+| qualification task | **5/5**, 112–225 s, 0 malformed tool calls, 0 permission denials | **6/6** after a translator fix, 21–58 s. **0/5** before it: the translator sent assistant text and its call as two assistant messages, and the model then stopped after announcing the next step |
+| permissions / sandbox | Claude's own modes apply unchanged (`acceptEdits` + `allowedTools`) | Codex's sandbox applies unchanged (`workspace-write`) |
+| tokens | correct (from the server's `usage`) | correct, including cached input (`turn.completed`) |
+| cost | **invented**: `total_cost_usd` $0.08–$0.43 a run, priced as if hosted | none reported (correct for local) |
+| context window reported | 200,000 by default (false); honours `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | fallback metadata, or the catalog entry's `context_window` (`modelContextWindow` on usage) |
+| unknown-model behaviour | `unrecognized_model` warning on stderr; works | "model metadata not found" error item. Without a catalog entry, `apply_patch` is not offered, yet the model still calls it (`unsupported call: apply_patch`). A catalog entry cloned from a "responses-lite"/code-mode model moves tools into an `additional_tools` input item. Cloning `gpt-5.4` with `apply_patch_tool_type: "freeform"` works; only `freeform` parses |
+
+**What the spike changes in the plan.**
+
+1. **The wire protocol is the gate, not the model.** A runtime is usable agentically only through
+   the endpoint the harness needs: Responses for Codex, Messages for Claude Code. A runtime is
+   probed for both, and the result is `Known<>` on the source. On this machine only
+   `llama-server` has both natively.
+2. **AW does not ship a protocol translator.** It is not an agent loop, but the spike's own
+   translator turned a passing model into 0/5 through one message-shape bug. AW should not own
+   that fidelity risk. A runtime without the endpoint is completion-only in AW.
+3. **Harness telemetry about local models is partly false.** Claude's `total_cost_usd` and default
+   `contextWindow` must not be recorded as `reported` for a local source: cost is `$0 API cost`
+   by rule (§19.4), and the window is `declared`/`probed` and passed to the harness
+   (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`, or the Codex catalog's `context_window`). This amends §6.5,
+   where Claude's `modelUsage` window is taken as `reported`.
+4. **Tool calling is a per-model fact, not a per-runtime one.** The same server went 10/10 and
+   0/10 on two models. So `toolCalling` for a local model starts `unknown`, and only a probe or
+   qualification run sets it to `measured`.
+5. **Reliably available local metrics** (for §19.4). Tokens in, out and cached come from the
+   server's `usage` on every runtime and through both harnesses. Wall time and per-call latency
+   are measured by AW. TTFT and tokens/s are server-reported only on llama.cpp (`timings`) and
+   Ollama; elsewhere they are client-measured from the stream, or unknown when a harness sits
+   in between. Slots come from llama.cpp only, and memory from none.
+
+**Qualification (proposal for #51).** Three stages, cheapest first, each run through the **same
+harness and endpoint** the model would be routed through (the 0/5 → 6/6 flip was the adapter,
+not the model):
+
+1. *Probe*, seconds: 10 single tool calls with required arguments, 10 tool-result round trips,
+   and 20 schema-validated JSON replies. This sets `toolCalling` and `structuredOutput` to
+   `measured`. Any miss means "completion-only" (Qwen2.5-Coder-7B stops here).
+2. *Tasks*, minutes: 3–5 scratch repos with seeded bugs and a deterministic check. The tests
+   must pass, the test files must be untouched, and the diff must stay inside the allowed paths.
+   Each runs k = 3 times. Record the pass rate, turns, wall time and tokens.
+3. *Show, don't tier*: results appear next to the tier picker. The model stays unassigned until
+   the user picks a tier (§6.3). One four-bug fix is `basic`-level evidence at most.
+
+**Recommendation for #51: go, in two slices, Codex first; the Claude Code path is not in #51.**
+
+- **Slice A, no harness:** the endpoint registry (loopback only by default), per-runtime probes
+  into `Known<>` (including which harness endpoints exist), health, and `StructuredCompletion`
+  served directly over `chat/completions`. It uses constrained decoding when probed
+  (llama.cpp `json_schema`), otherwise instruction plus validation plus one retry. This works
+  on every runtime seen, `mlx_lm.server` included, and is where a small local model is
+  immediately useful (assessment, verdicts).
+- **Slice B, agentic via Codex:** a local model runs as a Codex thread. `thread/start` gets
+  `modelProvider` and `config.model_providers.<id>`, plus a generated `model_catalog_json` entry
+  (context window, `apply_patch_tool_type: "freeform"`, non-lite base). It requires a native
+  `/v1/responses`. Its first step is a short measurement of `llama-server`'s Responses route with
+  Codex on a GGUF model (not done here). Why Codex: about 13× lower per-call latency on this
+  hardware, no invented cost, and AW already drives `app-server`. Open for #51: whether
+  `model_catalog_json` adds to Codex's catalog or replaces it (the spike's isolated home had
+  only the local entry), since AW's `app-server` also serves hosted threads.
+- **Claude Code path: later.** It works, but needs per-process env (the session host would
+  launch with a local `ANTHROPIC_BASE_URL`), reports false cost and window, and is ~13× slower
+  per call here. Revisit when a runtime serves `/v1/messages` natively with prefix caching that
+  holds across Claude's turns.
 
 ---
 
