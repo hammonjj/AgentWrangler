@@ -56,6 +56,8 @@ export interface HostLaunch {
   binary: string;
   /** Handed to the host as is; it applies the `claude` half. */
   policy?: LaunchPolicy;
+  /** The registry's `origin`, written into the manifest (#72). */
+  origin?: unknown;
 }
 
 export interface ScanResult {
@@ -307,6 +309,7 @@ export class HostSupervisor {
         effort: launch.effort,
         binary: launch.binary,
         ...(launch.policy ? { policy: launch.policy } : {}),
+        origin: launch.origin,
       },
     };
     let exited: string | undefined;

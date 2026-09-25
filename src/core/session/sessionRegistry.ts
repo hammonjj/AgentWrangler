@@ -88,6 +88,12 @@ export interface LiveRecordInput {
   branchAtStart?: string;
   launch?: LaunchOptionsRecord;
   origin?: unknown;
+  /**
+   * When this run began, if before now: a record rebuilt for a host that
+   * outlived the app starts when the host did, so that host's exit record
+   * still speaks for it at the next start (#72). Ignored while already live.
+   */
+  liveSince?: number;
 }
 
 const KEY = 'agentWrangler.sessions';
@@ -151,7 +157,7 @@ export class SessionRegistry {
       origin: input.origin ?? existing?.origin,
       state: 'live',
       // Kept while it stays live (an id re-announced mid-run is the same run).
-      liveSince: existing?.state === 'live' && existing.liveSince !== undefined ? existing.liveSince : now,
+      liveSince: existing?.state === 'live' && existing.liveSince !== undefined ? existing.liveSince : Math.min(input.liveSince ?? now, now),
       createdAt: existing?.createdAt ?? now,
       lastShownAt: now,
       updatedAt: now,

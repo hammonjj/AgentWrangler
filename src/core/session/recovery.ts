@@ -9,8 +9,9 @@
  * transcript), which is why every interrupted session is offered for Resume,
  * not just the newest.
  */
+import { parseLaunchPolicy } from '../../shared/launchPolicy';
 import type { HostManifest } from '../../shared/sessionProtocol';
-import type { SessionRecord, SessionRecordState } from './sessionRegistry';
+import type { LiveRecordInput, SessionRecord, SessionRecordState } from './sessionRegistry';
 
 /**
  * `endedReason` of a session whose host died without an exit record. Its
@@ -103,7 +104,8 @@ export interface StartupResult {
  * that outlived the app (`stillRunning`, from the manifests), or a host that
  * has since died says what became of it (`deadHosts`, from
  * `outcomesFromDeadHosts`); everything else keeps its state; stale records are
- * dropped and the list is capped.
+ * dropped and the list is capped. Neither the age rule nor the cap drops a
+ * record that was `live` coming in, or one still running in a host.
  *
  * `interrupted` holds only sessions left interrupted, so a session whose host
  * finished, failed or was parked while the app was away is never resumed
@@ -117,14 +119,21 @@ export function classifyOnStartup(
 ): StartupResult {
   const running = new Set([...stillRunning].map((id) => id.toLowerCase()));
   const interrupted: SessionRecord[] = [];
-  const kept: SessionRecord[] = [];
+  // Never dropped by the age rule or the cap: sessions still running in a
+  // host, and every record the app still thought live. `lastShownAt` says
+  // when the pane last showed a session, not whether it runs, so a hosted
+  // session nobody looked at for a while sorts last; and a Codex thread
+  // recorded live is most likely still running in the background server,
+  // which only a record lets this start rejoin (#72).
+  const pinned: SessionRecord[] = [];
+  const rest: SessionRecord[] = [];
   for (const r of records) {
     const id = r.sessionId.toLowerCase();
     if (running.has(id)) {
-      kept.push(r.state === 'live' ? r : { ...r, state: 'live', endedReason: undefined, updatedAt: now });
+      pinned.push(r.state === 'live' ? r : { ...r, state: 'live', endedReason: undefined, updatedAt: now });
       continue;
     }
-    if (now - r.lastShownAt > RECORD_MAX_AGE_MS) continue;
+    if (r.state !== 'live' && now - r.lastShownAt > RECORD_MAX_AGE_MS) continue;
     if (r.state === 'live') {
       // Only a record the app still thought live takes the host's word: one
       // already stopped (Close) or ended here stays what this app recorded.
@@ -136,15 +145,46 @@ export function classifyOnStartup(
       const outcome = current && dead ? dead : { state: 'interrupted' as const, reason: 'app-restart' };
       const next: SessionRecord = { ...r, state: outcome.state, endedReason: outcome.reason, updatedAt: now };
       if (next.state === 'interrupted') interrupted.push(next);
-      kept.push(next);
+      pinned.push(next);
     } else {
-      kept.push(r);
+      rest.push(r);
     }
   }
   const byNewest = (a: SessionRecord, b: SessionRecord) => b.lastShownAt - a.lastShownAt;
-  kept.sort(byNewest);
+  rest.sort(byNewest);
   interrupted.sort(byNewest);
-  return { records: kept.slice(0, MAX_RECORDS), interrupted };
+  // The cap trims history only: pinned records all stay, even past it.
+  const out = [...pinned, ...rest.slice(0, Math.max(0, MAX_RECORDS - pinned.length))].sort(byNewest);
+  return { records: out, interrupted };
+}
+
+/**
+ * The registry record for a host adopted with none (it was lost, or dropped
+ * before #72): rebuilt from what the host wrote down about its launch, so the
+ * session comes back on its model, mode and effort, and a §7.4 migration
+ * does not restart it on the defaults.
+ */
+export function recordFromManifest(
+  manifest: Pick<HostManifest, 'sessionId' | 'cwd' | 'launch' | 'origin'> & { startedAt?: number },
+): LiveRecordInput | undefined {
+  if (!manifest.sessionId) return undefined;
+  const l = manifest.launch ?? {};
+  return {
+    sessionId: manifest.sessionId,
+    provider: 'claude',
+    cwd: manifest.cwd,
+    // And under its policy (#71): a Resume of the rebuilt record must not drop the rules.
+    launch: prune({ model: l.model, permissionMode: l.permissionMode, effort: l.effort, binary: l.binary, policy: parseLaunchPolicy(l.policy) }),
+    origin: manifest.origin,
+    // The run began when the host did, not now: otherwise that host's exit
+    // record would read as old news at the next start, and a crash or a
+    // finish would come back as a plain interruption (auto-resume included).
+    liveSince: manifest.startedAt,
+  };
+}
+
+function prune<T extends object>(o: T): T {
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 }
 
 /** Whether a record should show as interrupted on its row right now. */

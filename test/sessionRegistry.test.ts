@@ -5,10 +5,30 @@ import {
   MAX_RECORDS,
   RECORD_MAX_AGE_MS,
   autoResumeCandidate,
+  HOST_LOST,
   classifyOnStartup,
+  outcomesFromDeadHosts,
+  recordFromManifest,
   showsInterrupted,
 } from '../src/core/session/recovery';
 import { LEGACY_KEY, SessionRegistry, type SessionRecord } from '../src/core/session/sessionRegistry';
+import type { HostManifest } from '../src/shared/sessionProtocol';
+
+function deadManifest(sessionId: string, startedAt: number): HostManifest {
+  return {
+    v: 1,
+    hostId: 'aaaaaaaa',
+    provider: 'claude',
+    sessionId,
+    cwd: '/Users/test/proj',
+    hostPid: 1,
+    socketPath: '/tmp/x.sock',
+    protocol: 1,
+    hostBuild: 'test',
+    sdkVersion: '0',
+    startedAt,
+  };
+}
 
 function memento(initial: Record<string, unknown> = {}) {
   const doc: Record<string, unknown> = { ...initial };
@@ -67,11 +87,109 @@ describe('classifyOnStartup (the recovery table)', () => {
 
   it('drops records too old to matter, and caps the list', () => {
     const many = Array.from({ length: MAX_RECORDS + 5 }, (_, i) => rec({ sessionId: `s${i}`, state: 'ended', lastShownAt: now - i }));
-    const stale = rec({ sessionId: 'stale', state: 'live', lastShownAt: now - RECORD_MAX_AGE_MS - 1 });
+    const stale = rec({ sessionId: 'stale', state: 'ended', lastShownAt: now - RECORD_MAX_AGE_MS - 1 });
     const { records, interrupted } = classifyOnStartup([...many, stale], now);
     expect(records).toHaveLength(MAX_RECORDS);
-    expect(records.some((r) => r.sessionId === 'stale')).toBe(false);
+    expect(records.map((r) => r.sessionId)).toEqual(many.slice(0, MAX_RECORDS).map((r) => r.sessionId));
     expect(interrupted).toEqual([]);
+  });
+
+  describe('never drops a live record (#72)', () => {
+    const history = Array.from({ length: MAX_RECORDS + 20 }, (_, i) => rec({ sessionId: `h${i}`, state: 'ended', lastShownAt: now - i }));
+
+    it.each(['claude', 'codex'] as const)('%s: an old live record survives the cap and is interrupted', (provider) => {
+      const old = rec({ sessionId: 'old', provider, state: 'live', lastShownAt: now - 20 * 24 * HOUR });
+      const { records, interrupted } = classifyOnStartup([...history, old], now);
+      expect(records.find((r) => r.sessionId === 'old')).toMatchObject({ provider, state: 'interrupted', endedReason: 'app-restart' });
+      expect(interrupted.map((r) => r.sessionId)).toEqual(['old']);
+      expect(records).toHaveLength(MAX_RECORDS);
+    });
+
+    it.each(['claude', 'codex'] as const)('%s: a live record past the age rule survives it', (provider) => {
+      const ancient = rec({ sessionId: 'ancient', provider, state: 'live', lastShownAt: now - RECORD_MAX_AGE_MS - HOUR });
+      const { records, interrupted } = classifyOnStartup([...history, ancient], now);
+      expect(records.some((r) => r.sessionId === 'ancient')).toBe(true);
+      expect(interrupted.map((r) => r.sessionId)).toEqual(['ancient']);
+    });
+
+    it('a session still running in a host survives the age rule and the cap, and stays live', () => {
+      const hosted = rec({ sessionId: 'Hosted', state: 'live', lastShownAt: now - RECORD_MAX_AGE_MS - HOUR });
+      const { records, interrupted } = classifyOnStartup([...history, hosted], now, new Set(['hosted']));
+      expect(records.find((r) => r.sessionId === 'Hosted')).toMatchObject({ state: 'live' });
+      expect(interrupted).toEqual([]);
+    });
+
+    it('keeps every live record even when they alone pass the cap', () => {
+      const live = Array.from({ length: MAX_RECORDS + 3 }, (_, i) =>
+        rec({ sessionId: `l${i}`, provider: i % 2 ? 'codex' : 'claude', state: 'live', lastShownAt: now - 40 * 24 * HOUR - i }),
+      );
+      const { records, interrupted } = classifyOnStartup([...history, ...live], now);
+      expect(records).toHaveLength(MAX_RECORDS + 3);
+      expect(records.every((r) => r.sessionId.startsWith('l'))).toBe(true);
+      expect(interrupted).toHaveLength(MAX_RECORDS + 3);
+    });
+
+    it('the next start treats an old interrupted record as history again', () => {
+      const old = rec({ sessionId: 'old', state: 'live', lastShownAt: now - RECORD_MAX_AGE_MS - HOUR });
+      const first = classifyOnStartup([old], now);
+      expect(classifyOnStartup(first.records, now + HOUR).records).toEqual([]);
+    });
+  });
+});
+
+describe('recordFromManifest (#72)', () => {
+  it('rebuilds the launch options and origin a host wrote down', () => {
+    const origin = { kind: 'orchestration', missionId: 'm1' };
+    expect(
+      recordFromManifest({
+        sessionId: 's1',
+        cwd: '/Users/test/proj',
+        launch: { resume: true, model: 'opus', permissionMode: 'plan', effort: 'high', binary: '/usr/local/bin/claude' },
+        origin,
+      }),
+    ).toEqual({
+      sessionId: 's1',
+      provider: 'claude',
+      cwd: '/Users/test/proj',
+      launch: { model: 'opus', permissionMode: 'plan', effort: 'high', binary: '/usr/local/bin/claude' },
+      origin,
+    });
+  });
+
+  it('copes with a manifest from before launch or origin were written', () => {
+    expect(recordFromManifest({ sessionId: 's1', cwd: '/Users/test/proj' })).toEqual({
+      sessionId: 's1',
+      provider: 'claude',
+      cwd: '/Users/test/proj',
+      launch: {},
+      origin: undefined,
+    });
+    expect(recordFromManifest({ cwd: '/Users/test/proj' })).toBeUndefined();
+  });
+
+  it('a rebuilt record starts when its host did, so a later host crash is still read as one', () => {
+    const t0 = 50 * 24 * HOUR;
+    let now = t0 + 2 * 24 * HOUR;
+    const registry = new SessionRegistry(memento(), { now: () => now });
+    registry.live(recordFromManifest({ sessionId: 's1', cwd: '/Users/test/proj', startedAt: t0 })!);
+    expect(registry.get('s1')?.liveSince).toBe(t0);
+    // The app quits, the host dies with no exit record, the app starts again.
+    now += HOUR;
+    const { records, interrupted } = registry.startup(new Set(), outcomesFromDeadHosts([deadManifest('s1', t0)]));
+    expect(records[0]).toMatchObject({ state: 'interrupted', endedReason: HOST_LOST });
+    expect(autoResumeCandidate(interrupted, now)).toBeUndefined();
+  });
+
+  it('never dates a run in the future', () => {
+    const registry = new SessionRegistry(memento(), { now: () => 1000 });
+    expect(registry.live({ sessionId: 's', provider: 'claude', cwd: '/Users/test/proj', liveSince: 5000 }).liveSince).toBe(1000);
+  });
+
+  it('what it rebuilds is what adopt reads back from the registry', () => {
+    const registry = new SessionRegistry(memento());
+    const input = recordFromManifest({ sessionId: 's1', cwd: '/Users/test/proj', launch: { model: 'sonnet', effort: 'low' }, origin: { kind: 'x' } });
+    registry.live(input!);
+    expect(registry.get('s1')).toMatchObject({ state: 'live', launch: { model: 'sonnet', effort: 'low' }, origin: { kind: 'x' } });
   });
 });
 

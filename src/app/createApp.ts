@@ -43,7 +43,7 @@ import { bootTimeMs, parentPidOf, startTimeOf } from '../core/procStart';
 import { sweepOrphans, sweepRefusal, type SweepResult } from '../core/session/orphanSweep';
 import { endProcess } from '../claude/runner/adopt';
 import { SessionRegistry, type SessionRecord } from '../core/session/sessionRegistry';
-import { autoResumeCandidate, outcomesFromDeadHosts } from '../core/session/recovery';
+import { autoResumeCandidate, outcomesFromDeadHosts, recordFromManifest } from '../core/session/recovery';
 import { checkoutFor } from '../core/checkout';
 import { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerView } from '../claude/runner/runnerView';
@@ -96,7 +96,6 @@ import { auditFile, DISCORD_BOT_TOKEN_KEY, mirrorFile } from '../remote/paths';
 import { RemoteControlService } from '../remote/service';
 import type { RemoteTransport } from '../remote/transport';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
-import { parseLaunchPolicy } from '../shared/launchPolicy';
 import type { PermissionModeName } from '../shared/conversation';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
@@ -453,15 +452,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // Take back every session still running in a host, before the providers'
   // first scan: each is ours from the first snapshot, never an external
   // session to take over or a stale one to resume.
+  // A host with no record gets one rebuilt from its manifest, so it comes back
+  // the way it was launched rather than on the defaults (#72).
   for (const manifest of hostScan.alive) {
-    if (!manifest.sessionId) continue;
-    const record = sessionRegistry.get(manifest.sessionId);
-    if (!record) {
-      // The host's own copy of its policy, so a later Resume still has the rules (#71).
-      const policy = parseLaunchPolicy(manifest.launch?.policy);
-      sessionRegistry.live({ sessionId: manifest.sessionId, provider: 'claude', cwd: manifest.cwd, ...(policy ? { launch: { policy } } : {}) });
+    const rebuilt = manifest.sessionId && !sessionRegistry.get(manifest.sessionId) ? recordFromManifest(manifest) : undefined;
+    if (rebuilt) {
+      const place = locate(manifest.cwd);
+      sessionRegistry.live({ ...rebuilt, repoRoot: place.repoRoot, worktree: place.worktree, branchAtStart: place.branch });
+      log(`session ${manifest.sessionId}: no record for its host ${manifest.hostId}; rebuilt from the manifest`);
     }
-    runners.adopt(manifest, record);
+    runners.adopt(manifest, sessionRegistry.get(manifest.sessionId));
   }
 
   // One typed reader for launch settings (#26), instead of ad hoc reads here.

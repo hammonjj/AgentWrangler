@@ -126,7 +126,25 @@ export class RunnerService implements SessionExecutor, Disposable {
         beforeResume: this.deps.beforeResume,
       },
     );
-    this.track(session);
+    // Its record is already live. A `/clear` later gives it a new id, whose
+    // record keeps how it was launched and who started it, as `start` does (#72).
+    const adoptedId = manifest.sessionId.toLowerCase();
+    const origin = record?.origin ?? manifest.origin;
+    this.track(session, (id) => {
+      if (id.toLowerCase() === adoptedId) return;
+      const { applied: _applied, ...launch } = record?.launch ?? {};
+      this.deps.registry?.live({
+        sessionId: id,
+        provider: 'claude',
+        cwd: session.cwd,
+        repoRoot: record?.repoRoot,
+        worktree: record?.worktree,
+        branchAtStart: record?.branchAtStart,
+        // The view's policy: the record's, or the manifest's copy (#71).
+        launch: { ...launch, ...(session.policy ? { policy: session.policy } : {}) },
+        origin,
+      });
+    });
     this.deps.log(`adopted session ${manifest.sessionId} from host ${manifest.hostId}`);
     return session;
   }

@@ -389,6 +389,12 @@ export interface HostManifest {
    * rules; readers parse it with `parseLaunchPolicy`.
    */
   launch?: { resume?: boolean; permissionMode?: string; model?: string; effort?: string; binary?: string; policy?: LaunchPolicy };
+  /**
+   * Who started the session (the registry's `origin`), opaque, for the same
+   * reason: an orchestrated attempt adopted without its record is still found
+   * as one. Absent in manifests written before #72.
+   */
+  origin?: unknown;
   socketPath: string;
   protocol: number;
   hostBuild: string;
@@ -429,5 +435,7 @@ export interface HostBoot {
      * is used; the host applies it to the SDK options as given and decides nothing.
      */
     policy?: LaunchPolicy;
+    /** Copied into the manifest as is; the host never reads it. */
+    origin?: unknown;
   };
 }

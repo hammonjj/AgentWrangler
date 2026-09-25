@@ -37,6 +37,7 @@ export function spawnHostedClaude(request: Omit<LaunchRequest, 'provider'>, deps
     effort: request.effort,
     binary: deps.binary,
     policy: request.policy,
+    origin: request.origin,
   });
   return new RunnerView(
     {
@@ -49,7 +50,7 @@ export function spawnHostedClaude(request: Omit<LaunchRequest, 'provider'>, deps
       origin: request.origin,
       policy: request.policy,
     },
-    { exec: client, log: deps.log, loadHistory: deps.loadHistory, migrate: migrator(sessionId, request.cwd, deps) },
+    { exec: client, log: deps.log, loadHistory: deps.loadHistory, migrate: migrator(sessionId, request.cwd, request.origin, deps) },
   );
 }
 
@@ -77,7 +78,7 @@ export function adoptHostedClaude(
     {
       exec: client,
       log: deps.log,
-      migrate: manifest.sessionId ? migrator(manifest.sessionId, manifest.cwd, deps) : undefined,
+      migrate: manifest.sessionId ? migrator(manifest.sessionId, manifest.cwd, launch.origin ?? manifest.origin, deps) : undefined,
     },
   );
 }
@@ -87,9 +88,10 @@ export function adoptHostedClaude(
  * fresh host of this build resuming the same id, on the view's current model,
  * mode and effort, under the policy it was launched with (§7.4). The view
  * names the id: a `/clear` inside the old host gave it a new one, and that is
- * the one to resume.
+ * the one to resume. `origin` does not change over a session's life, so the
+ * new manifest carries the old one's.
  */
-function migrator(initialId: string, cwd: string, deps: RemoteClaudeDeps): MigrateExecution {
+function migrator(initialId: string, cwd: string, origin: unknown, deps: RemoteClaudeDeps): MigrateExecution {
   return async (launch): Promise<ClaudeExecution> => {
     const sessionId = launch.sessionId ?? initialId;
     await deps.beforeResume?.(sessionId);
@@ -102,6 +104,7 @@ function migrator(initialId: string, cwd: string, deps: RemoteClaudeDeps): Migra
       effort: launch.effort,
       binary: deps.binary,
       policy: launch.policy,
+      origin,
     });
     return client;
   };

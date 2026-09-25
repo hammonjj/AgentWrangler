@@ -97,6 +97,7 @@ async function main(): Promise<void> {
       binary: boot.launch.binary,
       ...(policy ? { policy } : {}),
     },
+    origin: boot.launch.origin,
   };
   const writeManifest = () => {
     try {
