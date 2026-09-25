@@ -1,9 +1,11 @@
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import esbuild from 'esbuild';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isPidAlive, readProcessEntries } from '../src/claude/registry';
+import { RunnerService } from '../src/claude/runner/runnerService';
 import type { RunnerView } from '../src/claude/runner/runnerView';
 import { parentPidOf, startTimeOf } from '../src/core/procStart';
 import { HostSupervisor } from '../src/core/session/hostSupervisor';
@@ -97,8 +99,62 @@ afterAll(async () => {
   for (const e of await readProcessEntries(sessionsDir)) {
     if (isPidAlive(e.pid) && startTimeOf(e.pid) === e.procStart) process.kill(e.pid, 'SIGKILL');
   }
+  for (const p of extras) if (isPidAlive(p.pid) && startTimeOf(p.pid) === p.start) process.kill(p.pid, 'SIGKILL');
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+// ---- Stand-ins for a `claude` process, for the sweep's identity rows ----
+
+/** Processes started here whose `sessions/<pid>.json` may not name them truly; ended in `afterAll`. */
+const extras: { pid: number; start?: string }[] = [];
+
+/**
+ * Runs until killed. With `termDelayMs`, it takes that long to exit after SIGTERM, as a busy CLI
+ * does (S1). Once its handler is installed it writes `<pid>.ready`, so no signal lands before it.
+ */
+function standInScript(termDelayMs = 0): string {
+  const file = path.join(root, `standin-${termDelayMs}.js`);
+  const onTerm = termDelayMs > 0 ? `setTimeout(() => process.exit(0), ${termDelayMs})` : 'process.exit(0)';
+  const ready = JSON.stringify(root);
+  fs.writeFileSync(
+    file,
+    `process.on('SIGTERM', () => { ${onTerm}; });\n` +
+      `require('fs').writeFileSync(require('path').join(${ready}, process.pid + '.ready'), '');\n` +
+      'setInterval(() => {}, 1000);\n',
+  );
+  return file;
+}
+
+async function track(pid: number): Promise<number> {
+  await until(() => fs.existsSync(path.join(root, `${pid}.ready`)), 5000);
+  extras.push({ pid, start: startTimeOf(pid) });
+  return pid;
+}
+
+/** A child of this test process: its parent is not launchd, so it stands for a terminal's `claude`. */
+function spawnOwned(): Promise<number> {
+  const child = spawn(process.execPath, [standInScript()], { stdio: 'ignore' });
+  return track(child.pid!);
+}
+
+/** A process whose parent has exited, so launchd adopted it: what a SIGKILLed host leaves behind. */
+async function spawnOrphan(termDelayMs = 0): Promise<number> {
+  const sh = spawn('/bin/sh', ['-c', `"${process.execPath}" "${standInScript(termDelayMs)}" >/dev/null 2>&1 & echo $!`], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let out = '';
+  sh.stdout!.on('data', (d) => (out += String(d)));
+  await new Promise((r) => sh.on('exit', r));
+  const pid = Number(out.trim());
+  expect(Number.isInteger(pid) && pid > 0).toBe(true);
+  await track(pid);
+  await until(() => parentPidOf(pid) === 1, 5000);
+  return pid;
+}
+
+/** Write `sessions/<pid>.json` the way the CLI does. `procStart` defaults to the process's real start time. */
+function writeEntry(pid: number, sessionId: string, procStart = startTimeOf(pid)): void {
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(path.join(sessionsDir, `${pid}.json`), JSON.stringify({ pid, sessionId, procStart }));
+}
 
 describe.runIf(process.platform === 'darwin')('session host recovery, end to end', () => {
   it('sweeps the agent a killed host left behind, so a resume is the only process on the id', async () => {
@@ -256,4 +312,97 @@ describe.runIf(process.platform === 'darwin')('session host recovery, end to end
     expect(manifestFor(id)?.exit).toMatchObject({ reason: 'stopped', trigger: 'idleTimeout' });
     expect(await liveAgents(id)).toEqual([]);
   }, 45_000);
+});
+
+/**
+ * The sweep's identity rows (§16, added at CP0 from S1), with real processes
+ * standing in for `claude` and real `sessions/<pid>.json` files, and the
+ * resume going through `RunnerService` as the app's does. The unit tests in
+ * `orphanSweep.test.ts` cover the same branches with fakes; these prove the
+ * real probes (`ps` start time, parent pid) classify real processes the same way.
+ */
+describe.runIf(process.platform === 'darwin')('orphan identity, with real processes', () => {
+  /** A Claude runner as the app wires it: hosts on, every resume swept first, history reads recorded. */
+  function runner(sup: HostSupervisor, onHistory: () => void) {
+    return new RunnerService({
+      query: () => {
+        throw new Error('hosted sessions never run in-process');
+      },
+      binary: () => '/fake',
+      log,
+      hosts: { supervisor: sup, enabled: () => true },
+      loadHistory: async () => {
+        onHistory();
+        return { blocks: [], truncated: false };
+      },
+      beforeResume: async (sessionId) => {
+        const why = sweepRefusal(await sweepOrphans(sessionId, sweepDeps(sup)));
+        if (why) throw new Error(why);
+      },
+    });
+  }
+
+  it('a live process with a parent other than launchd is an owner: never signalled, and the resume is refused', async () => {
+    const id = 'bbbbbbbb-0000-4000-8000-000000000011';
+    const owner = await spawnOwned();
+    writeEntry(owner, id);
+    expect(parentPidOf(owner)).toBe(process.pid);
+
+    const sup = supervisor();
+    const swept = await sweepOrphans(id, sweepDeps(sup));
+    expect(swept).toMatchObject({ swept: [], owners: [owner], clear: false });
+    expect(sweepRefusal(swept)).toMatch(/take it over/);
+
+    let historyReads = 0;
+    await expect(runner(sup, () => historyReads++).resume({ cwd: root, resume: id })).rejects.toThrow(/take it over/);
+    expect(historyReads).toBe(0);
+    expect(manifestsFor(id)).toEqual([]);
+    expect(isPidAlive(owner)).toBe(true);
+    process.kill(owner, 'SIGKILL');
+  }, 30_000);
+
+  it('stale entries are ignored: a dead pid, and a live pid whose start time is not the one recorded', async () => {
+    const id = 'bbbbbbbb-0000-4000-8000-000000000012';
+    // A CLI that was SIGKILLed: its file outlives it.
+    const dead = await spawnOwned();
+    writeEntry(dead, id);
+    process.kill(dead, 'SIGKILL');
+    await until(() => !isPidAlive(dead), 5000);
+    // A pid reused by something else: alive, orphaned even, but not the process the file names.
+    const reused = await spawnOrphan();
+    writeEntry(reused, id, 'Thu Jan  1 00:00:00 1970');
+
+    const swept = await sweepOrphans(id, sweepDeps(supervisor()));
+    expect(swept).toEqual({ swept: [], refused: [], owners: [], held: [], clear: true });
+    // Nothing was signalled on a guess.
+    expect(isPidAlive(reused)).toBe(true);
+    process.kill(reused, 'SIGKILL');
+  }, 30_000);
+
+  it('the sweep waits for a slow orphan to exit, and only then is the history read and the session resumed', async () => {
+    const id = 'bbbbbbbb-0000-4000-8000-000000000013';
+    // Like a busy CLI: SIGTERM takes a while to land (S1 saw ~2.8 s).
+    const orphan = await spawnOrphan(1500);
+    writeEntry(orphan, id);
+
+    const sup = supervisor();
+    let orphanAliveAtHistory: boolean | undefined;
+    const t0 = Date.now();
+    const view = await runner(sup, () => {
+      orphanAliveAtHistory ??= isPidAlive(orphan);
+    }).resume({ cwd: root, resume: id });
+    // `resume` returned only after the sweep: the orphan is gone, and it took its time going.
+    expect(isPidAlive(orphan)).toBe(false);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(1400);
+
+    await view.send('back');
+    await until(() => texts(view).includes('echo: back'));
+    expect(orphanAliveAtHistory).toBe(false);
+    // One process on the id: the resumed agent, not the orphan.
+    expect((await liveAgents(id)).map((e) => e.pid)).toEqual([manifestFor(id)!.agentPid]);
+
+    const host = manifestFor(id)!.hostPid;
+    await view.end();
+    await until(() => !isPidAlive(host));
+  }, 30_000);
 });
