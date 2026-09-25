@@ -148,6 +148,7 @@ const MAX_BLOCKS = 2000;
 const INTERRUPT_GRACE_MS = 5000;
 /** How long a migration waits for the old host to exit (it gives its agent 5 s on a signal). */
 const MIGRATION_EXIT_WAIT_MS = 15_000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Attempts at the model list before giving up on a CLI that cannot answer. */
 const MAX_MODEL_ASKS = 3;
 
@@ -324,6 +325,8 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     const pics = images ?? [];
     if (this.migrating) await this.migrating;
     if (!this.canSend) return 'gone';
+    // It becomes the transcript entry's uuid, so it must be one.
+    if (opts.clientMessageId !== undefined && !UUID.test(opts.clientMessageId)) return 'unsupported';
     // An image on its own is a real message ("what is wrong with this?").
     if (!text.trim() && pics.length === 0) return 'applied';
     if (this.shouldMigrate()) {
@@ -334,7 +337,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     // so a client reattaching later can dedupe its own sends against the file.
     // A caller's own id is used as is: the CLI echoes it on the turn's
     // `result.user_message_uuid(s)`, which is how it finds its turns.
-    const uuid = opts.clientMessageId || this.newUuid();
+    const uuid = opts.clientMessageId ?? this.newUuid();
     // The CLI does not echo our own sends back, so the pane has to show them.
     const userId = `u:${Date.now()}:${this.blocks.length}`;
     this.append([

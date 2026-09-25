@@ -9,6 +9,7 @@
  */
 import type { SessionHandle } from '../../core/session/sessionHandle';
 import type { ModelChoice, PermissionModeName } from '../../shared/conversation';
+import type { LaunchPolicy } from '../../shared/launchPolicy';
 import type { ExecutionTarget, HarnessId, OrchestrationOrigin } from '../../shared/orchestration/types';
 
 /**
@@ -58,6 +59,11 @@ export interface AttemptLaunch {
   resume?: string;
   /** A fresh session's id, when the harness can take one. Chosen by the adapter if absent. */
   sessionId?: string;
+  /**
+   * Tool rules, limits and sandbox (plan §24.1). On a resume, absent means
+   * the session's recorded policy, never none: the executor re-applies it.
+   */
+  policy?: LaunchPolicy;
 }
 
 export interface AgentHarness {

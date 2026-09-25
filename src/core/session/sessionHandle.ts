@@ -121,6 +121,10 @@ export interface SendOptions {
    * caused from anyone else's. Claude: the SDK user-message `uuid`, echoed on
    * `result.user_message_uuid(s)`. Codex: `turn/start.clientUserMessageId`.
    * Minted by the handle when absent.
+   *
+   * A fresh UUID per message: Claude keeps it as the transcript entry's uuid
+   * (a send with anything else is `unsupported`), and sends are idempotent on
+   * it, so reusing one is "already sent" (`applied`, nothing sent again).
    */
   clientMessageId?: string;
 }

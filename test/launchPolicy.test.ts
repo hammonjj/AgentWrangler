@@ -12,6 +12,8 @@ import { RunnerService } from '../src/claude/runner/runnerService';
 import { Emitter } from '../src/core/events';
 import { LaunchDefaults } from '../src/core/launchDefaults';
 import { SessionRegistry } from '../src/core/session/sessionRegistry';
+import { recordFromManifest } from '../src/core/session/recovery';
+import { ClaudeCodeHarness } from '../src/orchestration/harness/claudeCodeHarness';
 import { codexPolicyParams, CodexRunnerService } from '../src/codex/runner';
 import { parseLaunchPolicy, type LaunchPolicy } from '../src/shared/launchPolicy';
 import { emptyHostState, type HostEvent, type HostSnapshot } from '../src/shared/sessionProtocol';
@@ -27,6 +29,8 @@ const POLICY: LaunchPolicy = {
   },
   codex: { sandbox: 'workspace-write', approvalPolicy: 'on-request', developerInstructions: 'Stay in the worktree.' },
 };
+
+const MINE = 'eeeeeeee-0000-4000-8000-000000000001';
 
 function memento(initial: Record<string, unknown> = {}) {
   const doc: Record<string, unknown> = { ...initial };
@@ -59,6 +63,14 @@ describe('parseLaunchPolicy', () => {
     expect(parsed).toEqual({ claude: { disallowedTools: ['Bash(git push:*)'] }, codex: { approvalPolicy: 'on-request' } });
   });
 
+  it("drops Codex approvalPolicy 'never' unless the policy names the sandbox too", () => {
+    expect(parseLaunchPolicy({ codex: { approvalPolicy: 'never' } })).toBeUndefined();
+    expect(parseLaunchPolicy({ codex: { approvalPolicy: 'never', sandbox: 'workspace-write' } })).toEqual({
+      codex: { approvalPolicy: 'never', sandbox: 'workspace-write' },
+    });
+    expect(codexPolicyParams({ codex: { approvalPolicy: 'never' } })).toEqual({});
+  });
+
   it('rejects malformed limits and output formats field by field', () => {
     expect(
       parseLaunchPolicy({ claude: { maxTurns: 1.5, maxBudgetUsd: Number.NaN, fallbackModel: ' ', outputFormat: { type: 'text' }, allowedTools: ['Read'] } }),
@@ -70,6 +82,11 @@ describe('claudePolicyOptions', () => {
   it('maps the claude half onto SDK options, and nothing else', () => {
     expect(claudePolicyOptions(POLICY.claude)).toEqual(POLICY.claude);
     expect(claudePolicyOptions(undefined)).toEqual({});
+  });
+
+  it('leaves out a fallback model that is the model itself (the SDK would refuse to start)', () => {
+    expect(claudePolicyOptions({ fallbackModel: 'sonnet', maxTurns: 3 }, 'sonnet')).toEqual({ maxTurns: 3 });
+    expect(claudePolicyOptions({ fallbackModel: 'sonnet' }, 'opus')).toEqual({ fallbackModel: 'sonnet' });
   });
 
   it('reaches the SDK options, after anything merged in, and changes nothing without a policy', () => {
@@ -126,7 +143,7 @@ describe('the registry keeps a policy', () => {
         'agentWrangler.sessions': [
           {
             v: 1, sessionId: 's1', provider: 'codex', cwd: '/Users/test/proj', state: 'stopped', createdAt: 1, lastShownAt: 1, updatedAt: 1,
-            launch: { policy: { codex: { sandbox: 'danger-full-access', approvalPolicy: 'never' } } },
+            launch: { policy: { codex: { sandbox: 'danger-full-access', approvalPolicy: 'on-request' } } },
           },
           {
             v: 1, sessionId: 's2', provider: 'codex', cwd: '/Users/test/proj', state: 'stopped', createdAt: 1, lastShownAt: 1, updatedAt: 1,
@@ -135,7 +152,7 @@ describe('the registry keeps a policy', () => {
         ],
       }),
     );
-    expect(registry.get('s1')?.launch.policy).toEqual({ codex: { approvalPolicy: 'never' } });
+    expect(registry.get('s1')?.launch.policy).toEqual({ codex: { approvalPolicy: 'on-request' } });
     expect(registry.get('s2')?.launch).toEqual({ model: 'm' });
   });
 });
@@ -165,7 +182,25 @@ describe('a resume gets the policy back', () => {
     const defaults = new LaunchDefaults({ get: <T>(_k: string, d: T) => d });
     await service.launch({ provider: 'claude', cwd: record.cwd, resume: record.sessionId, ...defaults.resumed('claude', record.launch) });
     expect(seen[1]).toMatchObject({ resume: record.sessionId, disallowedTools: ['Bash(git push:*)'], maxTurns: 40 });
+
+    // A resume that says nothing about policy (the orchestrator's "continue") still gets it.
+    await service.launch({ provider: 'claude', cwd: record.cwd, resume: record.sessionId });
+    expect(seen[2]).toMatchObject({ resume: record.sessionId, disallowedTools: ['Bash(git push:*)'] });
     service.dispose();
+  });
+
+  it('recordFromManifest rebuilds a lost record with the host’s policy', () => {
+    const rebuilt = recordFromManifest({ sessionId: 's1', cwd: '/Users/test/proj', launch: { model: 'opus', policy: POLICY } });
+    expect(rebuilt?.launch).toEqual({ model: 'opus', policy: POLICY });
+    expect(recordFromManifest({ sessionId: 's1', cwd: '/Users/test/proj', launch: { model: 'opus' } })?.launch).toEqual({ model: 'opus' });
+  });
+
+  it('the harnesses forward an attempt policy', async () => {
+    const launched: any[] = [];
+    const sessions = { launch: async (r: any) => (launched.push(r), {} as any) };
+    const claude = new ClaudeCodeHarness({ sessions, models: () => [] } as any);
+    await claude.launch({ cwd: '/Users/test/proj', prompt: 'p', target: { harness: 'claude-code', model: 'opus', effortNative: 'none' }, origin: {} as any, policy: POLICY });
+    expect(launched[0].policy).toEqual(POLICY);
   });
 });
 
@@ -223,9 +258,10 @@ describe('RunnerView', () => {
     (exec as { outdated: boolean }).outdated = false;
     const view = new RunnerView({ cwd: '/Users/test/proj', sessionId: 's1' }, { exec, log: () => undefined, newUuid: () => 'minted' });
     view.start();
-    await view.send('one', undefined, { clientMessageId: 'mine-1' });
+    await view.send('one', undefined, { clientMessageId: MINE });
     await view.send('two');
-    expect(exec.sent.map((m) => m.uuid)).toEqual(['mine-1', 'minted']);
+    expect(await view.send('three', undefined, { clientMessageId: 'not-a-uuid' })).toBe('unsupported');
+    expect(exec.sent.map((m) => m.uuid)).toEqual([MINE, 'minted']);
   });
 });
 
@@ -308,6 +344,31 @@ describe('CodexRunnerService', () => {
     service.dispose();
   });
 
+  it('a resume that names no policy gets the recorded one', async () => {
+    const registry = new SessionRegistry(memento());
+    registry.live({ sessionId: 't9', provider: 'codex', cwd: '/Users/test/proj', launch: { policy: POLICY } });
+    const server = new FakeCodex();
+    const service = new CodexRunnerService(server as any, undefined, { registry });
+    await service.launch({ provider: 'codex', cwd: '/Users/test/proj', resume: 't9' });
+    expect(server.of('thread/resume')).toEqual([{ threadId: 't9', ...POLICY.codex }]);
+    service.dispose();
+  });
+
+  it('re-sends the policy when it rejoins after the connection comes back', async () => {
+    const server = new FakeCodex();
+    let reconnect!: (event: { instance?: string; restarted: boolean }) => void;
+    (server as any).onReconnect = (listener: typeof reconnect) => {
+      reconnect = listener;
+      return { dispose: () => undefined };
+    };
+    const service = new CodexRunnerService(server as any);
+    await service.launch({ provider: 'codex', cwd: '/Users/test/proj', policy: POLICY });
+    reconnect({ restarted: true });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(server.of('thread/resume')).toEqual([{ threadId: 't1', ...POLICY.codex }]);
+    service.dispose();
+  });
+
   it('forks with the policy of the thread it came from', async () => {
     const server = new FakeCodex();
     const service = new CodexRunnerService(server as any);
@@ -321,10 +382,10 @@ describe('CodexRunnerService', () => {
     const server = new FakeCodex();
     const service = new CodexRunnerService(server as any);
     const runner = await service.launch({ provider: 'codex', cwd: '/Users/test/proj' });
-    await runner.send('one', [], { clientMessageId: 'mine-1' });
+    await runner.send('one', [], { clientMessageId: MINE });
     await runner.send('two');
     const turns = server.of('turn/start');
-    expect(turns[0].clientUserMessageId).toBe('mine-1');
+    expect(turns[0].clientUserMessageId).toBe(MINE);
     expect(turns[1]).not.toHaveProperty('clientUserMessageId');
     service.dispose();
   });

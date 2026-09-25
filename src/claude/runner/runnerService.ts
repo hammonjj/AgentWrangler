@@ -19,7 +19,7 @@ import { createLocalClaudeHandle } from '../../core/session/localClaudeHandle';
 import { HOST_LOST } from '../../core/session/recovery';
 import { adoptHostedClaude, spawnHostedClaude } from '../../core/session/remoteClaudeHandle';
 import type { LaunchRequest, SessionExecutor } from '../../core/session/sessionHandle';
-import type { ExecutorRegistry, SessionRecord } from '../../core/session/sessionRegistry';
+import { resumePolicy, type ExecutorRegistry, type SessionRecord } from '../../core/session/sessionRegistry';
 import type { ModelChoice, PermissionModeName } from '../../shared/conversation';
 import { parseLaunchPolicy } from '../../shared/launchPolicy';
 import type { HostManifest } from '../../shared/sessionProtocol';
@@ -157,7 +157,7 @@ export class RunnerService implements SessionExecutor, Disposable {
    */
   async resume(opts: RunnerStartOptions & { resume: string }): Promise<RunnerView> {
     await this.deps.beforeResume?.(opts.resume);
-    return this.start(opts);
+    return this.start({ ...opts, policy: resumePolicy(this.deps.registry, opts.resume, opts.policy) });
   }
 
   /** The machine woke from sleep: every hosted session rechecks its link. */

@@ -16,9 +16,18 @@
  *
  * Deliberately narrower than what the agents accept: there is no permission
  * mode here (that is `LaunchRequest.permissionMode`), nothing that could turn
- * on `bypassPermissions` or `allowDangerouslySkipPermissions`, and no Codex
- * `danger-full-access` sandbox. `parseLaunchPolicy` drops anything else, so a
- * value read back from disk can never widen what was asked for.
+ * on `bypassPermissions` or `allowDangerouslySkipPermissions`, no Codex
+ * `danger-full-access` sandbox, and no Codex `approvalPolicy: 'never'` unless
+ * the same policy names the sandbox it applies to (otherwise `never` would
+ * run on whatever sandbox the user's `config.toml` has, full access included).
+ * `parseLaunchPolicy` drops anything else wherever a policy is read back.
+ *
+ * It is **not** only a restriction. Claude `allowedTools` approves what it
+ * names without asking (`Bash` alone approves every command), which is the
+ * point for orchestrated attempts (§24.1) and why a policy is privileged: it
+ * is set only by the core code that starts a session (the launcher,
+ * orchestration), never taken from an agent, a planner's output or a remote
+ * command. The parser guards shape, not intent.
  *
  * Pure types and one pure parser. No Node, no DOM, no SDK import: this file is
  * bundled into the webviews too.
@@ -95,7 +104,8 @@ function parseCodex(raw: unknown): CodexLaunchPolicy | undefined {
   const out: CodexLaunchPolicy = {};
   if (typeof raw.sandbox === 'string' && SANDBOXES.includes(raw.sandbox)) out.sandbox = raw.sandbox as CodexSandbox;
   if (typeof raw.approvalPolicy === 'string' && APPROVALS.includes(raw.approvalPolicy)) {
-    out.approvalPolicy = raw.approvalPolicy as CodexApprovalPolicy;
+    // `never` only with a sandbox of AW's choosing: never on the user's, which may be full access.
+    if (raw.approvalPolicy !== 'never' || out.sandbox) out.approvalPolicy = raw.approvalPolicy as CodexApprovalPolicy;
   }
   if (typeof raw.developerInstructions === 'string' && raw.developerInstructions.trim()) {
     out.developerInstructions = raw.developerInstructions;

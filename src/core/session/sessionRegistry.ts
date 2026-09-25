@@ -245,7 +245,17 @@ export class SessionRegistry {
 
 /** The part of the registry an executor writes to. */
 export type ExecutorRegistry = Pick<SessionRegistry, 'live' | 'touch' | 'setState' | 'isInterrupted'> &
-  Partial<Pick<SessionRegistry, 'forget'>>;
+  Partial<Pick<SessionRegistry, 'forget' | 'get'>>;
+
+/**
+ * The policy a resume runs under: the one it names, else the one recorded for
+ * the id (#71). A resume that says nothing about policy gets the session's
+ * rules back, never none; the record would otherwise claim rules the agent lacks.
+ */
+export function resumePolicy(registry: ExecutorRegistry | undefined, resume: string | undefined, given: LaunchPolicy | undefined): LaunchPolicy | undefined {
+  if (given || !resume) return given;
+  return registry?.get?.(resume)?.launch.policy;
+}
 
 /** A record's policy as the parser reads it: only fields of the right shape, or none. */
 function withParsedPolicy(r: SessionRecord): SessionRecord {

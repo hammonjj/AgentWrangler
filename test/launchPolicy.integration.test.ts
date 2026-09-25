@@ -166,8 +166,7 @@ describe.runIf(process.platform === 'darwin')('launch policy through session hos
     await until(() => !isPidAlive(oldHost.hostPid));
 
     // A caller's message id comes back on the turn it caused.
-    expect(await view.send('mine', undefined, { clientMessageId: 'dddddddd-0000-4000-8000-000000000001' })).toBe('applied');
-    await until(() => turns.some((t) => (t as { user_message_uuid?: string }).user_message_uuid === 'dddddddd-0000-4000-8000-000000000001'));
+    expect(await view.send('mine', undefined, { clientMessageId: 'dddddddd-0000-4000-8000-000000000001' })).toBe('applied');    await until(() => turns.some((t) => (t as { user_message_uuid?: string }).user_message_uuid === 'dddddddd-0000-4000-8000-000000000001'));
 
     await view.end();
     await until(() => !isPidAlive(current.hostPid));

@@ -2047,7 +2047,14 @@ is never more permissive than the app's default mode.
   `parseLaunchPolicy` drops them wherever a policy is read back. **Checked live** (opt-in,
   `AW_LIVE_CLAUDE=1`, `sessionHost.live.test.ts`): a `Bash(touch:*)` deny held under `auto`
   both at first start and after Resume, as a `permission_denials` entry with no prompt. The host
-  still decides nothing.
+  still decides nothing. A resume that names no policy (escalation's "continue") gets the
+  recorded one from the executor, never none. Caveats for #33: `allowedTools` *grants*
+  (`Bash` alone approves every command), so a policy is set only by core code that starts
+  sessions, never from agent or planner output; Codex `approvalPolicy: 'never'` is dropped
+  unless the policy names its sandbox; `maxTurns` and `maxBudgetUsd` count from each start, so a
+  Resume or a migration resets them (a mission budget is the orchestrator's to keep, §15.3); a
+  core *older* than #71 adopting a newer host ignores `launch.policy` and would migrate it
+  without one, which only a downgrade can cause.
 - **One approval queue per mission.** Whatever still needs a human appears once in AW, grouped
   by mission, with "allow for this mission": the answer applies to the same request from every
   attempt in that mission and expires with it. N attempts asking the same thing is one prompt.

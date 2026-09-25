@@ -58,6 +58,7 @@ export class CodexHarness implements AgentHarness {
       effort,
       ...(req.resume ? { resume: req.resume } : {}),
       origin: req.origin,
+      ...(req.policy ? { policy: req.policy } : {}),
     });
     if (req.resume && effort) await handle.setEffort(effort);
     await handle.send(req.prompt);

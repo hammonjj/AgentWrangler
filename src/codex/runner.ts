@@ -17,10 +17,10 @@ import type {
   SessionLifecycle,
 } from '../core/session/sessionHandle';
 import { SessionViewBase } from '../core/session/sessionView';
-import type { ExecutorRegistry } from '../core/session/sessionRegistry';
+import { resumePolicy, type ExecutorRegistry } from '../core/session/sessionRegistry';
 import type { ConversationHistory } from '../claude/transcriptHistory';
 import { capText, type ComposerState, type ConvBlock, type ImageAttachment, type PermissionModeName } from '../shared/conversation';
-import type { LaunchPolicy } from '../shared/launchPolicy';
+import { parseLaunchPolicy, type LaunchPolicy } from '../shared/launchPolicy';
 import type { AgentSession } from '../shared/model';
 import { CodexAppServer, type ReconnectEvent, type RpcNotification, type RpcServerRequest } from './appServer';
 import { readRolloutBlocks } from './rollout';
@@ -39,7 +39,8 @@ function threadIdOf(params: any): string | undefined {
  * deny rule should depend on.
  */
 export function codexPolicyParams(policy: LaunchPolicy | undefined): Record<string, string> {
-  const codex = policy?.codex;
+  // Through the parser, so a policy built in code obeys the same rules as one read from disk.
+  const codex = parseLaunchPolicy(policy)?.codex;
   if (!codex) return {};
   return {
     ...(codex.sandbox ? { sandbox: codex.sandbox } : {}),
@@ -688,7 +689,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
       effort: request.effort,
       permissionMode: request.permissionMode,
       origin: request.origin,
-      policy: request.policy,
+      policy: resumePolicy(this.record.registry, request.resume, request.policy),
     };
     const runner = request.resume
       ? await this.resume(request.resume, request.cwd, request.initialBlocks ?? [], request.model, launch)
@@ -729,6 +730,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     const key = threadId.toLowerCase();
     const existing = this.runners.get(key);
     if (existing) return existing;
+    options = { ...options, policy: resumePolicy(this.record.registry, threadId, options.policy) };
     const result = await this.server.request<any>('thread/resume', {
       threadId,
       ...(options.effort ? { config: { model_reasoning_effort: options.effort } } : {}),
