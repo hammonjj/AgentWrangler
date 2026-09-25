@@ -20,6 +20,11 @@ export interface UsageWindow {
   resetsAtMs?: number;
   /** True for the window currently constraining requests (the API's `is_active`). */
   active: boolean;
+  /**
+   * Set only on a window the latest read did not mention, carried over from an
+   * earlier read (see `carryMissingWindows`): when that earlier read was taken.
+   */
+  readAtMs?: number;
 }
 
 /** Extra-usage credits that cover you past the plan limits, when enabled on the account. */
@@ -136,10 +141,37 @@ function limitLabel(l: RawLimit): { id: string; label: string } {
   }
 }
 
+/** Session first, then the all-models week, then everything else in the order it came. */
+function windowRank(id: string): number {
+  return id === 'session' ? 0 : id === 'weekly_all' ? 1 : 2;
+}
+
+/**
+ * Keep the cards a read left out.
+ *
+ * The endpoint does not always list every window: some reads carry only the
+ * model-scoped week, and the Session and Weekly cards used to vanish for a
+ * poll and flash back on the next. Absent is not reset — within a window the
+ * percent only climbs until `resetsAtMs` — so a window the new read omits keeps
+ * its last figure, marked with when it was read, until its reset passes. Past
+ * that the old number says nothing, and it is dropped rather than guessed at.
+ * A window with no reset time is carried too: there is no moment it expires.
+ */
+export function carryMissingWindows(prev: UsageSnapshot | undefined, next: UsageSnapshot, nowMs: number): UsageSnapshot {
+  if (!prev) return next;
+  const have = new Set(next.windows.map((w) => w.id));
+  const carried = prev.windows
+    .filter((w) => !have.has(w.id) && (w.resetsAtMs === undefined || w.resetsAtMs > nowMs))
+    .map((w) => ({ ...w, active: false, readAtMs: w.readAtMs ?? prev.fetchedAtMs }));
+  if (carried.length === 0) return next;
+  const windows = [...next.windows, ...carried].sort((a, b) => windowRank(a.id) - windowRank(b.id));
+  return { ...next, windows };
+}
+
 /**
  * Windows from the body. Prefers the `limits` array (what Claude Code's usage
- * screen renders, and the only place the model-scoped week is labelled); falls
- * back to the older top-level windows when `limits` is absent.
+ * screen renders, and the only place the model-scoped week is labelled), and
+ * fills in from the older top-level windows whatever `limits` did not list.
  */
 export function parseUsage(body: unknown, nowMs: number): UsageSnapshot | undefined {
   if (!body || typeof body !== 'object') return undefined;
@@ -158,18 +190,24 @@ export function parseUsage(body: unknown, nowMs: number): UsageSnapshot | undefi
         active: l.is_active === true,
       });
     }
-  } else {
-    const add = (id: string, label: string, w: RawWindow | null | undefined) => {
-      if (!w || typeof w !== 'object') return;
-      windows.push({ id, label, percent: clampPercent(w.utilization), resetsAtMs: parseResetsAt(w.resets_at), active: false });
-    };
-    add('session', 'Session (5hr)', raw.five_hour);
-    add('weekly_all', 'Weekly (7 day)', raw.seven_day);
+  }
+
+  const add = (id: string, label: string, w: RawWindow | null | undefined) => {
+    if (!w || typeof w !== 'object' || windows.some((x) => x.id === id)) return;
+    windows.push({ id, label, percent: clampPercent(w.utilization), resetsAtMs: parseResetsAt(w.resets_at), active: false });
+  };
+  // The session and all-models week are the cards people navigate by. A
+  // `limits` array that lists only the model-scoped week (it has happened)
+  // must not take them off the strip while the top-level windows still say.
+  add('session', 'Session (5hr)', raw.five_hour);
+  add('weekly_all', 'Weekly (7 day)', raw.seven_day);
+  if (windows.every((w) => !w.id.startsWith('weekly_scoped'))) {
     add('weekly_scoped:Opus', 'Weekly Opus', raw.seven_day_opus);
     add('weekly_scoped:Sonnet', 'Weekly Sonnet', raw.seven_day_sonnet);
   }
 
   if (windows.length === 0) return undefined;
+  windows.sort((a, b) => windowRank(a.id) - windowRank(b.id));
 
   // Three outcomes, not two. `enabled: false` is the account saying it has no
   // extra usage; a missing block is the response not mentioning it, which is
