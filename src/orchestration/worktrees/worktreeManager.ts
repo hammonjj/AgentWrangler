@@ -498,6 +498,86 @@ export class WorktreeManager {
     return next;
   }
 
+  // ---- An attempt's result ----
+
+  /**
+   * Commit whatever the attempt left uncommitted in its tree, on its branch
+   * (§13.1 rule 2, §24.1: Codex cannot commit under `workspace-write`, and a
+   * Claude agent may simply not have). Setup artifacts that are still exactly
+   * what setup made are left out, so a `node_modules` link is never committed.
+   * Hooks are skipped (`--no-verify`): this records the agent's work as it
+   * is, and verification is a separate step (#35). Returns the new head, or
+   * undefined when there was nothing to commit. Throws `git-failed` when git
+   * refuses, leaving the tree as it was.
+   */
+  async commitAll(a: WorktreeAssignment, message: string): Promise<string | undefined> {
+    this.assertOurs(a);
+    const entry = (await this.worktrees()).find((w) => w.path === a.path);
+    if (!entry || entry.branch !== a.branch || !fs.existsSync(a.path)) throw this.fail('missing', `${a.branch} at ${a.path} is not there to commit in`);
+    const artifacts = this.setupArtifacts(a.path)
+      .filter((x) => x.intact)
+      .map((x) => x.rel);
+    const inTree = (args: string[], timeoutMs?: number) => this.git(args, a.path, timeoutMs);
+    // Stage everything, then take the setup artifacts back out. Not an exclude
+    // pathspec: git refuses one that names an ignored path (`node_modules`
+    // without a slash matches the link), and fails the whole add.
+    const add = await inTree(['add', '--all', '--', '.']);
+    if (add.code !== 0) throw this.fail('git-failed', `git add failed in ${a.path}: ${add.stderr.trim()}`);
+    if (artifacts.length > 0) {
+      const unstage = await inTree(['reset', '--quiet', '--', ...artifacts.map((rel) => `:(literal)${rel}`)]);
+      if (unstage.code !== 0) {
+        await inTree(['reset', '--quiet']);
+        throw this.fail('git-failed', `git reset failed in ${a.path}: ${unstage.stderr.trim()}`);
+      }
+    }
+    const staged = await inTree(['diff', '--cached', '--quiet']);
+    if (staged.code === 0) return undefined;
+    if (staged.code !== 1) throw this.fail('git-failed', `git diff --cached failed in ${a.path}: ${staged.stderr.trim()}`);
+    // No hooks at all: `--no-verify` skips only two of them, and a relative
+    // `core.hooksPath` (Husky) points into the tree the agent wrote, so its
+    // hooks would run here, outside the agent's sandbox and permission rules.
+    // No signing either: a pinentry prompt would hang an unattended commit.
+    const commit = await inTree(
+      ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '--no-verify', '-m', message],
+      2 * 60_000,
+    );
+    if (commit.code !== 0) {
+      // Leave the work exactly as the agent did: staged or not, it is all still in the tree.
+      await inTree(['reset', '--quiet']);
+      throw this.fail('git-failed', `git commit failed in ${a.path}: ${commit.stderr.trim() || `exit ${commit.code}`}`);
+    }
+    return this.branchHead(a.branch);
+  }
+
+  /** Commits, files and lines on the branch since its base (§16.3 "Git numbers"). */
+  async diffStats(a: WorktreeAssignment): Promise<{ headCommit: string; commits: number; filesChanged: number; insertions: number; deletions: number }> {
+    const head = await this.branchHead(a.branch);
+    const range = `${a.baseCommit}..${head}`;
+    const count = await this.gitOk(['rev-list', '--count', range], 'git-failed');
+    const numstat = await this.gitOk(['diff', '--numstat', '-z', '--no-renames', range], 'git-failed');
+    let filesChanged = 0;
+    let insertions = 0;
+    let deletions = 0;
+    // `-z`: "<ins>\t<del>\t<path>\0", with "-" for a binary file's counts.
+    for (const rec of numstat.stdout.split('\0')) {
+      const m = /^(-|\d+)\t(-|\d+)\t/.exec(rec);
+      if (!m) continue;
+      filesChanged++;
+      if (m[1] !== '-') insertions += Number(m[1]);
+      if (m[2] !== '-') deletions += Number(m[2]);
+    }
+    return { headCommit: head, commits: Number(count.stdout.trim()) || 0, filesChanged, insertions, deletions };
+  }
+
+  /** The branch's changes since its base, as a patch (a summary first). */
+  async diffText(a: WorktreeAssignment): Promise<string> {
+    const head = await this.branchHead(a.branch);
+    const range = `${a.baseCommit}..${head}`;
+    const stat = await this.gitOk(['diff', '--stat', range], 'git-failed');
+    const patch = await this.gitOk(['diff', '--no-color', range], 'git-failed');
+    return `${a.branch}: ${range}\n\n${stat.stdout}\n${patch.stdout}`;
+  }
+
   // ---- Inspection ----
 
   /** Every worktree git knows for this repository, flagged when it is under AW's root. */

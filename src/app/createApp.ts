@@ -52,6 +52,10 @@ import { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import { LaunchDefaults } from '../core/launchDefaults';
 import { createOrchestration } from '../orchestration';
+import { TaskError, type TaskAction, type TaskRunner } from '../orchestration/engine/taskRunner';
+import { Emitter } from '../core/events';
+import type { TurnRecord } from '../shared/orchestration/telemetry';
+import type { Mission } from '../shared/orchestration/types';
 import { TelemetryLog } from '../core/telemetry/telemetryLog';
 import { TELEMETRY_ENABLED_KEY, TELEMETRY_PRICES_KEY, TurnTelemetry } from '../core/telemetry/turnTelemetry';
 import type { PriceTable } from '../core/telemetry/turnUsage';
@@ -477,12 +481,26 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // Codex threads are rejoined (in `start()`). Orchestration's recovery waits for it.
   let settleStartup: () => void = () => undefined;
   const startupSettled = new Promise<void>((resolve) => (settleStartup = resolve));
-  // Inert behind `orchestration.enabled` (off by default) until #33.
+  // Per-turn usage for every session AW runs (#27): local JSONL, metadata only,
+  // on by default and switched off by `telemetry.enabled`. Attempt records (#33) go in the same log.
+  const telemetryDir = path.join(host.dataDir, 'orchestration', 'telemetry');
+  const telemetryLog = new TelemetryLog(telemetryDir);
+  const turnRecords = new Emitter<TurnRecord>();
+  host.subscribe(turnRecords);
+  // Behind `orchestration.enabled` (off by default): tasks (#33) and nothing else yet.
   const orchestration = createOrchestration({
     settings: host.settings,
     dataDir: host.dataDir,
     sessions,
     registry: sessionRegistry,
+    // G1: an attempt must survive `app:install`, so Claude attempts need hosts.
+    hostsEnabled: () => !!hostSupervisor && host.settings.get<boolean>('experimental.sessionHosts', false) === true,
+    onTurnRecord: (listener) => turnRecords.event(listener),
+    telemetry: {
+      append: (record) => (host.settings.get<boolean>(TELEMETRY_ENABLED_KEY, true) !== false ? telemetryLog.append(record) : false),
+    },
+    notify: host.notify,
+    openFile: (file) => host.shell.openFile(file),
     launchDefaults,
     startupSettled,
     log,
@@ -491,9 +509,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
   });
   host.subscribe(orchestration);
 
-  // Per-turn usage for every session AW runs (#27): local JSONL, metadata only,
-  // on by default and switched off by `telemetry.enabled`.
-  const telemetryDir = path.join(host.dataDir, 'orchestration', 'telemetry');
   // What each session has used, summed from its records, on every surface's
   // copy of the session (#28): the Usage column and the conversation header.
   const sessionUsage = new SessionUsageIndex();
@@ -503,8 +518,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
   void sessionUsage.load(telemetryDir).catch((err) => log(`telemetry: could not read past records: ${String(err)}`));
   const turnTelemetry = new TurnTelemetry({
     sessions,
-    log: new TelemetryLog(telemetryDir),
-    onRecord: (record) => sessionUsage.add(record),
+    log: telemetryLog,
+    onRecord: (record) => {
+      sessionUsage.add(record);
+      turnRecords.fire(record);
+    },
     onModelLimits: (model, limits) => models.observe('anthropic', model, limits),
     enabled: () => host.settings.get<boolean>(TELEMETRY_ENABLED_KEY, true) !== false,
     prices: () => {
@@ -1031,11 +1049,129 @@ export function createApp(host: HostServices): AgentWranglerApp {
     return dir ? startConversation(dir) : undefined;
   };
 
+  const tasks = orchestration.tasks;
   const launcher: ConversationLauncher = {
     newConversation: (cwd, selectedProvider) =>
       selectedProvider === 'codex' ? startCodexConversation(cwd) : newConversation(cwd),
     browseForProject: () => browseForProject(),
+    // Only with orchestration on; the launcher shows its Tasks button only then.
+    taskMenu: tasks ? (cwd, provider) => taskMenu(tasks, cwd, provider) : undefined,
   };
+
+  /**
+   * "Run as task" (#33): the launcher's Tasks button. A quick pick, not a
+   * view: the task table and task strip are #34's. Runs a new task in the
+   * launcher's folder on the launcher's route, or acts on one already running.
+   */
+  async function taskMenu(runner: TaskRunner, cwd: string, provider: 'claude' | 'codex'): Promise<void> {
+    type Row = { label: string; description?: string; detail?: string; missionId?: string; create?: true };
+    const recent = runner.list().filter((m) => !['completed', 'cancelled'].includes(m.state));
+    const rows: Row[] = [
+      { label: '$(add) Run a new task…', description: cwd === GLOBAL_PROJECT_DIR ? 'pick a project folder first' : cwd, create: true },
+      ...recent.map((m) => ({ label: m.title, description: taskStateLabel(m), detail: m.tasks[0].stateReason, missionId: m.id })),
+    ];
+    const picked = await dialogs.pick(rows, { placeHolder: 'Tasks run in a worktree and branch of their own' });
+    if (!picked) return;
+    if (picked.create) return newTask(runner, cwd, provider);
+    if (picked.missionId) return taskActionsMenu(runner, picked.missionId);
+  }
+
+  async function newTask(runner: TaskRunner, cwd: string, provider: 'claude' | 'codex'): Promise<void> {
+    if (cwd === GLOBAL_PROJECT_DIR) {
+      dialogs.error('Agent Wrangler: a task runs in a worktree of a git repository. Pick a project folder in the launcher first.');
+      return;
+    }
+    const objective = await dialogs.input({
+      title: 'Run as task',
+      prompt: `What should the task do? It runs in a new worktree and branch of ${path.basename(cwd)}, on the launcher's model and effort.`,
+      validateInput: (v) => (v.trim() ? undefined : 'Say what the task should do.'),
+    });
+    if (!objective?.trim()) return;
+    const criteria = await dialogs.input({
+      title: 'Run as task',
+      prompt: 'Acceptance criteria, separated by semicolons (optional).',
+    });
+    if (criteria === undefined) return;
+    const defaults = launchDefaults.for(provider);
+    try {
+      const mission = await runner.start({
+        folder: cwd,
+        objective,
+        acceptanceCriteria: criteria.split(';'),
+        route: { harness: provider === 'codex' ? 'codex' : 'claude-code', model: defaults.model, effort: defaults.effort },
+      });
+      const handle = runner.handleOf(mission.id);
+      if (handle) surface?.showSession(handle);
+      dialogs.flash(`Task started on ${mission.worktrees.at(-1)?.branch ?? 'its own branch'}`);
+    } catch (error) {
+      log(`task: ${String(error)}`);
+      dialogs.error(`Agent Wrangler: ${error instanceof TaskError ? error.message : `could not start the task — ${(error as Error).message}`}`);
+    }
+  }
+
+  const TASK_ACTION_LABEL: Record<TaskAction, string> = {
+    'show-session': 'Show its conversation',
+    'open-diff': 'Open the diff',
+    accept: 'Accept the result',
+    resume: 'Resume the attempt',
+    retry: 'Retry fresh, in a new worktree',
+    'recreate-worktree': 'Recreate its worktree from its branch',
+    cancel: 'Cancel the task',
+  };
+
+  async function taskActionsMenu(runner: TaskRunner, missionId: string): Promise<void> {
+    const m = runner.get(missionId);
+    if (!m) return;
+    const rows = runner.actions(missionId).map((action) => ({ label: TASK_ACTION_LABEL[action], action }));
+    const picked = await dialogs.pick(rows, { placeHolder: `${m.title} — ${taskStateLabel(m)}` });
+    if (!picked) return;
+    try {
+      switch (picked.action) {
+        case 'show-session': {
+          const handle = runner.handleOf(missionId);
+          if (handle) surface?.showSession(handle);
+          return;
+        }
+        case 'open-diff':
+          host.shell.openFile(await runner.diff(missionId));
+          return;
+        case 'accept':
+          await runner.accept(missionId);
+          dialogs.flash('Accepted. The branch is kept for you to merge.');
+          return;
+        case 'resume':
+          await runner.resume(missionId);
+          return;
+        case 'retry':
+          await runner.retry(missionId);
+          return;
+        case 'recreate-worktree':
+          await runner.recreateWorktree(missionId);
+          return;
+        case 'cancel': {
+          const ok = await dialogs.warn(`Cancel “${m.title}”?`, { modal: true, detail: 'Its session is ended. Its worktree and branch are kept.' }, 'Cancel Task');
+          if (ok === 'Cancel Task') await runner.cancel(missionId);
+          return;
+        }
+      }
+    } catch (error) {
+      log(`task ${missionId}: ${String(error)}`);
+      dialogs.error(`Agent Wrangler: ${(error as Error).message}`);
+    }
+  }
+
+  function taskStateLabel(m: Mission): string {
+    const task = m.tasks[0];
+    const attempt = runnerAttempt(m);
+    if (m.state === 'review') return 'accepted — branch kept';
+    if (task.state === 'needs-human') return attempt?.state === 'succeeded' ? 'ready for review' : `needs you — attempt ${attempt?.state ?? 'not started'}`;
+    return attempt ? `attempt ${attempt.n} ${attempt.state}` : task.state;
+  }
+
+  function runnerAttempt(m: Mission) {
+    const id = m.tasks[0]?.attemptIds.at(-1);
+    return id ? m.attempts.find((a) => a.id === id) : undefined;
+  }
 
   /**
    * Store a bot token and connect.

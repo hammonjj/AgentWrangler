@@ -868,7 +868,8 @@ bar.id = 'bar';
 bar.innerHTML = `<div class="launch"><button id="proj" class="projbtn" aria-haspopup="listbox" aria-expanded="false"><span id="projname"></span><span class="chev" aria-hidden="true">▾</span></button>
 <select id="launchmodel" class="launchsel" title="Model for the next conversation"></select>
 <select id="launcheffort" class="launchsel" title="How hard Claude thinks, for the next conversation"></select>
-<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button></div>
+<button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
+<button id="tasks" class="newbtn taskbtn" hidden title="Run a task in its own worktree and branch of this folder's repository, on this model and effort — or see the tasks already running">Tasks</button></div>
 <div id="ctl" class="ctlgroup"><select id="provider" class="providerfilter" title="Filter sessions by provider"><option value="all">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select><button id="discord" class="ctlbtn discordbtn" hidden aria-pressed="false"></button><button id="pauseall" class="ctlbtn"></button></div>
 <div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
 // First in the body, above the usage strip, which is itself above the scrolling
@@ -879,6 +880,7 @@ const projBtn = bar.querySelector<HTMLButtonElement>('#proj')!;
 const projName = bar.querySelector<HTMLElement>('#projname')!;
 const projMenu = bar.querySelector<HTMLElement>('#projmenu')!;
 const newBtn = bar.querySelector<HTMLButtonElement>('#new')!;
+const tasksBtn = bar.querySelector<HTMLButtonElement>('#tasks')!;
 const launchModel = bar.querySelector<HTMLSelectElement>('#launchmodel')!;
 const launchEffort = bar.querySelector<HTMLSelectElement>('#launcheffort')!;
 
@@ -933,6 +935,7 @@ function fillSelect(el: HTMLSelectElement, rows: { value: string; label: string 
 
 type LaunchProvider = 'anthropic' | 'openai';
 type LauncherState = {
+  tasks?: boolean;
   models: ModelChoice[];
   provider: LaunchProvider;
   anthropic: { model: string; effort: string };
@@ -946,6 +949,7 @@ function modelValue(provider: LaunchProvider, model: string): string {
 
 function renderLaunchDefaults(launcher: LauncherState): void {
   launchProvider = launcher.provider;
+  tasksBtn.hidden = launcher.tasks !== true;
   const models = launcher.models;
   // The CLI's list has a default row of its own, already labelled with the
   // model it resolves to. Its label is borrowed for the unset row and the row
@@ -1164,6 +1168,10 @@ document.addEventListener(
 
 newBtn.addEventListener('click', () => {
   post({ type: 'newConversation', cwd: currentProject(), provider: launchProvider === 'openai' ? 'codex' : 'claude' });
+});
+
+tasksBtn.addEventListener('click', () => {
+  post({ type: 'taskMenu', cwd: currentProject(), provider: launchProvider === 'openai' ? 'codex' : 'claude' });
 });
 
 // ---- fleet controls ----

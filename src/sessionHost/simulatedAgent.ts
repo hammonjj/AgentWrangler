@@ -44,6 +44,8 @@ export interface SimTurnContext {
   interrupted: Promise<void>;
   /** Make the agent process die now. Resolves once it has gone. */
   crash: () => Promise<void>;
+  /** The `uuid` of the message this turn answers, echoed as `user_message_uuid(s)` like the CLI does. */
+  messageUuid?: string;
 }
 
 /** What a turn with no usage of its own reports, so telemetry always has something to record. */
@@ -318,6 +320,7 @@ class Messages {
       },
       permission_denials: [],
       queued_turn_count: 0,
+      ...(this.ctx.messageUuid ? { user_message_uuid: this.ctx.messageUuid, user_message_uuids: [this.ctx.messageUuid] } : {}),
       uuid: randomUUID(),
       session_id: this.ctx.sessionId,
     };
@@ -393,6 +396,7 @@ export function simulatedQuery({ prompt, options }: { prompt: AsyncIterable<SDKU
           canUseTool: options.canUseTool,
           interrupted,
           crash: async () => finish(new Error('Claude Code process exited with code 1')),
+          messageUuid: typeof (msg as { uuid?: unknown }).uuid === 'string' ? (msg as { uuid: string }).uuid : undefined,
         }, turn);
         onInterrupt = undefined;
         turn++;

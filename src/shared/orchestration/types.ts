@@ -404,6 +404,20 @@ export interface UsageSummary {
   costUsd?: number;
   costBasis: CostBasis;
   turns: number;
+  /** The same, per model (the `attempt` record's `usage`, §16.2). */
+  byModel?: Record<string, { in?: number; out?: number; cacheRead?: number; cacheWrite?: number; thinking?: number; costUsd?: number }>;
+  /** Turn records summed so far, by id, so a record seen twice counts once. */
+  turnIds?: string[];
+}
+
+/** An attempt's clock (§16.3): active time is launch to end minus the time spent waiting on a person. */
+export interface AttemptTiming {
+  /** When its task was queued for it. */
+  queuedAt?: Millis;
+  /** When the current wait on a person began, while there is one. */
+  waitingSince?: Millis;
+  /** Time spent waiting on a person, summed over finished waits. */
+  waitedOnHumanMs?: number;
 }
 
 export type CostBasis = 'harness-estimate' | 'price-table' | 'none';
@@ -414,6 +428,8 @@ export interface AttemptFlags {
   tookOver?: boolean;
   /** The upstream changed after this attempt started; merge-check before integration (§12.1). */
   staleBase?: boolean;
+  /** Its session's host stopped answering; the host still holds it, so it is not interrupted (§23.3). */
+  hostUnreachable?: boolean;
 }
 
 /** One try at a task. Persisted as `launching` before the session is launched; never reopened (§7.2). */
@@ -435,6 +451,20 @@ export interface ExecutionAttempt {
   verification: VerificationResult[];
   usage?: UsageSummary;
   flags: AttemptFlags;
+  /**
+   * The client message ids of every message the orchestrator sent into the
+   * session. A turn caused by any other message was the user's (§16.3).
+   */
+  sentIds?: string[];
+  /** Turns the orchestrator saw end, for harnesses that do not echo message ids (Codex). */
+  turnsSeen?: number;
+  /** The interrupted attempt this one resumes (same session, `assignment.mode: 'continue'`). */
+  resumeOf?: string;
+  /** Started by `autoRecover`, not by a person: at most one per interrupted attempt (§23.3). */
+  autoResumed?: boolean;
+  /** Interrupted with a conversation that can be resumed (the same session id). */
+  resumable?: boolean;
+  timing?: AttemptTiming;
   createdAt: Millis;
 }
 

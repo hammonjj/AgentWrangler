@@ -49,16 +49,20 @@ export class ClaudeCodeHarness implements AgentHarness {
 
   async launch(req: AttemptLaunch): Promise<SessionHandle> {
     assertTarget(this.id, req);
-    return this.deps.sessions.launch({
+    const handle = await this.deps.sessions.launch({
       provider: 'claude',
       cwd: req.cwd,
       model: req.target.model || undefined,
       effort: nativeEffort(req.target),
       permissionMode: req.permissionMode,
       ...(req.resume ? { resume: req.resume } : { sessionId: req.sessionId ?? randomUUID() }),
-      initialPrompt: req.prompt,
+      // With an id of its own the prompt is sent here, so it carries that id.
+      ...(req.promptId ? {} : { initialPrompt: req.prompt }),
       origin: req.origin,
       ...(req.policy ? { policy: req.policy } : {}),
     });
+    // Not awaited, like `initialPrompt`: the send settles when the agent takes it.
+    if (req.promptId) void handle.send(req.prompt, undefined, { clientMessageId: req.promptId });
+    return handle;
   }
 }

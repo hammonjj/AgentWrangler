@@ -159,6 +159,15 @@ export const SETTINGS: SettingSpec[] = [
       'Run each new Claude conversation in its own small background process, so quitting, reinstalling or a crash of Agent Wrangler no longer ends it: it keeps working, and Agent Wrangler reconnects when it opens again. ⌘Q then leaves those conversations running; Quit and Stop All Agents (⌥⌘Q) ends them. Applies to conversations started after it is switched on.',
   },
   {
+    key: 'orchestration.enabled',
+    label: 'Run tasks in worktrees of their own (experimental)',
+    group: 'Conversations',
+    type: 'boolean',
+    default: false,
+    description:
+      'Adds a Tasks button beside + New. A task is an objective and its acceptance criteria, run by one agent on the launcher’s model and effort in a new git worktree and branch beside the repository, never in the checkout you work in. It survives quitting and reinstalling Agent Wrangler, and ends with a branch and a diff for you to review. Claude tasks need the setting above. Takes effect after a restart.',
+  },
+  {
     key: 'lifecycle.orphanIdleHours',
     label: 'End idle sessions with no Agent Wrangler connected after (hours)',
     group: 'Conversations',
