@@ -5,7 +5,7 @@ import type { PauseService } from '../core/pauseService';
 import type { PinService } from '../core/pinService';
 import type { SessionStore } from '../core/sessionStore';
 import { withHostedPermission, type HostedPermission } from '../core/sessionView';
-import type { ModelCatalogService } from '../core/modelCatalog';
+import type { CapabilityCatalog } from '../core/capabilityCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import { displayTitle, GLOBAL_PROJECT_DIR, type HookHealth, type ProjectDTO } from '../shared/model';
@@ -102,7 +102,7 @@ export class DashboardHost {
     private pins: PinService,
     private settings: HostSettings,
     private dialogs: HostDialogs,
-    private models: ModelCatalogService,
+    private models: Pick<CapabilityCatalog, 'value' | 'onDidChange'>,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),

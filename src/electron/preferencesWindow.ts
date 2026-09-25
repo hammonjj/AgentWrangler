@@ -21,7 +21,8 @@ import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostSettings } from '../host/hostServices';
 import { settingUpdate, type HostToPreferences, type PreferencesToHost } from '../shared/preferences';
-import { isSettingActionId, type SettingActionId } from '../shared/preferences';
+import { isSettingActionId, modelPolicyChange, type OrchestrationPrefsView, type SettingActionId } from '../shared/preferences';
+import type { ModelPolicyChange } from '../shared/orchestration/catalog';
 import { SETTINGS } from '../shared/settings';
 import { documentUrl } from './bundleProtocol';
 import { TO_HOST, TO_WEBVIEW } from './channels';
@@ -40,6 +41,12 @@ export interface PreferencesWindowOptions {
   runAction?(id: SettingActionId): Promise<{ ok: boolean; lines: string[] }>;
   /** Told when the window is created and when it has closed, for the Dock icon. */
   onDidChangeOpen?(open: boolean): void;
+  /** Orchestration → tier map. Absent: the section says there is nothing to show. */
+  orchestration?: {
+    view(): OrchestrationPrefsView;
+    onDidChange(listener: () => void): Disposable;
+    setPolicy(change: ModelPolicyChange): Promise<boolean>;
+  };
 }
 
 const BY_KEY = new Map(SETTINGS.map((s) => [s.key, s]));
@@ -61,6 +68,9 @@ export class PreferencesWindow implements Disposable {
     // value that is no longer true and writing anything else puts the stale one
     // back.
     this.subs.push(opts.settings.onDidChange(() => this.push()));
+    // The catalog changes when a CLI reports its models, when a usage read
+    // lands, and when a tier is changed here: all of it belongs on screen.
+    if (opts.orchestration) this.subs.push(opts.orchestration.onDidChange(() => this.pushOrchestration()));
   }
 
   /** Open it, or bring the open one forward. */
@@ -131,6 +141,21 @@ export class PreferencesWindow implements Disposable {
     if (!message || typeof message !== 'object') return;
     if (message.type === 'ready') {
       this.push();
+      this.pushOrchestration();
+      return;
+    }
+    if (message.type === 'modelPolicy') {
+      // Same rule as settings: a shape no window sends does not get to write,
+      // and the catalog then refuses a key or tier it does not know.
+      const change = modelPolicyChange(message);
+      if (!change || !this.opts.orchestration) {
+        this.opts.log('preferences: refused a model policy change');
+        return;
+      }
+      void this.opts.orchestration.setPolicy(change).then((ok) => {
+        if (!ok) this.opts.log(`preferences: refused model policy for ${change.key}`);
+        this.pushOrchestration();
+      });
       return;
     }
     if (message.type === 'close') {
@@ -190,5 +215,10 @@ export class PreferencesWindow implements Disposable {
     for (const spec of SETTINGS) values[spec.key] = this.opts.settings.get(spec.key, spec.default);
     const message: HostToPreferences = { type: 'values', values };
     this.window.webContents.send(TO_WEBVIEW, message);
+  }
+
+  private pushOrchestration(): void {
+    if (!this.opts.orchestration) return;
+    this.post({ type: 'orchestration', view: this.opts.orchestration.view() });
   }
 }

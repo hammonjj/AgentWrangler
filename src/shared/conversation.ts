@@ -11,6 +11,8 @@
  * free of `vscode`, Node and DOM imports.
  */
 
+import type { HostedSource } from './harness';
+
 /**
  * Mirrors the Agent SDK's `PermissionMode`. Duplicated rather than imported
  * because shared code is bundled into the webview, where the SDK cannot go.
@@ -260,8 +262,12 @@ export interface ConversationCapabilities {
  * this account can use.
  */
 export interface ModelChoice {
-  /** Which runner advertises this model. Older saved catalogs default to Anthropic. */
-  provider?: 'anthropic' | 'openai';
+  /**
+   * The model source (`shared/harness.ts`), not the harness: `anthropic` for
+   * what Claude Code offers, `openai` for Codex. Older saved catalogs default
+   * to Anthropic.
+   */
+  provider?: HostedSource;
   /** What `setModel` is called with — usually an alias like `sonnet`. */
   value: string;
   label: string;
@@ -278,6 +284,13 @@ export interface ModelChoice {
    * of the model, not of the product, and Haiku has none.
    */
   effortLevels?: string[];
+  /** The CLI's own sentence about the model, when it gave one. */
+  description?: string;
+  /**
+   * What the model accepts as input (`text`, `image`), when the CLI says.
+   * Codex reports it; Claude Code does not, so it stays absent (unknown) there.
+   */
+  inputModalities?: string[];
 }
 
 /** Live state of a session this extension drives. Absent for transcript-backed panes. */

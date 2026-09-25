@@ -13,8 +13,9 @@
 
 import './preferences.css';
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
-import type { HostToPreferences, PreferencesToHost, SettingActionId } from '../../shared/preferences';
+import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId } from '../../shared/preferences';
 import { settingGroups, type SettingSpec } from '../../shared/settings';
+import { ORCHESTRATION_GROUP, renderOrchestration } from './orchestration';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
 
@@ -41,6 +42,11 @@ let values: Record<string, string | boolean | number> = {};
 /** The controls, so an external change can be reflected without a re-render. */
 const controls = new Map<string, HTMLInputElement | HTMLSelectElement>();
 const rows = new Map<string, HTMLElement>();
+/** The last catalog the host sent, and where it is drawn. */
+let orchestration: OrchestrationPrefsView | undefined;
+let orchestrationBody: HTMLElement | undefined;
+/** A newer view arrived while a dropdown in it had focus. */
+let orchestrationStale = false;
 
 function valueOf(spec: SettingSpec): string | boolean | number {
   const v = values[spec.key];
@@ -405,7 +411,7 @@ function render(): void {
   actionResults.clear();
 
   const groups = settingGroups();
-  root.appendChild(renderNav(groups));
+  root.appendChild(renderNav([...groups, { group: ORCHESTRATION_GROUP }]));
 
   const main = document.createElement('div');
   main.className = 'pf-main';
@@ -451,6 +457,24 @@ function render(): void {
     main.appendChild(section);
   }
 
+  // Not a settings group: one row per model, from the catalog the host sends.
+  const orch = document.createElement('section');
+  orch.className = 'pf-group pf-orchestration';
+  orch.dataset.group = ORCHESTRATION_GROUP;
+  sections.set(ORCHESTRATION_GROUP, orch);
+  const orchHeading = document.createElement('h2');
+  orchHeading.textContent = ORCHESTRATION_GROUP;
+  const body = document.createElement('div');
+  orchestrationBody = body;
+  body.addEventListener('focusout', () => {
+    if (!orchestrationStale) return;
+    orchestrationStale = false;
+    renderOrchestration(body, orchestration, post);
+  });
+  orch.append(orchHeading, body);
+  renderOrchestration(orchestrationBody, orchestration, post);
+  main.appendChild(orch);
+
   root.appendChild(main);
   for (const parentKey of dependents.keys()) syncReveal(parentKey);
   markCurrent(groups[0]?.group ?? '');
@@ -468,6 +492,18 @@ window.addEventListener('message', (event: MessageEvent) => {
   if (message.type === 'actionResult') {
     setActionsBusy(false);
     showActionResult(message.ok, message.lines);
+    return;
+  }
+  if (message.type === 'orchestration') {
+    orchestration = message.view;
+    // A usage read re-sends the view every minute or so. Redrawing under an
+    // open tier dropdown would close it, so wait until focus leaves it.
+    const active = document.activeElement;
+    if (orchestrationBody?.contains(active) && active instanceof HTMLSelectElement) {
+      orchestrationStale = true;
+      return;
+    }
+    if (orchestrationBody) renderOrchestration(orchestrationBody, orchestration, post);
     return;
   }
   if (message.type !== 'values') return;

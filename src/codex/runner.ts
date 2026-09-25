@@ -841,6 +841,8 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
         effortLevels: Array.isArray(entry.supportedReasoningEfforts)
           ? entry.supportedReasoningEfforts.map((level: any) => String(level.reasoningEffort ?? level.effort ?? level))
           : undefined,
+        ...(typeof entry.description === 'string' && entry.description !== '' ? { description: entry.description } : {}),
+        ...(Array.isArray(entry.inputModalities) ? { inputModalities: entry.inputModalities.map(String) } : {}),
       }));
       runner.setModels(models);
       this.rememberModels?.(models);

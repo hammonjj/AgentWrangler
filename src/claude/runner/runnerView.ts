@@ -802,6 +802,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
       const models = ((await this.exec.control({ op: 'supportedModels' })) ?? []) as {
         value?: unknown;
         displayName?: string;
+        description?: unknown;
         resolvedModel?: unknown;
         supportsEffort?: unknown;
         supportedEffortLevels?: unknown;
@@ -821,6 +822,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
             label: m.displayName ? modelChoiceLabel(m.displayName, resolved) : (m.value as string),
             resolved,
             effortLevels,
+            ...(typeof m.description === 'string' && m.description !== '' ? { description: m.description } : {}),
           };
         });
       if (choices.length > 0) {

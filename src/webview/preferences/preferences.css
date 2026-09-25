@@ -410,3 +410,116 @@
 #prefsApp .pf-actionresult.bad {
   border-left-color: var(--vscode-errorForeground, #ed4245);
 }
+
+/*
+ * Orchestration → tier map: one row per model, not per setting.
+ *
+ * Rows rather than a table, because the window can be 520px wide and a model
+ * carries six facts; each fact gets its own short line instead of a column
+ * that would truncate.
+ */
+#prefsApp .pf-subhead {
+  margin: 16px 0 6px;
+  font-size: 0.92em;
+  font-weight: 600;
+}
+
+#prefsApp .pf-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#prefsApp .pf-source {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+#prefsApp .pf-source-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--vscode-descriptionForeground);
+  align-self: center;
+}
+
+#prefsApp .pf-source.reachable .pf-source-dot {
+  background: var(--vscode-charts-green, #3ba55d);
+}
+#prefsApp .pf-source.degraded .pf-source-dot {
+  background: var(--vscode-charts-yellow, #d29922);
+}
+#prefsApp .pf-source.down .pf-source-dot {
+  background: var(--vscode-errorForeground, #ed4245);
+}
+
+#prefsApp .pf-source .pf-source-text {
+  margin: 0;
+}
+
+#prefsApp .pf-model {
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+#prefsApp .pf-model-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+#prefsApp .pf-model-name {
+  font-weight: 600;
+}
+
+#prefsApp .pf-model.changed .pf-reset {
+  visibility: visible;
+}
+
+#prefsApp .pf-model.changed .pf-model-name::after {
+  content: '•';
+  margin-left: 6px;
+  color: var(--vscode-charts-blue);
+}
+
+#prefsApp .pf-model-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 6px 0 4px;
+}
+
+#prefsApp .pf-model-controls .pf-select {
+  min-width: 18ch;
+}
+
+#prefsApp .pf-model-enabled {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#prefsApp .pf-model-fact,
+#prefsApp .pf-model-meta {
+  margin: 1px 0 0;
+  font-size: 0.9em;
+}
+
+#prefsApp .pf-model-why {
+  margin: 4px 0 0;
+  font-size: 0.9em;
+  color: var(--vscode-charts-yellow, #d29922);
+}
+
+#prefsApp .pf-model.notroutable .pf-model-name {
+  opacity: 0.8;
+}
+
+#prefsApp .pf-version {
+  margin-top: 10px;
+  font-size: 0.82em;
+  opacity: 0.75;
+}

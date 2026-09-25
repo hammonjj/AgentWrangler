@@ -40,7 +40,7 @@ export interface RunnerServiceDeps {
   /**
    * Told the model list each time a session reports one. The launcher has no
    * running CLI to ask, so the last answer is kept for it — see
-   * `ModelCatalogService`.
+   * `CapabilityCatalog`.
    */
   rememberModels?: (models: ModelChoice[] | undefined) => void;
   /** Session hosts: where new sessions run when `enabled()` says so, and how surviving ones are adopted. */
@@ -283,7 +283,7 @@ export class RunnerService implements SessionExecutor, Disposable {
       if ('state' in p.block) this.changeEmitter.fire();
     });
     // The model list arrives a moment after start, and is the only place it is
-    // ever published; the launcher needs it too. See `ModelCatalogService`.
+    // ever published; the launcher needs it too. See `CapabilityCatalog`.
     if (this.deps.rememberModels) {
       const remember = this.deps.rememberModels;
       session.onComposer((composer) => remember(composer.models));

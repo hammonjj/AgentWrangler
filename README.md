@@ -484,6 +484,8 @@ Transcripts and hook logs are both read incrementally (bounded tail reads with a
 
 `runner.defaultPermissionMode` (`acceptEdits` — or `default` to be asked every time, `plan` to plan first) · `runner.model` (empty — Claude Code's own default) · `runner.autoResumeLastOnStartup` (true) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting, blocked or done) · `pollIntervalSeconds` (5) · `showUsage` (true) · `usagePollIntervalSeconds` (60, and 20 by itself near a limit) · `autoPause.enabled` (false) · `autoPause.percent` (98)
 
+**Preferences → Orchestration** lists every model Claude Code and Codex have reported. For each one it shows the capability tier Agent Wrangler assigns it (`basic < standard < expert < frontier`; `frontier` is reached only by escalation), whether it is enabled, how AW's effort levels map onto the model's own, what is known about it and where each fact came from, and how its cost is worked out. Unassigned models are listed first, and routing never picks one automatically. Your choices go into `settings.json` under `orchestration.models`; anything left at its default is not written.
+
 ## Development
 
 ```bash

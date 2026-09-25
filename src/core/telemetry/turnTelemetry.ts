@@ -19,7 +19,7 @@ import type { SessionHandle, SessionViewEvent } from '../session/sessionHandle';
 import type { SessionExecutors } from '../session/sessionExecutors';
 import type { SessionRegistry } from '../session/sessionRegistry';
 import type { TelemetryLog } from './telemetryLog';
-import { claudeTurnUsage, codexTurnUsage, priceCost, type PriceTable, type SegmentState } from './turnUsage';
+import { claudeModelLimits, claudeTurnUsage, codexTurnUsage, priceCost, type PriceTable, type SegmentState } from './turnUsage';
 
 export const TELEMETRY_ENABLED_KEY = 'telemetry.enabled';
 /** Optional per-model prices for Codex, which reports no cost: `{model: {inPerMTok, outPerMTok, cacheReadPerMTok?}}`. */
@@ -38,6 +38,11 @@ export interface TurnTelemetryDeps {
   logLine?: (msg: string) => void;
   /** Told each record once it is written (the per-session usage index, #28). */
   onRecord?: (record: TurnRecord) => void;
+  /**
+   * Told the per-model limits a Claude turn reported, whether or not recording
+   * is on: they are capabilities for the catalog (#29), not usage.
+   */
+  onModelLimits?: (model: string, limits: { contextWindow?: number; maxOutputTokens?: number }) => void;
 }
 
 const ASK_KINDS = new Set(['permission', 'question', 'plan']);
@@ -147,6 +152,9 @@ export class TurnTelemetry implements Disposable {
     const usage = claude ? claudeTurnUsage(state, raw, now) : codexTurnUsage(state, raw, now);
     if (usage.kind === 'duplicate') return;
     t.reset = false;
+    if (claude && this.deps.onModelLimits) {
+      for (const [model, limits] of Object.entries(claudeModelLimits(raw))) this.deps.onModelLimits(model, limits);
+    }
 
     // Time still waiting on an ask counts up to now, then continues from now.
     let waited = t.waitedMs;

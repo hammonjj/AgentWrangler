@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { claudeTurnUsage, codexTurnUsage, priceCost, type SegmentState } from '../../src/core/telemetry/turnUsage';
+import { claudeModelLimits, claudeTurnUsage, codexTurnUsage, priceCost, type SegmentState } from '../../src/core/telemetry/turnUsage';
 
 const T = 1_790_000_000_000;
 
@@ -152,5 +152,24 @@ describe('priceCost', () => {
     expect(priceCost(prices, { 'gpt-x': { in: 1_000_000, out: 500_000, cacheRead: 400_000 } })).toBe(0.6 * 2 + 0.4 * 0.5 + 0.5 * 8);
     expect(priceCost(prices, { other: { in: 1 } })).toBeUndefined();
     expect(priceCost(undefined, { 'gpt-x': { in: 1 } })).toBeUndefined();
+  });
+});
+
+describe('claudeModelLimits', () => {
+  it('reads each model\'s reported limits, treating zero as unreported', () => {
+    expect(
+      claudeModelLimits({
+        modelUsage: {
+          'claude-opus-5-5': { inputTokens: 1, contextWindow: 200_000, maxOutputTokens: 64_000 },
+          'claude-haiku-4-5': { inputTokens: 1, contextWindow: 0, maxOutputTokens: 32_000 },
+          'claude-none': { inputTokens: 1 },
+        },
+      }),
+    ).toEqual({
+      'claude-opus-5-5': { contextWindow: 200_000, maxOutputTokens: 64_000 },
+      'claude-haiku-4-5': { maxOutputTokens: 32_000 },
+    });
+    expect(claudeModelLimits({})).toEqual({});
+    expect(claudeModelLimits(null)).toEqual({});
   });
 });

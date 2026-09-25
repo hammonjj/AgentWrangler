@@ -3,6 +3,7 @@
  * webview bundles — it must stay free of `vscode`, Node, and DOM imports.
  */
 import type { SessionUsage } from './sessionUsage';
+import type { SessionProvider } from './harness';
 
 /**
  * `waiting` and `done` both mean the agent has finished its turn and is idle at
@@ -82,8 +83,11 @@ export interface AgentSession {
   subagents?: SubagentSummary;
   /** What this session has used, from its telemetry records (#28). Absent when it has none. */
   usage?: SessionUsage;
-  /** Provider id, e.g. 'claude'. */
-  provider: string;
+  /**
+   * The harness this session runs in (`shared/harness.ts`): not the model
+   * source, which is `ModelChoice.provider`.
+   */
+  provider: SessionProvider;
   /** Client that originated the session, e.g. vscode, cli, or desktop. */
   client?: string;
   sessionId: string;

@@ -597,6 +597,39 @@ version, changing a model's tier changes future routing only.
 
 Nothing in routing ever infers effort from tier or tier from effort.
 
+### 6.5 As built (#29, 2026-09-25)
+
+- **Where it lives.** `src/shared/orchestration/catalog.ts` is the pure part: `Known<T>`,
+  `ModelDescriptor`, `CatalogEntry`, `DEFAULT_TIERS`, `TIER_DEFAULTS` (the only place a model is
+  named), `defaultEffortMap`, `buildCatalog` and `modelsInTierRange`. `src/core/capabilityCatalog.ts`
+  (`CapabilityCatalog`, formerly `ModelCatalogService`) stores the facts and reads the policy.
+  `src/shared/orchestration/sourceHealth.ts` turns a source's `UsageState` into health and capacity.
+  `src/shared/harness.ts` names the two vocabularies: `SessionProvider` (`claude`/`codex`, the
+  harness, `AgentSession.provider`) and `HostedSource` (`anthropic`/`openai`, the source,
+  `ModelChoice.provider`).
+- **Facts vs policy.** Reported facts are stored in global state under
+  `agentWrangler.capabilityCatalog` (`{v: 1, reported, observed}`). Policy is stored in settings:
+  `orchestration.models` (`{"<source>:<resolved id>": {tier, enabled, effort}}`, where `tier: null`
+  is an explicit "unassigned") and optionally `orchestration.tiers`. A value equal to the default is
+  stored by absence, like every other setting.
+- **One row per resolved model.** The policy key is `<source>:<resolved id>`, so aliases that resolve
+  to one model (`default` and `opus`) share a tier. The harness is called with the stable alias, not
+  `default`. `opus[1m]` resolves to a different id and is its own row.
+- **Upgrade.** When the new key is absent, the old `agentWrangler.modelCatalog` list is read once,
+  split by source, and written under the new key. The old key is left alone and never read again.
+- **Effort.** Codex reports `max` and `ultra` above `xhigh`. Both are treated like Claude's `max`
+  (pin only), so AW `max` maps to `xhigh` on both harnesses. `none` and `minimal` are pin only.
+- **Provenance.** `contextWindow` and `maxOutputTokens` are `reported` from Claude's `modelUsage`
+  after first use (via `TurnTelemetry.onModelLimits`, whether or not telemetry recording is on).
+  `vision` is `reported` from Codex's `inputModalities`. `nativeEffort` is `reported` by both.
+  Tool calling, structured output, streaming, throughput and concurrency stay `unknown` for hosted
+  models.
+- **Health.** A source with no usage read is `unknown`. A window at 100% is `down` until it resets
+  (`capacity.backoffUntil`). At 90% or more it is `degraded`. A failed read keeps the last good one
+  and says how old it is.
+- **Catalog version.** `cat-<fnv1a>` over the tiers and each model's tier, enablement, effort map and
+  aliases. Report timestamps are left out.
+
 ---
 
 ## 7. Domain model
