@@ -56,6 +56,11 @@ export class ClaudeProvider implements AgentProvider {
   onTranscriptAppended = (listener: (e: TranscriptAppendEvent) => void): Disposable =>
     this.appendEmitter.event(listener);
 
+  /** The effort level a session last reported running at, from its hook payloads; undefined if none did. */
+  appliedEffort(sessionId: string): string | undefined {
+    return this.hooks.get(sessionId)?.appliedEffort;
+  }
+
   /** True once any hook event has been seen — the dashboard warns when hooks are installed but silent. */
   get hooksReporting(): boolean {
     return this.hooks.hasEverReported;

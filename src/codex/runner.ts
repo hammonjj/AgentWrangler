@@ -72,6 +72,8 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
   private streamingKind: 'assistant' | 'thinking' = 'assistant';
   private turnAssistantText = '';
   private turnOutcome: 'completed' | 'failed' | 'interrupted' = 'completed';
+  /** The last `thread/tokenUsage/updated`: `total` is cumulative per thread, `last` one turn's worth. */
+  private tokenUsage?: { turnId?: string; tokenUsage: unknown };
   private idleStatus: 'waiting' | 'done';
   private lastActivityAt = Date.now();
   private seq = 0;
@@ -253,6 +255,13 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
       this.settleElsewhere(params.requestId);
       return;
     }
+    if (event.method === 'thread/tokenUsage/updated') {
+      // `turn/completed` carries no usage; this is where Codex reports it.
+      if (params.tokenUsage && typeof params.tokenUsage === 'object') {
+        this.tokenUsage = { turnId: typeof params.turnId === 'string' ? params.turnId : undefined, tokenUsage: params.tokenUsage };
+      }
+      return;
+    }
     if (event.method === 'turn/started') {
       this.activeTurnId = params.turn?.id;
       this.setBusy(true);
@@ -275,8 +284,13 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
       this.pendingQuestions.clear();
       this.setBusy(false);
       if (params.turn?.error?.message) this.add({ kind: 'note', id: this.id(), tone: 'error', text: capText(params.turn.error.message) });
-      // Codex's own turn-completion payload, untranslated (token usage, status).
-      this.emitTurnEnd(params);
+      // Codex's own turn-completion payload, untranslated (`{threadId, turn}`:
+      // status, error, timings). It has no usage of its own, so the latest
+      // `thread/tokenUsage/updated` rides along as `usageUpdate` (its params
+      // minus the thread id: {turnId, tokenUsage: {total, last,
+      // modelContextWindow}}), and the thread's model as `model`: the only two
+      // things added.
+      this.emitTurnEnd({ ...params, ...(this.tokenUsage ? { usageUpdate: this.tokenUsage } : {}), model: this.currentModel });
       return;
     }
     if (event.method === 'item/agentMessage/delta') {

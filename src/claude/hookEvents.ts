@@ -93,6 +93,12 @@ export interface HookEvent {
    * we need to keep per session.
    */
   todo?: TodoProgress;
+  /**
+   * The effort the turn actually ran at (`effort.level`), after any silent
+   * downgrade for the model. Only on tool-context hooks (`PreToolUse`,
+   * `PostToolUse`, `Stop`, …) of models that support effort.
+   */
+  effortLevel?: string;
   /** Our receipt time. Hook payloads carry no timestamp of their own. */
   receivedAtMs: number;
 }
@@ -132,6 +138,11 @@ export interface HookSessionState {
   lastEventName: string;
   /** True once SessionEnd arrives; the pid usually disappears at the same time. */
   finished: boolean;
+  /**
+   * The effort level the session last reported running at (`effort.level` on a
+   * tool-context hook). Kept across turns: it changes only when a hook says so.
+   */
+  appliedEffort?: string;
 
   // ---- current turn ----
   /**
@@ -228,8 +239,14 @@ export function parseHookLine(line: string, receivedAtMs: number): HookEvent | u
     requestId: hookEventName === PERMISSION_PENDING_EVENT ? str(obj.request_id) : undefined,
     agentId: undefined,
     todo: toolName === TODO_TOOL ? parseTodos(obj.tool_input) : undefined,
+    effortLevel: effortLevelOf(obj.effort),
     receivedAtMs,
   };
+}
+
+function effortLevelOf(effort: unknown): string | undefined {
+  if (!effort || typeof effort !== 'object') return undefined;
+  return str((effort as { level?: unknown }).level);
 }
 
 function str(v: unknown): string | undefined {
@@ -284,6 +301,7 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
   const next: HookSessionState = {
     ...base,
     cwd: e.cwd ?? base.cwd,
+    appliedEffort: e.effortLevel ?? base.appliedEffort,
     lastEventAtMs: e.receivedAtMs,
     lastEventName: e.hookEventName,
   };

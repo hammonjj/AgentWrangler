@@ -50,6 +50,17 @@ describe('parseHookLine', () => {
     expect(e?.receivedAtMs).toBe(T0);
   });
 
+  it('reads the applied effort level and keeps it across events that lack it (#27)', () => {
+    const st = feed([
+      { hook_event_name: 'UserPromptSubmit' },
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', effort: { level: 'xhigh' } },
+      { hook_event_name: 'PostToolUse', tool_name: 'Bash' },
+      { hook_event_name: 'Stop' },
+    ]);
+    expect(st.appliedEffort).toBe('xhigh');
+    expect(parseHookLine(line({ hook_event_name: 'PreToolUse', session_id: SID, effort: 'high' }), T0)?.effortLevel).toBeUndefined();
+  });
+
   it('lowercases the session id so it matches registry/transcript keys', () => {
     const upper = SID.toUpperCase();
     expect(parseHookLine(line({ hook_event_name: 'Stop', session_id: upper }), T0)?.sessionId).toBe(SID);

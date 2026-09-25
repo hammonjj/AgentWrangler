@@ -89,6 +89,21 @@ describe('CodexRunner', () => {
     expect(runner.session.status).toBe('done');
   });
 
+  it('carries the latest token usage and the model on its turn end (#27)', async () => {
+    const server = new FakeServer();
+    const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj', 'gpt-test');
+    const ends: any[] = [];
+    runner.onTurnEnd((raw) => ends.push(raw));
+    await runner.send('hello');
+    const tokenUsage = { total: { inputTokens: 10, outputTokens: 2 }, last: { inputTokens: 10, outputTokens: 2 }, modelContextWindow: 100 };
+    server.notifications.fire({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread-1', turnId: 'turn-1', tokenUsage } });
+    server.notifications.fire({ method: 'thread/tokenUsage/updated', params: { threadId: 'other', turnId: 'x', tokenUsage: {} } });
+    server.notifications.fire({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    expect(ends).toEqual([
+      { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' }, usageUpdate: { turnId: 'turn-1', tokenUsage }, model: 'gpt-test' },
+    ]);
+  });
+
   it('uses the final assistant message to distinguish Waiting from Done', async () => {
     const server = new FakeServer();
     const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj');

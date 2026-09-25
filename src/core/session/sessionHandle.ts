@@ -58,8 +58,14 @@ export type SessionViewEvent =
   | { seq: number; type: 'lifecycle'; lifecycle: SessionLifecycle }
   /** The conversation was replaced (`/clear`): start again from a snapshot. */
   | { seq: number; type: 'reset' }
-  /** A turn finished. `raw` is the provider's own turn-end payload, untranslated. */
-  | { seq: number; type: 'turnEnd'; raw: unknown };
+  /**
+   * A turn finished. `raw` is the provider's own turn-end payload, untranslated.
+   * `segment` names the execution that produced it (a Claude `Query`: one
+   * in-process session, or one session host), so a consumer of cumulative
+   * totals knows when they restart: a resume or a version migration is a new
+   * segment, a core restart that reattaches to the same host is not.
+   */
+  | { seq: number; type: 'turnEnd'; raw: unknown; segment?: string };
 
 export interface SessionViewSnapshot {
   /** Subscribe from this to follow on without a gap or a repeat. */
@@ -133,7 +139,7 @@ export interface SessionHandle {
   onComposer(listener: (composer: ComposerState) => void): Disposable;
   onLifecycle(listener: (lifecycle: SessionLifecycle) => void): Disposable;
   onReset(listener: () => void): Disposable;
-  onTurnEnd(listener: (raw: unknown) => void): Disposable;
+  onTurnEnd(listener: (raw: unknown, segment?: string) => void): Disposable;
 
   /** The conversation from before this process took it over, for a resumed session. */
   history(): Promise<ConversationHistory>;
