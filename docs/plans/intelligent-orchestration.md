@@ -1,6 +1,7 @@
 # Agent Wrangler intelligent orchestration: architecture and roadmap
 
-Status: proposed, 2026-09-24. Planning only; nothing here is built.
+Status: proposed, 2026-09-24. Planning only; nothing here is built. **Post-#4 gate (#25) passed
+2026-09-25 with amendments**, recorded in §35 and in the sections it names.
 Scope: turning a mission into tasks, assessing them, choosing agent + model + effort, running
 them safely in parallel, verifying the results, escalating when they fail, and recording enough
 telemetry that routing can one day learn from it.
@@ -57,19 +58,20 @@ what this plan asks of it.
 ### 1.1 What orchestration stands on
 
 This plan assumes every stage of #4 has landed (Stages 1–6; Stages 7 and 8 are optional). The
-things it uses, with their #4 playbook sections (`docs/plans/session-lifecycle-architecture.md`):
+things it uses, with their #4 playbook sections (`docs/plans/session-lifecycle-architecture.md`).
+Names and states are **as built** (checked at the #25 gate against `450a8ac`, §35):
 
 | #4 deliverable | Issue | Why orchestration needs it |
 |---|---|---|
-| `SessionExecutor` / `SessionHandle`: one provider-agnostic way to start, observe, send to and end a session; Claude execution split from translation | #12 | The only execution seam an orchestrator should call. Today there is none (§2.1): `RunnerService` and `CodexRunnerService` share no type, and `createApp` holds the launch logic as closures. |
-| `SessionRegistry` (`sessions.json`): every AW-owned session with launch options (model, permission mode, effort), `repoRoot`, worktree, branch at start, state | #13 | An ExecutionAttempt references a registry session id. The registry is the durable answer to "what happened to that attempt's process" after any restart. |
-| Explicit lifecycle states (`launching`, `live`, `stopping`, `stopped`, `ended`, `failed`, `lost`, `interrupted`; link states `connecting`, `unreachable`) and "Interrupted — Resume" for every session | #13, #15 | The attempt state machine (§7.5) maps onto these, so orchestration does not invent a second process model. |
-| Survivable session hosts, reattach after core restart, orphan sweep, bounded version drift | #14, #15 | **The reason #4 comes first.** In this repo the app is reinstalled many times a day, and today every install kills every hosted agent. A mission of five parallel tasks that dies on every `app:install` is unusable. With hosts, in-flight attempts survive the core restarting and the orchestrator reattaches. |
-| Codex threads survive restarts | #17 | Codex is a routing target; its attempts need the same survival. |
-| Windowless core, OS notifications, menu-bar counts | #18 | Missions run for hours with the window closed; "task needs you" must reach James without the window. |
+| `SessionExecutor` / `SessionHandle` (`src/core/session/sessionHandle.ts`): one provider-agnostic way to start (`launch(LaunchRequest)`), observe (cached view, `snapshot()` + `subscribe(fromSeq)`, `onTurnEnd`), send to and end a session; `SessionExecutors` looks any id up across both providers; Claude execution split from translation | #12 | The only execution seam an orchestrator should call. Before #4 there was none (§2.1). |
+| `SessionRegistry` (`sessions.json`): every AW-owned session with launch options (model, permission mode, effort, plus an `applied` slot), `repoRoot`, worktree, branch at start, opaque `origin`, state | #13 | An ExecutionAttempt references its registry sessions. The registry is the durable answer to "what happened to that attempt's process" after any restart. |
+| Registry states `live`, `stopped`, `ended`, `failed`, `interrupted`, each with an `endedReason` (`app-restart`, `host lost`, `idle`, `machine restarted`, `host stopped`, `host signalled`, `cleared`, `open-elsewhere`, `agent error`); handle lifecycle `starting`, `idle`, `running`, `ending`, `ended`, `error`, and link states `connecting`, `unreachable`; "Interrupted — Resume" on every interrupted row. There is no `launching` or `lost` state: a host that died silently is `interrupted` with `host lost` | #13, #15 | The attempt state machine (§7.5) maps onto these (§23.3's table), so orchestration does not invent a second process model. |
+| Survivable session hosts, reattach after core restart, orphan sweep, bounded version drift | #14, #15 | **The reason #4 comes first.** In this repo the app is reinstalled many times a day, and without hosts every install kills every AW-run agent. A mission of five parallel tasks that dies on every `app:install` is unusable. With hosts, in-flight attempts survive the core restarting and the orchestrator reattaches. **Hosts are behind `experimental.sessionHosts` (default off) until #15's default flip**, so #33 waits for it (§35, G1). |
+| Codex threads survive restarts (`CodexHost`: one detached app-server; `rejoinCodexThreads` at startup) | #17 | Codex is a routing target; its attempts need the same survival. |
+| Windowless core, OS notifications (`HostServices.notify`), menu-bar counts | #18 | Missions run for hours with the window closed; "task needs you" must reach James without the window. |
 | Exclusive resource leases (Unity Editor) | #23 (spike, done), #68 | #23 decided it (`spikes/f2-resource-leases.md`): a `PreToolUse` hook on declared resources, lease files as the lock of record, and a core `LeaseService` with `acquire` (never waits) and `bind` for A5. #68 builds it. The scheduler's exclusive-resource constraint (§13.5) calls that service; #47 does not build its own. |
 | Checkout-sharing warning | #22 | Same `repoRoot`/worktree data the scheduler uses for contention (§13.4). |
-| Core control socket + `aw` CLI | #21 (optional) | A later `aw mission` / `aw task` surface. Not required. |
+| Core control socket + `aw` CLI (control protocol v1 frozen; `send`/`stop` refused under an agent's environment) | #21 (optional) | A later `aw mission` / `aw task` surface. Not required. |
 | Host-first permission routing; hosted sessions approvable only through AW | #15 | Orchestrated attempts ask permission like any hosted session; nothing new is needed, and an agent cannot approve its own prompt. |
 
 ### 1.2 Principles inherited from #4, unchanged
@@ -91,23 +93,28 @@ things it uses, with their #4 playbook sections (`docs/plans/session-lifecycle-a
 
 Small things that are cheap while #4 is being built and expensive to retrofit. Posted as comments
 on the named issues (A1–A2 on #12, A3, A4 and A6 on #13, A5 on #23); none changes #4's scope or
-order.
+order. **Status as built** is from the #25 gate (2026-09-25, §35); A7–A10 were found there.
 
-| Ask | Issue | Detail |
-|---|---|---|
-| A1. `SessionExecutor.start` takes a launch request object | #12 | `{provider, cwd, model?, effort?, permissionMode?, sessionId?, resume?, initialPrompt?, origin?}` rather than positional arguments, so orchestration adds fields without touching every call site. |
-| A2. `SessionHandle` exposes turn completion with the raw result | #12 | An event carrying the provider's turn-end payload (Claude `result`: `usage`, `modelUsage`, `total_cost_usd`, `num_turns`, `duration_ms`, `duration_api_ms`, `ttft_ms`, `terminal_reason`, `api_error_status`, `permission_denials`; Codex: turn completion + token usage). Telemetry (§16) reads this and never reaches into `RunnerView`. |
-| A3. Registry records carry an optional opaque `origin` | #13 | e.g. `{kind: "orchestration", missionId, taskId, attemptId}`. The registry does not interpret it; recovery (§23.3) uses it to reconnect attempts to sessions. |
-| A4. Registry keeps requested *and* applied model/effort | #13 | `launch.effort` is what AW asked for. The applied effort can differ (the CLI silently downgrades for models without that level); Claude reports it in tool-context hook payloads (`effort.level`) and, on some hosts, in `system/init`. Keep a slot for `applied`. |
-| A5. Leases can be held by the scheduler, not only requested by an agent | #23 | Orchestration acquires a lease *before* starting an attempt (`holder: attemptId`), then hands it to the session. The spike should keep that shape possible. |
-| A6. Newest-session auto-resume skips orchestrated sessions | #13 | `runner.autoResumeLastOnStartup` resumes the newest interrupted session. For a session with `origin.kind = orchestration` the orchestrator owns recovery (§23.3), so #4's auto-resume should leave it alone. |
+| Ask | Issue | Detail | Status at the gate |
+|---|---|---|---|
+| A1. `SessionExecutor.start` takes a launch request object | #12 | `{provider, cwd, model?, effort?, permissionMode?, sessionId?, resume?, initialPrompt?, origin?}` rather than positional arguments, so orchestration adds fields without touching every call site. | **Landed** as `SessionExecutor.launch(LaunchRequest)`. The launcher still bypasses it (`runners.start`, positional `codexRunners.start`), which #26's typed launch path fixes; `CodexRunnerService.launch` ignores `permissionMode`, and on resume `origin` and `effort` (#71). |
+| A2. `SessionHandle` exposes turn completion with the raw result | #12 | An event carrying the provider's turn-end payload (Claude `result`: `usage`, `modelUsage`, `total_cost_usd`, `num_turns`, `duration_ms`, `duration_api_ms`, `ttft_ms`, `terminal_reason`, `api_error_status`, `permission_denials`; Codex: turn completion + token usage). Telemetry (§16) reads this and never reaches into `RunnerView`. | **Claude landed** (`turnEnd` carries the SDK `result` untranslated). **Codex partial**: `turnEnd` carries `turn/completed`, which has no usage; `thread/tokenUsage/updated` is ignored. Added to #27. Replay caveats for both in §16.3. |
+| A3. Registry records carry an optional opaque `origin` | #13 | e.g. `{kind: "orchestration", missionId, taskId, attemptId}`. The registry does not interpret it; recovery (§23.3) uses it to reconnect attempts to sessions. | **Landed** on `LaunchRequest`, handles and records, kept across adopt, resume, migration and id changes. Hole: a live record the startup cap drops is re-created without it (#72). |
+| A4. Registry keeps requested *and* applied model/effort | #13 | `launch.effort` is what AW asked for. The applied effort can differ (the CLI silently downgrades for models without that level); Claude reports it in tool-context hook payloads (`effort.level`) and, on some hosts, in `system/init`. Keep a slot for `applied`. | **Slot landed, no writer** (`noteApplied` has no caller; the hook parser does not read `effort`). Added to #27. |
+| A5. Leases can be held by the scheduler, not only requested by an agent | #23 | Orchestration acquires a lease *before* starting an attempt (`holder: attemptId`), then hands it to the session. The spike should keep that shape possible. | **Superseded** by #23's design: holder `{kind: 'attempt', attemptId, sessionId?}`, `acquire` never waits, `bind` once the session exists, `bindBy` deadline 10 min (`spikes/f2-resource-leases.md`). Built by #68 (open); #47 now depends on #68. |
+| A6. Newest-session auto-resume skips orchestrated sessions | #13 | `runner.autoResumeLastOnStartup` resumes the newest interrupted session. For a session with `origin.kind = orchestration` the orchestrator owns recovery (§23.3), so #4's auto-resume should leave it alone. | **Landed** (`autoResumeCandidate`). |
+| A7. Launch policy reaches the agent and survives resume and migration | new | Tool allow/deny rules, limits (`maxTurns`, `maxBudgetUsd`), `fallbackModel`, `outputFormat`; Codex `sandbox`, `approvalPolicy`, `developerInstructions`. Carried through `LaunchRequest` → `HostBoot` → SDK options / `thread/start`, recorded in the registry, re-applied on Resume, §7.4 migration and every Codex `thread/resume`. | **Not landed**: none of it can reach an agent today, and what can (model, effort, mode) is all a migration carries. #71, blocks #33. |
+| A8. The handle says whether background work is outstanding | new | "Turn over" is not "work done" while a background shell or subagent runs (§7.5). | **Not on the handle**: `backgroundTaskCount` reads the host snapshot, and only `RunnerView` sees it. The same detector #60 and #67 need; asked on #60. In #33's scope if #60 has not exposed it. |
+| A9. `send` takes a client message id | new | So an attempt can tell the turns its own sends caused from the user's (`userIntervened`, §16.3). Claude echoes the SDK message `uuid` as `result.user_message_uuid(s)`; Codex takes `turn/start.clientUserMessageId`. | **Not landed**: `RunnerView` mints the uuid itself and does not return it. #71. |
+| A10. The registry never drops a live session | new | Recovery looks attempts up in the registry. | **Not landed**: the startup cap (100, by `lastShownAt`) drops live records, and adoption then loses launch options and `origin`; a dropped Codex thread is never rejoined. #72, blocks #33. |
 
 ---
 
 ## 2. Current architecture (evidence, 2026-09-24)
 
 This section describes the repo as it is on `main` today, then notes where #4 changes it. File
-references are to `main` at `7948980`.
+references are to `main` at `7948980`. §2.1–§2.4 are that evidence, kept as written; §2.5 says
+what #4 actually delivered (the #25 gate, `450a8ac`).
 
 ### 2.1 Concept inventory
 
@@ -184,6 +191,33 @@ From a repo-wide grep; these are the places orchestration must not copy and shou
    `LeaseService`, storage), and `createApp` calls it once.
 7. **No new provider conditionals in UI.** Orchestration UI reads capabilities from the host,
    never `provider === …`.
+
+### 2.5 After #4, as built (2026-09-25, `450a8ac`)
+
+What changed in §2.1's inventory, and what did not:
+
+- **Execution seam: in place.** `SessionHandle`, `SessionExecutor.launch(LaunchRequest)` and
+  `SessionExecutors` (`src/core/session/`). `RunnerService` (Claude: `RunnerView` over an
+  in-process `ClaudeSdkSession` or a `HostClient`) and `CodexRunnerService` (`CodexRunner` over
+  `CodexAppServer`) both implement it. Every handle has a numbered view log (1 MiB) behind
+  `snapshot()` / `subscribe(fromSeq)`; the `on*` conveniences are live-only.
+- **Registry: in place.** `SessionRegistry` in `sessions.json`, both providers, with `origin` and
+  `launch.applied`. Capped at 100 records at startup (A10).
+- **Hosts: in place, off by default.** Claude hosts (protocol v1 and manifest v1 frozen at CP2),
+  orphan sweep before every resume, drift migration on an idle send, idle-orphan parking. New
+  sessions use them only with `experimental.sessionHosts`; surviving hosts are adopted either way.
+  Codex: one detached `codex app-server` (`CodexHost`), rejoined at startup.
+- **Startup order** (`createApp`): host scan → `registry.startup` → sweeps of dead, recordless
+  hosts → adopt live hosts → (in `start()`) `rejoinCodexThreads` and, 2 s later,
+  `resumeLastRunner`. §23.3 hooks in after the Codex rejoin.
+- **Launch options: still ad hoc.** `startConversation` / `startCodexConversation` read
+  `runner.*` / `codexRunner.*` settings directly and call the executors' own `start`, not
+  `launch`. `runner.defaultPermissionMode` defaults to `auto`. #26's `LaunchDefaults` stands.
+- **Provider conditionals: unchanged** in `conversationHost.ts` and the webviews; `createApp.ts`
+  has grown to about 2,000 lines. §2.2 and §2.4 items 3 and 6 stand.
+- **Telemetry: unchanged** apart from the handle's `turnEnd` (A2). Nothing is persisted.
+- **Also new:** `HostServices.notify` (#18), the checkout-sharing warning (#22), `run/core.sock`
+  and `aw` (#21), the lease design (#23; built by #68–#70).
 
 ---
 
@@ -327,7 +361,7 @@ Scheduler → Execution Runtime → Verification → retry/escalate*. Against th
   │ Scheduler: admit?                  deps · concurrency · contention · leases · budget       │
   │ Resolver ─► ExecutionTarget        catalog · health · capacity · prefs · caps              │
   │ Worktree ─► WorktreeAssignment     branch from the mission branch head                     │
-  │ SessionExecutor.start (#4) ─► ExecutionAttempt, running in a host                         │
+  │ SessionExecutors.launch (#4) ─► ExecutionAttempt, running in a host                       │
   │   turn results ─► Telemetry                                                                │
   │ Verifier ─► VerificationResult     strategies from repo policy                             │
   │ Outcome classifier ─► EscalationPolicy ─► done │ retry │ escalate │ wait │ needs human     │
@@ -339,7 +373,9 @@ Scheduler → Execution Runtime → Verification → retry/escalate*. Against th
 ```
 
 Everything in the box runs in the core. Hosts run the agents; the core runs `git`, the verifiers
-and all policy.
+and all policy. The one piece of policy that reaches a host is **data at launch**: an attempt's
+tool rules, limits and Codex sandbox/approval settings (§24.1, ask A7). The host applies them the
+way it applies a model name, and decides nothing (#4 §6).
 
 ### 5.3 Where it lives in the code
 
@@ -403,6 +439,14 @@ harness in no-tools mode: an Agent SDK query with no tools, `maxTurns: 1` and
 `outputFormat: {type: 'json_schema', schema}`, whose `result` carries `structured_output`. Later a
 local endpoint can serve the same interface directly (§19). Completions are routed like tasks,
 normally to the `basic` tier at `low` effort.
+
+**A completion is not a session** (amended at the #25 gate). It does not go through
+`SessionExecutors`: a hosted launch would spawn a host process and a `claude` per call, write a
+registry record (churning the 100-record cap, A10) and show a row, all to survive a restart that a
+one-shot call does not need to survive. `StructuredCompletion` runs an in-process, unrecorded,
+one-shot SDK `query()` in the core with the options above; a completion cut off by a restart is
+simply asked again. Codex could serve one the same way later (`thread/start` with
+`ephemeral: true`, then `turn/start` with `outputSchema`), which the pinned app-server supports.
 
 ### 6.2 Interfaces
 
@@ -544,9 +588,12 @@ version, changing a model's tier changes future routing only.
   **applied** (what the harness says it used). Claude reports the applied level in tool-context
   hook payloads (`effort.level`, after any silent downgrade) and on some hosts in `system/init`;
   where nothing reports it, `applied` is unknown, not assumed.
-- Changing effort mid-session: Claude has no SDK call; AW sends `/effort <level>` (the existing
-  `RunnerSession.setEffort`). Codex takes effort per turn. `HarnessCapabilities` says which, so
-  escalation (§15) knows whether "raise effort" can continue the session or needs a new one.
+- Changing effort mid-session: Claude has no SDK call; AW sends `/effort <level>`
+  (`RunnerView.setEffort`, only when the CLI advertises `/effort`). Codex takes effort per turn
+  (`turn/start.effort`, confirmed in the pinned app-server), but `CodexRunner.setEffort` answers
+  `unsupported` as built; #30's Codex adapter sends it on the next `turn/start`.
+  `HarnessCapabilities` says which, so escalation (§15) knows whether "raise effort" can continue
+  the session or needs a new one.
 
 Nothing in routing ever infers effort from tier or tier from effort.
 
@@ -619,12 +666,16 @@ verdict, reason}, catalogVersion}`, `shadow? {requirement, target, reasons}`, `d
 | 'user'`, `decidedAt`. Invariant: immutable; `target.tier ≤ requirement.maxTier` always.
 
 **ExecutionAttempt**: `id`, `taskId`, `n`, `routingDecisionId`, `assignment {mode: 'fresh' |
-'continue', sessionId, harness}`, `worktreeId`, `state`, `launchedAt`, `endedAt`, `outcome?
+'continue', sessionIds[], harness}`, `worktreeId`, `state`, `launchedAt`, `endedAt`, `outcome?
 {status, category, signature}`, `git {baseCommit, headCommit, commits, filesChanged, insertions,
 deletions}`, `verification[]`, `usage` summary (§16), `flags {userIntervened, userEditedBranch,
-tookOver}`. Invariants: persisted as `launching` **before** `SessionExecutor.start` is called;
+tookOver}`. Invariants: persisted as `launching` **before** `SessionExecutors.launch` is called;
 never reopened after it ends; `interrupted` means its session was lost (host or agent gone,
 machine down), whether that is seen live or by recovery at startup.
+`sessionIds` (amended at the #25 gate) lists every id the attempt's session has had, current
+last: a session's id can change during its life (`/clear`; the code also expects compaction and
+resume to issue new ids), and #4's registry then records the new id with the same `origin`. The
+registry, found by `origin.attemptId`, is the tie-breaker (§23.3).
 
 **WorktreeAssignment**: `id`, `purpose: 'task' | 'integration'`, `taskId?`, `path`, `branch`,
 `baseCommit`, `state: creating | ready | in-use | retained | removed | missing`, `createdAt`,
@@ -711,6 +762,23 @@ created ─► launching ─► running ⇄ waiting-human ─► finishing ─�
 
 `waiting-human` mirrors the session's pending ask (permission, question, plan). The attempt's
 active-time clock stops while it waits (§16.3).
+
+**Against #4 as built** (the #25 gate):
+
+- **`running → finishing` is not a session end.** A Claude session in streaming-input mode stays
+  `live` and `idle` after its turn; only a stop ends it. The attempt has finished its work when
+  the handle's last turn has ended, its lifecycle is `idle`, it holds no pending ask, and no
+  background work is outstanding (ask A8: a background shell or subagent reports back and starts
+  another turn, the #60 case). That is read from the handle's state, not only from a `turnEnd`
+  event: after a restart Codex sends no `turn/completed` for a turn that finished while nobody
+  was connected, and Claude's replay may repeat or skip one (§16.3).
+- **The orchestrator ends the attempt's session**, through the handle (registry `stopped`), once
+  the task can no longer use it: after `done`, `failed` or `cancelled`, or when a retry will be
+  fresh. It stays live (idle) while verification runs, because a `quality-new` retry continues it
+  (§15.2).
+- `launching` has no registry counterpart: #4 records a Claude session when `launch` returns (its
+  id is pre-assigned), a Codex one when `thread/start` returns, before the first turn. The full
+  mapping of registry state and handle lifecycle to attempt state is §23.3's table.
 
 ---
 
@@ -1304,7 +1372,7 @@ session ended with a pending question.
 | Category | Evidence | Action |
 |---|---|---|
 | `infra` | API 5xx or a dropped stream inside a live session | retry the **same route in the same session** after backoff (not counted against quality limits, up to 2); then fail over to another harness at the same tier if allowed; then `needs-human` |
-| `lost` | the session itself is gone (host or agent crash, machine down): attempt `interrupted` | **Resume attempt** / **Retry fresh** offered to the user; automatic only with the mission's `autoRecover` (one resume), matching #4's no-auto-resume rule (§23.3) |
+| `lost` | the session itself is gone (host or agent crash, machine down): attempt `interrupted` | **Resume attempt** / **Retry fresh** offered to the user; automatic only with the mission's `autoRecover` (one resume), and never after a host crash (`host lost`), matching #4's no-auto-resume rule (§23.3) |
 | `capacity` | 429, rate limit, usage window over threshold | `wait` until capacity returns (the scheduler holds it); fail over to another source only if the policy allows; **never** raises the tier |
 | `context` | `prompt_too_long`, context overflow | a same-tier model with a larger window; else propose `split-task` (replan); else `needs-human` |
 | `quality-new` | verification failed with a signature not seen before on this task | retry **continuing the same session** with the failure evidence as the next message (cheap, and the context is warm) |
@@ -1399,17 +1467,36 @@ idempotent by event id.
   attempt's usage is the sum over its segments. A crashed session's final `result` may carry
   zeroed totals: a total lower than the previous one without a known reset is treated as "no
   data" for that turn, never subtracted. This is the part of Phase 1 most worth unit testing.
-- **Claude applied effort**: from tool-context hook payloads (`effort.level`), which AW's hooks
-  already receive, and from `system/init` where the host publishes it.
-- **Codex tokens**: from `thread/tokenUsage/updated`, which is cumulative per thread, so the
-  same differencing applies, including on resumed threads. No cost is reported, so cost is either
-  computed from a user-editable price table (`basis: price-table`) or absent.
+- **Turn ends across a core restart** (checked against #4 at the gate). Adopting a host replays
+  its ring after the last message the transcript holds, so the last turn's `result` is usually
+  delivered **again**, and turns that finished while the core was down are **not delivered at
+  all**. Records are therefore idempotent by the `result`'s own `uuid` (Codex: `turn.id`), and
+  the first result after a gap is differenced against the last one recorded, so the cumulative
+  totals carry the missed turns; that record says it spans the gap (`coversGap: true`) instead of
+  claiming one turn. A handle's `onTurnEnd` is live-only: the sink attaches before the handle
+  starts, or subscribes from seq 0 of the handle's view log.
+- **Claude applied effort**: from tool-context hook payloads (`effort.level`; present in SDK
+  0.3.268's hook input for `PreToolUse`, `PostToolUse`, `Stop` and the like, "after any silent
+  downgrade"). The hook log keeps payloads verbatim, hosted sessions included, but the parser
+  does not read `effort` yet, and nothing calls `SessionRegistry.noteApplied` (A4): #27 does both.
+  Also from `system/init` where the host publishes it.
+- **Codex tokens**: from `thread/tokenUsage/updated {threadId, turnId, tokenUsage: {total, last,
+  modelContextWindow}}`, which `CodexRunner` ignores as built; `turn/completed` carries no usage.
+  `last` is already per turn and `total` is cumulative per thread, so a turn missed while the
+  core was away is recovered from `total` as above. No cost arrives with it. The pinned
+  app-server also answers `account/usage/read {threadId}` with an estimated usage per model ×
+  reasoning effort (credits, and USD "when its billing route is available"): #27 checks whether
+  that is a usable cost basis (`basis: 'harness-estimate'`) and applied-effort source; otherwise
+  cost comes from a user-editable price table (`basis: price-table`) or is absent.
 - **Active time**: turn durations minus time with a pending ask. **Queue time**: from `queued` to
   `launching`. **Waiting on the human**: the sum of pending-ask intervals.
 - **Git numbers**: `git diff --numstat base..head` in the task worktree. Deterministic.
-- **User intervention**: a send, take-over or answer from the user into the attempt's session
-  (known from `SessionActions` call sites); `userEditedBranch`: commits on the task branch outside
-  any attempt's lifetime.
+- **User intervention**: a send, take-over or answer from the user into the attempt's session;
+  `userEditedBranch`: commits on the task branch outside any attempt's lifetime. Not from
+  `SessionActions` call sites, as first planned: the pane's composer and `aw send` go straight to
+  the handle. The attempt instead knows the ids of its own sends (ask A9), and a turn whose
+  `user_message_uuid(s)` (Codex: `clientUserMessageId`) it did not send is the user's. Take-over
+  and answers are handle commands the orchestrator did not issue.
 - **Reverted later**: a revert commit of the integration merge on the base branch, checked when
   the mission view is opened. Best-effort, and labelled so.
 
@@ -1420,8 +1507,8 @@ idempotent by event id.
 | Tokens in/out | ✔ per model (`modelUsage`) | ✔ (token usage notifications) | server-reported, if any |
 | Cache read/write | ✔ | cached input only (§3) | usually none |
 | Thinking tokens | ✔ where the CLI records them | reasoning tokens (§3) | varies |
-| Cost | estimate (`costUSD`, `total_cost_usd`; "not a billing statement"); on the subscription it is API-equivalent | none; price table | none (`$0 API cost`) |
-| Applied effort | hook payload; `init` on some hosts | echo of the requested config | n/a or `reasoning_effort` echo |
+| Cost | estimate (`costUSD`, `total_cost_usd`; "not a billing statement"); on the subscription it is API-equivalent | none per turn; per thread possibly `account/usage/read` (unverified, #27); else price table | none (`$0 API cost`) |
+| Applied effort | hook payload; `init` on some hosts | echo of the requested config; possibly `account/usage/read`'s per-effort groups | n/a or `reasoning_effort` echo |
 | Time to first token | `ttft_ms` on `result` | not reported (compute from notifications) | server timings |
 | Tool calls | from our reducer | from our reducer | from the harness |
 | Rate limits | `/api/oauth/usage` windows | `account/rateLimits/read` | slots / queue |
@@ -1745,34 +1832,71 @@ Every side effect that is hard to undo is preceded by a persisted intent:
 
 | Step | Persisted first | Why |
 |---|---|---|
-| Start an attempt | attempt `launching` with a pre-assigned session id (Claude: the SDK `sessionId` option, which #4 already passes) or a launch nonce (Codex: the thread id is known only after `thread/start`, so it is matched by the registry `origin` tag, §1.3 A3) | a crash between "decided" and "started" leaves a findable record, never an unowned session |
+| Start an attempt | attempt `launching` with its `origin` (`{kind: 'orchestration', missionId, taskId, attemptId}`) and, for Claude, a pre-assigned session id that the orchestrator passes as `LaunchRequest.sessionId` (with hosts on `RunnerService` would pick one itself, but the attempt must know it before the call). Codex needs no nonce: `CodexRunnerService` records the thread, with its `origin`, as soon as `thread/start` returns and before the first `turn/start`, so a crash leaves either a record found by `origin.attemptId` or a thread with no turns, which #4 drops as unresumable (gate finding) | a crash between "decided" and "started" leaves a findable record, never an unowned session |
 | Create a worktree | `WorktreeAssignment creating` with path and branch | a half-created worktree is found and finished or cleaned |
 | Merge into the mission branch | `integrating` with the pre-merge head | a crash mid-merge is detected (`MERGE_HEAD`) and redone from a known state |
 | Run a verifier | stage `running` | re-run on recovery; verification is repeatable |
 
 ### 23.3 Recovery on core start
 
-Runs **after** #4's startup reconciliation (manifests → registry states), never before, so it
-sees true session states.
+Rewritten at the #25 gate by walking #4's startup code (`createApp`, `recovery.ts`,
+`hostClient.ts`, `runner.ts` at `450a8ac`). #4 starts up in this order:
+
+1. `HostSupervisor.scan()` sorts host manifests into alive, dead and foreign (a manifest version
+   this build cannot read).
+2. `SessionRegistry.startup()` classifies records. A `live` record whose session is in an alive
+   or foreign host stays `live`. Any other `live` record becomes `interrupted` (`app-restart`),
+   or takes its dead host's exit record: `ended`, `failed`, `stopped` (`idle`, parked by the
+   idle-orphan rule), or `interrupted` with `host lost` (no record), `host stopped`,
+   `host signalled` or `machine restarted`. Then the list is capped (A10, #72).
+3. Dead hosts with no exit record are swept for orphaned agents (async).
+4. Every alive host is adopted: its handle starts `connecting` and catches up asynchronously
+   (snapshot, paged replay, reconcile), then follows the host's state.
+5. In `start()`: `rejoinCodexThreads()` resumes every Codex record left `interrupted` by
+   `app-restart` (async). Reattached → `live`; held by another app-server → `stopped`
+   (`open-elsewhere`); no turns → forgotten; any other error → stays `interrupted`.
+6. Two seconds later, `resumeLastRunner()` resumes the newest interrupted Claude session, never
+   one with `origin.kind = 'orchestration'` (A6).
+
+**Orchestration recovery runs after step 4 and after step 5 has resolved** (`createOrchestration`
+is handed that promise), never before step 2, so it sees true session states. Then:
 
 1. Load missions that are not in a terminal state.
-2. For each attempt in `launching | running | finishing`, look up its session in `SessionRegistry`
-   (by id, or by `origin.attemptId`):
-   - `live` → keep it `running`; subscribe to the handle again. **This is the common case after
-     `app:install` once #4 is done.**
-   - `ended` cleanly after its last turn → continue to `finishing` (collect the diff, verify).
-   - `interrupted | lost | failed` → attempt `interrupted`; the task goes to `needs-human` with
-     **Resume attempt** (resume the same session id, #4's Resume) and **Retry fresh**. No automatic
-     resume, as #4 decided for hosts, because crash loops are worse than a click. A mission
-     setting `autoRecover` (off by default) allows one automatic resume per attempt.
-   - no session found for a `launching` attempt → `interrupted`; nothing ran.
+2. For each attempt in `launching | running | waiting-human | finishing`, find its session:
+   registry records whose `origin.attemptId` matches, newest `liveSince` first; failing that, the
+   attempt's `sessionIds`. Then its live handle, `SessionExecutors.get(id)`. Decide by this table:
+
+   | Registry record | Handle | Attempt | Why |
+   |---|---|---|---|
+   | `live` | `connecting`, `starting` or `running` | stays `running`; resubscribe | **the common case after `app:install`** |
+   | `live` | `idle`, no pending ask, no background work (A8) | `finishing` | the work finished while the core was away; no turn-end event is guaranteed (§16.3) |
+   | `live` | a pending question, plan or permission | `waiting-human` | the ask came back from the host snapshot, or Codex re-sent it after `thread/resume` |
+   | `live` | `unreachable` | stays `running`, flagged "host unreachable" | the host still holds the session and #4 blocks any resume of it; the agent may yet finish. Never `interrupted` |
+   | `live` | none: a foreign host | `needs-human`: "held by a host this version cannot follow" | #4 offers Stop host or Leave; orchestration does not choose |
+   | `interrupted`: `app-restart`, `machine restarted`, `host stopped`, `host signalled` | none | `interrupted`; the task goes to `needs-human` with **Resume attempt** (#4's Resume: same id, orphan sweep first) and **Retry fresh** | the conversation is intact |
+   | `interrupted`: `host lost` | none | the same; Resume is never automatic, even with `autoRecover` | #4 never auto-resumes after a host crash: crash loops are worse than a click |
+   | `stopped`: `idle` | none | `interrupted`, resumable | parked by the idle-orphan rule, which is not loss (#4 §7.5); reachable only after a core absence longer than `lifecycle.orphanIdleHours` |
+   | `stopped`: `open-elsewhere` (Codex) | read-only | `needs-human`: "open in another app" | #4 does not retry the writer lock |
+   | `stopped`: anything else | none | if the orchestrator did not stop it: `cancelled`, and the task goes to `needs-human` | a person closed or released it, or quit with ⌥⌘Q |
+   | `ended` | none | `finishing` | the agent exited on its own (rare for Claude, which stays idle) |
+   | `failed` | none | `failed`, category from the exit, then escalation (§15) | the agent errored |
+   | none, attempt `launching` | — | `interrupted`: "nothing ran" | Claude's id was pre-assigned, so no record means no host (a host that did start is adopted and recorded in step 4); a Codex thread with no record has no turns |
+   | none, attempt past `launching` | — | `interrupted`, logged as unexpected | cannot happen once #72 keeps live records |
+
+   A mission's `autoRecover` (off by default) allows one automatic Resume per attempt, always
+   through `RunnerService.resume` (so the orphan sweep runs first) and never for `host lost`. If
+   the record found has lost its `origin` (re-created at adoption, #72), the task runner writes it
+   back, so A6 keeps protecting it.
 3. Verification stages that were `running` → re-run (their processes were children of the old
    core).
 4. Merges in progress → abort (`git merge --abort`) and redo from the recorded pre-merge head.
 5. Worktrees: check each assignment's path and branch still exist (`git worktree list
    --porcelain`). Missing → `missing`; the task goes to `needs-human` with "recreate from branch"
    if the branch survives.
-6. Rebuild the reconstructible state (§7.3), then let the scheduler take one step.
+6. Leases (P9): attempt-held leases that were never bound carry the old core's pid and are stale
+   to #68's reaper; bound ones follow their session's registry state. Tasks still `queued`
+   acquire again.
+7. Rebuild the reconstructible state (§7.3), then let the scheduler take one step.
 
 ### 23.4 Versioning
 
@@ -1819,15 +1943,36 @@ is never more permissive than the app's default mode.
   meant to remove. AW adds allow rules for the verification commands named in the repo policy
   (§13.6) and for `git` subcommands that stay inside the worktree.
 - **Codex attempts: `workspace-write` sandbox** (writes confined to the worktree, no network),
-  approval policy `on-request`, so only a step outside the sandbox asks. Exact parameter names
-  are verified at the #25 gate against the app-server protocol as #4 ships it.
+  approval policy `on-request`, so only a step outside the sandbox asks. **Parameter names
+  verified at the #25 gate** against the pinned app-server (0.155.0-alpha.16.3, from its
+  generated protocol types): `thread/start` and `thread/resume` take
+  `sandbox: 'read-only' | 'workspace-write' | 'danger-full-access'` and
+  `approvalPolicy: 'untrusted' | 'on-request' | {granular: …} | 'never'` (this build has no
+  `on-failure`); `turn/start` can override both per turn, as `approvalPolicy` and
+  `sandboxPolicy: {type: 'workspaceWrite', writableRoots, networkAccess, excludeTmpdirEnvVar,
+  excludeSlashTmp}`. As built, AW sends none of them, so Codex threads run on the user's
+  `~/.codex/config.toml` defaults; #71 sends them on `thread/start` and on every `thread/resume`,
+  reattach included. Open, and verified in #71: a linked worktree's git directory lives in the
+  primary checkout (`.git/worktrees/<name>`), outside the writable root, so an agent's
+  `git commit` may be refused or escalate to a prompt. If it does, the core commits the
+  attempt's changes itself when the attempt finishes, which §13.1 rule 2 already allows.
+- **How the rules reach the agent** (gate finding, ask A7). Claude: SDK launch options
+  (`allowedTools` for the allow rules, `disallowedTools` for the hard denies, in Claude Code's
+  permission-rule syntax; a deny rule wins over the mode and over any allow, and AW never uses
+  `bypassPermissions`), passed as data through `LaunchRequest` and `HostBoot`. #71's tests
+  confirm the deny holds under `auto`. Neither path
+  exists yet, and a §7.4 version migration or a Resume would today restart the agent with only
+  its model, effort and mode, silently dropping every rule. #71 carries the policy end to end and
+  records it in the registry; #33 is blocked by it. The host still decides nothing.
 - **One approval queue per mission.** Whatever still needs a human appears once in AW, grouped
   by mission, with "allow for this mission": the answer applies to the same request from every
   attempt in that mission and expires with it. N attempts asking the same thing is one prompt.
 - **Hard denies, enforced by AW in every mode** (a pre-tool-use check on Claude sessions, the
   sandbox plus approval handling on Codex): `git push`; writes outside the attempt's worktree;
   any change to the primary checkout; `npm run app:install` except through the exclusive lease
-  (§13.5). A denial is a `policy` outcome (§15.2), not a prompt.
+  (§13.5). A denial is a `policy` outcome (§15.2), not a prompt. *Gate proposal (G2, for James
+  to confirm):* deny `app:install` to attempts outright. #68's lease only serialises installs and
+  ships with the `aw-app` resource off, and §13.3 already says finishing never installs.
 - **Never `bypassPermissions`**, and escalation never changes permission mode (above).
 
 ---
@@ -2074,7 +2219,9 @@ Issue numbers are in §30.
   machines; `MissionStore`; `LaunchDefaults` replacing ad hoc `runner.*` / `codexRunner.*` reads in
   `createApp`; `createOrchestration(deps)` skeleton wired but inert.
 - **Implementation**: #25 gate (review against #4's final `SessionExecutor`, registry and host
-  protocol; amend this document and the issues); #26 domain model and store.
+  protocol; amend this document and the issues; **done 2026-09-25, §35**); #26 domain model and
+  store. The gate added #71 (launch policy through hosts, registry, resume and migration) and #72
+  (the registry must keep live records), both needed before #33, not before #26.
 - **Tests**: state machine transition tables; store round trip, atomicity and migration fixtures;
   `LaunchDefaults` equals the old behaviour.
 - **Observability**: none user-visible.
@@ -2091,7 +2238,10 @@ Issue numbers are in §30.
 - **Objective**: know exactly what every AW-hosted session does: models, effort, tokens, cost
   estimate, time, tool calls, permission waits.
 - **Architectural changes**: a telemetry sink subscribed to `SessionHandle` turn completions
-  (§1.3 A2); the delta computation (§16.3); Codex token usage parity; JSONL logs with rotation.
+  (§1.3 A2); the delta computation (§16.3); Codex token usage parity (`CodexRunner` folds
+  `thread/tokenUsage/updated` into its turn-end payload, which today carries none); turn records
+  idempotent by result id, with gap-spanning records after a restart (§16.3); applied effort from
+  hook payloads into `SessionRegistry.noteApplied` (A4); JSONL logs with rotation.
 - **Implementation**: #27 recording; #28 display (a Usage column or second-line item in the
   table; a per-session summary in the conversation header; the session's cost basis always
   shown).
@@ -2116,7 +2266,8 @@ Issue numbers are in §30.
 - **Architectural changes**: `CapabilityCatalog` (grows from `ModelCatalogService`); tier map in
   settings; effort maps; `ModelSource` health and capacity (from `UsageService` and errors);
   `AgentHarness` adapters for Claude Code and Codex over `SessionExecutor`; `SimulatedHarness` and
-  `SimulatedCompletion`; `StructuredCompletion` via a harness in no-tools mode;
+  `SimulatedCompletion`; `StructuredCompletion` via a one-shot, in-process SDK query in no-tools
+  mode, not a session (§6.1, gate); Codex per-turn effort in the Codex adapter (§6.4);
   `AgentSession.provider` narrowed and the `anthropic/openai` vs `claude/codex` vocabularies named
   (`source` vs `harness`).
 - **Implementation**: #29 catalog + tier map in Preferences; #30 harness seam + simulation.
@@ -2140,6 +2291,9 @@ Issue numbers are in §30.
 - **Architectural changes**: `WorktreeManager`; per-repo policy (§13.6); `TaskRunner` with the
   write-ahead discipline and recovery (§23); `origin` tags on sessions; single-task missions;
   task and route chips; the task strip in the conversation pane.
+- **Prerequisites from #4** (gate): session hosts on by default (#15's flip), so an attempt
+  survives `app:install`; the launch policy carried end to end (#71), so an attempt's rules
+  survive Resume and migration; live records kept by the registry (#72).
 - **Implementation**: #31 worktrees; #32 repo policy; #33 task runner + recovery; #34 UI.
 - **Tests**: temp-repo integration for worktrees; recovery fixtures (live, interrupted, missing
   worktree); UI formatters; manual: a task survives `app:install` mid-attempt.
@@ -2255,7 +2409,8 @@ Issue numbers are in §30.
 - **Objective**: independent tasks run at the same time, safely, and their results meet on a
   mission branch that is verified as a whole.
 - **Architectural changes**: the scheduler step function and loop; the Integrator and mission
-  branch; conflict-resolution attempts; overlap serialisation; leases (#23); admission control on
+  branch; conflict-resolution attempts; overlap serialisation; leases (#68's `LeaseService`,
+  designed by #23; Codex attempts also need #70); admission control on
   usage windows and caps; the mission simulation suite.
 - **Implementation**: #45 scheduler; #46 integration; #47 contention and leases; #48
   simulation suite.
@@ -2351,7 +2506,7 @@ in the Project with Status Inbox, labelled `orchestration` plus the type shown.
 | P2 | #30 | Add a harness seam over the session executor, with a simulated harness for tests | tech-debt | P2 · M · Providers/Runner | #26 |
 | P3 | #31 | Create, set up and clean up task worktrees and branches | feature | P2 · M · Automation | #26 |
 | P3 | #32 | Read a per-repository orchestration policy | feature | P2 · S · Automation | #26 |
-| P3 | #33 | Run a task in its own worktree with a chosen route, surviving restarts | feature | P2 · L · Automation | #27, #29, #30, #31, #32 |
+| P3 | #33 | Run a task in its own worktree with a chosen route, surviving restarts | feature | P2 · L · Automation | #27, #29, #30, #31, #32; since the gate also #15, #71, #72 |
 | P3 | #34 | Show tasks and their attempts in the table and conversation panes | feature | P2 · M · Automation | #33 |
 | P4 | #35 | Verify task results with repo-defined checks before calling them done | feature | P2 · M · Automation | #33 |
 | P4 | #36 | Add an advisory review-agent verifier for acceptance criteria | feature | P3 · S · Automation | #35 |
@@ -2365,7 +2520,7 @@ in the Project with Status Inbox, labelled `orchestration` plus the type shown.
 | P8 | #44 | Decompose a mission into tasks with a read-only planner | feature | P3 · L · Automation | #43, #37 |
 | P9 | #45 | Schedule mission tasks by dependency, capacity and usage budget | feature | P3 · L · Automation | #43, #41 |
 | P9 | #46 | Integrate verified task branches into a verified mission branch | feature | P3 · L · Automation | #45, #35 |
-| P9 | #47 | Keep overlapping tasks and exclusive resources from running at once | feature | P3 · M · Automation | #45, #23 |
+| P9 | #47 | Keep overlapping tasks and exclusive resources from running at once | feature | P3 · M · Automation | #45, #68 (was #23, which decided the design #68 builds) |
 | P9 | #48 | Simulate whole missions under injected failures | testing | P3 · M · Automation | #45, #30 |
 | P10 | #49 | Show routing analytics and a calibration report | feature, telemetry | P3 · M · Automation | #42, #46 |
 | Future | #50 | Spike: how local models could run behind Codex and Claude Code | spike, local-model, future | P3 · S · Providers/Runner | #29 + gate |
@@ -2377,6 +2532,16 @@ in the Project with Status Inbox, labelled `orchestration` plus the type shown.
 
 Forward-compatibility asks A1–A5 (§1.3) were posted as comments on #12, #13 and #23.
 
+Added by the #25 gate (2026-09-25), outside the epic's sub-issues because they change #4's
+session layer:
+
+| Phase | Issue | Title | Type | Pri · Effort · Area | Blocks |
+|---|---|---|---|---|---|
+| P0 | #71 | Carry each session's launch policy through hosts, the registry, resume and migration (asks A7, A9) | tech-debt, orchestration | P2 · M · Providers/Runner | #33 |
+| — | #72 | Session registry drops live sessions at its 100-record cap, and a re-adopted host loses its launch options (ask A10) | bug | P2 · S · Providers/Runner | #33 |
+
+Ask A8 (background work on the handle) was posted on #60, which needs the same detector.
+
 ### 30.2 Dependency order
 
 ```text
@@ -2386,6 +2551,7 @@ Forward-compatibility asks A1–A5 (§1.3) were posted as comments on #12, #13 a
                                    ├─► #31 worktrees ───────────┤
                                    └─► #32 repo policy ─────────┤
                         #27 ────────────────────────────────────┴─► #33 run a task ─► #34 task UI
+            #15 flip + #71 launch policy + #72 registry cap ───────────┘   (added by the gate)
 #33 ─► #35 verification ─► #36 review verifier
 #33 + #30 + #32 ─► #37 assessment ─┬─► #38 router (+#29, #34) ─► #40 pins/caps ─┐
                                    └─► #39 corpus ─────────────┐                │
@@ -2393,7 +2559,7 @@ Forward-compatibility asks A1–A5 (§1.3) were posted as comments on #12, #13 a
 #41 + #39 ─► #42 automatic routing ◄───────────────────────────┘
 #34 + #35 ─► #43 missions ─► #44 planner (+#37)
 #43 + #41 ─► #45 scheduler ─┬─► #46 integration (+#35)
-                            ├─► #47 contention (+#23)
+                            ├─► #47 contention (+#68)
                             └─► #48 simulation suite (+#30)
 #42 + #46 ─► #49 analytics
 Future: #29 ─► #50 local spike ─► #51 local provider · #49 ─► #52 adaptive
@@ -2413,6 +2579,8 @@ class if names change.
 |---|---|---|---|
 | #25 gate | Expert / xhigh | architecture review against #4 as built; decides amendments | — |
 | #26 foundations | Expert / high | types and state machines outlive every phase | invariants will not settle → xhigh |
+| #71 launch policy (gate) | Expert / high | host boot path and the protocol file; a dropped deny rule is a security regression | — |
+| #72 registry cap (gate) | Standard / high | a small fix in pure classification code, with tests | — |
 | #27 telemetry | Standard / high | well-specified; the cumulative-delta logic needs care | delta tests disagree with the CLI → Expert / high |
 | #28 usage UI | Standard / medium | UI over settled data; narrow-pane rules | — |
 | #29 catalog | Expert / high | the capability abstraction is the keystone for local models | — |
@@ -2509,4 +2677,104 @@ named carry the detail.
 6. **Mission size caps**: default 8 tasks, hard cap 12, three concurrent attempts.
 7. **Strictly after #4.** The pure pieces could start earlier, but do not; #25's gate runs once
    #4 lands.
+
+**Re-checked against #4 as built at the #25 gate (2026-09-25):**
+
+1. Policy on AW's side: **stands.** Nothing in #4 writes into repositories either. `repoRoot` and
+   the worktree come from #4's `checkoutFor` (#22); keying by the git common directory matches
+   #23's lease qualifier for `keyBy: 'repo'`.
+2. Gated local merge: **stands.** #4 does not touch it.
+3. Tier defaults with an escalation-only `frontier`: **stands.** #4 left model discovery as it
+   was (`supportedModels()`, `model/list`, `ModelCatalogService`); #29 re-reads the lists before
+   shipping defaults.
+4. Permission posture: **stands, with its mechanism settled.** Codex's `workspace-write` and
+   `on-request` are the pinned app-server's real names (§24.1). The rules reach agents only once
+   #71 lands. `auto` is already the app's default mode (`runner.defaultPermissionMode`), so "the
+   parent's mode is a ceiling" holds by default. G2 below refines one hard deny.
+5. Telemetry on by default: **stands.**
+6. Size caps: **stands.**
+7. Strictly after #4: **carried forward, refined (G3, for James to confirm).** #4 is open only for
+   #15's soak, CP3 and default flip, the docs (#19) and the Stage 7 decision (#20); none of them
+   changes an interface this plan uses. The gate ran now at James's request. Proposed: #26–#32
+   (types, store, telemetry, catalog, seam, worktrees, repo policy) may start, since they only use
+   merged code; #33, the first issue that runs an attempt, waits for #15's flip (G1).
+
+New decisions raised by the gate, carried forward with a recommendation (§35.4): **G1** attempts
+require session hosts, so #33 waits for #15's flip; **G2** attempts never run `app:install`;
+**G3** the refinement of decision 7 above.
+
+---
+
+## 35. Post-#4 gate (2026-09-25, #25)
+
+Reviewed against `main` at `450a8ac`. #4 is built there except for #15's soak, CP3 and default
+flip, the docs (#19) and the Stage 7 decision (#20). None of those changes an interface this plan
+uses.
+
+**Verdict: the plan stands.** Orchestration stays a core-side layer over `SessionExecutor`, and
+hosts hold no policy (#4 §6). The one thing that reaches a host is launch-time data, which it
+applies without deciding anything (§5.2). The amendments change how orchestration uses #4, not
+what orchestration is. **#26 may start.** #33 gains three prerequisites: #15's flip, #71 and #72.
+
+### 35.1 What was read
+
+- `src/core/session/` (`sessionHandle`, `sessionExecutors`, `sessionView`, `sessionRegistry`,
+  `recovery`, `hostClient`, `remoteClaudeHandle`, `localClaudeHandle`, `orphanSweep`),
+  `src/claude/runner/` (`runnerService`, `runnerView`, `claudeSdkSession`), `src/codex/runner.ts`,
+  `src/shared/sessionProtocol.ts` (host protocol v1, manifest v1, `HostBoot`), and the startup
+  path in `src/app/createApp.ts`.
+- #18's `HostServices.notify`, and #23's `spikes/f2-resource-leases.md`.
+- The Agent SDK 0.3.268 type definitions: the `result` message, the hook input's `effort` and
+  `Options`.
+- The pinned Codex app-server (0.155.0-alpha.16.3), through the protocol types it generates
+  (`codex app-server generate-ts`). Only types were generated; nothing was sent to the running
+  server.
+- §23.3 was walked step by step against the startup and recovery code (the Tests / validation
+  step of #25), and has been rewritten from that walk.
+
+### 35.2 Forward-compatibility asks
+
+The status of each ask is in §1.3. In short: **A1, A3 and A6 landed**, A3 with a hole (#72).
+**A2** landed for Claude; for Codex the usage is missing (added to #27). **A4** landed as a slot
+with no writer (added to #27). **A5** was superseded by #23's design and is built by #68. The
+gate added **A7** and **A9** (#71), **A8** (asked on #60, and in #33's scope if still needed) and
+**A10** (#72).
+
+### 35.3 Changes, and why
+
+| # | Finding | Changed | Why |
+|---|---|---|---|
+| 1 | The executor call is `SessionExecutors.launch(LaunchRequest)`. Registry states are `live`, `stopped`, `ended`, `failed` and `interrupted`, each with an `endedReason`; handle lifecycles are `starting`, `idle`, `running`, `ending`, `ended`, `error`, `connecting` and `unreachable`. There is no `launching` or `lost` state. | §1.1, §5.2, §7.2, §23.3 | The plan named states #4 did not build. |
+| 2 | A session's id can change during its life, and the registry follows with a new record carrying the same `origin`. | §7.2 (`sessionIds[]`), §23.3 | An attempt holding one id would lose its session. |
+| 3 | A finished turn is not a finished attempt. A Claude session stays `live` and `idle`, and background work can start another turn. | §7.5, §23.3, ask A8 | The attempt would move to verification too early, or never. |
+| 4 | Recovery has to run after host adoption and after the async Codex rejoin. It must treat `connecting` as live and `unreachable` or foreign hosts as held. It must also read `stopped` by its reason. | §23.3 (rewritten) | Codex records stay `interrupted` until their resume succeeds. The original §23.3 had no row for these states. |
+| 5 | After a restart, adoption delivers the last turn's `result` again and skips turns that finished while the app was down. Codex sends nothing for those turns. | §16.3, #27 | Without the fix, telemetry double-counts one turn and silently merges others. |
+| 6 | Codex's `turn/completed` carries no usage, and `CodexRunner` ignores `thread/tokenUsage/updated`. `account/usage/read {threadId}` may give a per-thread estimate. | §16.3, §16.4, #27 | A2 is only half met for Codex. |
+| 7 | Applied effort has a slot and no writer. SDK 0.3.268 hooks carry `effort.level`. | §16.3, #27 | A4. |
+| 8 | Nothing beyond model, effort and mode can reach an agent. A version migration or a Resume carries only those, so a deny rule would silently disappear. | §24.1, §5.2, #71 | Hard denies have to survive migration and resume, or they are not hard. |
+| 9 | Codex's parameter names are confirmed: `sandbox: 'workspace-write'` and `approvalPolicy: 'on-request'` on `thread/start` and `thread/resume`, overridable per turn. This build has no `on-failure`. AW sends none of them today. It is still open whether an agent can commit in a linked worktree under `workspace-write`. | §24.1, #71 | #25's own ask (§24.1 left it to the gate). |
+| 10 | Structured completions do not go through hosted sessions. | §6.1, §29 P2, #30 | Each call would cost a host process, a `claude` and a registry record, all to survive a restart that a one-shot call can simply redo. |
+| 11 | Codex takes effort per turn (`turn/start.effort`), but `CodexRunner.setEffort` answers `unsupported`. | §6.4, #30 | The Codex adapter can then honestly report `per-turn`. |
+| 12 | New Claude sessions use hosts only with `experimental.sessionHosts`, which is off by default. | §1.1, §29 P3, #33 ← #15 | An in-process attempt dies on `app:install`, which is the thing #4 exists to prevent (G1). |
+| 13 | The registry's startup cap drops live records. Adoption then loses launch options and `origin`, and a dropped Codex thread is never rejoined. | §1.3, §23.3, #72, #33 ← #72 | Recovery depends on the registry. The bug also affects ordinary sessions. |
+| 14 | Leases: #23 designed the scheduler-held form (`acquire`, `bind`, `bindBy`); #68 builds it and #70 covers Codex. | §1.3, §29 P9, #47 ← #68 | #47 no longer builds a service of its own. |
+| 15 | The pane's composer and `aw send` call the handle directly, not `SessionActions`. | §16.3, ask A9 (#71) | `userIntervened` cannot be read from `SessionActions` call sites. |
+| 16 | `lost` never auto-resumes after a host crash, even with `autoRecover`. | §15.2, §23.3 | This matches #4's rule against crash loops. |
+| 17 | An as-built subsection was added. | §2.5 | §2.1–§2.4 remain as the dated evidence. |
+
+No change was needed where #4 delivered what the plan assumed: `origin` and auto-resume (A3, A6),
+the handle's `turnEnd` for Claude, the Codex host and its re-sent asks, #18's notifications, #21's
+refusal to take `send` or `stop` from an agent's environment, and #22's checkout data.
+
+### 35.4 Decisions carried forward (for James)
+
+- **G1: attempts require session hosts.** #33 is blocked by #15 until the default flips. The
+  alternative is for #33 to launch attempts hosted whatever the setting says. That is possible
+  (hosts are adopted either way), but it would put orchestration ahead of #15's soak.
+  Recommended: wait for the flip.
+- **G2: attempts never run `npm run app:install`.** This would be a hard deny, replacing "except
+  through the exclusive lease" in §24.1. Recommended, because finishing already never installs
+  (§13.3).
+- **G3: decision 7, refined.** #26–#32 start now; #33 waits for G1. Recommended: they use only
+  merged code, and #4's open items do not touch them.
 
