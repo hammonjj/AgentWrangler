@@ -27,7 +27,7 @@ describe('CodexRunner', () => {
   it('starts a thread with the selected model and provider-specific effort', async () => {
     const server = new FakeServer();
     const service = new CodexRunnerService(server as any);
-    await service.start('/Users/test/proj', 'gpt-test', 'high');
+    await service.start('/Users/test/proj', 'gpt-test', { effort: 'high' });
     expect(server.calls[0]).toEqual({
       method: 'thread/start',
       params: { cwd: '/Users/test/proj', model: 'gpt-test', config: { model_reasoning_effort: 'high' } },

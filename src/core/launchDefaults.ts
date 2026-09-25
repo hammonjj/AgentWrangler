@@ -9,6 +9,7 @@
  * a restart, exactly as the ad hoc reads did.
  */
 import type { PermissionModeName } from '../shared/conversation';
+import type { LaunchPolicy } from '../shared/launchPolicy';
 import type { LaunchRequest, SessionProvider } from './session/sessionHandle';
 import type { LaunchOptionsRecord } from './session/sessionRegistry';
 
@@ -20,6 +21,8 @@ export interface LaunchOptions {
   model?: string;
   effort?: string;
   permissionMode?: PermissionModeName;
+  /** Never a default: only a resume carries one, from the session's record. */
+  policy?: LaunchPolicy;
 }
 
 /** The app's default permission mode for sessions it starts (`runner.defaultPermissionMode`). */
@@ -61,6 +64,8 @@ export class LaunchDefaults {
       effort: previous?.effort ?? now.effort,
     };
     if (provider === 'claude') out.permissionMode = (previous?.permissionMode as PermissionModeName | undefined) ?? now.permissionMode;
+    // The rules it was launched under come back with it (#71); there is no default to fall back to.
+    if (previous?.policy) out.policy = previous.policy;
     return out;
   }
 

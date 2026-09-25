@@ -18,6 +18,7 @@ import { query as sdkQuery, type Options, type SpawnedProcess, type SpawnOptions
 import { ClaudeSdkSession, type QueryFn } from '../claude/runner/claudeSdkSession';
 import { startTimeOf } from '../core/procStart';
 import { writeJsonAtomic } from '../core/session/manifestFile';
+import { parseLaunchPolicy } from '../shared/launchPolicy';
 import type { HostBoot, HostEvent, HostManifest } from '../shared/sessionProtocol';
 import { CAPABILITY_CONFIGURE_IDLE, CONTROL_OPS, HOST_PROTOCOL_VERSION, backgroundTaskCount } from '../shared/sessionProtocol';
 import { agentEnv } from './env';
@@ -66,6 +67,8 @@ async function main(): Promise<void> {
   const boot = await readBootLine();
   const say = (m: string) => log(boot.hostId, m);
   const fake = process.env.AW_SESSION_HOST_FAKE === '1';
+  // Applied exactly as the core sent it; parsed only so a malformed field is dropped, never widened.
+  const policy = parseLaunchPolicy(boot.launch.policy);
   say(`start build=${boot.hostBuild} cwd=${boot.launch.cwd}${boot.launch.resume ? ` resume=${boot.launch.resume}` : ''}${fake ? ' (fake agent)' : ''}`);
 
   let agent: ChildProcess | undefined;
@@ -92,6 +95,7 @@ async function main(): Promise<void> {
       model: boot.launch.model,
       effort: boot.launch.effort,
       binary: boot.launch.binary,
+      ...(policy ? { policy } : {}),
     },
   };
   const writeManifest = () => {
@@ -156,6 +160,7 @@ async function main(): Promise<void> {
       permissionMode: boot.launch.permissionMode,
       model: boot.launch.model,
       effort: boot.launch.effort,
+      policy: policy?.claude,
     },
     { query: (fake ? fakeQuery : sdkQuery) as QueryFn, binary: boot.launch.binary, log: say, sdkOptions },
   );

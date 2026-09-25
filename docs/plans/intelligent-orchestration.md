@@ -103,9 +103,9 @@ order. **Status as built** is from the #25 gate (2026-09-25, §35); A7–A10 wer
 | A4. Registry keeps requested *and* applied model/effort | #13 | `launch.effort` is what AW asked for. The applied effort can differ (the CLI silently downgrades for models without that level); Claude reports it in tool-context hook payloads (`effort.level`) and, on some hosts, in `system/init`. Keep a slot for `applied`. | **Slot landed, no writer** (`noteApplied` has no caller; the hook parser does not read `effort`). Added to #27. |
 | A5. Leases can be held by the scheduler, not only requested by an agent | #23 | Orchestration acquires a lease *before* starting an attempt (`holder: attemptId`), then hands it to the session. The spike should keep that shape possible. | **Superseded** by #23's design: holder `{kind: 'attempt', attemptId, sessionId?}`, `acquire` never waits, `bind` once the session exists, `bindBy` deadline 10 min (`spikes/f2-resource-leases.md`). Built by #68 (open); #47 now depends on #68. |
 | A6. Newest-session auto-resume skips orchestrated sessions | #13 | `runner.autoResumeLastOnStartup` resumes the newest interrupted session. For a session with `origin.kind = orchestration` the orchestrator owns recovery (§23.3), so #4's auto-resume should leave it alone. | **Landed** (`autoResumeCandidate`). |
-| A7. Launch policy reaches the agent and survives resume and migration | new | Tool allow/deny rules, limits (`maxTurns`, `maxBudgetUsd`), `fallbackModel`, `outputFormat`; Codex `sandbox`, `approvalPolicy`, `developerInstructions`. Carried through `LaunchRequest` → `HostBoot` → SDK options / `thread/start`, recorded in the registry, re-applied on Resume, §7.4 migration and every Codex `thread/resume`. | **Not landed**: none of it can reach an agent today, and what can (model, effort, mode) is all a migration carries. #71, blocks #33. |
+| A7. Launch policy reaches the agent and survives resume and migration | new | Tool allow/deny rules, limits (`maxTurns`, `maxBudgetUsd`), `fallbackModel`, `outputFormat`; Codex `sandbox`, `approvalPolicy`, `developerInstructions`. Carried through `LaunchRequest` → `HostBoot` → SDK options / `thread/start`, recorded in the registry, re-applied on Resume, §7.4 migration and every Codex `thread/resume`. | **Landed** (#71): `LaunchPolicy`, recorded in the registry and the host manifest, re-applied on Resume, migration, `/clear` and every Codex `thread/resume`/fork (§24.1). `CodexRunnerService.launch` now passes mode, effort and origin on start and resume. |
 | A8. The handle says whether background work is outstanding | new | "Turn over" is not "work done" while a background shell or subagent runs (§7.5). | **Not on the handle**: `backgroundTaskCount` reads the host snapshot, and only `RunnerView` sees it. The same detector #60 and #67 need; asked on #60. In #33's scope if #60 has not exposed it. |
-| A9. `send` takes a client message id | new | So an attempt can tell the turns its own sends caused from the user's (`userIntervened`, §16.3). Claude echoes the SDK message `uuid` as `result.user_message_uuid(s)`; Codex takes `turn/start.clientUserMessageId`. | **Not landed**: `RunnerView` mints the uuid itself and does not return it. #71. |
+| A9. `send` takes a client message id | new | So an attempt can tell the turns its own sends caused from the user's (`userIntervened`, §16.3). Claude echoes the SDK message `uuid` as `result.user_message_uuid(s)`; Codex takes `turn/start.clientUserMessageId`. | **Landed** (#71): `send(text, images, {clientMessageId})`. Claude uses it as the message `uuid` (echoed on `result.user_message_uuid(s)`); Codex sends it as `clientUserMessageId`. Minted by the handle when absent. |
 | A10. The registry never drops a live session | new | Recovery looks attempts up in the registry. | **Not landed**: the startup cap (100, by `lastShownAt`) drops live records, and adoption then loses launch options and `origin`; a dropped Codex thread is never rejoined. #72, blocks #33. |
 
 ---
@@ -2019,20 +2019,35 @@ is never more permissive than the app's default mode.
   `approvalPolicy: 'untrusted' | 'on-request' | {granular: …} | 'never'` (this build has no
   `on-failure`); `turn/start` can override both per turn, as `approvalPolicy` and
   `sandboxPolicy: {type: 'workspaceWrite', writableRoots, networkAccess, excludeTmpdirEnvVar,
-  excludeSlashTmp}`. As built, AW sends none of them, so Codex threads run on the user's
-  `~/.codex/config.toml` defaults; #71 sends them on `thread/start` and on every `thread/resume`,
-  reattach included. Open, and verified in #71: a linked worktree's git directory lives in the
-  primary checkout (`.git/worktrees/<name>`), outside the writable root, so an agent's
-  `git commit` may be refused or escalate to a prompt. If it does, the core commits the
-  attempt's changes itself when the attempt finishes, which §13.1 rule 2 already allows.
+  excludeSlashTmp}`. Since #71 AW sends `sandbox`, `approvalPolicy` and `developerInstructions`
+  from the launch policy on `thread/start`, on every `thread/resume` (Take over, reconnect,
+  startup reattach) and on `thread/fork`; with no policy it sends none, and the thread runs on
+  the user's `~/.codex/config.toml` defaults as before.
+  **Git under `workspace-write` (verified in #71, 2026-09-25, `codex sandbox` on
+  0.155.0-alpha.16.3, repos outside `/tmp`):** an agent can edit files in the worktree but
+  **cannot commit, or even `git add`**. The refusal is not only because a linked worktree's git
+  directory (`<primary>/.git/worktrees/<name>`) is outside the writable root: Codex keeps `.git`
+  read-only inside writable roots too, so a plain repo is refused the same way
+  (`index.lock: Operation not permitted`). Naming the primary's `.git` as an extra writable root
+  does make the commit work, and is **not** to be used: it opens the whole of the primary's
+  `.git` (its `config`, `hooks`, and `main`'s refs) to the attempt, which is an escape from the
+  sandbox. So the core commits a Codex attempt's changes itself when it finishes (§13.1 rule 2),
+  and #33 should tell Codex attempts (`developerInstructions`) not to commit. Under `on-request`
+  an agent that tries anyway asks to leave the sandbox; that ask should be answered no.
 - **How the rules reach the agent** (gate finding, ask A7). Claude: SDK launch options
   (`allowedTools` for the allow rules, `disallowedTools` for the hard denies, in Claude Code's
   permission-rule syntax; a deny rule wins over the mode and over any allow, and AW never uses
-  `bypassPermissions`), passed as data through `LaunchRequest` and `HostBoot`. #71's tests
-  confirm the deny holds under `auto`. Neither path
-  exists yet, and a §7.4 version migration or a Resume would today restart the agent with only
-  its model, effort and mode, silently dropping every rule. #71 carries the policy end to end and
-  records it in the registry; #33 is blocked by it. The host still decides nothing.
+  `bypassPermissions`), passed as data through `LaunchRequest` and `HostBoot`. **As built
+  (#71):** one `LaunchPolicy` (`src/shared/launchPolicy.ts`, a `claude` half and a `codex`
+  half) rides `LaunchRequest.policy` → `HostBoot.launch.policy` → SDK options, is recorded in
+  the registry's launch record and in the host manifest's `launch` (so a session adopted
+  without a record still has it), and is applied again on Resume, on a §7.4 migration, and when
+  a `/clear` gives an adopted session a new id. It cannot carry a permission mode,
+  `bypassPermissions`, `allowDangerouslySkipPermissions` or `danger-full-access`;
+  `parseLaunchPolicy` drops them wherever a policy is read back. **Checked live** (opt-in,
+  `AW_LIVE_CLAUDE=1`, `sessionHost.live.test.ts`): a `Bash(touch:*)` deny held under `auto`
+  both at first start and after Resume, as a `permission_denials` entry with no prompt. The host
+  still decides nothing.
 - **One approval queue per mission.** Whatever still needs a human appears once in AW, grouped
   by mission, with "allow for this mission": the answer applies to the same request from every
   attempt in that mission and expires with it. N attempts asking the same thing is one prompt.

@@ -24,7 +24,11 @@
  *   `bytes` each to its stdout, honouring backpressure, then `flood done`. The
  *   host must drain the pipe at full speed however slow its clients are, so
  *   the flood finishes whether or not anyone is reading;
- * - `big:<bytes>`: a tool result of `bytes` characters, then `big done`.
+ * - `big:<bytes>`: a tool result of `bytes` characters, then `big done`;
+ * - `policy?`: replies `policy: <json>`, the launch-policy SDK options this
+ *   start was given (the launch-policy tests, #71).
+ *
+ * Every `result` echoes the message's `uuid` as `user_message_uuid(s)`, as the CLI does.
  *
  * A first message that starts with a simulation script (`<aw-sim>…</aw-sim>`,
  * the simulated harness's, #30) turns all of that off: every turn of the
@@ -71,6 +75,12 @@ function handle(c) {
   if (c.cmd === 'flood') void flood(c.count, c.bytes);
 }
 `;
+
+/** The launch-policy options the agent was started with (`policy?`), and whether anything unsafe was set. */
+function policyOptionsOf(options: Options): Record<string, unknown> {
+  const keys = ['allowedTools', 'disallowedTools', 'maxTurns', 'maxBudgetUsd', 'fallbackModel', 'outputFormat', 'permissionMode', 'allowDangerouslySkipPermissions'] as const;
+  return Object.fromEntries(keys.filter((k) => options[k] !== undefined).map((k) => [k, options[k]]));
+}
 
 /** After `close()`, how long before the fake SIGKILLs a child that ignored SIGTERM: the SDK's own escalation. */
 const CLOSE_KILL_MS = 5000;
@@ -257,6 +267,8 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<SDKUserMe
           message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'x'.repeat(Number(big[1])) }] },
         });
         reply = 'big done';
+      } else if (text.startsWith('policy?')) {
+        reply = `policy: ${JSON.stringify(policyOptionsOf(options))}`;
       }
       onInterrupt = undefined;
       if (text.includes('ask')) {
@@ -280,7 +292,17 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<SDKUserMe
         parent_tool_use_id: null,
         message: { id: `m${turn}`, role: 'assistant', model: 'fake', content: [{ type: 'text', text: reply }], stop_reason: 'end_turn' },
       });
-      push({ type: 'result', subtype: 'success', is_error: false, result: reply, session_id: sessionId, queued_turn_count: 0 });
+      // The CLI echoes the client's message uuid on the turn's result; so does this.
+      const uuid = (msg as { uuid?: unknown }).uuid;
+      push({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: reply,
+        session_id: sessionId,
+        queued_turn_count: 0,
+        ...(typeof uuid === 'string' ? { user_message_uuid: uuid, user_message_uuids: [uuid] } : {}),
+      });
     }
   })();
 

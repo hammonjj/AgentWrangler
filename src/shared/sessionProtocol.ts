@@ -19,6 +19,7 @@
  * Pure types plus one pure reducer. No Node, no DOM, no SDK import (this file is
  * bundled into the webviews too).
  */
+import type { LaunchPolicy } from './launchPolicy';
 
 /** The host's own minimal lifecycle. Richer states (`connecting`, …) are the core's. */
 export type HostState = 'starting' | 'idle' | 'running' | 'ending' | 'exited';
@@ -381,8 +382,13 @@ export interface HostManifest {
   hostStartTime?: string;
   agentPid?: number;
   agentStartTime?: string;
-  /** How the session was launched, so it can be described even if the core's registry lost it. */
-  launch?: { resume?: boolean; permissionMode?: string; model?: string; effort?: string; binary?: string };
+  /**
+   * How the session was launched, so it can be described even if the core's
+   * registry lost it. `policy` (#71, additive) is kept here too, so a session
+   * adopted without a registry record still moves to a new host with its
+   * rules; readers parse it with `parseLaunchPolicy`.
+   */
+  launch?: { resume?: boolean; permissionMode?: string; model?: string; effort?: string; binary?: string; policy?: LaunchPolicy };
   socketPath: string;
   protocol: number;
   hostBuild: string;
@@ -418,5 +424,10 @@ export interface HostBoot {
     effort?: string;
     /** Absolute path of the `claude` to spawn. */
     binary: string;
+    /**
+     * The session's launch policy (`launchPolicy.ts`). Only its `claude` half
+     * is used; the host applies it to the SDK options as given and decides nothing.
+     */
+    policy?: LaunchPolicy;
   };
 }

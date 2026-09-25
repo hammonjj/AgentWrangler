@@ -23,6 +23,7 @@ import type { ConversationHistory } from '../../claude/transcriptHistory';
 import type { BlockPatch, ComposerState, ConvBlock, ImageAttachment, PermissionModeName } from '../../shared/conversation';
 import type { AgentSession } from '../../shared/model';
 import type { SessionProvider } from '../../shared/harness';
+import type { LaunchPolicy } from '../../shared/launchPolicy';
 
 /** The harness a session runs in. Declared in `shared/harness.ts`, beside the model source it is not. */
 export type { SessionProvider };
@@ -104,8 +105,24 @@ export interface LaunchRequest {
    * Recorded in the registry, never interpreted by the executor.
    */
   origin?: unknown;
+  /**
+   * Tool rules, limits and sandbox settings (`shared/launchPolicy.ts`).
+   * Recorded with the session and applied again on every resume, migration
+   * and rejoin. Absent: launched exactly as without it.
+   */
+  policy?: LaunchPolicy;
   /** Codex only: blocks to show for the conversation so far when resuming. */
   initialBlocks?: ConvBlock[];
+}
+
+export interface SendOptions {
+  /**
+   * The caller's own id for this message, so it can tell the turns its sends
+   * caused from anyone else's. Claude: the SDK user-message `uuid`, echoed on
+   * `result.user_message_uuid(s)`. Codex: `turn/start.clientUserMessageId`.
+   * Minted by the handle when absent.
+   */
+  clientMessageId?: string;
 }
 
 export interface SessionHandle {
@@ -149,7 +166,7 @@ export interface SessionHandle {
   fullBlockText(id: string): string | undefined;
 
   // ---- commands ----
-  send(text: string, images?: ImageAttachment[]): Promise<CommandOutcome>;
+  send(text: string, images?: ImageAttachment[], opts?: SendOptions): Promise<CommandOutcome>;
   interrupt(): Promise<CommandOutcome>;
   setPermissionMode(mode: PermissionModeName): Promise<CommandOutcome>;
   setModel(model?: string): Promise<CommandOutcome>;

@@ -3,8 +3,9 @@
  * in-process one, fed by a `HostClient` over the host's socket instead of by
  * a `ClaudeSdkSession` in this process (playbook §5.1, Stage 3).
  */
-import { RunnerView, type ClaudeExecution } from '../../claude/runner/runnerView';
+import { RunnerView, type ClaudeExecution, type MigrateExecution } from '../../claude/runner/runnerView';
 import type { ConversationHistory } from '../../claude/transcriptHistory';
+import type { LaunchPolicy } from '../../shared/launchPolicy';
 import type { HostManifest } from '../../shared/sessionProtocol';
 import type { PermissionModeName } from '../../shared/conversation';
 import type { HostSupervisor } from './hostSupervisor';
@@ -35,6 +36,7 @@ export function spawnHostedClaude(request: Omit<LaunchRequest, 'provider'>, deps
     model: request.model,
     effort: request.effort,
     binary: deps.binary,
+    policy: request.policy,
   });
   return new RunnerView(
     {
@@ -45,6 +47,7 @@ export function spawnHostedClaude(request: Omit<LaunchRequest, 'provider'>, deps
       model: request.model,
       effort: request.effort,
       origin: request.origin,
+      policy: request.policy,
     },
     { exec: client, log: deps.log, loadHistory: deps.loadHistory, migrate: migrator(sessionId, request.cwd, deps) },
   );
@@ -53,11 +56,12 @@ export function spawnHostedClaude(request: Omit<LaunchRequest, 'provider'>, deps
 /**
  * Reattach to a host a previous run of the app left running. The transcript
  * is read first: it is the view's history, and the host's ring is replayed
- * without the messages it already holds.
+ * without the messages it already holds. The host is already running under
+ * its policy; `launch.policy` is what a later migration re-applies.
  */
 export function adoptHostedClaude(
   manifest: HostManifest,
-  launch: { permissionMode?: PermissionModeName; model?: string; effort?: string; origin?: unknown },
+  launch: { permissionMode?: PermissionModeName; model?: string; effort?: string; origin?: unknown; policy?: LaunchPolicy },
   deps: RemoteClaudeDeps,
 ): RunnerView {
   const history: Promise<ConversationHistory> =
@@ -81,11 +85,12 @@ export function adoptHostedClaude(
 /**
  * The new host a version migration moves a session to: swept first, then a
  * fresh host of this build resuming the same id, on the view's current model,
- * mode and effort (§7.4). The view names the id: a `/clear` inside the old
- * host gave it a new one, and that is the one to resume.
+ * mode and effort, under the policy it was launched with (§7.4). The view
+ * names the id: a `/clear` inside the old host gave it a new one, and that is
+ * the one to resume.
  */
-function migrator(initialId: string, cwd: string, deps: RemoteClaudeDeps) {
-  return async (launch: { sessionId?: string; permissionMode?: PermissionModeName; model?: string; effort?: string }): Promise<ClaudeExecution> => {
+function migrator(initialId: string, cwd: string, deps: RemoteClaudeDeps): MigrateExecution {
+  return async (launch): Promise<ClaudeExecution> => {
     const sessionId = launch.sessionId ?? initialId;
     await deps.beforeResume?.(sessionId);
     const { client } = deps.supervisor.spawn({
@@ -96,6 +101,7 @@ function migrator(initialId: string, cwd: string, deps: RemoteClaudeDeps) {
       model: launch.model,
       effort: launch.effort,
       binary: deps.binary,
+      policy: launch.policy,
     });
     return client;
   };

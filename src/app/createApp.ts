@@ -96,6 +96,8 @@ import { auditFile, DISCORD_BOT_TOKEN_KEY, mirrorFile } from '../remote/paths';
 import { RemoteControlService } from '../remote/service';
 import type { RemoteTransport } from '../remote/transport';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
+import { parseLaunchPolicy } from '../shared/launchPolicy';
+import type { PermissionModeName } from '../shared/conversation';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
 import type { SessionActions } from '../ui/actions';
@@ -454,7 +456,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
   for (const manifest of hostScan.alive) {
     if (!manifest.sessionId) continue;
     const record = sessionRegistry.get(manifest.sessionId);
-    if (!record) sessionRegistry.live({ sessionId: manifest.sessionId, provider: 'claude', cwd: manifest.cwd });
+    if (!record) {
+      // The host's own copy of its policy, so a later Resume still has the rules (#71).
+      const policy = parseLaunchPolicy(manifest.launch?.policy);
+      sessionRegistry.live({ sessionId: manifest.sessionId, provider: 'claude', cwd: manifest.cwd, ...(policy ? { launch: { policy } } : {}) });
+    }
     runners.adopt(manifest, record);
   }
 
@@ -1238,10 +1244,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const history = session.transcriptPath
       ? await readRolloutBlocks(session.transcriptPath).catch(() => ({ blocks: [], truncated: false }))
       : { blocks: [], truncated: false };
+    // A thread AW started before comes back under the rules it was started with (#71).
+    const previous = sessionRegistry.get(session.sessionId);
+    const policy = previous?.launch.policy;
     let runner: Awaited<ReturnType<CodexRunnerService['resume']>>;
     for (;;) {
       try {
-        runner = await codexRunners.resume(session.sessionId, session.cwd, history.blocks, session.model);
+        runner = await codexRunners.resume(session.sessionId, session.cwd, history.blocks, session.model, {
+          origin: previous?.origin,
+          permissionMode: previous?.launch.permissionMode as PermissionModeName | undefined,
+          policy,
+        });
         break;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1259,7 +1272,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         );
         if (choice === 'Retry') continue;
         if (choice !== 'Fork here') return;
-        runner = await codexRunners.fork(session.sessionId, session.cwd, history.blocks, session.model);
+        runner = await codexRunners.fork(session.sessionId, session.cwd, history.blocks, session.model, policy);
         log(`forked active Codex conversation ${session.sessionId} as ${runner.threadId}`);
         break;
       }

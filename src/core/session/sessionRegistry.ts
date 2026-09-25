@@ -12,6 +12,7 @@
  * fewer than a hundred records, one writer, "load all, replace one".
  */
 import { classifyOnStartup, showsInterrupted, type HostOutcome, type StartupResult } from './recovery';
+import { parseLaunchPolicy, type LaunchPolicy } from '../../shared/launchPolicy';
 import type { SessionProvider } from './sessionHandle';
 
 /** The slice of a key-value store this needs. `JsonStore` and a test double both fit. */
@@ -42,6 +43,12 @@ export interface LaunchOptionsRecord {
   applied?: { model?: string; effort?: string };
   binary?: string;
   cliVersion?: string;
+  /**
+   * The launch policy (#71): applied again on every resume, migration and
+   * rejoin. Read back through `parseLaunchPolicy`, so a hand-edited file
+   * cannot widen it. Records from before #71 have none.
+   */
+  policy?: LaunchPolicy;
 }
 
 export interface SessionRecord {
@@ -103,7 +110,10 @@ export class SessionRegistry {
   all(): SessionRecord[] {
     const raw = this.store.get<unknown>(KEY, []);
     if (!Array.isArray(raw)) return [];
-    return raw.filter(isRecord).sort((a, b) => b.lastShownAt - a.lastShownAt);
+    return raw
+      .filter(isRecord)
+      .map(withParsedPolicy)
+      .sort((a, b) => b.lastShownAt - a.lastShownAt);
   }
 
   get(sessionId: string | undefined): SessionRecord | undefined {
@@ -135,7 +145,9 @@ export class SessionRegistry {
       repoRoot: input.repoRoot ?? existing?.repoRoot,
       worktree: input.worktree ?? existing?.worktree,
       branchAtStart: input.branchAtStart ?? existing?.branchAtStart,
-      launch: { ...existing?.launch, ...input.launch },
+      // Field by field, and an absent field keeps what was recorded: a
+      // re-announced id (or a caller that knows less) must not drop a policy.
+      launch: { ...existing?.launch, ...defined(input.launch) },
       origin: input.origin ?? existing?.origin,
       state: 'live',
       // Kept while it stays live (an id re-announced mid-run is the same run).
@@ -228,6 +240,20 @@ export class SessionRegistry {
 /** The part of the registry an executor writes to. */
 export type ExecutorRegistry = Pick<SessionRegistry, 'live' | 'touch' | 'setState' | 'isInterrupted'> &
   Partial<Pick<SessionRegistry, 'forget'>>;
+
+/** A record's policy as the parser reads it: only fields of the right shape, or none. */
+function withParsedPolicy(r: SessionRecord): SessionRecord {
+  if (r.launch.policy === undefined) return r;
+  const policy = parseLaunchPolicy(r.launch.policy);
+  const { policy: _raw, ...launch } = r.launch;
+  return { ...r, launch: policy ? { ...launch, policy } : launch };
+}
+
+/** The object without its undefined fields. */
+function defined<T extends object>(o: T | undefined): Partial<T> {
+  if (!o) return {};
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
 
 function isRecord(r: unknown): r is SessionRecord {
   if (!r || typeof r !== 'object') return false;

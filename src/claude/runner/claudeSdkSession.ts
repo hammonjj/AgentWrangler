@@ -18,6 +18,7 @@ import type { CanUseTool, Options, PermissionResult, Query, SDKUserMessage } fro
 import type { Disposable } from '../../core/events';
 import { InputQueue } from '../../core/runner/inputQueue';
 import { SeqLog } from '../../core/session/seqLog';
+import type { ClaudeLaunchPolicy } from '../../shared/launchPolicy';
 import {
   emptyHostState,
   reduceHostSnapshot,
@@ -47,6 +48,25 @@ export interface ClaudeSessionOptions {
   model?: string;
   /** `low` | `medium` | `high` | `xhigh` | `max`, or absent for the CLI's default. Start-time only. */
   effort?: string;
+  /** Tool rules and limits (`LaunchPolicy.claude`), applied as SDK options at start. */
+  policy?: ClaudeLaunchPolicy;
+}
+
+/**
+ * The SDK options a launch policy sets, and only those: nothing here can
+ * change the permission mode, `canUseTool`, or turn on
+ * `allowDangerouslySkipPermissions`. Empty for no policy.
+ */
+export function claudePolicyOptions(policy: ClaudeLaunchPolicy | undefined): Partial<Options> {
+  if (!policy) return {};
+  const out: Partial<Options> = {};
+  if (policy.allowedTools?.length) out.allowedTools = [...policy.allowedTools];
+  if (policy.disallowedTools?.length) out.disallowedTools = [...policy.disallowedTools];
+  if (policy.maxTurns !== undefined) out.maxTurns = policy.maxTurns;
+  if (policy.maxBudgetUsd !== undefined) out.maxBudgetUsd = policy.maxBudgetUsd;
+  if (policy.fallbackModel) out.fallbackModel = policy.fallbackModel;
+  if (policy.outputFormat) out.outputFormat = policy.outputFormat;
+  return out;
 }
 
 export interface ClaudeSessionDeps {
@@ -216,6 +236,8 @@ export class ClaudeSdkSession {
       includePartialMessages: true,
       stderr: (data) => this.deps.log(`runner stderr: ${data.trim().slice(0, 400)}`),
       ...this.deps.sdkOptions,
+      // Last, so nothing merged above can loosen a rule the launch asked for.
+      ...claudePolicyOptions(this.opts.policy),
     };
     try {
       this.query = this.deps.query({ prompt: this.input, options });
