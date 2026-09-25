@@ -67,7 +67,7 @@ body,
 }
 /* Models, effort, tokens and cost (#28). It gives way before the title does;
    the tooltip carries every figure in full. */
-#convApp #usage {
+#convApp #convUsage {
   color: var(--vscode-descriptionForeground);
   font-size: 0.88em;
   font-variant-numeric: tabular-nums;
@@ -77,7 +77,7 @@ body,
   min-width: 0;
   flex: 0 3 auto;
 }
-#convApp #usage[hidden] {
+#convApp #convUsage[hidden] {
   display: none;
 }
 
