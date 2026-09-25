@@ -1,5 +1,6 @@
 import type { ModelChoice } from '../../shared/conversation';
 import { subagentText } from '../../shared/subagents';
+import { usageCellText, usageTitle } from '../../shared/sessionUsage';
 import './dashboard.css';
 import {
   clampResizeWidth,
@@ -547,6 +548,11 @@ const CELL: Record<ColumnId, (s: SessionDTO) => string> = {
       ? '<td class="c-model"></td>'
       : `<td class="c-model" title="${esc(s.model ?? label)}">${esc(label)}</td>`;
   },
+  // Blank, not zero, for a session with no usage records (#28).
+  usage: (s) =>
+    s.usage === undefined
+      ? '<td class="c-usage"></td>'
+      : `<td class="c-usage" title="${esc(usageTitle(s.usage))}">${esc(usageCellText(s.usage))}</td>`,
   subagents: (s) => {
     const text = subagentText(s.subagents);
     const title = text ? `${text}. Estimated from recent worker transcripts, including nested workers; excludes guardian reviews.` : '';
@@ -611,6 +617,7 @@ function rowHtml(s: SessionDTO, span: number): string {
     shown.has('worktree') || s.worktree === s.projectName ? '' : esc(s.worktree ?? ''),
     shown.has('branch') ? '' : branchText(s),
     shown.has('model') ? '' : esc(modelLabel(s.model) ?? ''),
+    shown.has('usage') || !s.usage ? '' : `<span class="usage" title="${esc(usageTitle(s.usage))}">${esc(usageCellText(s.usage))}</span>`,
     shown.has('pr') ? '' : prHtml(s),
     shown.has('subagents') ? '' : esc(subagentText(s.subagents)),
   ]

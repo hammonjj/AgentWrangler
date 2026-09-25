@@ -55,6 +55,7 @@ import { createOrchestration } from '../orchestration';
 import { TelemetryLog } from '../core/telemetry/telemetryLog';
 import { TELEMETRY_ENABLED_KEY, TELEMETRY_PRICES_KEY, TurnTelemetry } from '../core/telemetry/turnTelemetry';
 import type { PriceTable } from '../core/telemetry/turnUsage';
+import { SessionUsageIndex } from '../core/telemetry/sessionUsageIndex';
 import { HostSupervisor } from '../core/session/hostSupervisor';
 import { shouldAutoResume } from '../core/session/resumePolicy';
 import {
@@ -482,9 +483,18 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
   // Per-turn usage for every session AW runs (#27): local JSONL, metadata only,
   // on by default and switched off by `telemetry.enabled`.
+  const telemetryDir = path.join(host.dataDir, 'orchestration', 'telemetry');
+  // What each session has used, summed from its records, on every surface's
+  // copy of the session (#28): the Usage column and the conversation header.
+  const sessionUsage = new SessionUsageIndex();
+  host.subscribe(sessionUsage);
+  store.useUsage((id) => sessionUsage.get(id));
+  host.subscribe(sessionUsage.onDidChange(() => store.usageApplied()));
+  void sessionUsage.load(telemetryDir).catch((err) => log(`telemetry: could not read past records: ${String(err)}`));
   const turnTelemetry = new TurnTelemetry({
     sessions,
-    log: new TelemetryLog(path.join(host.dataDir, 'orchestration', 'telemetry')),
+    log: new TelemetryLog(telemetryDir),
+    onRecord: (record) => sessionUsage.add(record),
     enabled: () => host.settings.get<boolean>(TELEMETRY_ENABLED_KEY, true) !== false,
     prices: () => {
       const table = host.settings.get<unknown>(TELEMETRY_PRICES_KEY, undefined);

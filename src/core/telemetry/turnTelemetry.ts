@@ -36,6 +36,8 @@ export interface TurnTelemetryDeps {
   registry?: Pick<SessionRegistry, 'get' | 'noteApplied'>;
   now?: () => number;
   logLine?: (msg: string) => void;
+  /** Told each record once it is written (the per-session usage index, #28). */
+  onRecord?: (record: TurnRecord) => void;
 }
 
 const ASK_KINDS = new Set(['permission', 'question', 'plan']);
@@ -191,8 +193,9 @@ export class TurnTelemetry implements Disposable {
     if (waited > 0) record.waitedOnHumanMs = waited;
     if (isOrchestrationOrigin(handle.origin)) record.attemptId = handle.origin.attemptId;
 
-    this.deps.log.append(record);
+    const written = this.deps.log.append(record);
     this.deps.log.setSegment(key, usage.next);
+    if (written) this.deps.onRecord?.(record);
     if (claude && record.effort.applied) this.noteApplied(sessionId, record.effort.applied);
   }
 

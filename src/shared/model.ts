@@ -2,6 +2,7 @@
  * Shared data model. This file is imported by BOTH the extension host and the
  * webview bundles — it must stay free of `vscode`, Node, and DOM imports.
  */
+import type { SessionUsage } from './sessionUsage';
 
 /**
  * `waiting` and `done` both mean the agent has finished its turn and is idle at
@@ -79,6 +80,8 @@ export interface SubagentSummary {
 export interface AgentSession {
   /** Estimated descendant worker status within the discovery window; excludes guardians. */
   subagents?: SubagentSummary;
+  /** What this session has used, from its telemetry records (#28). Absent when it has none. */
+  usage?: SessionUsage;
   /** Provider id, e.g. 'claude'. */
   provider: string;
   /** Client that originated the session, e.g. vscode, cli, or desktop. */
