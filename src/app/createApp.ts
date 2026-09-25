@@ -93,6 +93,7 @@ import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import type { PermissionModeName } from '../shared/conversation';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
 import type { SessionActions } from '../ui/actions';
+import type { RunBy, StopOutcome } from '../core/control/protocol';
 import type { ConversationLauncher, ProjectSource, RunnerOwnership, UsageSource } from '../ui/dashboardHost';
 import { adoptActionFor } from '../ui/openTarget';
 import { resumeInTerminal } from '../ui/terminal';
@@ -171,6 +172,14 @@ export interface AgentWranglerApp {
    * background server are in neither: they keep running on their own terms.
    */
   sessionCounts(): { hosted: number; local: number };
+  /** Who runs this session: AW somewhere that survives a quit, AW in-process, or not AW. */
+  runBy(sessionId: string): RunBy;
+  /**
+   * End the process running a session, with no dialog: `aw stop`. The menu's
+   * Stop… asks first and then does the same. A session mid-turn is left alone
+   * (`working`) unless `force`, since stopping it throws the turn away.
+   */
+  stopSession(key: string, opts?: { force?: boolean }): Promise<StopOutcome | 'gone'>;
   /**
    * The app is quitting: end the sessions that cannot survive it (and hosted
    * ones too with `includeHosted`), awaited and bounded by `withinMs`. Ended
@@ -671,7 +680,22 @@ export function createApp(host: HostServices): AgentWranglerApp {
     if (choice !== 'Close session') return;
 
     // It may have finished, or ended on its own, while the dialog was up.
-    const now = store.get(s.key) ?? s;
+    const outcome = await closeSessionNow(store.get(s.key) ?? s);
+    if (outcome === 'hostRefused') dialogs.error(`Agent Wrangler: the host holding ${label} did not stop. See the log.`);
+    if (outcome === 'refused') {
+      dialogs.error(
+        `Agent Wrangler: could not stop the process running ${label} — it is ignoring both signals. ` +
+          'End it from its own terminal.',
+      );
+    }
+  };
+
+  /**
+   * The close itself, with no dialog: what the menu's Stop… does once it has
+   * been confirmed, and what `aw stop` does (the typed command is the
+   * confirmation). `nothing` means there was no process to end.
+   */
+  const closeSessionNow = async (now: AgentSession): Promise<StopOutcome> => {
     const runner = runners.get(now.sessionId);
     if (codexRunners.owns(now.sessionId)) {
       codexRunners.release(now.sessionId);
@@ -688,10 +712,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (now.pid !== undefined && pause.isPaused(now.pid)) pause.resume(now.pid);
       const held = hostSupervisor.heldBy(now.sessionId)!;
       const outcome = await hostSupervisor.stopHost(held.manifest);
-      if (outcome === 'refused') {
-        dialogs.error(`Agent Wrangler: the host holding ${label} did not stop. See the log.`);
-        return;
-      }
+      if (outcome === 'refused') return 'hostRefused';
       if (!runners.owns(now.sessionId)) sessionRegistry.setState(now.sessionId, 'stopped');
     } else if (now.pid !== undefined) {
       // A stopped process cannot act on SIGTERM, so ending a paused session
@@ -705,17 +726,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
         : undefined;
       const outcome = await endProcess(now.pid, processControl, entry?.procStart);
       log(`close ${now.sessionId}: ending pid ${now.pid} → ${outcome}`);
-      if (outcome === 'refused') {
-        dialogs.error(
-          `Agent Wrangler: could not stop the process running ${label} — it is ignoring both signals. ` +
-            'End it from its own terminal.',
-        );
-        return;
+      if (outcome === 'refused') return 'refused';
+      if (outcome === 'already-gone') {
+        void store.forceRefresh();
+        return 'nothing';
       }
+    } else {
+      // Its process went while the dialog was up (or there never was one).
+      void store.forceRefresh();
+      return 'nothing';
     }
     // The registry and the transcript will both say "ended" shortly; ask now so
     // the row the user just acted on does not sit there looking alive.
     void store.forceRefresh();
+    return 'stopped';
   };
 
   /**
@@ -1916,6 +1940,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
         ? 0
         : codexRunners.list().filter((h) => h.lifecycle !== 'ended' && h.lifecycle !== 'error').length;
       return { hosted: claude.hosted, local: claude.local + codex };
+    },
+    runBy: (sessionId) => {
+      const claude = runners.get(sessionId);
+      if (claude) return claude.hosted ? 'hosted' : 'app';
+      if (codexRunners.owns(sessionId)) return codexKeepAlive ? 'hosted' : 'app';
+      // A host this app holds but is not following (Close stops it as ours).
+      if (hostSupervisor?.heldBy(sessionId)) return 'hosted';
+      return 'external';
+    },
+    async stopSession(key, opts = {}) {
+      const s = store.get(key);
+      if (!s) return 'gone';
+      if (!opts.force && (s.status === 'busy' || s.status === 'stuck' || s.status === 'blocked')) return 'working';
+      return closeSessionNow(s);
     },
     async stopAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}) {
       const { hosted, local } = runners.counts();

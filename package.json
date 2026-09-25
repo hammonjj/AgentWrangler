@@ -16,6 +16,7 @@
     "app:package": "npm run build && electron-builder --mac --dir",
     "app:install": "npm run app:package && bash scripts/install-app.sh",
     "app:signing-setup": "bash scripts/setup-signing-cert.sh",
+    "cli:install": "bash scripts/install-cli.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:integration": "vitest run test/sessionHost.integration.test.ts test/sessionLifecycle.integration.test.ts"

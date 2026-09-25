@@ -1697,6 +1697,51 @@ Recommended effort: High (Medium for later commands)
 Review checkpoint: Opus High review of the control-socket API (it is forever, like §9).
 ```
 
+**Outcome (2026-09-25, #21).** Built ahead of Stage 4's default flip: the CLI depends on the
+manifests, registry and recovery code that merged in 257a119, not on the flip.
+
+- **Files as built.** `src/core/control/{protocol,server,paths}.ts` (wire types, server,
+  socket and token paths), `src/app/controlBackend.ts` (the methods over the app's services),
+  `src/cli/*` (args, client, formatters, attach renderer, offline reader), `bin/aw`,
+  `scripts/install-cli.sh` (`npm run cli:install`).
+- **Auth.** Same shape as a host: 0600 socket in the 0700 `run/`, and a 256-bit token in
+  `run/core.token` (0600), new at every launch, presented in `hello`. If `run/core.sock` is over
+  the 103-byte limit, the socket falls back to `~/.agentwrangler/run/`, like host sockets do.
+- **What is frozen in control protocol v1.** Method names and params, the listed result fields,
+  the error codes (`-32004` not found, `-32005` ambiguous with `data.matches`, `-32006`
+  unsupported, plus the host protocol's), and the `session.event` / `session.closed` envelopes,
+  which carry the session `key` so a later version can allow more than one subscription. Additions
+  within v1 go through `hello.capabilities`, which is empty today. Enumerations may grow, as in
+  §9.5, and readers show unknown values as-is. The wire declares its own status, lifecycle and
+  outcome unions, and the backend checks at compile time that the UI's unions fit inside them.
+  `subscribe` returns at most `maxBlocks` blocks (default 50, cap 200).
+  **Not frozen:** the `ConvBlock` / `SessionViewEvent` payloads inside `subscribe`. Only the
+  same-bundle CLI may parse them. The CLI ships in the app bundle and runs on the app's own binary (`ELECTRON_RUN_AS_NODE`,
+  `exec -a aw`, so `install-app.sh`'s `pgrep` never takes it for the app), and `hello` reports
+  the app's build so a mismatch is flagged.
+- **`send`** goes to the session's handle, as the pane's composer does. It is only for sessions AW
+  runs; for anything else it answers `-32006` and does not adopt. **`stop`** is the menu's
+  Stop… minus the dialog: `confirmAndCloseSession` was split so that both call
+  `closeSessionNow`. A session mid-turn is left alone unless `--force`. The app flashes a notice
+  on every `send` and `stop`, and logs the method and session, never the content.
+- **§12's injection concern.** The CLI refuses `send` and `stop` when its environment shows it is
+  running under an agent (`AGENTWRANGLER_HOSTED`, `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`,
+  `CODEX_SANDBOX*`, `CODEX_THREAD_ID`). This is a speed bump for the over-eager or injected
+  agent, not a wall: the token file is readable by the same user, as host tokens are. The CLI
+  strips control characters from everything it prints, because agent-written text reaching the
+  terminal is an injection path of its own (OSC 52 writes the clipboard).
+- **Opus High review (CP for Stage 8), 2026-09-25.** Verdict: sound, and no easier for one
+  agent to drive another than before. Fixed from it:
+  - `attach` reported `gone` after a compaction, because it looked the handle up by its old id;
+  - the wire unions and forward-compat fields above;
+  - escape stripping;
+  - an `'error'` listener on the server, so an accept failure can't crash the main process;
+  - `send`/`stop` refused once a quit is committed;
+  - the client's name and pid in the audit log, and `subscribe` logged too;
+  - `runBy: hosted` for held-but-unfollowed hosts;
+  - owner and mode checked on the fallback socket directory;
+  - stray arguments rejected (`aw stop x -f` no longer stops without force).
+
 ### Follow-ups (outside the critical path)
 
 - **F1 (feature):** warn when two live sessions share one checkout. Any time, and better after

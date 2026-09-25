@@ -216,6 +216,26 @@ including streaming replies, interruption, and approval decisions.
   - **Every provider, not just Claude.** It used to be Claude-only, which left *Archive* — a hide, not a stop — as the only thing you could do to a Codex row you were finished with. The two real conditions are the ones above and they answer for any provider: a Codex thread this window runs has no pid of its own (one app-server serves every thread) and is closed by releasing it, and a Codex conversation running somewhere else has neither a pid nor a handle and correctly does not offer the item.
 - The menu carries the same actions (refresh, new conversation, open conversation, open a conversation in its own tab, rename a conversation, go to where a session runs, resume, copy id, reveal transcript, pause all agents, resume all paused agents, pause or resume one agent, install/remove status hooks, connect or disconnect Discord).
 
+## From a terminal: `aw`
+
+`npm run cli:install` puts an `aw` command on your `PATH` (a copy of `bin/aw`, so it keeps working if the checkout goes). It runs the CLI bundled inside the installed app, using the app's own runtime, so it needs no Node and always matches the installed build.
+
+| Command | What it does |
+|---|---|
+| `aw status` | What the app is doing: sessions by status, and how many it runs that survive a quit. |
+| `aw sessions [--all]` | The rows of the table (`--all` adds archived ones). |
+| `aw session <id>` | One session in detail, including what it is waiting on. |
+| `aw attach <id>` | Follow a session the app runs, read-only, until it ends or Ctrl-C. |
+| `aw send <id> <text…>` | Send a message to a session the app runs (`-` reads the text from stdin). |
+| `aw stop <id> [--force]` | End the process running a session, as the row menu's *Close session* does. A session mid-turn is left alone unless `--force`. |
+| `aw projects` | The project folders the launcher offers. |
+
+`<id>` is a session id, a unique prefix of one (four characters or more), or a key such as `claude:<id>`. `--json` prints the raw result.
+
+- **It is a client of the app, never a supervisor.** It talks only to the app's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new at every launch). It never connects to session hosts, and every command goes the same way as the equivalent click. The app shows a short notice when `aw` sends or stops something.
+- **With the app quit**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the app starts) and what the app last recorded. Everything else says the app is not running.
+- **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12).
+
 ## Remote control (experimental)
 
 Answer a permission prompt from your phone. Off by default, and under
