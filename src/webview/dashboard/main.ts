@@ -1,5 +1,4 @@
 import type { ModelChoice } from '../../shared/conversation';
-import { subagentText } from '../../shared/subagents';
 import { usageCellText, usageTitle } from '../../shared/sessionUsage';
 import './dashboard.css';
 import {
@@ -88,7 +87,6 @@ const questionDrafts = new Map<string, QuestionDraft>();
 // has to feel immediate, so the webview keeps its own copy and posts changes.
 // The snapshot that comes back matches what we already drew.
 let columns: ColumnPrefs = {};
-let showCodexSubagents = false;
 /**
  * Whether the table is narrow enough to fold its optional columns away.
  *
@@ -581,11 +579,6 @@ const CELL: Record<ColumnId, (s: SessionDTO) => string> = {
     s.usage === undefined
       ? '<td class="c-usage"></td>'
       : `<td class="c-usage" title="${esc(usageTitle(s.usage))}">${esc(usageCellText(s.usage))}</td>`,
-  subagents: (s) => {
-    const text = subagentText(s.subagents);
-    const title = text ? `${text}. Estimated from recent worker transcripts, including nested workers; excludes guardian reviews.` : '';
-    return `<td class="c-subagents" title="${esc(title)}">${esc(text)}</td>`;
-  },
   pr: (s) => `<td class="c-pr">${prHtml(s)}</td>`,
   eta: etaCell,
   age: ageCell,
@@ -647,7 +640,6 @@ function rowHtml(s: SessionDTO, span: number): string {
     shown.has('model') ? '' : esc(modelLabel(s.model) ?? ''),
     shown.has('usage') || !s.usage ? '' : `<span class="usage" title="${esc(usageTitle(s.usage))}">${esc(usageCellText(s.usage))}</span>`,
     shown.has('pr') ? '' : prHtml(s),
-    shown.has('subagents') ? '' : esc(subagentText(s.subagents)),
   ]
     .filter(Boolean)
     .join('<span class="sep">·</span>');
@@ -861,8 +853,6 @@ function menuHtml(): string {
   <div class="cmhead">Columns</div>
   ${rows}
   <button class="cmreset" data-cols="reset">Reset widths</button>
-  <div class="cmhead">Codex sessions</div>
-  <label class="cmrow"><input type="checkbox" data-codex-subagents${showCodexSubagents ? ' checked' : ''}>Show internal/subagent sessions</label>
 </div>`;
 }
 
@@ -1374,7 +1364,6 @@ vscodeApi.onMessage((body) => {
     codexUsage = m.codexUsage;
     // Our own drag already drew this; anything else is another dashboard's.
     if (m.columns) columns = m.columns;
-    showCodexSubagents = m.showCodexSubagents === true;
     if (m.discord) discord = m.discord;
     if (m.launcher) {
       renderLaunchDefaults(m.launcher);
@@ -1725,12 +1714,4 @@ post({ type: 'ready' });
 app.addEventListener('input', (event) => {
   const stepper = (event.target as HTMLElement | null)?.closest?.<HTMLElement>('.qstep');
   if (stepper) saveQuestionDraft(stepper);
-});
-
-// Kept in the column menu so diagnostic visibility is beside the worker summary.
-app.addEventListener('change', (event) => {
-  const input = event.target;
-  if (input instanceof HTMLInputElement && input.hasAttribute('data-codex-subagents')) {
-    post({ type: 'setShowCodexSubagents', value: input.checked });
-  }
 });

@@ -8,6 +8,7 @@
  * checkout" can be answered later without re-deriving where a session started.
  */
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseWorktreeGitdir } from './worktree';
 
@@ -74,9 +75,30 @@ export function checkoutRootFor(cwd: string | undefined): string | undefined {
   return root;
 }
 
+/**
+ * The project a folder belongs to, as the table names and groups it: the
+ * main repository's folder name, so a linked worktree (`AgentWrangler-foo`)
+ * and a subfolder (`AgentWrangler/src`) both read as `AgentWrangler`, and the
+ * Worktree column says which tree. Outside git, the folder's own name.
+ * A repository at the home folder itself (a dotfiles repo) is ignored, or
+ * every folder under home would be one project.
+ */
+export function projectNameFor(cwd: string | undefined, home: string = os.homedir()): string | undefined {
+  if (!cwd) return undefined;
+  if (projectCache.has(cwd)) return projectCache.get(cwd);
+  const repo = checkoutFor(cwd).repoRoot;
+  const dir = repo && path.resolve(repo) !== path.resolve(home) ? repo : cwd;
+  const name = path.basename(dir) || undefined;
+  if (projectCache.size >= MAX_ROOT_CACHE) projectCache.clear();
+  projectCache.set(cwd, name);
+  return name;
+}
+const projectCache = new Map<string, string | undefined>();
+
 /** Forget every root — the manual Refresh, alongside `clearWorktreeCache`. */
 export function clearCheckoutRootCache(): void {
   rootCache.clear();
+  projectCache.clear();
 }
 
 /** `ref: refs/heads/<branch>` → `<branch>`; a detached HEAD (a bare sha) has none. */

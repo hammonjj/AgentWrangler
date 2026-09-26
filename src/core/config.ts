@@ -8,7 +8,6 @@ import type { HostSettings } from '../host/hostServices';
 export interface WranglerConfig {
   claudeBinaryPath: string;
   codexBinaryPath: string;
-  showCodexSubagents: boolean;
   stuckThresholdSeconds: number;
   endedWindowHours: number;
   maxEndedSessions: number;
@@ -42,7 +41,6 @@ export interface WranglerConfig {
 export const DEFAULT_CONFIG: WranglerConfig = {
   claudeBinaryPath: 'claude',
   codexBinaryPath: 'codex',
-  showCodexSubagents: false,
   // Ten minutes, not one. Neither the transcript nor the hooks say anything
   // while the model is generating, and a long think or a big `Write` is
   // routinely silent for 2–6 minutes (measured: gaps of 121s, 388s, 79s and
@@ -108,7 +106,6 @@ export function readConfig(settings: HostSettings): WranglerConfig {
   return {
     claudeBinaryPath: settings.get('claudeBinaryPath', d.claudeBinaryPath),
     codexBinaryPath: settings.get('codexBinaryPath', d.codexBinaryPath),
-    showCodexSubagents: settings.get('showCodexSubagents', d.showCodexSubagents),
     stuckThresholdSeconds: settings.get('stuckThresholdSeconds', d.stuckThresholdSeconds),
     endedWindowHours: settings.get('endedWindowHours', d.endedWindowHours),
     maxEndedSessions: settings.get('maxEndedSessions', d.maxEndedSessions),

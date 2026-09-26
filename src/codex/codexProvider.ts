@@ -4,6 +4,7 @@ import type { ConfigGetter } from '../core/config';
 import { Emitter, type Disposable } from '../core/events';
 import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import { worktreeFor } from '../core/worktree';
+import { projectNameFor } from '../core/checkout';
 import type { AgentSession } from '../shared/model';
 import { summarizeSubagents, visibleCodexSummaries } from './subagents';
 import { codexSessionIndex, codexSessionsDir } from './paths';
@@ -74,7 +75,8 @@ export class CodexProvider implements AgentProvider {
     const now = Date.now();
     const summaries = [...this.summaries.values()];
     const subagents = summarizeSubagents(summaries, now, cfg.stuckThresholdSeconds * 1000);
-    return visibleCodexSummaries(summaries, cfg.showCodexSubagents)
+    // Subagents are never rows of their own; their counts ride on the parent (`subagents`).
+    return visibleCodexSummaries(summaries, false)
       .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
       .slice(0, cfg.maxEndedSessions + 100)
       .map((summary) => {
@@ -88,7 +90,7 @@ export class CodexProvider implements AgentProvider {
           title: this.threadNames.get(summary.sessionId.toLowerCase()) ?? summary.title ?? summary.subtitle ?? summary.sessionId.slice(0, 8),
           subtitle: summary.subtitle,
           cwd,
-          projectName: cwd ? path.basename(cwd) : undefined,
+          projectName: projectNameFor(cwd),
           worktree: worktree?.name,
           worktreePath: worktree?.root,
           gitBranch: summary.gitBranch,

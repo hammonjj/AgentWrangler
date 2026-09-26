@@ -248,15 +248,6 @@ export const SETTINGS: SettingSpec[] = [
     description:
       'Start Agent Wrangler in the menu bar when you log in, without opening its window. It is never restarted automatically after a quit or a crash.',
   },
-  {
-    key: 'showCodexSubagents',
-    label: 'Show Codex subagents as their own rows',
-    group: 'Agents and status',
-    type: 'boolean',
-    default: false,
-    description:
-      'Show internal and subagent Codex sessions as separate rows for debugging. Main conversations always summarize linked workers in the Subagents column.',
-  },
 
   // ---- Telemetry ----
   {
