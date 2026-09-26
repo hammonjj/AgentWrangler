@@ -131,6 +131,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     notify: deps.notify,
     openFile: deps.openFile,
     diffsDir: path.join(deps.dataDir, 'orchestration', 'diffs'),
+    logsDir: path.join(deps.dataDir, 'orchestration', 'logs'),
     settleMs: deps.settleMs,
     log,
   });

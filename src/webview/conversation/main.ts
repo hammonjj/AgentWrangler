@@ -1270,6 +1270,14 @@ function renderTask(): void {
     n.textContent = `attempt ${t.attempt.n}/${t.attempt.of}`;
     head.append(n);
   }
+  // The verdict, last on the line: what the checks made of the result (#35).
+  if (t.verification) {
+    const v = document.createElement('span');
+    v.className = `tschip verify v-${t.verification.verdict}`;
+    v.textContent = `${t.verification.glyph} ${t.verification.text}`;
+    v.title = t.verification.title;
+    head.append(v);
+  }
   taskStrip.append(head);
 
   // The second line: where the work is. A branch and a diff stat are what tell
@@ -1287,8 +1295,42 @@ function renderTask(): void {
     taskStrip.append(meta);
   }
 
+  // Why the verdict is what it is: one line per stage, plus the reason a
+  // failure is not being blamed on the attempt when it is not (#35). A
+  // verdict with no working shown is one the user has to take on trust.
+  if (t.verification) {
+    const v = t.verification;
+    if (v.baseIsRed) {
+      const note = document.createElement('div');
+      note.className = 'tsmeta base-red';
+      note.textContent = 'A check fails on the base commit too — the repository was already red.';
+      taskStrip.append(note);
+    }
+    if (v.stages.length > 0) {
+      const list = document.createElement('div');
+      list.className = 'tsstages';
+      for (const line of v.stages) {
+        const row = document.createElement('div');
+        row.className = 'tsstage';
+        row.textContent = line;
+        list.append(row);
+      }
+      taskStrip.append(list);
+    }
+  }
+
   const actions = document.createElement('div');
   actions.className = 'tsactions';
+  if (t.verification?.logPath) {
+    const logPath = t.verification.logPath;
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'tsbtn';
+    open.textContent = 'Open log';
+    open.title = logPath;
+    open.addEventListener('click', () => post({ type: 'openFile', path: logPath }));
+    actions.append(open);
+  }
   for (const a of TASK_STRIP_ACTIONS) {
     if (!t.actions.includes(a)) continue;
     const b = document.createElement('button');

@@ -975,6 +975,13 @@ button.pbtn:disabled {
   border-color: var(--vscode-textLink-foreground, #569cd6);
   color: var(--vscode-textLink-foreground, #569cd6);
 }
+/* The verification verdict on a row (#35). Only ever green for a result
+   something actually vouched for; `unverified` keeps the quiet default. */
+.chip.task.verify {
+  border-color: var(--vscode-panel-border, var(--vscode-widget-border, #555));
+  color: var(--vscode-descriptionForeground);
+}
+
 /* The expensive routes: the `expert` tier and `max` effort. Filled rather than
    outlined, so a costly agent is visible across a table without reading it. */
 .chip.task.loud {

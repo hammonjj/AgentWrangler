@@ -49,7 +49,9 @@ import {
   type OutcomeCategory,
   type RoutingDecision,
   type Task,
+  type TaskKind,
   type TaskState,
+  type VerificationResult,
   type WorktreeAssignment,
 } from '../../shared/orchestration/types';
 import { ulid } from '../domain/ids';
@@ -58,7 +60,10 @@ import type { AgentHarness } from '../harness/types';
 import type { LoadedRepoPolicy, RepoPolicyStore } from '../policy/repoPolicyStore';
 import type { MissionStore } from '../store/missionStore';
 import { slugify } from '../worktrees/naming';
+import { nodeExec, type Exec } from '../worktrees/exec';
 import type { WorktreeManager } from '../worktrees/worktreeManager';
+import { Verifier } from '../verify/verifier';
+import { buildVerificationPlan, summariseVerification } from '../../shared/orchestration/verification';
 import { attemptRecord, addTurnUsage } from './attemptRecord';
 import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from './attemptPolicy';
 import { sessionVerdict, turnFailure, turnMessageIds, type HandleView, type SessionVerdict } from './sessionVerdict';
@@ -80,6 +85,15 @@ export interface NewTask {
   title?: string;
   objective: string;
   acceptanceCriteria: string[];
+  /**
+   * What sort of work it is, which decides its verification plan (#35).
+   *
+   * Defaults to `feature`: until the assessor exists (#37) nothing can tell,
+   * and a person who asked an agent to go and do something in a worktree is
+   * expecting files to change — which is why an empty diff has always failed
+   * a task here.
+   */
+  kind?: TaskKind;
   route: TaskRoute;
   /** What the branch is cut from. Default: the primary checkout's `HEAD`. */
   baseRef?: string;
@@ -116,6 +130,10 @@ export interface TaskRunnerDeps {
   notify?: (notice: { title: string; body: string; onClick?: () => void }) => void;
   /** Where diffs are written for the user to open. */
   diffsDir: string;
+  /** Where verification writes each stage's output: `<logsDir>/<attemptId>/<stage>.log` (#35). */
+  logsDir: string;
+  /** How verification commands are run. Injected so a test can script pass, fail, flaky and timeout. */
+  exec?: Exec;
   /** Asked to open a diff file once one is written for a notification click. */
   openFile?: (file: string) => void;
   now?: () => number;
@@ -255,7 +273,11 @@ export class TaskRunner implements Disposable {
       scope: { paths: [], subsystems: [], confidence: 'low' },
       dependsOn: [],
       overrides: { pins: routePins(req.route) },
-      verification: { stages: [] },
+      // Built from the repository's own policy, and frozen on the task: the
+      // checks a result is judged by must be the ones that were in force when
+      // it started, not whatever the policy says by the time it finishes (#35).
+      kindHint: req.kind ?? 'feature',
+      verification: buildVerificationPlan({ kind: req.kind ?? 'feature', policy: loaded.policy }),
       revision: 1,
       state: 'pending',
       assessmentIds: [],
@@ -918,24 +940,115 @@ export class TaskRunner implements Disposable {
     m = this.need(missionId);
     m = this.patchAttempt(m, a.id, (x) => ({ ...x, git: { baseCommit: wt.baseCommit, ...stats } }));
     this.put(m);
-    m = await this.releaseTree(missionId, a.id);
-    const t = this.now();
+    // The two ways an attempt is over before anything is worth checking. Both
+    // release the tree first: there is nothing to run in it.
     if (failure) {
+      m = await this.releaseTree(missionId, a.id);
       this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', ...failure }, `its last turn ended in an error (${failure.signature})`));
       this.notify(this.need(missionId), 'failed', `Its last turn ended in an error (${failure.signature}). Retry it fresh, or cancel it.`);
       return;
     }
     if (stats.filesChanged === 0) {
+      m = await this.releaseTree(missionId, a.id);
       this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', category: 'empty', signature: 'no-diff' }, 'the attempt changed nothing'));
       this.notify(this.need(missionId), 'changed nothing', 'The attempt finished without changing anything. Retry it, or cancel it.');
       return;
     }
+
+    // Verification runs while the worktree is still this attempt's: the
+    // commands run *in* it, so releasing it first would be handing the tree
+    // back and then using it anyway.
     a = m.attempts.find((x) => x.id === attemptId)!;
-    if (a.state === 'finishing') m = this.patchAttempt(m, a.id, (x) => transitionAttempt(m, x, 'verifying', { now: t, reason: 'no verification yet (#35)' }));
-    m = this.endAttempt(m, a.id, 'succeeded', { status: 'succeeded' }, 'unverified: review the diff');
+    if (a.state === 'finishing') {
+      m = this.patchAttempt(m, a.id, (x) => transitionAttempt(m, x, 'verifying', { now: this.now() }));
+      this.put(m);
+    }
+    const results = await this.verify(missionId, attemptId, wt, stats.headCommit);
+    m = this.need(missionId);
+    m = this.patchAttempt(m, a.id, (x) => ({ ...x, verification: results }));
+    this.put(m);
+    m = await this.releaseTree(missionId, a.id);
+
+    const plan = m.tasks[0].verification;
+    const verdict = summariseVerification(plan, results);
+    this.log(`task ${missionId}: attempt ${a.n} ${verdict.verdict}: ${verdict.summary}`);
+    if (verdict.verdict === 'failed') {
+      this.put(
+        this.endAttempt(
+          m,
+          a.id,
+          'failed',
+          // `quality-new` until #41 can tell a repeat from a first sighting;
+          // the signature is what will let it.
+          { status: 'failed', category: 'quality-new', signature: verdict.signature },
+          `verification failed: ${verdict.summary}`,
+        ),
+      );
+      this.notify(this.need(missionId), 'failed verification', `${verdict.summary}. Retry it, or open the diff and decide.`, 'open-diff');
+      return;
+    }
+    // Everything else is the user's call. `passed` is a result they can accept
+    // with confidence; `unverified`, `inconclusive` and `error` are results
+    // nothing could vouch for, and each says which it is rather than all three
+    // arriving as the same bland "ready for review".
+    m = this.endAttempt(m, a.id, 'succeeded', { status: 'succeeded' }, `${verdict.verdict}: ${verdict.summary}`);
     this.put(m);
     this.log(`task ${missionId}: attempt ${a.n} finished: ${stats.commits} commit(s), ${stats.filesChanged} file(s)`);
-    this.notify(m, 'is ready for review', `${stats.filesChanged} file(s) changed on ${wt.branch}. Click to open the diff.`, 'open-diff');
+    const headline = verdict.verdict === 'passed' ? 'passed its checks' : `is ready for review (${verdict.verdict})`;
+    this.notify(m, headline, `${verdict.summary} — ${stats.filesChanged} file(s) on ${wt.branch}. Click to open the diff.`, 'open-diff');
+  }
+
+  /**
+   * Run the task's verification plan against an attempt's worktree.
+   *
+   * Every failure here is the verifier's, not the agent's: if verification
+   * itself cannot run, the attempt is not failed for it (§14.3). An empty plan
+   * gives an empty list, which `summariseVerification` reads as `unverified` —
+   * a repository with no checks produces results nobody has vouched for, and
+   * that is exactly what the user is told.
+   */
+  private async verify(
+    missionId: string,
+    attemptId: string,
+    wt: WorktreeAssignment,
+    headCommit: string | undefined,
+  ): Promise<VerificationResult[]> {
+    const m = this.need(missionId);
+    const task = m.tasks[0];
+    const a = m.attempts.find((x) => x.id === attemptId)!;
+    if (task.verification.stages.length === 0) return [];
+    const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
+    if (!loaded) return [];
+    try {
+      const manager = await this.managerFor(m);
+      const verifier = new Verifier({
+        exec: this.deps.exec ?? nodeExec,
+        logsDir: this.deps.logsDir,
+        withBaseCheckout: (base, fn) => manager.withBaseCheckout(base, fn),
+        diffText: () => manager.diffText(wt),
+        changedFiles: () => manager.changedFiles(wt),
+        now: this.now,
+        log: this.log,
+      });
+      return await verifier.run(task.verification, {
+        attemptId: a.id,
+        task,
+        policy: loaded.policy,
+        worktree: wt,
+        headCommit,
+      });
+    } catch (e) {
+      this.log(`task ${missionId}: verification could not run: ${errorText(e)}`);
+      return [
+        {
+          strategy: 'verification',
+          state: 'finished',
+          outcome: 'error',
+          summary: `verification could not run: ${errorText(e)}`,
+          startedAt: this.now(),
+        },
+      ];
+    }
   }
 
   /**
