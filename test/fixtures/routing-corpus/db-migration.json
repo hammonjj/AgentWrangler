@@ -1,0 +1,27 @@
+{
+  "id": "db-migration",
+  "case": "database migration",
+  "card": {
+    "objective": "Add a migration that backfills the normalised email column and then adds a unique index on it, and update the user model to read it.",
+    "acceptanceCriteria": ["The migration is reversible.", "Duplicate emails are reported rather than silently dropped.", "The model reads the new column."],
+    "scope": ["db/migrations", "src/models/user.ts"],
+    "verification": ["test"],
+    "repo": {
+      "files": {
+        "db/migrations/0010_create_users.sql": 3000,
+        "db/migrations/0011_add_email_normalised.sql": 1500,
+        "src/models/user.ts": 7000,
+        "src/models/account.ts": 6000,
+        "test/models.test.ts": 9000
+      },
+      "verification": ["test"],
+      "risk": [{ "paths": ["db/migrations"], "level": "high", "why": "schema migrations run against production data" }]
+    }
+  },
+  "labels": { "complexity": "involved", "breadth": "cross-cutting", "risk": "high", "ambiguity": "clear", "verifiability": "partial", "kind": "migration", "domains": ["db"] },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "never": [{ "tier": "basic" }, { "effort": "low" }]
+  }
+}

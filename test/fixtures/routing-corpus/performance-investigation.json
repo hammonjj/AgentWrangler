@@ -1,0 +1,26 @@
+{
+  "id": "performance-investigation",
+  "case": "performance investigation",
+  "card": {
+    "objective": "Investigate why opening the conversation pane takes over two seconds with long transcripts and report the cause with measurements. No code changes.",
+    "acceptanceCriteria": ["A written report names the slowest step with timings.", "The report proposes at least one fix."],
+    "scope": ["src/webview/conversation"],
+    "verification": [],
+    "repo": {
+      "files": {
+        "src/webview/conversation/main.ts": 18000,
+        "src/webview/conversation/render.ts": 26000,
+        "src/webview/conversation/markdown.ts": 14000,
+        "src/webview/conversation/blocks/tool.ts": 9000,
+        "src/webview/conversation/blocks/text.ts": 6000
+      },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "involved", "breadth": "subsystem", "risk": "low", "ambiguity": "minor-gaps", "verifiability": "weak", "kind": "investigation", "domains": ["ui"] },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "never": [{ "tier": "basic" }, { "effort": "low" }]
+  }
+}

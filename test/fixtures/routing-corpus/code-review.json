@@ -1,0 +1,20 @@
+{
+  "id": "code-review",
+  "case": "review with no machine check",
+  "card": {
+    "objective": "Review the export branch's diff for correctness problems and report findings with file and line. Do not change code.",
+    "acceptanceCriteria": ["Every finding names a file, a line and a failure scenario."],
+    "scope": ["src/cli"],
+    "verification": [],
+    "repo": {
+      "files": { "src/cli/export.ts": 9000, "src/cli/flags.ts": 5000, "src/cli/index.ts": 3000, "test/cli.test.ts": 8000 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "involved", "breadth": "few-files", "risk": "low", "ambiguity": "minor-gaps", "verifiability": "none", "kind": "review" },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "never": [{ "tier": "basic" }, { "effort": "low" }]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "id": "large-refactor",
+  "case": "large refactor",
+  "card": {
+    "objective": "Refactor the session store into a pure reducer plus side-effect handlers, without changing behaviour.",
+    "acceptanceCriteria": ["State transitions live in one pure reducer.", "Disk and network effects live in handlers.", "All existing tests pass unchanged."],
+    "scope": ["src/core/store"],
+    "verification": ["test", "typecheck"],
+    "repo": {
+      "files": {
+        "src/core/store/index.ts": 6000,
+        "src/core/store/sessions.ts": 21000,
+        "src/core/store/persist.ts": 9000,
+        "src/core/store/events.ts": 7000,
+        "src/core/store/selectors/byProject.ts": 5000,
+        "src/core/store/selectors/byState.ts": 4000,
+        "src/core/store/effects/disk.ts": 8000,
+        "src/core/store/effects/network.ts": 7000,
+        "test/store.test.ts": 15000
+      },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "hard", "breadth": "subsystem", "risk": "moderate", "ambiguity": "minor-gaps", "verifiability": "strong", "kind": "refactor" },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["high", "max"],
+    "never": [{ "tier": "basic" }, { "effort": "low" }]
+  }
+}

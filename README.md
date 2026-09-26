@@ -325,6 +325,24 @@ new worktree and branch of the chosen folder's repository:
 
   The verdict shows as a badge on the session's row and in the task strip, with a line per
   stage and a button to open the failing log.
+- **Review.** Some acceptance criteria are not something a command can check ("the error names
+  the file"). For those, once the commands have passed, a **read-only reviewer** (Sonnet) is
+  given the objective, the criteria and the diff, may read files in the task's worktree and
+  nothing else — plan mode, `Read`/`Grep`/`Glob` only, reads outside the worktree refused — and
+  answers *met*, *unmet* or *unclear* for each criterion, plus any concerns. The strip lists
+  every criterion with its verdict and the reviewer's reason, and the review's cost.
+  - It is **advisory** by default: an *unmet* criterion is a warning on the result, not a
+    failure. A repository's policy can make it **required** for chosen kinds of task
+    (`review.requiredFor`); then *unmet* fails the task and *unclear* makes it inconclusive —
+    never a pass.
+  - By default it runs only when the task was assessed at **moderate risk or above, or weakly
+    verifiable or below** — the tasks its commands say least about (`review.when`: `auto`,
+    `always` or `never`). A task that has not been assessed is reviewed.
+  - Its verdict is evidence, not verification: a repository with no commands still gives
+    *unverified*, however many criteria the reviewer called met. It posts nothing anywhere.
+  - A review is a model session with the repository in view, and costs like one. Each is
+    recorded on the attempt's usage line as counts, model, tokens and cost (never the
+    reviewer's words), so whether it catches what tests miss can be judged later.
 - **Where you see it.** A task's session is an ordinary row, with two extra chips: which task it
   is for, and what it ran on (`Opus 5 · high`). An expensive route — the `expert` tier, or `max`
   effort — is filled rather than outlined, so it is visible without opening anything. Click the
@@ -339,9 +357,26 @@ new worktree and branch of the chosen folder's repository:
   rule from the repository policy, the cheap model that reads the objective (never the code), or
   you. Risk a policy path rule raised is never talked down by the model, and nothing can be
   called verifiable that the repository has no command for. The strip shows a summary chip and an
-  *Assessment* button that opens the lot. Nothing routes on it yet; it does not hold the task up,
-  and if the model answers nothing usable the description is the rules' alone, marked low
-  confidence.
+  *Assessment* button that opens the lot. It does not hold a manual task up, and if the model
+  answers nothing usable the description is the rules' alone, marked low confidence.
+- **Which route it should run on.** From that description a router works out what the work
+  *needs* — a capability tier (`basic`/`standard`/`expert`), an effort level, hard needs such as
+  context size, and gates (`plan-first` for an open-ended task, `human-review` for a critical
+  one) — and a resolver picks a model from Preferences → Orchestration that meets it, is
+  enabled and assigned a tier, and whose usage window has room. Tier and effort come from
+  different things: risk and breadth raise the tier, weak checks and ambiguity raise the
+  effort. How it routes is set by `orchestration.routing` in `settings.json`:
+  - `{"mode": "manual"}` (the default): the task runs on the launcher's model and effort, as
+    before, and the router's choice is recorded beside it for comparison.
+  - `{"mode": "assisted"}`: *Run a new task…* assesses first and shows the proposed route.
+    One click runs it; *Change effort…* or *Change model…* runs yours instead, and the change
+    is recorded. Dismissing it leaves the proposal in the Tasks menu.
+  - `"maxTier"` and `"maxEffort"` cap every new task. A cap is never exceeded: work that needs
+    more than the cap waits for you, saying both why it needs more and what the cap is.
+
+  **Why this route** in the task strip (and the route chip's tooltip) shows the rules that
+  fired and on what, the requirement, the fallbacks, and every model that was not picked and
+  why — read back from what was recorded when the attempt started, not worked out again.
 - **Restarts.** A task's conversation is an ordinary row in the table. It survives quitting and
   reinstalling (Claude tasks need *Keep conversations running when Agent Wrangler quits*, and
   are refused without it). On relaunch the task is picked up where it is. If its session was
@@ -349,7 +384,9 @@ new worktree and branch of the chosen folder's repository:
   same session id, and *Retry fresh*. It never resumes by itself.
 - **Records.** Missions are `orchestration/missions/<id>.json` under the app's support folder.
   Each attempt adds one `attempt` line to the usage records, with its route, timings, usage
-  summed from its turns, git numbers and flags. Like the turn lines, it holds metadata only.
+  summed from its turns, git numbers and flags, and a `routing` line records what the router
+  recommended, what ran, and which dimensions differed. Like the turn lines, they hold metadata
+  only.
 
 ## Repository policies (orchestration)
 
@@ -362,7 +399,11 @@ plus a hash of its git common directory, so every worktree of a repository share
 - Commands are argv arrays (`["npm", "test"]`), never shell strings. A model can name a command
   (`command:unit`) but never add one.
 - A file is laid over the defaults field by field. With no file: no verification commands (results
-  are `unverified`), no risk paths, worktrees in `../<repo>.aw`, finish by merging locally.
+  are `unverified`), an advisory review for risky or weakly verified tasks, no risk paths,
+  worktrees in `../<repo>.aw`, finish by merging locally.
+- `"review": { "when": "auto" | "always" | "never", "requiredFor": ["migration", …] }` controls
+  the reviewer (above). A kind listed in `requiredFor` is always reviewed, and the review is
+  required for it, whatever `when` says.
 - A file with any error is ignored whole, with each error's path in the log, never half-applied.
 - Each attempt records the policy version it ran under (`default`, or `v1-<hash>` of the
   effective policy).

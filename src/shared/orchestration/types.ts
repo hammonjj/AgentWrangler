@@ -212,6 +212,22 @@ export type TaskKind =
   | 'conflict-resolution'
   | 'plan';
 
+/** Every task kind, in the order the assessor's schema lists them. */
+export const TASK_KINDS: readonly TaskKind[] = [
+  'docs',
+  'test',
+  'bugfix',
+  'feature',
+  'refactor',
+  'migration',
+  'architecture',
+  'investigation',
+  'review',
+  'chore',
+  'conflict-resolution',
+  'plan',
+];
+
 /** The user's per-task overrides. The pin is the only model name a task may carry. */
 export interface TaskOverrides {
   pins?: RoutePins;
@@ -234,6 +250,12 @@ export interface Task {
   acceptanceCriteria: string[];
   scope: TaskScope;
   kindHint?: TaskKind;
+  /**
+   * `kindHint` is the runner's default (`feature`, so an empty diff still
+   * fails verification), not something a person or the planner said. The
+   * assessor is not told it, so the kind the router reads is the assessed one (#38).
+   */
+  kindDefaulted?: boolean;
   dependsOn: TaskDependency[];
   overrides?: TaskOverrides;
   verification: VerificationPlan;
@@ -247,6 +269,12 @@ export interface Task {
   result?: TaskResult;
   /** An integrated upstream was later rejected or reverted; a rerun needs the user (§12.3). */
   invalidated?: boolean;
+  /**
+   * The router's proposal while an `assisted` task waits for the user to
+   * accept or change it (#38). Copied into the attempt's decision as its
+   * `shadow` when it launches.
+   */
+  recommendation?: RouteRecommendation;
   createdBy: 'user' | 'planner';
 }
 
@@ -332,7 +360,57 @@ export interface ResolverCandidate {
   reason: string;
 }
 
-/** One routing decision per attempt. Immutable; `target.tier ≤ requirement.maxTier` always (§7.2). */
+/**
+ * What the router and resolver recommend for a task, from one assessment
+ * against one catalog snapshot (§9; #38). The proposal `assisted` mode shows,
+ * and the shadow `manual` mode records beside what the user picked.
+ */
+export interface RouteRecommendation {
+  assessmentId: string;
+  /** The router's rule version (`ROUTER_VERSION`). */
+  policyVersion: string;
+  requirement: RouteRequirement;
+  reasons: RoutingReason[];
+  /**
+   * `route`: `resolution.target` is the recommendation. `needs-human`: the work
+   * needs more than the caps allow, a gate asks for a person first, or nothing
+   * the policy allows can run it. `blocked`: something would, once capacity
+   * frees up. `note` says which.
+   */
+  verdict: 'route' | 'needs-human' | 'blocked';
+  note?: string;
+  resolution: { target?: ExecutionTarget; candidates: ResolverCandidate[]; catalogVersion: string; note?: string };
+  at: Millis;
+}
+
+/** A route dimension a person can change from the recommendation. */
+export type RouteDimension = 'harness' | 'model' | 'tier' | 'effort';
+
+/**
+ * How the route that ran compares with the recommendation (§27.3).
+ * `accepted`: the user took the proposal as offered (`assisted`).
+ * `matched`: what ran is what the router would have picked, though nobody was
+ * asked (`manual`, or a retry on the same route). `changed-*`: the most
+ * significant dimension that differs (tier, then harness, then model, then
+ * effort); `RoutingDecision.overrides` lists all of them.
+ */
+export type RouteAgreement =
+  | 'accepted'
+  | 'matched'
+  | 'changed-tier'
+  | 'changed-harness'
+  | 'changed-model'
+  | 'changed-effort'
+  | 'no-recommendation';
+
+/**
+ * One routing decision per attempt. Immutable; `target.tier ≤ requirement.maxTier` always (§7.2).
+ *
+ * One exception, and only one: a `manual` decision made before its task was
+ * assessed gets its `shadow` (and `agreement`) filled in once, when the
+ * assessment lands (#38). Nothing already on the record changes, and a
+ * decision that has a shadow is never touched again.
+ */
 export interface RoutingDecision {
   id: string;
   taskId: string;
@@ -342,10 +420,12 @@ export interface RoutingDecision {
   policyVersion: string;
   requirement: RouteRequirement;
   reasons: RoutingReason[];
-  overrides: string[];
-  resolution: { target: ExecutionTarget; candidates: ResolverCandidate[]; catalogVersion: string };
-  /** What the router would have chosen, beside what ran (§27.3). */
-  shadow?: { requirement: RouteRequirement; target?: ExecutionTarget; reasons: RoutingReason[] };
+  /** The dimensions the user changed from the recommendation. */
+  overrides: RouteDimension[];
+  resolution: { target: ExecutionTarget; candidates: ResolverCandidate[]; catalogVersion: string; note?: string };
+  /** What the router recommended, beside what ran (§27.3). In `assisted` it is the proposal the user saw. */
+  shadow?: RouteRecommendation;
+  agreement?: RouteAgreement;
   decidedBy: 'router' | 'user';
   decidedAt: Millis;
 }
@@ -497,6 +577,12 @@ export interface VerificationStage {
   strategy: string;
   required: boolean;
   timeoutSec?: number;
+  /**
+   * Run the stage only when the task's assessment says the repository's own
+   * checks say little about it: risk `moderate` or higher, or verifiability
+   * `weak` or lower (#36, `review.when: auto`). Absent: always run.
+   */
+  onlyIf?: 'risky-or-weakly-verified';
 }
 
 export interface VerificationPlan {
@@ -515,6 +601,37 @@ export interface VerificationResult {
   preExisting?: boolean;
   startedAt: Millis;
   durationMs?: number;
+  /** What the reviewer said, for a `review` stage that reached a verdict (#36). */
+  review?: ReviewVerdict;
+  /** The stage's `onlyIf` did not hold, so it was not run (outcome `unavailable`). */
+  skipped?: boolean;
+}
+
+/** The reviewer's answer for one acceptance criterion (§14.1 `review`). */
+export type CriterionVerdict = 'met' | 'unmet' | 'unclear';
+
+export interface ReviewCriterion {
+  /** `c1`, `c2`, … — the criterion's position in `Task.acceptanceCriteria`, from 1. */
+  id: string;
+  verdict: CriterionVerdict;
+  why: string;
+}
+
+/**
+ * A `review` stage's verdict (#36): one entry per acceptance criterion, in
+ * the task's order, plus concerns the reviewer raised beyond them. Evidence,
+ * never a pass on its own: `review` does not count as verification for a task
+ * that nothing else verified (§14.3).
+ */
+export interface ReviewVerdict {
+  criteria: ReviewCriterion[];
+  concerns: string[];
+  /** The reviewer's model, as the completion reported it. */
+  model: string;
+  /** Tokens and cost of the review, when reported. */
+  usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number };
+  /** Criteria the reviewer left out or answered twice, which were read as `unclear`. */
+  repaired?: number;
 }
 
 // ---------------------------------------------------------------------------

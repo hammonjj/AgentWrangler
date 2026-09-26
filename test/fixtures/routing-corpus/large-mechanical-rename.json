@@ -1,0 +1,31 @@
+{
+  "id": "large-mechanical-rename",
+  "case": "large but mechanical",
+  "card": {
+    "objective": "Rename getUserById to findUserById everywhere, including tests. No behaviour change.",
+    "acceptanceCriteria": ["No reference to getUserById remains.", "Typecheck and tests pass."],
+    "scope": ["src/**/*.ts", "test/**/*.ts"],
+    "verification": ["test", "typecheck"],
+    "repo": {
+      "files": {
+        "src/app/main.ts": 5000,
+        "src/core/users.ts": 8000,
+        "src/core/session/owner.ts": 6000,
+        "src/ui/profile.ts": 7000,
+        "src/remote/sync.ts": 9000,
+        "src/cli/whoami.ts": 2000,
+        "src/shared/types.ts": 6000,
+        "src/api/routes.ts": 11000,
+        "test/users.test.ts": 7000,
+        "test/sync.test.ts": 6000
+      },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "cross-cutting", "risk": "moderate", "ambiguity": "clear", "verifiability": "strong", "kind": "refactor" },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low", "medium"],
+    "never": [{ "tier": "expert" }, { "effort": "max" }]
+  }
+}

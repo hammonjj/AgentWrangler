@@ -15,6 +15,9 @@ import type {
   HarnessId,
   ModelSourceId,
   OutcomeCategory,
+  RouteAgreement,
+  RouteDimension,
+  RouteRecommendation,
   RoutingMode,
   TierName,
   VerificationOutcomeKind,
@@ -95,8 +98,11 @@ export interface AttemptRecord extends RecordBase {
   assessment?: { dimensions: Record<string, { value: string; confidence: string }>; assessorVersion: string };
   requirement?: { tier: TierName; effort: EffortLevel };
   target: ExecutionTarget & { effortRequested?: EffortLevel; effortApplied?: string };
-  shadow?: { tier: TierName; effort: EffortLevel; target?: ExecutionTarget };
-  agreement?: 'accepted' | 'changed-tier' | 'changed-effort' | 'changed-model';
+  /** What the router recommended for this attempt (#38): in `manual` the shadow, in `assisted` the proposal. */
+  shadow?: { tier: TierName; effort: EffortLevel; target?: ExecutionTarget; verdict: RouteRecommendation['verdict'] };
+  agreement?: RouteAgreement;
+  /** The dimensions that differ from the recommendation. */
+  changed?: RouteDimension[];
   queuedAt?: number;
   startedAt?: number;
   endedAt?: number;
@@ -115,10 +121,60 @@ export interface AttemptRecord extends RecordBase {
   git?: { filesChanged: number; insertions: number; deletions: number; commits: number };
   /** Fraction of changed files inside the predicted scope. */
   scopeAccuracy?: number;
-  verification: { strategy: string; outcome: VerificationOutcomeKind; flaky?: boolean; preExisting?: boolean; durationMs?: number }[];
+  verification: {
+    strategy: string;
+    outcome: VerificationOutcomeKind;
+    flaky?: boolean;
+    preExisting?: boolean;
+    skipped?: boolean;
+    durationMs?: number;
+    /**
+     * A `review` stage's verdict, as counts and cost (#36): enough to ask later
+     * whether the reviewer catches what the commands miss, with none of what it
+     * wrote (its reasons quote the code).
+     */
+    review?: {
+      met: number;
+      unmet: number;
+      unclear: number;
+      concerns: number;
+      repaired?: number;
+      model: string;
+      inputTokens?: number;
+      outputTokens?: number;
+      costUsd?: number;
+    };
+  }[];
   flags: AttemptFlags;
   /** The record was written for an interrupted attempt and may be incomplete. */
   partial?: boolean;
 }
 
-export type TelemetryRecord = TurnRecord | AttemptRecord;
+/**
+ * One routing decision, once it carries a recommendation (§16.2, #38): what
+ * the router asked for, what the resolver picked, what ran, and whether they
+ * agree. Rule ids and levels only — never the objective, and never the reason
+ * texts, which can quote a risk path's description.
+ */
+export interface RoutingRecord extends RecordBase {
+  type: 'routing';
+  missionId: string;
+  taskId: string;
+  decisionId: string;
+  attemptN: number;
+  mode: RoutingMode;
+  decidedBy: 'router' | 'user';
+  routerVersion: string;
+  catalogVersion: string;
+  assessmentId?: string;
+  requirement: { minTier: TierName; maxTier: TierName; effort: EffortLevel; gates: string[] };
+  ruleIds: string[];
+  verdict: RouteRecommendation['verdict'];
+  recommended?: ExecutionTarget;
+  ran: ExecutionTarget;
+  agreement: RouteAgreement;
+  changed: RouteDimension[];
+  candidates: { chosen: number; fallback: number; rejected: number };
+}
+
+export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord;

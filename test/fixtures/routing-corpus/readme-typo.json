@@ -1,0 +1,21 @@
+{
+  "id": "readme-typo",
+  "case": "small typo",
+  "card": {
+    "objective": "Fix the misspelled package name in the README install section.",
+    "acceptanceCriteria": ["The install command in the README names the package correctly."],
+    "scope": ["README.md"],
+    "verification": [],
+    "repo": {
+      "files": { "README.md": 6000, "src/index.ts": 4000, "test/index.test.ts": 3000, "package.json": 1500 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "trivial", "breadth": "single-file", "risk": "low", "ambiguity": "clear", "verifiability": "weak", "kind": "docs" },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low"],
+    "notGates": ["plan-first", "human-review"],
+    "never": [{ "tier": "expert" }]
+  }
+}

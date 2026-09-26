@@ -1,0 +1,20 @@
+{
+  "id": "python-endpoint",
+  "case": "small feature in another language",
+  "card": {
+    "objective": "Add a GET /health endpoint that returns the build version and process uptime as JSON.",
+    "acceptanceCriteria": ["GET /health returns 200 with version and uptime fields.", "A test covers the endpoint."],
+    "scope": ["app/routes/status.py", "app/main.py"],
+    "verification": ["test"],
+    "repo": {
+      "files": { "app/main.py": 4000, "app/routes/status.py": 3000, "app/routes/users.py": 9000, "tests/test_status.py": 2500 },
+      "verification": ["test"]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "few-files", "risk": "low", "ambiguity": "clear", "verifiability": "partial", "kind": "feature", "domains": ["python"] },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low", "medium"],
+    "never": [{ "tier": "expert" }]
+  }
+}

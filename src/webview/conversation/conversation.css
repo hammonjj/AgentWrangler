@@ -255,6 +255,45 @@ body,
 #taskStrip .tsmeta.base-red {
   color: var(--vscode-charts-yellow, #d7ba7d);
 }
+/* The reviewer's verdict per acceptance criterion (#36). */
+#taskStrip .tsreview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.85em;
+}
+#taskStrip .tsreview-head {
+  color: var(--vscode-descriptionForeground);
+}
+#taskStrip .tscrit {
+  display: grid;
+  grid-template-columns: 1.2em minmax(0, 1fr);
+  column-gap: 4px;
+}
+#taskStrip .tscrit-glyph {
+  text-align: center;
+}
+#taskStrip .tscrit-text {
+  overflow-wrap: anywhere;
+}
+#taskStrip .tscrit-why {
+  grid-column: 2;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+#taskStrip .tscrit.v-met .tscrit-glyph {
+  color: var(--vscode-charts-green, #89d185);
+}
+#taskStrip .tscrit.v-unmet .tscrit-glyph {
+  color: var(--vscode-errorForeground, #f48771);
+}
+#taskStrip .tscrit.v-unclear .tscrit-glyph,
+#taskStrip .tsconcern {
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
+#taskStrip .tsconcern {
+  overflow-wrap: anywhere;
+}
 #taskStrip .tsmeta {
   color: var(--vscode-descriptionForeground);
   font-size: 0.85em;
@@ -296,6 +335,34 @@ body,
   font-size: 0.85em;
   opacity: 0.8;
   overflow-wrap: anywhere;
+}
+/* "Why this route" (#38): the same list shape as the assessment, a section per
+   heading, every line allowed to wrap at 300px. */
+#taskStrip .tsroutewhy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+#taskStrip .tsroutewhy .tsroutesum {
+  color: var(--vscode-foreground);
+}
+#taskStrip .tsroutewhy .tsroutehead {
+  margin-top: 2px;
+  font-weight: 600;
+}
+#taskStrip .tsroutewhy .tsrouterule {
+  padding-left: 1em;
+}
+#taskStrip .tsroutewhy .tsrouteid {
+  opacity: 0.75;
+  font-family: var(--vscode-editor-font-family, monospace);
+  margin-right: 6px;
+}
+#taskStrip .tsroutewhy .tsroutefoot {
+  opacity: 0.7;
 }
 #taskStrip .tsactions {
   display: flex;

@@ -13,14 +13,17 @@
  * pane can be sent without starting anything.
  */
 import { modelLabel } from '../../shared/modelName';
-import { stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
+import { REVIEW, stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
 import { PROVENANCE_LABEL } from '../policy/assessment';
+import { explainDecision } from './routeExplain';
 import type {
   AssessmentRowView,
+  RouteExplanationView,
   TaskAssessmentView,
   TaskAttemptView,
   TaskBadge,
   TaskDiffView,
+  TaskReviewView,
   TaskRouteView,
   TaskVerificationView,
   TaskView,
@@ -33,6 +36,7 @@ import type {
   Mission,
   RoutingDecision,
   Task,
+  VerificationResult,
 } from '../../shared/orchestration/types';
 
 /** How a harness's sessions are keyed in the table (`${provider}:${sessionId}`). */
@@ -76,7 +80,14 @@ export function routeViewOf(m: Mission, a: ExecutionAttempt | undefined): TaskRo
     tier: t.tier,
     mode: d.mode,
     location: t.location,
+    why: explainDecision(m, d).summary,
   };
+}
+
+/** Why the attempt runs where it does (#38), from its stored decision. */
+export function routingViewOf(m: Mission, a: ExecutionAttempt | undefined): RouteExplanationView | undefined {
+  const d = decisionOf(m, a);
+  return d ? explainDecision(m, d) : undefined;
 }
 
 /**
@@ -107,6 +118,22 @@ export function verificationViewOf(
     logPath:
       results.find((r) => r.outcome === 'failed' || r.outcome === 'inconclusive' || r.outcome === 'error')?.evidence?.logPath ??
       [...results].reverse().find((r) => r.evidence?.logPath)?.evidence?.logPath,
+    review: reviewViewOf(task, results),
+  };
+}
+
+/** The last review verdict among the results, with each criterion's own text beside its verdict (#36). */
+export function reviewViewOf(task: Task, results: readonly VerificationResult[]): TaskReviewView | undefined {
+  const r = [...results].reverse().find((x) => x.strategy === REVIEW && x.review);
+  if (!r?.review) return undefined;
+  const v = r.review;
+  return {
+    required: task.verification.stages.some((s) => s.strategy === REVIEW && s.required),
+    outcome: r.outcome ?? 'no result',
+    criteria: v.criteria.map((c, i) => ({ id: c.id, text: task.acceptanceCriteria[i] ?? c.id, verdict: c.verdict, why: c.why })),
+    concerns: v.concerns,
+    model: v.model,
+    ...(v.usage?.costUsd !== undefined ? { costUsd: v.usage.costUsd } : {}),
   };
 }
 
@@ -230,6 +257,7 @@ export function taskViewOf(m: Mission, actions: TaskViewAction[]): TaskView | un
     stateReason: task.stateReason,
     route: routeViewOf(m, current),
     assessment: assessmentViewOf(m),
+    routing: routingViewOf(m, current),
     attempt: current ? { n: current.n, of: attempts.length } : undefined,
     branch: wt?.branch,
     worktreePath: wt?.path,

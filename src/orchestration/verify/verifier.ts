@@ -39,20 +39,26 @@ import {
   HUMAN,
   REGRESSION_TEST,
   REVIEW,
+  REVIEW_TIMEOUT_SEC,
   diffSanityFindings,
   failingNames,
   normalizeSignature,
   outputTail,
+  reviewOutcome,
+  stageApplies,
   stripAnsi,
 } from '../../shared/orchestration/verification';
 import type {
+  Risk,
   Task,
+  Verifiability,
   VerificationPlan,
   VerificationResult,
   VerificationStage,
   WorktreeAssignment,
 } from '../../shared/orchestration/types';
 import type { Exec, ExecResult } from '../worktrees/exec';
+import type { Reviewer } from './reviewer';
 
 /** What a stage is being run against. */
 export interface VerifyContext {
@@ -62,6 +68,8 @@ export interface VerifyContext {
   worktree: WorktreeAssignment;
   /** The commit the attempt produced. Absent when it committed nothing. */
   headCommit?: string;
+  /** What the task's newest assessment said, for stages with `onlyIf` (#36). Absent: not assessed. */
+  assessment?: { risk: Risk; verifiability: Verifiability };
 }
 
 export interface VerifierDeps {
@@ -80,6 +88,8 @@ export interface VerifierDeps {
   diffText(): Promise<string>;
   /** Per-file numbers, for `diff-sanity`: a pure deletion has no `+` lines to read a path from. */
   changedFiles(): Promise<{ file: string; insertions: number; deletions: number }[]>;
+  /** The review-agent verifier (#36). Absent: a `review` stage is `unavailable`. */
+  reviewer?: Pick<Reviewer, 'review'>;
   now?: () => number;
   log?: (msg: string) => void;
 }
@@ -152,9 +162,17 @@ export class Verifier {
       // the summary `unverified` rather than a pass nobody granted.
       return Promise.resolve({ outcome: 'unavailable', summary: 'waiting for you to accept the result' });
     }
-    if (stage.strategy === REVIEW || stage.strategy === REGRESSION_TEST) {
-      // Declared so a plan can name them; #36 runs the reviewer. Saying so is
-      // better than silently passing a stage that never ran.
+    if (!stageApplies(stage, ctx.assessment)) {
+      return Promise.resolve({
+        outcome: 'unavailable',
+        skipped: true,
+        summary: `not run: the task was assessed ${ctx.assessment?.risk} risk with ${ctx.assessment?.verifiability} verifiability, so its checks already say enough`,
+      });
+    }
+    if (stage.strategy === REVIEW) return this.review(stage, ctx);
+    if (stage.strategy === REGRESSION_TEST) {
+      // Declared so a plan can name it. Saying so is better than silently
+      // passing a stage that never ran.
       return Promise.resolve({ outcome: 'unavailable', summary: `${stage.strategy} is not implemented yet` });
     }
     const command = commandForStrategy(ctx.policy, stage.strategy);
@@ -273,6 +291,49 @@ export class Verifier {
       this.log(`verify ${ctx.attemptId}: could not check ${name} against base ${base.slice(0, 8)}: ${errorText(e)}`);
       return undefined;
     }
+  }
+
+  // ---- review (§14.1, #36) ----
+
+  /**
+   * Ask a read-only reviewer whether each acceptance criterion is met.
+   *
+   * No reviewer configured is `unavailable` (nobody said), a reviewer that
+   * could not answer is `error` (infrastructure, §14.3), and an answer maps to
+   * `passed`/`failed`/`inconclusive` by `reviewOutcome`. The verdict itself is
+   * kept on the result either way it came out, because the per-criterion
+   * reasons are the point — a bare "inconclusive" tells the user nothing.
+   */
+  private async review(stage: VerificationStage, ctx: VerifyContext): Promise<Outcome> {
+    // A review the policy requires and that could not happen is not a pass
+    // nobody granted: it is inconclusive, and the task waits for the user.
+    const nobody = stage.required ? 'inconclusive' : 'unavailable';
+    const reviewer = this.deps.reviewer;
+    if (!reviewer) return { outcome: nobody, summary: 'no reviewer is configured' };
+    if (ctx.task.acceptanceCriteria.length === 0) return { outcome: nobody, summary: 'the task has no acceptance criteria to review' };
+    const diff = await this.deps.diffText();
+    const r = await reviewer.review({
+      task: ctx.task,
+      diff,
+      cwd: ctx.worktree.path,
+      timeoutMs: (stage.timeoutSec ?? REVIEW_TIMEOUT_SEC) * 1000,
+    });
+    if (!r.ok) {
+      if (r.reason === 'no-completion') return { outcome: nobody, summary: `no reviewer: ${r.message}` };
+      return {
+        outcome: 'error',
+        summary: r.reason === 'timeout' ? 'the reviewer timed out' : `the reviewer could not answer: ${r.message}`,
+        evidence: { signature: `review:${r.reason}` },
+      };
+    }
+    const o = reviewOutcome(r.verdict);
+    const unmet = r.verdict.criteria.filter((c) => c.verdict !== 'met').map((c) => c.id);
+    return {
+      outcome: o.outcome,
+      summary: o.summary,
+      review: r.verdict,
+      ...(unmet.length > 0 ? { evidence: { failing: unmet, signature: `review:${unmet.join(',')}` } } : {}),
+    };
   }
 
   // ---- diff-sanity (§14.1) ----

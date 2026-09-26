@@ -6,8 +6,9 @@
  * never the objective, the prompt or anything the agent wrote. A field
  * nobody reported is absent, never zero.
  */
-import { TELEMETRY_SCHEMA_VERSION, type AttemptRecord, type TurnRecord } from '../../shared/orchestration/telemetry';
-import type { ExecutionAttempt, Millis, Mission, UsageSummary } from '../../shared/orchestration/types';
+import { TELEMETRY_SCHEMA_VERSION, type AttemptRecord, type RoutingRecord, type TurnRecord } from '../../shared/orchestration/telemetry';
+import type { ExecutionAttempt, Millis, Mission, ReviewVerdict, RoutingDecision, UsageSummary } from '../../shared/orchestration/types';
+import { reviewCounts } from '../../shared/orchestration/verification';
 
 /** Fold one turn record into an attempt's usage. A record already counted is ignored. */
 export function addTurnUsage(usage: UsageSummary | undefined, r: TurnRecord): UsageSummary {
@@ -92,6 +93,19 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     repoPolicyVersion: a.repoPolicyVersion,
     ...(assessment ? { assessment: assessment.snapshot, routingConfidence: assessment.confidence } : {}),
     target: { ...target, ...(decision.requirement.effort ? { effortRequested: decision.requirement.effort } : {}) },
+    ...(decision.shadow
+      ? {
+          requirement: { tier: decision.shadow.requirement.minTier, effort: decision.shadow.requirement.effort },
+          shadow: {
+            tier: decision.shadow.requirement.minTier,
+            effort: decision.shadow.requirement.effort,
+            ...(decision.shadow.resolution.target ? { target: decision.shadow.resolution.target } : {}),
+            verdict: decision.shadow.verdict,
+          },
+          ...(decision.agreement ? { agreement: decision.agreement } : {}),
+          ...(decision.overrides.length > 0 ? { changed: [...decision.overrides] } : {}),
+        }
+      : {}),
     queuedAt: a.timing?.queuedAt,
     startedAt: a.launchedAt,
     endedAt: a.endedAt,
@@ -103,7 +117,17 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     signature: a.outcome?.signature,
     verification: a.verification
       .filter((v) => v.outcome !== undefined)
-      .map((v) => ({ strategy: v.strategy, outcome: v.outcome!, flaky: v.flaky, preExisting: v.preExisting, durationMs: v.durationMs })),
+      .map((v) =>
+        prune({
+          strategy: v.strategy,
+          outcome: v.outcome!,
+          flaky: v.flaky,
+          preExisting: v.preExisting,
+          skipped: v.skipped,
+          durationMs: v.durationMs,
+          review: v.review ? reviewTelemetry(v.review) : undefined,
+        }),
+      ),
     flags: { ...a.flags },
   };
   if (a.launchedAt !== undefined) {
@@ -114,6 +138,61 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
   if (a.git) record.git = { filesChanged: a.git.filesChanged, insertions: a.git.insertions, deletions: a.git.deletions, commits: a.git.commits };
   if (outcome === 'interrupted') record.partial = true;
   return prune(record);
+}
+
+/**
+ * The `routing` record for a decision that carries a recommendation (#38).
+ * Undefined for one that does not (a manual decision whose task has not been
+ * assessed yet): there is nothing to compare, and it is written once the
+ * shadow is filled in. The id is the decision's, so writing it twice records once.
+ */
+export function routingRecord(mission: Mission, d: RoutingDecision, now: Millis): RoutingRecord | undefined {
+  const rec = d.shadow;
+  if (!rec) return undefined;
+  // The resolver's view of the pool, whoever decided: that is what the router is being judged on.
+  const count = (v: string) => rec.resolution.candidates.filter((c) => c.verdict === v).length;
+  return prune<RoutingRecord>({
+    v: TELEMETRY_SCHEMA_VERSION,
+    type: 'routing',
+    at: now,
+    id: `routing:${d.id}`,
+    missionId: mission.id,
+    taskId: d.taskId,
+    decisionId: d.id,
+    attemptN: d.attemptN,
+    mode: d.mode,
+    decidedBy: d.decidedBy,
+    routerVersion: rec.policyVersion,
+    catalogVersion: rec.resolution.catalogVersion,
+    assessmentId: rec.assessmentId,
+    requirement: {
+      minTier: rec.requirement.minTier,
+      maxTier: rec.requirement.maxTier,
+      effort: rec.requirement.effort,
+      gates: [...rec.requirement.gates],
+    },
+    ruleIds: rec.reasons.map((r) => r.ruleId),
+    verdict: rec.verdict,
+    recommended: rec.resolution.target,
+    ran: d.resolution.target,
+    agreement: d.agreement ?? 'no-recommendation',
+    changed: [...d.overrides],
+    candidates: { chosen: count('chosen'), fallback: count('fallback'), rejected: count('rejected') },
+  });
+}
+
+/** A review verdict as numbers: counts, the model and its cost, never its reasons. */
+function reviewTelemetry(v: ReviewVerdict): NonNullable<AttemptRecord['verification'][number]['review']> {
+  const n = reviewCounts(v);
+  return prune({
+    ...n,
+    concerns: v.concerns.length,
+    repaired: v.repaired,
+    model: v.model,
+    inputTokens: v.usage?.inputTokens,
+    outputTokens: v.usage?.outputTokens,
+    costUsd: v.usage?.costUsd,
+  });
 }
 
 function prune<T extends object>(o: T): T {

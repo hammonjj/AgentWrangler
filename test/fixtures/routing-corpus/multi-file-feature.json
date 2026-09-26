@@ -1,0 +1,27 @@
+{
+  "id": "multi-file-feature",
+  "case": "multi-file feature",
+  "card": {
+    "objective": "Add a configurable idle timeout setting: read it at startup, show it in preferences, and apply it in the session store.",
+    "acceptanceCriteria": ["The setting persists across restarts.", "Sessions idle past the timeout are marked idle.", "Preferences shows and edits the value."],
+    "scope": ["src/core/config.ts", "src/core/store.ts", "src/ui/prefs.ts", "src/ui/prefs.css"],
+    "verification": ["test", "typecheck"],
+    "repo": {
+      "files": {
+        "src/core/config.ts": 9000,
+        "src/core/store.ts": 22000,
+        "src/ui/prefs.ts": 12000,
+        "src/ui/prefs.css": 4000,
+        "src/ui/table.ts": 16000,
+        "test/store.test.ts": 9000
+      },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "involved", "breadth": "few-files", "risk": "moderate", "ambiguity": "minor-gaps", "verifiability": "strong", "kind": "feature", "domains": ["typescript", "ui"] },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "never": [{ "tier": "basic" }, { "effort": "low" }]
+  }
+}

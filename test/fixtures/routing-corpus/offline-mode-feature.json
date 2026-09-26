@@ -1,0 +1,31 @@
+{
+  "id": "offline-mode-feature",
+  "case": "hard cross-cutting feature",
+  "card": {
+    "objective": "Add offline mode: queue outgoing messages while disconnected and replay them in order on reconnect, across the transport, the store, the wire types and the UI.",
+    "acceptanceCriteria": ["Messages sent while offline are delivered once, in order, after reconnect.", "The UI shows an offline banner with the queue length.", "A queue that survives a restart is not required."],
+    "scope": ["src/remote", "src/core/store.ts", "src/ui", "src/shared/wire.ts", "src/app/boot.ts"],
+    "verification": ["test"],
+    "repo": {
+      "files": {
+        "src/remote/transport.ts": 12000,
+        "src/remote/queue.ts": 3000,
+        "src/remote/discord/bot.ts": 15000,
+        "src/core/store.ts": 22000,
+        "src/ui/status.ts": 6000,
+        "src/ui/banner.ts": 3000,
+        "src/ui/settings/offline.ts": 2000,
+        "src/shared/wire.ts": 9000,
+        "src/app/boot.ts": 5000,
+        "test/transport.test.ts": 10000
+      },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "hard", "breadth": "cross-cutting", "risk": "high", "ambiguity": "minor-gaps", "verifiability": "partial", "kind": "feature" },
+  "expect": {
+    "tierIn": ["expert"],
+    "effortIn": ["high", "max"],
+    "never": [{ "tier": "basic" }, { "tier": "standard" }, { "effort": "low" }]
+  }
+}

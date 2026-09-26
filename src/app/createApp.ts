@@ -51,8 +51,12 @@ import type { HostManifest } from '../shared/sessionProtocol';
 import { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import { LaunchDefaults } from '../core/launchDefaults';
-import { createOrchestration } from '../orchestration';
-import { TaskError, type TaskAction, type TaskRunner } from '../orchestration/engine/taskRunner';
+import { createOrchestration, parseRoutingSettings, ROUTING_KEY } from '../orchestration';
+import { TaskError, type TaskAction, type TaskRoute, type TaskRunner } from '../orchestration/engine/taskRunner';
+import { explainRecommendation, targetLabel } from '../orchestration/view/routeExplain';
+import { sourceStatus } from '../shared/orchestration/sourceHealth';
+import { EFFORT_LEVELS, type RouteRecommendation } from '../shared/orchestration/types';
+import { nativeEffortFor, tierRank } from '../shared/orchestration/catalog';
 import { Emitter } from '../core/events';
 import type { TurnRecord } from '../shared/orchestration/telemetry';
 import type { Mission } from '../shared/orchestration/types';
@@ -511,6 +515,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
     log,
     models: () => models.value,
     completion: { query: sdkQuery, binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath) },
+    // What the resolver decides against (#38): the catalog as it stands, and each source's usage window.
+    routingSnapshot: () => {
+      const now = Date.now();
+      return {
+        catalog: models.catalog,
+        sources: { anthropic: sourceStatus('anthropic', usage.usage, now), openai: sourceStatus('openai', codexUsage.usage, now) },
+        now,
+      };
+    },
   });
   host.subscribe(orchestration);
 
@@ -1149,7 +1162,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const picked = await dialogs.pick(rows, { placeHolder: 'Tasks run in a worktree and branch of their own' });
     if (!picked) return;
     if (picked.create) return newTask(runner, cwd, provider);
-    if (picked.missionId) return taskActionsMenu(runner, picked.missionId);
+    if (picked.missionId) {
+      // An `assisted` proposal nobody has started yet: back to the proposal (#38).
+      const task = runner.get(picked.missionId)?.tasks[0];
+      if (task?.recommendation && task.attemptIds.length === 0 && ['routed', 'needs-human'].includes(task.state)) {
+        return reviewProposal(runner, picked.missionId, task.recommendation);
+      }
+      return taskActionsMenu(runner, picked.missionId);
+    }
   }
 
   async function newTask(runner: TaskRunner, cwd: string, provider: 'claude' | 'codex'): Promise<void> {
@@ -1169,12 +1189,28 @@ export function createApp(host: HostServices): AgentWranglerApp {
     });
     if (criteria === undefined) return;
     const defaults = launchDefaults.for(provider);
+    const routing = parseRoutingSettings(host.settings.get<unknown>(ROUTING_KEY, undefined));
+    const harness = provider === 'codex' ? 'codex' : 'claude-code';
+    // The launcher's harness is a preference, not a pin: the router ranks it first within the tier it picks.
+    const policy = { caps: routing.caps, preferences: { harness } };
+    if (routing.mode === 'assisted') {
+      try {
+        dialogs.flash('Assessing the task to propose a route…');
+        const { mission, recommendation } = await runner.propose({ folder: cwd, objective, acceptanceCriteria: criteria.split(';'), policy });
+        await reviewProposal(runner, mission.id, recommendation);
+      } catch (error) {
+        log(`task: ${String(error)}`);
+        dialogs.error(`Agent Wrangler: ${error instanceof TaskError ? error.message : `could not propose a route — ${(error as Error).message}`}`);
+      }
+      return;
+    }
     try {
       const mission = await runner.start({
         folder: cwd,
         objective,
         acceptanceCriteria: criteria.split(';'),
-        route: { harness: provider === 'codex' ? 'codex' : 'claude-code', model: defaults.model, effort: defaults.effort },
+        route: { harness, model: defaults.model, effort: defaults.effort },
+        policy,
       });
       const handle = runner.handleOf(mission.id);
       if (handle) surface?.showSession(handle);
@@ -1182,6 +1218,92 @@ export function createApp(host: HostServices): AgentWranglerApp {
     } catch (error) {
       log(`task: ${String(error)}`);
       dialogs.error(`Agent Wrangler: ${error instanceof TaskError ? error.message : `could not start the task — ${(error as Error).message}`}`);
+    }
+  }
+
+  /**
+   * `assisted` (#38): the proposal, pre-filled. One click runs it; changing
+   * the effort or the model runs that instead and is recorded as a labelled
+   * disagreement. Dismissing leaves it waiting in the Tasks menu.
+   */
+  async function reviewProposal(runner: TaskRunner, missionId: string, rec: RouteRecommendation): Promise<void> {
+    type Row = { label: string; description?: string; detail?: string; action: 'accept' | 'effort' | 'model' | 'why' | 'cancel' };
+    const target = rec.resolution.target;
+    const why = explainRecommendation(rec);
+    for (;;) {
+      const rows: Row[] = [];
+      if (target && rec.verdict !== 'blocked') {
+        rows.push({
+          label: rec.verdict === 'route' ? `$(check) Run on ${targetLabel(target)}` : `$(warning) Run on ${targetLabel(target)} anyway`,
+          description: rec.verdict === 'route' ? 'recommended' : 'needs you',
+          detail: rec.verdict === 'route' ? why.summary : rec.note,
+          action: 'accept',
+        });
+        rows.push({ label: 'Change effort…', description: `recommended ${rec.requirement.effort}`, action: 'effort' });
+      } else {
+        rows.push({ label: '$(warning) No route recommended', description: rec.verdict, detail: rec.note, action: 'why' });
+      }
+      rows.push({ label: 'Change model…', description: `needs ${rec.requirement.minTier}${rec.requirement.maxTier !== rec.requirement.minTier ? `, capped at ${rec.requirement.maxTier}` : ''}`, action: 'model' });
+      rows.push({ label: 'Why this route?', action: 'why' });
+      rows.push({ label: 'Cancel the task', action: 'cancel' });
+      const picked = await dialogs.pick(rows, { placeHolder: `Proposed route — ${runner.get(missionId)?.title ?? 'task'}`, matchOnDetail: true });
+      if (!picked) {
+        dialogs.flash('The proposal is waiting in the Tasks menu.');
+        return;
+      }
+      let route: TaskRoute | undefined;
+      if (picked.action === 'why') {
+        const lines = [why.summary, '', `Needs: ${why.requirement ?? '—'}`, ...why.rules.map((r) => `• ${r.ruleId}: ${r.text}`)];
+        if (why.fallbacks.length > 0) lines.push('', `Fallbacks: ${why.fallbacks.join('; ')}`);
+        if (why.rejected.length > 0) lines.push('', 'Not chosen:', ...why.rejected.map((r) => `• ${r}`));
+        if (why.note) lines.push('', why.note);
+        await dialogs.info(lines.join('\n'));
+        continue;
+      }
+      if (picked.action === 'cancel') {
+        await runner.cancel(missionId);
+        return;
+      }
+      if (picked.action === 'effort' && target) {
+        const entry = models.catalog.entries.find((e) => e.descriptor.source === target.source && e.aliases.includes(target.model));
+        const levels = EFFORT_LEVELS.map((l) => ({ label: l, description: l === rec.requirement.effort ? 'recommended' : entry ? nativeEffortFor(entry, l) : undefined, level: l }));
+        const level = await dialogs.pick(levels, { placeHolder: `Effort for ${targetLabel(target)}` });
+        if (!level) continue;
+        const native = entry ? nativeEffortFor(entry, level.level) : level.level;
+        route = { harness: target.harness, model: target.model, ...(native !== 'none' ? { effort: native } : {}) };
+      }
+      if (picked.action === 'model') {
+        const cat = models.catalog;
+        const cap = tierRank(cat.tiers, rec.requirement.maxTier);
+        const choices = cat.entries
+          .filter((e) => e.routable && e.tier !== undefined && (cap < 0 || tierRank(cat.tiers, e.tier) <= cap))
+          .flatMap((e) => e.harnesses.map((h) => ({ entry: e, harness: h })))
+          .map(({ entry, harness: h }) => ({
+            label: entry.descriptor.label,
+            description: `${entry.tier} · ${h === 'codex' ? 'Codex' : 'Claude Code'}${entry.key === (target && `${target.source}:${target.resolvedModel ?? target.model}`) ? ' · recommended' : ''}`,
+            entry,
+            harness: h,
+          }));
+        if (choices.length === 0) {
+          dialogs.error('Agent Wrangler: no model is routable within this task’s cap. Give models a tier in Preferences → Orchestration.');
+          continue;
+        }
+        const m = await dialogs.pick(choices, { placeHolder: `Model — the task needs ${rec.requirement.minTier}` });
+        if (!m) continue;
+        const native = nativeEffortFor(m.entry, rec.requirement.effort);
+        route = { harness: m.harness, model: m.entry.descriptor.modelId, ...(native !== 'none' ? { effort: native } : {}) };
+      }
+      try {
+        const mission = await runner.startProposed(missionId, route ? { route } : {});
+        const handle = runner.handleOf(mission.id);
+        if (handle) surface?.showSession(handle);
+        dialogs.flash(`Task started on ${mission.worktrees.at(-1)?.branch ?? 'its own branch'}`);
+        return;
+      } catch (error) {
+        log(`task ${missionId}: ${String(error)}`);
+        dialogs.error(`Agent Wrangler: ${error instanceof TaskError ? error.message : `could not start the task — ${(error as Error).message}`}`);
+        if (!(error instanceof TaskError)) return;
+      }
     }
   }
 
@@ -1240,6 +1362,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const task = m.tasks[0];
     const attempt = runnerAttempt(m);
     if (m.state === 'review') return 'accepted — branch kept';
+    if (task.recommendation && !attempt) return task.state === 'routed' ? 'route proposed — waiting for you' : 'needs you — no route recommended';
     if (task.state === 'needs-human') return attempt?.state === 'succeeded' ? 'ready for review' : `needs you — attempt ${attempt?.state ?? 'not started'}`;
     return attempt ? `attempt ${attempt.n} ${attempt.state}` : task.state;
   }

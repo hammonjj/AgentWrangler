@@ -1,0 +1,20 @@
+{
+  "id": "routine-dependency-bump",
+  "case": "dependency bump off any protocol path",
+  "card": {
+    "objective": "Bump the markdown renderer devDependency to its latest patch release.",
+    "acceptanceCriteria": ["package.json names the new patch version.", "Typecheck and tests pass."],
+    "scope": ["package.json"],
+    "verification": ["test", "typecheck"],
+    "repo": {
+      "files": { "package.json": 2500, "src/render.ts": 6000, "test/render.test.ts": 5000 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "trivial", "breadth": "single-file", "risk": "low", "ambiguity": "clear", "verifiability": "strong", "kind": "chore", "domains": ["config"] },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low", "medium"],
+    "never": [{ "tier": "expert" }]
+  }
+}

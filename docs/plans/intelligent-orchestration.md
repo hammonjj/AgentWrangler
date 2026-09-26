@@ -912,7 +912,7 @@ assessment at `confidence: low`, which routes conservatively. Assessment never b
 
 - **Where it lives.** `src/orchestration/policy/assessment.ts` is the pure part: the ordinals, the
   deterministic pass, the JSON schema, the prompt, the combine step and `inputsHash`, with
-  `ASSESSOR_VERSION = 'asm-1'` over all of it. `src/orchestration/policy/assessor.ts` adds the
+  `ASSESSOR_VERSION = 'asm-1'` over all of it (`asm-2` since #39's rule fixes, §27.4). `src/orchestration/policy/assessor.ts` adds the
   three things rules cannot have — the repository on disk, the completion and a cache.
   `src/orchestration/policy/globs.ts` is the glob matching risk paths and exclusive resources
   need; a wildcard-free pattern also matches what is under it, and `globsOverlap` compares two
@@ -1068,6 +1068,66 @@ assembled from the stored decision, not regenerated:
 > confidence: high (rules + model agreed).
 
 Rendered in the task detail (§18) and as the tooltip of the route chip.
+
+### 9.6 As built (#38, 2026-09-26)
+
+- **Where it lives.** `src/orchestration/policy/router.ts` (pure; `ROUTER_VERSION = 'rtr-1'`,
+  recorded as a decision's `policyVersion`): `TIER_RULES` and `EFFORT_RULES` are arrays of
+  `{id, apply, text, inputs}` evaluated in §9.3's order, and every rule that changes the result
+  adds a `RoutingReason` with its id and the levels it read. `resolver.ts` (pure) takes a
+  `ResolverSnapshot {catalog, sources, now}` — a value, so a stored decision replays.
+  `recommend.ts` runs one then the other into a `RouteRecommendation`, and `compareRoutes` says
+  how a route that ran differs from it. `view/routeExplain.ts` builds "why this route" from what
+  was stored.
+- **Tier names.** The rules say `basic`/`standard`/`expert`; a tier list that renames or inserts
+  tiers maps onto them by position among the `route`-reachable ones (weakest, second,
+  strongest), so an extra tier never leaves a rule pointing at nothing.
+- **Caps.** Everything the router computes is a floor, so a `minTier` above the mission's
+  `maxTier` is `needs-human` with the rule that set the tier and the cap in one sentence — never
+  a clamp. `maxEffort` *is* a clamp, with a `cap.effort` reason: effort buys deliberation from
+  the same model, and asking for less of it never runs work on something too weak. A cap naming a
+  tier that does not exist is ignored and said so (`cap.unknown`).
+- **Context.** `contextLoad`'s band top (30k/100k/250k, 400k for `very-large`) × 1.5, written
+  into `requirement.needs` as `context:<tokens>` so a replay resolves against the same need.
+  **Deviation from §9.4 step 1** ("context window known"): Claude reports a window only after a
+  model's first use and Codex never does (§6.5), so requiring a known window would make almost
+  every hosted model unroutable. An unreported *hosted* window is assumed to hold up to 200k
+  (`ASSUMED_HOSTED_WINDOW`; every hosted coding model offered today has at least that), and the
+  chosen candidate's reason says it was assumed. A local model is never assumed (§19.6).
+- **Availability.** A source `down` with a `backoffUntil` (a full window), or at or above the
+  admission threshold (`caps.maxUsageWindowPercent`, default 95%), rejects its models with the
+  reason. If only capacity stands in the way the result is `blocked`; if policy or the catalog
+  allow nothing, `needs-human`. A source nobody has read does not block. Tool needs (`edit`,
+  `shell`, `network`) are both harnesses'; `vision` needs a model that *reported* taking images;
+  `exclusive:` is a lease, #68's.
+- **Rank.** Preferred harness, preferred source, prefer-local, effort control when `high`/`max` is
+  wanted (soft, §6.4), known price, then catalog order. The launcher's harness is the mission's
+  `preferences.harness`, so a task started from the Codex launcher prefers a Codex model of the
+  tier it needs.
+- **`manual`.** The decision is the user's, made at launch, before the assessment (§8.5). When the
+  assessment lands, the decision's `shadow`, `agreement` and `overrides` are filled in **once** —
+  the single, documented exception to its immutability; nothing already on it changes. A retry
+  or resume is decided with the assessment in hand, so its shadow is there from the start.
+- **`assisted`.** `TaskRunner.propose` records the mission, moves the task `ready → assessing`,
+  awaits the assessment (rules only at low confidence if the call fails), and stops at `routed`
+  with the proposal on `task.recommendation` — or at `needs-human` for a cap conflict, a
+  `plan-first` gate or nothing routable. Nothing is launched and no worktree made.
+  `startProposed(id)` runs the proposal (`decidedBy: 'router'`, `agreement: 'accepted'`, the
+  router's reasons and candidates on the decision); `startProposed(id, {route})` runs the user's
+  route (`decidedBy: 'user'`, `overrides` naming every changed dimension, `agreement` the most
+  significant: tier, harness, model, effort) and refuses one above the tier cap (§10.2). The UI
+  is a quick pick in the launcher's task flow: *Run on …*, *Change effort…*, *Change model…*
+  (only models within the cap), *Why this route?*. Dismissing leaves it in the Tasks menu.
+- **Kind.** The runner defaults an unspecified task's `kindHint` to `feature` so an empty diff
+  still fails verification (#35). That default is now marked `kindDefaulted` and not passed to
+  the assessor, which otherwise took it as the user's word at high confidence and left every
+  kind floor and ceiling dead.
+- **Setting.** `orchestration.routing: {mode: 'manual' | 'assisted', maxTier?, maxEffort?}`,
+  default `manual`, frozen into each mission's policy when it is recorded. Not in Preferences yet.
+- **Telemetry.** A `routing` record per decision once it carries a recommendation (rule ids,
+  levels, both targets, `agreement`, `changed`, candidate counts; never reason texts, which can
+  quote a risk path's description). The `attempt` record gains `requirement`, `shadow`,
+  `agreement` and `changed`.
 
 ---
 
@@ -1460,6 +1520,49 @@ a model can name a strategy but never supply a command.
 
 After each integration, and before mission review, `missionDefault` runs on the mission branch
 (§13.3). Its result is part of the mission's health indicator.
+
+### 14.5 As built: the review verifier (#36, 2026-09-26)
+
+- **A completion with a workspace, not a hosted attempt.** §14.1 calls the reviewer "a read-only
+  attempt routed as `kind: review`". What shipped is a `StructuredCompletion` given
+  `workspace: { cwd }` (`completion/structuredCompletion.ts`): the SDK's one-shot `query()` in the
+  task's worktree with `permissionMode: 'plan'`, `tools: ['Read', 'Grep', 'Glob']` (fixed in the
+  completion, not chosen by the caller), up to 16 turns and `outputFormat: json_schema`. No
+  session host, no row, no transcript, no settings or hooks — the same reasons a completion is not
+  a session (§6.1). A hosted attempt would have needed a structured final output #4's
+  `LaunchRequest` does not carry (`structuredFinalOutput: false`), and a row in the table for
+  something the user never asked to watch.
+- **Reads are confined to the worktree.** Verified against the SDK (2026-09-26): in plan mode a
+  `Read` inside `cwd` is allowed without asking, and one outside it goes to `canUseTool`, which
+  `workspaceToolDecision` denies. So the diff — which is agent-written and may carry text meant to
+  steer the reviewer — cannot get it to read anything but the result it is judging.
+- **Where it lives.** `verify/reviewer.ts`: schema (`REVIEW_SCHEMA`), instructions, input (criteria
+  numbered `c1…cN`, diff cut at 60k characters with a note to read the files) and `Reviewer`,
+  which never throws. `shared/orchestration/verification.ts`: `normaliseReview` (a skipped
+  criterion becomes `unclear`, a duplicate keeps its first answer, unknown ids are dropped, each
+  repair counted), `reviewOutcome` (any `unmet` → `failed`; else any `unclear` → `inconclusive`;
+  all `met` → `passed`), `stageApplies`, and the plan's `review` stage. Model `sonnet`, effort
+  `medium`, requirement `standard` — until #38 routes it.
+- **When it runs.** Repo policy gains `review: { when: 'auto' | 'always' | 'never', requiredFor:
+  TaskKind[] }`, default `auto` and none required. The plan (frozen at task start, like the rest of
+  it) gets an advisory `review` stage last among the automatic stages, before `human`, for any task
+  with acceptance criteria; under `auto` it carries `onlyIf: 'risky-or-weakly-verified'`, decided
+  at verify time from the task's newest assessment: risk ≥ `moderate` or verifiability ≤ `weak`.
+  No assessment runs it. A kind in `requiredFor` gets a required, ungated stage whatever `when`
+  says. A skipped stage is `unavailable` with `skipped: true` and costs nothing.
+- **What it can decide.** Advisory: nothing — an unmet or unclear verdict is "n advisory checks
+  failed" on an otherwise passing result. Required: `unmet` fails the attempt (`quality-new`,
+  signature `review:c2,…`), `unclear` is `inconclusive` (§14.3), and a reviewer that could not
+  answer is `error`. A required review with no reviewer configured is `inconclusive`, not a silent
+  pass. `review` is never in `verifies()`, so it cannot turn `unverified` into `passed`.
+- **Where it shows.** `VerificationResult.review` keeps the verdict; `TaskVerificationView.review`
+  pairs each verdict with the criterion's own text, and the strip draws it open under the stage
+  lines: glyph, criterion, reason, then concerns, headed "Review (advisory|required) · model ·
+  cost".
+- **Telemetry.** Each `review` entry on the `attempt` record carries `met`/`unmet`/`unclear`
+  counts, the number of concerns and repairs, the model, tokens and cost — never the reasons,
+  which quote the code. Beside the command stages on the same record, that is what "does it catch
+  what the tests miss" will be answered from.
 
 ---
 
@@ -2462,6 +2565,60 @@ from James's own shadow data is possible and stays on the machine.
     that kind.
 
   Automatic routing is then opt-in per mission, starting with low-risk missions.
+
+### 27.4 As built (#39, 2026-09-26)
+
+- **The cards.** `test/fixtures/routing-corpus/*.json`, 31 of them, one per file, every §27.1
+  case plus a few that pin specific rules (a changelog in a repo with no verification, a lint fix
+  whose verb reads as a bugfix, a persisted-format flag, a hard cross-cutting feature). A card
+  carries a made-up repository (`repo.files` is path → bytes, plus its verification command
+  names, risk rules and exclusive resources), so the assessor's real rule pass runs over it
+  through an in-memory file system: nothing is stubbed between the card and `deterministicPass`.
+  Labels are the five ordinals plus `kind`, with optional per-dimension confidence. Expectations
+  are `tierIn`, `effortIn`, `requires`, `gates`, `notGates` and `never` shapes.
+- **The harness.** `test/orchestration/routingCorpus.ts` loads and validates the cards (a card
+  whose ranges and `never` list overlap is rejected), turns a card into rule inputs, and holds the
+  checks. `routingCorpus.test.ts` runs in `npm test`:
+  - every label must be one the assessor could actually produce: labels → model answer →
+    `combine` must give the labels back. A label the rules override is a corpus bug or a rule
+    bug. Writing the corpus found four rule bugs, fixed in `asm-2` (see below);
+  - labelled assessment → router → requirement must land inside every card's expectations;
+  - zero egregious misroutes, across the labelled assessments **and** across the rules-only
+    assessments (the completion failed), which must route safely too.
+- **Egregious, as code** (`EGREGIOUS`): docs at expert tier and high effort or more; architecture
+  or plan at basic tier or low effort; critical risk below expert; and §9.2's principle, basic
+  tier without at least partial verification or above moderate risk.
+- **The router seam.** `test/orchestration/corpusRouter.ts` adapts #38's `routeTask` to "an
+  assessment in, a requirement out", with the default tier list. A router signature change is a
+  change there only.
+- **The live evaluation.** `routingCorpus.live.test.ts`, behind `AW_LIVE_ASSESSOR=1`: every card
+  through the real `Assessor` (rules plus one `haiku` completion, two at a time), agreement per
+  dimension (exact and within one level) and for `kind`, plus the downstream requirement check.
+  It prints numbers only and writes `test/fixtures/routing-corpus/recorded/<assessor version>.json`:
+  the model's structured answers keyed by card, with a hash of what the card showed the model,
+  the agreement, and which completions failed and why. The cards are invented, so it is
+  public-safe and committed. `npm test` replays it: the replayed agreement must equal the
+  recorded one, and the real answers must never route egregiously. A card edited since the
+  recording is skipped, not replayed against a stale answer; a new assessor version has no
+  recording until someone runs the live evaluation.
+- **Rule fixes the corpus forced (`asm-1` → `asm-2`).**
+  - A kind guessed from a verb in the objective (`confidence: low`) beat the model, even though
+    the code said the model may disagree: "Fix the lint warnings" was a bugfix whatever the model
+    said. It is now a fallback for when there is no model answer. A kind the task carries, or one
+    the files decide (docs only, tests only), still stands.
+  - "No acceptance criteria → underspecified" was an answer, so a model could never raise it to
+    `open-ended`, and the vaguest tasks could never get the `plan-first` gate. It is a floor now.
+  - Breadth counted a source file and its test as two top-level directories, so every "change
+    plus test" task was `cross-cutting` and gained a tier point. The spread is measured over code
+    files; tests still count towards the number of files.
+  - Two files at the repository root (`package.json` and its lockfile) were two "top levels", so
+    `cross-cutting`. Root files share one.
+- **Open, not changed.** A docs-only scope still makes complexity `trivial` by rule, so a design
+  write-up in Markdown is routed as trivial documentation (standard tier at most, by the docs
+  ceiling, but low effort). §8.2 sanctions the rule; the corpus has no card that disputes it
+  yet. In the first live run the model also answered `kind: plan` for a vague request. `plan` is
+  meant for the planner's own task (§11.1), and the model can still name it; the result
+  over-routes, which is safe.
 
 ---
 

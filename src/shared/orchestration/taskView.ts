@@ -20,6 +20,7 @@
  *   never dropped, so every chip here has to be short enough to survive that.
  */
 import { formatDuration } from '../model';
+import { modelLabel } from '../modelName';
 import { formatTokens, formatUsd } from '../sessionUsage';
 import type {
   AttemptState,
@@ -53,9 +54,38 @@ export interface TaskRouteView {
   /** AW's effort level, when the target had one. */
   effort?: EffortLevel | string;
   tier?: TierName;
-  /** `manual` until #38 routes anything; shown as a marker beside the route. */
+  /** `manual` or `assisted` (#38); `auto` from #42. Shown as a marker beside the route. */
   mode: RoutingMode;
   location?: 'hosted' | 'local';
+  /** Why this route, from the stored decision (§9.5): the tooltip's second paragraph. */
+  why?: string;
+}
+
+/**
+ * "Why this route" (§9.5, #38), assembled from the stored decision and never
+ * regenerated: which rules fired on which inputs, what the requirement was,
+ * and every candidate the resolver passed over and why.
+ */
+export interface RouteExplanationView {
+  /** "Sonnet 5 · medium (standard)". What ran. */
+  headline: string;
+  /** "Recommended and accepted", "Picked by you", "Changed from the recommendation (effort)". */
+  decided: string;
+  /** The §9.5 paragraph: the chip's tooltip and the panel's first line. */
+  summary: string;
+  /** "standard (up to expert) · medium effort · needs edit, shell · 150k context". */
+  requirement?: string;
+  /** Each rule that fired, in the order it fired. */
+  rules: { ruleId: string; text: string }[];
+  gates: string[];
+  /** In `manual`, or when the user changed it: what the router would have picked, and how that compares. */
+  comparison?: string;
+  fallbacks: string[];
+  rejected: string[];
+  /** Why the router could not route it, or why it upgraded. */
+  note?: string;
+  /** The router and catalog versions it was decided with. */
+  versions?: string;
 }
 
 /** One line of the strip's attempts list. Each opens its own session. */
@@ -142,6 +172,20 @@ export interface TaskVerificationView {
   stages: string[];
   /** The log of the first stage worth opening, when one was written. */
   logPath?: string;
+  /** The reviewer's verdict per acceptance criterion, when a review ran (#36). */
+  review?: TaskReviewView;
+}
+
+/** A `review` stage's verdict as the strip shows it (#36). */
+export interface TaskReviewView {
+  /** Required by the repository's policy; otherwise advisory. */
+  required: boolean;
+  /** The stage outcome: `passed`, `failed`, `inconclusive`. */
+  outcome: string;
+  criteria: { id: string; text: string; verdict: 'met' | 'unmet' | 'unclear'; why: string }[];
+  concerns: string[];
+  model: string;
+  costUsd?: number;
 }
 
 /** The task strip above the conversation (§18.3). Built by the host, drawn by the pane. */
@@ -158,6 +202,8 @@ export interface TaskView {
   route?: TaskRouteView;
   /** What the work is like (#37). Absent until the assessor has answered. */
   assessment?: TaskAssessmentView;
+  /** Why the current attempt runs where it does (#38). Absent before the first attempt. */
+  routing?: RouteExplanationView;
   /** `n` of `of`: the attempt on screen, and how many there have been. */
   attempt?: { n: number; of: number };
   branch?: string;
@@ -226,10 +272,11 @@ export function routeChipTitle(r: TaskRouteView): string {
   if (r.effort) parts.push(`${r.effort} effort`);
   parts.push(`${r.mode} routing`);
   if (r.location === 'local') parts.push('local model');
-  return parts.join(' · ');
+  const line = parts.join(' · ');
+  return r.why ? `${line}\n\n${r.why}` : line;
 }
 
-/** `manual` needs no marker; the other two do, until #38 makes them common. */
+/** `manual` needs no marker; the other two do. */
 export function routeModeMarker(mode: RoutingMode): string | undefined {
   return mode === 'manual' ? undefined : mode === 'auto' ? 'A' : 'a';
 }
@@ -351,6 +398,25 @@ export function assessmentChipTitle(a: TaskAssessmentView): string {
   if (a.requires.length > 0) parts.push(`needs: ${a.requires.join(', ')}`);
   if (a.note) parts.push(a.note);
   return parts.join('\n');
+}
+
+/** A criterion verdict's glyph in the strip's review list (#36). */
+export const CRITERION_GLYPH: Record<TaskReviewView['criteria'][number]['verdict'], string> = {
+  met: '✓',
+  unmet: '✗',
+  unclear: '?',
+};
+
+/**
+ * The review list's heading: "Review (advisory) · sonnet · $0.12".
+ * Advisory or required first, because it decides whether the verdict below
+ * can hold the task back.
+ */
+export function reviewHeadText(r: TaskReviewView): string {
+  const parts = [`Review (${r.required ? 'required' : 'advisory'})`];
+  if (r.model) parts.push(modelLabel(r.model) ?? r.model);
+  if (r.costUsd !== undefined) parts.push(formatUsd(r.costUsd));
+  return parts.join(' · ');
 }
 
 /** The strip's one-line summary, used as its collapsed state and its tooltip. */

@@ -20,7 +20,9 @@ import {
   assessmentChipTitle,
   assessmentRowTitle,
   attemptLine,
+  CRITERION_GLYPH,
   diffStatText,
+  reviewHeadText,
   routeChipText,
   routeChipTitle,
   routeIsLoud,
@@ -1226,6 +1228,90 @@ function setBanner(next: ConversationCapabilities): void {
 let task: TaskView | undefined;
 let attemptsOpen = false;
 let assessmentOpen = false;
+let routingOpen = false;
+
+/**
+ * "Why this route" (§9.5, #38): the rules that fired, the requirement, and the
+ * candidates passed over, as the host assembled them from the stored decision.
+ */
+function routingPanel(r: NonNullable<TaskView['routing']>): HTMLElement {
+  const box = document.createElement('div');
+  box.className = 'tsroutewhy';
+  const line = (cls: string, text: string) => {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.textContent = text;
+    box.append(el);
+    return el;
+  };
+  line('tsroutesum', `${r.decided}: ${r.headline}`);
+  if (r.comparison) line('', r.comparison);
+  if (r.requirement) line('', `Needs ${r.requirement}`);
+  if (r.gates.length > 0) line('', `Gates: ${r.gates.join(', ')}`);
+  if (r.note) line('', r.note);
+  if (r.rules.length > 0) {
+    line('tsroutehead', 'Rules');
+    for (const rule of r.rules) {
+      const row = line('tsrouterule', '');
+      const id = document.createElement('span');
+      id.className = 'tsrouteid';
+      id.textContent = rule.ruleId;
+      row.append(id, document.createTextNode(rule.text));
+    }
+  }
+  if (r.fallbacks.length > 0) {
+    line('tsroutehead', 'Fallbacks');
+    for (const f of r.fallbacks) line('tsrouterule', f);
+  }
+  if (r.rejected.length > 0) {
+    line('tsroutehead', 'Not chosen');
+    for (const f of r.rejected) line('tsrouterule', f);
+  }
+  if (r.versions) line('tsroutefoot', r.versions);
+  return box;
+}
+
+/**
+ * The reviewer's verdict (#36): one row per acceptance criterion — its glyph,
+ * the criterion as the user wrote it, and the reviewer's reason under it —
+ * then any concerns. Always open: a verdict whose reasons are behind a click
+ * is one the user takes on trust. DOM and `textContent` throughout, because
+ * the reasons quote the code and the criteria are the user's own text.
+ */
+function reviewPanel(r: NonNullable<NonNullable<TaskView['verification']>['review']>): HTMLElement {
+  const box = document.createElement('div');
+  box.className = 'tsreview';
+  const head = document.createElement('div');
+  head.className = 'tsreview-head';
+  head.textContent = reviewHeadText(r);
+  box.append(head);
+  for (const c of r.criteria) {
+    const row = document.createElement('div');
+    row.className = `tscrit v-${c.verdict}`;
+    row.title = `${c.id}: ${c.verdict}`;
+    const glyph = document.createElement('span');
+    glyph.className = 'tscrit-glyph';
+    glyph.textContent = CRITERION_GLYPH[c.verdict];
+    const text = document.createElement('span');
+    text.className = 'tscrit-text';
+    text.textContent = c.text;
+    row.append(glyph, text);
+    if (c.why) {
+      const why = document.createElement('span');
+      why.className = 'tscrit-why';
+      why.textContent = c.why;
+      row.append(why);
+    }
+    box.append(row);
+  }
+  for (const concern of r.concerns) {
+    const row = document.createElement('div');
+    row.className = 'tsconcern';
+    row.textContent = `⚠ ${concern}`;
+    box.append(row);
+  }
+  return box;
+}
 
 /**
  * The assessment panel: one line per dimension, each saying its value, how
@@ -1371,6 +1457,7 @@ function renderTask(): void {
       }
       taskStrip.append(list);
     }
+    if (v.review) taskStrip.append(reviewPanel(v.review));
   }
 
   const actions = document.createElement('div');
@@ -1423,8 +1510,23 @@ function renderTask(): void {
     });
     actions.append(toggle);
   }
+  // Why this route: reachable from the strip as well as the chip's tooltip,
+  // because a tooltip cannot be read at leisure or copied (#38).
+  if (t.routing) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tsbtn link';
+    toggle.setAttribute('aria-expanded', String(routingOpen));
+    toggle.textContent = routingOpen ? 'Hide route' : 'Why this route';
+    toggle.addEventListener('click', () => {
+      routingOpen = !routingOpen;
+      renderTask();
+    });
+    actions.append(toggle);
+  }
   if (actions.childElementCount > 0) taskStrip.append(actions);
 
+  if (routingOpen && t.routing) taskStrip.append(routingPanel(t.routing));
   if (assessmentOpen && t.assessment) taskStrip.append(assessmentPanel(t.assessment));
 
   if (attemptsOpen && t.attempts.length > 1) {
@@ -2170,7 +2272,7 @@ vscodeApi.onMessage((body) => {
       // A different conversation is a different task (usually none at all), so
       // the attempts list and the assessment start closed rather than
       // inheriting the last one's.
-      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = false;
+      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = routingOpen = false;
       task = m.task;
       renderTask();
       stick = true;
@@ -2210,7 +2312,7 @@ vscodeApi.onMessage((body) => {
       setBanner(m.caps);
       break;
     case 'task':
-      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = false;
+      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = routingOpen = false;
       task = m.task;
       renderTask();
       break;
