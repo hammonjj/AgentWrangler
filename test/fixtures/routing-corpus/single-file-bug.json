@@ -1,0 +1,20 @@
+{
+  "id": "single-file-bug",
+  "case": "single-file bug with strong tests",
+  "card": {
+    "objective": "Fix the pagination parser dropping the last page when the item count is an exact multiple of the page size.",
+    "acceptanceCriteria": ["A 20-item list with page size 10 yields two pages.", "Existing parser tests still pass."],
+    "scope": ["src/core/parser.ts"],
+    "verification": ["test", "typecheck"],
+    "repo": {
+      "files": { "src/core/parser.ts": 11000, "src/core/store.ts": 22000, "test/parser.test.ts": 7000, "package.json": 1500 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "single-file", "risk": "moderate", "ambiguity": "clear", "verifiability": "strong", "kind": "bugfix" },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low", "medium", "high"],
+    "never": [{ "tier": "expert" }, { "effort": "max" }]
+  }
+}

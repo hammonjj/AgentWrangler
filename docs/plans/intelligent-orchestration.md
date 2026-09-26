@@ -912,7 +912,7 @@ assessment at `confidence: low`, which routes conservatively. Assessment never b
 
 - **Where it lives.** `src/orchestration/policy/assessment.ts` is the pure part: the ordinals, the
   deterministic pass, the JSON schema, the prompt, the combine step and `inputsHash`, with
-  `ASSESSOR_VERSION = 'asm-1'` over all of it. `src/orchestration/policy/assessor.ts` adds the
+  `ASSESSOR_VERSION = 'asm-1'` over all of it (`asm-2` since #39's rule fixes, §27.4). `src/orchestration/policy/assessor.ts` adds the
   three things rules cannot have — the repository on disk, the completion and a cache.
   `src/orchestration/policy/globs.ts` is the glob matching risk paths and exclusive resources
   need; a wildcard-free pattern also matches what is under it, and `globsOverlap` compares two
@@ -2565,6 +2565,60 @@ from James's own shadow data is possible and stays on the machine.
     that kind.
 
   Automatic routing is then opt-in per mission, starting with low-risk missions.
+
+### 27.4 As built (#39, 2026-09-26)
+
+- **The cards.** `test/fixtures/routing-corpus/*.json`, 31 of them, one per file, every §27.1
+  case plus a few that pin specific rules (a changelog in a repo with no verification, a lint fix
+  whose verb reads as a bugfix, a persisted-format flag, a hard cross-cutting feature). A card
+  carries a made-up repository (`repo.files` is path → bytes, plus its verification command
+  names, risk rules and exclusive resources), so the assessor's real rule pass runs over it
+  through an in-memory file system: nothing is stubbed between the card and `deterministicPass`.
+  Labels are the five ordinals plus `kind`, with optional per-dimension confidence. Expectations
+  are `tierIn`, `effortIn`, `requires`, `gates`, `notGates` and `never` shapes.
+- **The harness.** `test/orchestration/routingCorpus.ts` loads and validates the cards (a card
+  whose ranges and `never` list overlap is rejected), turns a card into rule inputs, and holds the
+  checks. `routingCorpus.test.ts` runs in `npm test`:
+  - every label must be one the assessor could actually produce: labels → model answer →
+    `combine` must give the labels back. A label the rules override is a corpus bug or a rule
+    bug. Writing the corpus found four rule bugs, fixed in `asm-2` (see below);
+  - labelled assessment → router → requirement must land inside every card's expectations;
+  - zero egregious misroutes, across the labelled assessments **and** across the rules-only
+    assessments (the completion failed), which must route safely too.
+- **Egregious, as code** (`EGREGIOUS`): docs at expert tier and high effort or more; architecture
+  or plan at basic tier or low effort; critical risk below expert; and §9.2's principle, basic
+  tier without at least partial verification or above moderate risk.
+- **The router seam.** `test/orchestration/corpusRouter.ts` adapts #38's `routeTask` to "an
+  assessment in, a requirement out", with the default tier list. A router signature change is a
+  change there only.
+- **The live evaluation.** `routingCorpus.live.test.ts`, behind `AW_LIVE_ASSESSOR=1`: every card
+  through the real `Assessor` (rules plus one `haiku` completion, two at a time), agreement per
+  dimension (exact and within one level) and for `kind`, plus the downstream requirement check.
+  It prints numbers only and writes `test/fixtures/routing-corpus/recorded/<assessor version>.json`:
+  the model's structured answers keyed by card, with a hash of what the card showed the model,
+  the agreement, and which completions failed and why. The cards are invented, so it is
+  public-safe and committed. `npm test` replays it: the replayed agreement must equal the
+  recorded one, and the real answers must never route egregiously. A card edited since the
+  recording is skipped, not replayed against a stale answer; a new assessor version has no
+  recording until someone runs the live evaluation.
+- **Rule fixes the corpus forced (`asm-1` → `asm-2`).**
+  - A kind guessed from a verb in the objective (`confidence: low`) beat the model, even though
+    the code said the model may disagree: "Fix the lint warnings" was a bugfix whatever the model
+    said. It is now a fallback for when there is no model answer. A kind the task carries, or one
+    the files decide (docs only, tests only), still stands.
+  - "No acceptance criteria → underspecified" was an answer, so a model could never raise it to
+    `open-ended`, and the vaguest tasks could never get the `plan-first` gate. It is a floor now.
+  - Breadth counted a source file and its test as two top-level directories, so every "change
+    plus test" task was `cross-cutting` and gained a tier point. The spread is measured over code
+    files; tests still count towards the number of files.
+  - Two files at the repository root (`package.json` and its lockfile) were two "top levels", so
+    `cross-cutting`. Root files share one.
+- **Open, not changed.** A docs-only scope still makes complexity `trivial` by rule, so a design
+  write-up in Markdown is routed as trivial documentation (standard tier at most, by the docs
+  ceiling, but low effort). §8.2 sanctions the rule; the corpus has no card that disputes it
+  yet. In the first live run the model also answered `kind: plan` for a vague request. `plan` is
+  meant for the planner's own task (§11.1), and the model can still name it; the result
+  over-routes, which is safe.
 
 ---
 

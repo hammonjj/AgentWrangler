@@ -1,0 +1,20 @@
+{
+  "id": "flaky-test-fix",
+  "case": "flaky test fix",
+  "card": {
+    "objective": "Find out why the store reconnect test fails intermittently on CI and fix the cause, not the symptom.",
+    "acceptanceCriteria": ["The cause is named in the commit message.", "The test passes 200 runs in a row locally."],
+    "scope": ["test/store.test.ts", "src/core/store.ts"],
+    "verification": ["test"],
+    "repo": {
+      "files": { "src/core/store.ts": 22000, "src/core/reconnect.ts": 6000, "test/store.test.ts": 15000 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "involved", "breadth": "few-files", "risk": "low", "ambiguity": "minor-gaps", "verifiability": "weak", "kind": "bugfix" },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high", "max"],
+    "never": [{ "tier": "basic" }, { "effort": "low" }]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "persisted-format-flag",
+  "case": "small change to a persisted format",
+  "card": {
+    "objective": "Add a pinned flag to the saved session index, reading older index files that lack it as unpinned.",
+    "acceptanceCriteria": ["Pinned survives a restart.", "An index file from the previous build loads with every session unpinned."],
+    "scope": ["src/core/sessionIndex.ts"],
+    "verification": ["test", "typecheck"],
+    "repo": {
+      "files": { "src/core/sessionIndex.ts": 10000, "src/core/store.ts": 22000, "test/sessionIndex.test.ts": 8000 },
+      "verification": ["test", "typecheck"],
+      "risk": [{ "paths": ["src/core/sessionIndex.ts"], "level": "high", "why": "persisted format read by older builds" }]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "single-file", "risk": "high", "ambiguity": "clear", "verifiability": "strong", "kind": "feature" },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "never": [{ "tier": "basic" }]
+  }
+}

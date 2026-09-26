@@ -1,0 +1,20 @@
+{
+  "id": "git-conflict-resolution",
+  "case": "git conflict resolution",
+  "card": {
+    "objective": "Resolve the merge conflicts from rebasing the export branch onto main, keeping both the new CSV option and the flag that main renamed.",
+    "acceptanceCriteria": ["No conflict markers remain.", "Both the CSV option and the renamed flag work.", "Tests pass."],
+    "scope": ["src/cli/export.ts", "src/cli/flags.ts"],
+    "verification": ["test", "typecheck"],
+    "repo": {
+      "files": { "src/cli/export.ts": 9000, "src/cli/flags.ts": 5000, "src/cli/index.ts": 3000, "test/cli.test.ts": 8000 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "involved", "breadth": "few-files", "risk": "moderate", "ambiguity": "minor-gaps", "verifiability": "strong", "kind": "conflict-resolution", "domains": ["git"] },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "never": [{ "tier": "basic" }]
+  }
+}

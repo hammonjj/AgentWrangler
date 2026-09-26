@@ -1,0 +1,20 @@
+{
+  "id": "parser-bug-weak-tests",
+  "case": "tricky single-file bug, weak verification",
+  "card": {
+    "objective": "Fix the date parser applying the wrong timezone offset to timestamps that fall inside a daylight-saving transition.",
+    "acceptanceCriteria": ["Timestamps in the skipped and repeated hours convert to the correct UTC instant."],
+    "scope": ["src/time/parseDate.ts"],
+    "verification": [],
+    "repo": {
+      "files": { "src/time/parseDate.ts": 9000, "src/time/format.ts": 5000, "package.json": 1500 },
+      "verification": ["lint"]
+    }
+  },
+  "labels": { "complexity": "involved", "breadth": "single-file", "risk": "moderate", "ambiguity": "minor-gaps", "verifiability": "weak", "kind": "bugfix" },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "never": [{ "tier": "basic" }, { "effort": "low" }]
+  }
+}

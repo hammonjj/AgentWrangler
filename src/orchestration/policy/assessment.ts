@@ -47,7 +47,7 @@ import { matchesAny, overlapping } from './globs';
  * It is recorded on every assessment, so an assessment made by an older
  * assessor is never mistaken for one this build would make.
  */
-export const ASSESSOR_VERSION = 'asm-1';
+export const ASSESSOR_VERSION = 'asm-2';
 
 // ---------------------------------------------------------------------------
 // Ordinals
@@ -196,11 +196,21 @@ function contextLoadOf(facts: ScopeFacts): Assessed<ContextLoad> {
   };
 }
 
+/** Same shape as the assessor's walk uses to count test files. */
+const TEST_FILE = /(^|[./\\-])(test|tests|spec|__tests__)([./\\-]|$)/i;
+
 function breadthOf(facts: ScopeFacts): Assessed<Breadth> | undefined {
   if (!facts.known || facts.files.length === 0) return undefined;
   const n = facts.files.length;
-  const value: Breadth =
-    n === 1 ? 'single-file' : facts.topLevels.length > 1 || facts.directories.length > 6 ? 'cross-cutting' : n <= 4 ? 'few-files' : 'subsystem';
+  // Spread is measured over the code, not its tests: tests usually live in a
+  // tree of their own that mirrors the source, so a source file and its test
+  // are two top-level directories and still one area of the repository (#39).
+  const code = facts.files.filter((f) => !TEST_FILE.test(f));
+  const spread = code.length > 0 ? code : facts.files;
+  const dirs = new Set(spread.map((f) => (f.lastIndexOf('/') < 0 ? '' : f.slice(0, f.lastIndexOf('/')))));
+  // Files at the root share one "top level": the root, not one per file name.
+  const tops = new Set(spread.map((f) => (f.includes('/') ? f.split('/')[0] : '')));
+  const value: Breadth = n === 1 ? 'single-file' : tops.size > 1 || dirs.size > 6 ? 'cross-cutting' : n <= 4 ? 'few-files' : 'subsystem';
   return {
     value,
     confidence: facts.truncated ? 'medium' : 'high',
@@ -606,16 +616,30 @@ export function combine(rules: RulePass, model: ModelAnswer | undefined, edits: 
         : m;
   }
 
+  // Ambiguity: "no acceptance criteria" is a floor, not an answer. The model may
+  // still find the task open-ended, which is what adds the plan-first gate
+  // (§9.3), and a task with nothing saying when it is done is never clear (#39).
+  let ambiguity: Assessed<Ambiguity>;
+  if (edits.ambiguity === undefined && d.ambiguity && model && rank(AMBIGUITY_LEVELS, model.ambiguity.value) > rank(AMBIGUITY_LEVELS, d.ambiguity.value)) {
+    ambiguity = fromModel(model.ambiguity);
+  } else {
+    ambiguity = pick(AMBIGUITY_LEVELS, 'minor-gaps', d.ambiguity, model?.ambiguity, edits.ambiguity, NO_MODEL);
+  }
+
   const dimensions: AssessmentDimensions = {
     complexity: pick(COMPLEXITY_LEVELS, 'involved', d.complexity, model?.complexity, edits.complexity, NO_MODEL),
     breadth: pick(BREADTH_LEVELS, 'subsystem', d.breadth, model?.breadth, edits.breadth, NO_MODEL),
     risk,
-    ambiguity: pick(AMBIGUITY_LEVELS, 'minor-gaps', d.ambiguity, model?.ambiguity, edits.ambiguity, NO_MODEL),
+    ambiguity,
     verifiability,
     contextLoad: edits.contextLoad !== undefined ? userValue(edits.contextLoad) : d.contextLoad ?? contextLoadOf(NO_SCOPE_FACTS),
   };
 
-  const kind = pick(TASK_KINDS, 'feature', rules.kind, model?.kind, edits.kind, NO_MODEL);
+  // A kind guessed from a verb in the objective is a hint for when there is no
+  // model answer; the model read the whole objective and wins over it (#39).
+  // A kind the task carries, or one the files decide (docs only, tests only), stands.
+  const kindHint = rules.kind && model && rules.kind.from === 'rule' && rules.kind.confidence === 'low' ? undefined : rules.kind;
+  const kind = pick(TASK_KINDS, 'feature', kindHint, model?.kind, edits.kind, NO_MODEL);
   const domains = edits.domains ?? [...new Set([...rules.domains, ...(model?.domains ?? []).map((s) => s.toLowerCase().trim()).filter(Boolean)])].sort();
   // A model may only add tool needs it is allowed to name; `exclusive:` comes from policy alone.
   const requires =

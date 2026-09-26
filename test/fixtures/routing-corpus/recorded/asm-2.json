@@ -1,0 +1,1259 @@
+{
+  "assessorVersion": "asm-2",
+  "model": "haiku",
+  "recordedAt": "2026-09-26",
+  "agreement": {
+    "cards": 28,
+    "dimensions": {
+      "complexity": {
+        "exact": 21,
+        "withinOne": 28
+      },
+      "breadth": {
+        "exact": 27,
+        "withinOne": 28
+      },
+      "risk": {
+        "exact": 21,
+        "withinOne": 28
+      },
+      "ambiguity": {
+        "exact": 22,
+        "withinOne": 28
+      },
+      "verifiability": {
+        "exact": 19,
+        "withinOne": 27
+      }
+    },
+    "kind": {
+      "exact": 24
+    }
+  },
+  "failed": {
+    "architecture-change": "error",
+    "db-migration": "error",
+    "memory-leak": "error"
+  },
+  "answers": {
+    "ci-config": {
+      "cardHash": "edae0ccd",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Standard CI pattern: copy existing job configuration and change runner platform from Linux to macOS"
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Only .github/workflows/ci.yml is in scope per established facts"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "CI controls build/publish pipeline; however, adding new job alongside existing one limits impact if macOS job fails while Linux job remains unaffected"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Acceptance criteria explicitly specify platform (macOS), Node version (20), and constraint (Linux job unchanged)"
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "medium",
+          "evidence": "YAML syntax and job structure verifiable via static analysis, but runtime behavior and test success on macOS require workflow execution"
+        },
+        "kind": {
+          "value": "feature",
+          "confidence": "high",
+          "evidence": "Task expands CI capability to a new platform"
+        },
+        "domains": [
+          "ci",
+          "github-actions",
+          "yaml"
+        ],
+        "requires": [
+          "edit"
+        ]
+      }
+    },
+    "code-review": {
+      "cardHash": "1fc2b473",
+      "answer": {
+        "kind": {
+          "value": "review",
+          "confidence": "high",
+          "evidence": "Objective explicitly states 'Review the export branch's diff for correctness problems'"
+        },
+        "complexity": {
+          "value": "involved",
+          "confidence": "medium",
+          "evidence": "Requires understanding code semantics and identifying correctness issues across multiple files; needs design knowledge but limited scope prevents 'hard'"
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Exactly 3 TypeScript files in scope (export.ts, flags.ts, index.ts) within src/cli directory"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "Export functionality affects data serialization/output correctness, but established facts note no matching repository risk paths"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Task objective and acceptance criteria are explicit: identify correctness problems with file, line, and failure scenario"
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "high",
+          "evidence": "Automated tools can detect syntax/pattern issues, but semantic correctness determination requires human review; findings may be subjective"
+        },
+        "domains": [
+          "typescript",
+          "cli",
+          "export"
+        ],
+        "requires": [
+          "edit"
+        ]
+      }
+    },
+    "css-tweak": {
+      "cardHash": "8e1549d8",
+      "answer": {
+        "complexity": {
+          "value": "trivial",
+          "confidence": "high",
+          "evidence": "Changing a CSS padding value from 4px to 6px is a mechanical text substitution with one obvious way to implement it."
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Scope explicitly lists only src/ui/table.css as the file to modify."
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "CSS spacing changes can affect layout and visual appearance; while not critical, incorrect implementation could break UI alignment without visible test coverage."
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Objective and acceptance criteria are explicit: change row padding from 4px to 6px in the session table."
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "CSS values are directly verifiable by code inspection; padding value can be confirmed to be exactly 6px and applied to the correct selector."
+        },
+        "kind": {
+          "value": "chore",
+          "confidence": "medium",
+          "evidence": "This is a minor styling adjustment to spacing parameters, not a bug fix, feature, or refactor."
+        },
+        "domains": [
+          "css",
+          "ui",
+          "table"
+        ],
+        "requires": [
+          "edit"
+        ]
+      }
+    },
+    "docs-changelog-unverified": {
+      "cardHash": "966ad4c6",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Straightforward markdown editing: insert a new version section with three bullet points in the correct location (above 1.3.2)"
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Only CHANGELOG.md is in scope; task is isolated to one file"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "User-facing changelog affects user perception of releases; errors are visible but easily corrected and non-critical"
+        },
+        "ambiguity": {
+          "value": "minor-gaps",
+          "confidence": "medium",
+          "evidence": "The specific content of the three merged changes is not detailed in the task, though the implementer likely knows what they are"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Acceptance criteria are precise: 1.4.0 section must exist above 1.3.2 with exactly three entries—easily verified by parsing markdown"
+        },
+        "kind": {
+          "value": "chore",
+          "confidence": "high",
+          "evidence": "Changelog maintenance is routine documentation work, not feature/bugfix/test development"
+        },
+        "domains": [
+          "docs"
+        ],
+        "requires": [
+          "edit"
+        ]
+      }
+    },
+    "docs-guide-update": {
+      "cardHash": "771668a0",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "medium",
+          "evidence": "Straightforward documentation of existing command following established format patterns; no complex design needed"
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Exactly 2 files in scope: docs/guide.md and docs/cli.md"
+        },
+        "risk": {
+          "value": "low",
+          "confidence": "high",
+          "evidence": "Documentation-only changes with no data loss risk; automated docs-check provides verification safety"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "medium",
+          "evidence": "Acceptance criteria explicitly specify documenting export command and flags in both files with link checks; only ambiguity is understanding the command itself"
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "high",
+          "evidence": "Task explicitly notes partial verification; docs-check can verify links and structure but not semantic accuracy of command descriptions"
+        },
+        "kind": {
+          "value": "docs",
+          "confidence": "high",
+          "evidence": "Objective explicitly states 'Document the new export command'"
+        },
+        "domains": [
+          "docs",
+          "cli"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "flaky-test-fix": {
+      "cardHash": "4a6b5c23",
+      "answer": {
+        "kind": {
+          "value": "bugfix",
+          "confidence": "high",
+          "evidence": "Task explicitly asks to find and fix the root cause of an intermittent test failure"
+        },
+        "complexity": {
+          "value": "involved",
+          "confidence": "medium",
+          "evidence": "Intermittent test failures require investigation into subtle timing/race conditions and understanding of both test and implementation design"
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Scope explicitly limited to 2 files: test/store.test.ts and src/core/store.ts"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "Incorrect fix could hide real bugs in store reconnection; however, acceptance criteria requiring root cause fix mitigate this"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Task objective and success criteria are explicit: name the cause in commit and pass 200 consecutive runs"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Success is objectively verifiable: test passes 200 local runs and commit message documents the root cause"
+        },
+        "domains": [
+          "typescript",
+          "testing",
+          "async"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "git-conflict-resolution": {
+      "cardHash": "c9cf4695",
+      "answer": {
+        "kind": {
+          "value": "conflict-resolution",
+          "confidence": "high",
+          "evidence": "Task objective explicitly states 'resolve the merge conflicts' from rebase; acceptance criteria requires no conflict markers remain."
+        },
+        "complexity": {
+          "value": "involved",
+          "confidence": "medium",
+          "evidence": "Must reconcile two concurrent changes (CSV option + flag rename) that likely reference each other; not routine because design decisions needed about integration."
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Scope limited to 2 files: export.ts and flags.ts; contained change not touching subsystems."
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "Merge conflicts easily cause semantic errors (wrong references, broken features) that are hard to spot, but strong test verification catches mistakes."
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Objective and acceptance criteria are explicit: keep both features, tests must pass, no conflict markers—strategy is specified."
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "All three acceptance criteria are programmatically checkable: grep for conflict markers, run tests, verify both features function correctly."
+        },
+        "domains": [
+          "typescript",
+          "cli"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "large-mechanical-rename": {
+      "cardHash": "1493c654",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Mechanical search-and-replace refactoring with one obvious approach; TypeScript compilation will catch any missed references."
+        },
+        "breadth": {
+          "value": "subsystem",
+          "confidence": "medium",
+          "evidence": "Touches multiple interconnected modules (core, ui, app, cli, api, remote, tests) centered on user management feature; likely impacts most or all 10 files in scope."
+        },
+        "risk": {
+          "value": "low",
+          "confidence": "high",
+          "evidence": "TypeScript compilation will fail on any missed references; strong automated verification planned; pure internal rename with no external contracts or data involved."
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Objective and acceptance criteria are explicit: rename function everywhere, no behavior change, typecheck and tests must pass."
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Fully automated verification: typecheck catches missed references, tests verify behavior, grep confirms no old name remains."
+        },
+        "kind": {
+          "value": "refactor",
+          "confidence": "high",
+          "evidence": "Task explicitly states 'no behaviour change' and involves renaming a function; this is a pure refactoring operation."
+        },
+        "domains": [
+          "typescript"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "large-refactor": {
+      "cardHash": "bbc7786b",
+      "answer": {
+        "complexity": {
+          "value": "involved",
+          "confidence": "high",
+          "evidence": "Requires identifying and separating pure state transitions from effects, restructuring reducer, with design decisions on organization and high risk of subtle behavior changes"
+        },
+        "breadth": {
+          "value": "subsystem",
+          "confidence": "high",
+          "evidence": "All 8 files in single src/core/store directory, but refactoring entire store architecture"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "high",
+          "evidence": "State management bugs can evade tests; persistence/network issues possible; but tests gate change and repository risk paths don't match scope"
+        },
+        "ambiguity": {
+          "value": "minor-gaps",
+          "confidence": "medium",
+          "evidence": "Main goals clear, but implementation details open: reducer structure, role of events.ts, how to reorganize existing effect files"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Gated by existing test suite (must pass unchanged) and TypeScript compilation; behavior change directly testable"
+        },
+        "kind": {
+          "value": "refactor",
+          "confidence": "high",
+          "evidence": "Task explicitly states no behavior change, moving logic between files/functions, not adding features or fixing bugs"
+        },
+        "domains": [
+          "typescript",
+          "state-management",
+          "testing",
+          "persistence",
+          "network"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "lint-fix": {
+      "cardHash": "cb4ea15c",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Straightforward removal of flagged imports with one obvious approach: trust lint and delete identified lines"
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Exactly 3 TypeScript files in src/util, isolated change with no cross-cutting dependencies"
+        },
+        "risk": {
+          "value": "low",
+          "confidence": "high",
+          "evidence": "Removing unused imports is mechanically safe; lint tool prevents accidental removal of used imports"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Task objective and acceptance criteria are explicit: fix unused-import warnings until lint passes"
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "medium",
+          "evidence": "Lint and typecheck definitively verify import removal; established facts note verification is weak, possibly due to limited runtime validation"
+        },
+        "kind": {
+          "value": "bugfix",
+          "confidence": "high",
+          "evidence": "Task is explicitly fixing lint warnings, a code quality/maintenance fix"
+        },
+        "domains": [
+          "typescript",
+          "linting"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "multi-file-feature": {
+      "cardHash": "69f67cad",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "medium",
+          "evidence": "Standard feature pattern: config → UI → logic application with clear acceptance criteria, though idle detection method not specified"
+        },
+        "breadth": {
+          "value": "subsystem",
+          "confidence": "medium",
+          "evidence": "Coordinated changes across core (config, store) and UI (prefs) layers in 4 files, but localized to these subsystems"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "Affects session idle marking behavior; no risky paths identified but incorrect implementation could break idle detection"
+        },
+        "ambiguity": {
+          "value": "minor-gaps",
+          "confidence": "medium",
+          "evidence": "Core objective clear but needs deciding: config key name, default timeout value, idle detection method, UI control type"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "All acceptance criteria directly testable: persistence (config I/O), idle marking (logic), UI binding; typecheck covers types"
+        },
+        "kind": {
+          "value": "feature",
+          "confidence": "high",
+          "evidence": "Objective explicitly requests new configurable idle timeout capability"
+        },
+        "domains": [
+          "typescript",
+          "ui",
+          "config",
+          "session"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "offline-mode-feature": {
+      "cardHash": "e710c843",
+      "answer": {
+        "complexity": {
+          "value": "involved",
+          "confidence": "medium",
+          "evidence": "Requires coordination across transport, store, UI, and wire layers with ordering guarantees and edge case handling"
+        },
+        "breadth": {
+          "value": "cross-cutting",
+          "confidence": "high",
+          "evidence": "Scope spans remote/, core/store.ts, ui/, shared/wire.ts, and app/boot.ts across multiple subsystems"
+        },
+        "risk": {
+          "value": "high",
+          "confidence": "medium",
+          "evidence": "Message duplication or out-of-order delivery violates acceptance criteria and breaks data integrity in messaging system"
+        },
+        "ambiguity": {
+          "value": "minor-gaps",
+          "confidence": "high",
+          "evidence": "Three acceptance criteria are clear; implementation details like offline detection and failed replay handling need minor decisions"
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "medium",
+          "evidence": "Tests can verify ordering and replay happy path, but async timing bugs and cross-layer integration are harder to verify automatically"
+        },
+        "kind": {
+          "value": "feature",
+          "confidence": "high",
+          "evidence": "Task adds new offline-mode capability with message queuing"
+        },
+        "domains": [
+          "typescript",
+          "messaging",
+          "networking",
+          "ui",
+          "state-management",
+          "transport"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "parser-bug-weak-tests": {
+      "cardHash": "04bdabb5",
+      "answer": {
+        "complexity": {
+          "value": "involved",
+          "confidence": "medium",
+          "evidence": "DST transition logic is subtle with multiple edge cases (skipped and repeated hours); requires careful offset calculation"
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Scope explicitly limited to src/time/parseDate.ts"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "Incorrect DST handling silently produces wrong UTC instants during transitions; impact depends on how widely parser is used"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Acceptance criteria explicitly defines correct behavior: timestamps in transition hours must map to correct UTC instant"
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "medium",
+          "evidence": "DST bugs are testable via UTC conversion checks, but repo has weak verification setup per facts"
+        },
+        "kind": {
+          "value": "bugfix",
+          "confidence": "high",
+          "evidence": "Task explicitly describes fixing incorrect behavior in existing parser"
+        },
+        "domains": [
+          "timezone",
+          "datetime",
+          "typescript"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "performance-investigation": {
+      "cardHash": "bc5e2a46",
+      "answer": {
+        "kind": {
+          "value": "investigation",
+          "confidence": "high",
+          "evidence": "Task explicitly asks to investigate slowness, measure it, and report findings with no code changes required."
+        },
+        "complexity": {
+          "value": "involved",
+          "confidence": "high",
+          "evidence": "Requires understanding code flow, profiling to identify bottlenecks, and reasoning about performance improvements—not mechanical but also not subtly difficult."
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Scope is explicitly src/webview/conversation with 5 files total, a focused single-feature subsystem."
+        },
+        "risk": {
+          "value": "low",
+          "confidence": "high",
+          "evidence": "Investigation report with no code changes; worst case is inaccurate findings, not data loss or system breakage."
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Task objectives and acceptance criteria are specific: identify slowest step, provide timings, propose a fix."
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "medium",
+          "evidence": "Report structure and required sections are verifiable; correctness of performance measurements and quality of proposed fixes are hard to verify without profiling and testing."
+        },
+        "requires": [
+          "edit",
+          "vision"
+        ],
+        "domains": [
+          "typescript",
+          "performance",
+          "webview"
+        ]
+      }
+    },
+    "persisted-format-flag": {
+      "cardHash": "772e1150",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "One clear path: add field with backward-compatible default; no subtle design issues"
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Scope explicitly limited to src/core/sessionIndex.ts per established facts"
+        },
+        "risk": {
+          "value": "high",
+          "confidence": "high",
+          "evidence": "Established facts flag this as persisted format risk path; breaking it loses sessions or blocks old builds"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Objective and acceptance criteria are explicit; no discretion needed on what to implement"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Established facts confirm test and typecheck configured; criteria are testable (flag presence, defaults, persistence)"
+        },
+        "kind": {
+          "value": "feature",
+          "confidence": "high",
+          "evidence": "Objective explicitly states adding new pinned flag capability"
+        },
+        "domains": [
+          "typescript",
+          "sessions",
+          "persistence"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "plan-mission": {
+      "cardHash": "2562d81e",
+      "answer": {
+        "kind": {
+          "value": "plan",
+          "confidence": "high",
+          "evidence": "Task explicitly states 'kind is plan' and objective is to break feature into subtasks with structure"
+        },
+        "complexity": {
+          "value": "involved",
+          "confidence": "high",
+          "evidence": "Requires design decisions about task boundaries, dependencies, granularity, and implementation order for a non-trivial feature"
+        },
+        "breadth": {
+          "value": "cross-cutting",
+          "confidence": "medium",
+          "evidence": "Offline-mode typically spans network, storage, UI, and sync layers; however scope is unspecified so guessing from domain knowledge"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "high",
+          "evidence": "Poor planning causes implementation rework and circular dependencies, but can be corrected before work starts"
+        },
+        "ambiguity": {
+          "value": "underspecified",
+          "confidence": "high",
+          "evidence": "Feature scope unclear (what does offline-mode include?), system architecture unknown, file scope unspecified, context missing"
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "high",
+          "evidence": "Can verify tasks have AC and no dependency cycles (structural), but cannot verify plan completeness or correctness without domain context"
+        },
+        "domains": [
+          "planning",
+          "architecture"
+        ],
+        "requires": [
+          "edit"
+        ]
+      }
+    },
+    "protocol-dependency-bump": {
+      "cardHash": "6a0a4eff",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "medium",
+          "evidence": "Straightforward version bump in package files with automated test verification; complexity in backward-compat handling is in existing code/tests, not this task"
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Only 2 files in scope: package.json and package-lock.json"
+        },
+        "risk": {
+          "value": "high",
+          "confidence": "medium",
+          "evidence": "Encoder pins host protocol; older hosts must still decode. Repository risk path explicitly flags this, but configured tests should catch breakage"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Explicit version target (3.x) and acceptance criteria (round-trip tests with recorded 2.x frames) are unambiguous"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Task explicitly states 'Configured verification: strong — test, typecheck'; backward compatibility is automatically verified by protocol tests"
+        },
+        "kind": {
+          "value": "chore",
+          "confidence": "medium",
+          "evidence": "Routine dependency version upgrade; 'bump' indicates maintenance, not significant protocol changes or new features"
+        },
+        "domains": [
+          "encoder",
+          "protocol"
+        ],
+        "requires": [
+          "edit",
+          "shell",
+          "network"
+        ]
+      }
+    },
+    "python-endpoint": {
+      "cardHash": "70c11669",
+      "answer": {
+        "kind": {
+          "value": "feature",
+          "confidence": "high",
+          "evidence": "New endpoint with explicit requirements and acceptance criteria including test coverage."
+        },
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Standard pattern: register route, track app start time, read version from config, return JSON. One obvious implementation approach."
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Scope explicitly limited to 2 files; localized endpoint addition with no cross-subsystem impact."
+        },
+        "risk": {
+          "value": "low",
+          "confidence": "high",
+          "evidence": "Health endpoint is non-critical infrastructure with no data mutation, auth changes, or breaking changes to existing APIs."
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "medium",
+          "evidence": "Endpoint path, method, format, and status code are explicit; implementation details like version source and uptime units are unspecified but follow standard conventions."
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Testable via HTTP: verify 200 status, JSON structure with version and uptime fields, and test file passes."
+        },
+        "domains": [
+          "python",
+          "web",
+          "monitoring",
+          "test"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "readme-typo": {
+      "cardHash": "3590f50b",
+      "answer": {
+        "complexity": {
+          "value": "trivial",
+          "confidence": "high",
+          "evidence": "Simple mechanical text replacement - locate misspelled package name and correct it"
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Only README.md is in scope"
+        },
+        "risk": {
+          "value": "low",
+          "confidence": "high",
+          "evidence": "Documentation fix with straightforward verification; established facts show no repository risk paths match this scope"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Task explicitly specifies fixing misspelled package name; acceptance criteria unambiguous"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Can definitively verify by checking if package name in README matches the actual correct package name"
+        },
+        "kind": {
+          "value": "bugfix",
+          "confidence": "high",
+          "evidence": "Correcting an incorrect/misspelled package name in documentation"
+        },
+        "domains": [
+          "docs"
+        ],
+        "requires": [
+          "edit"
+        ]
+      }
+    },
+    "regression-test": {
+      "cardHash": "a6e4ad3e",
+      "answer": {
+        "kind": {
+          "value": "test",
+          "confidence": "high",
+          "evidence": "Task explicitly states 'add a regression test'"
+        },
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Simple test case with explicit acceptance criteria: feed empty line, assert no exception"
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Scope is only test/transcript.test.ts"
+        },
+        "risk": {
+          "value": "low",
+          "confidence": "high",
+          "evidence": "Adding a test has minimal risk; failures don't corrupt data or break production code"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Acceptance criteria explicitly specify: empty line input, assert no exception thrown"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Tests are automatically verifiable; task uses test runner configured for partial verification"
+        },
+        "domains": [
+          "typescript",
+          "test"
+        ],
+        "requires": [
+          "edit"
+        ]
+      }
+    },
+    "routine-dependency-bump": {
+      "cardHash": "e0a9c55e",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Straightforward: identify latest patch, update one field, verify with tests. One clear execution path."
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Scope is package.json only; test/typecheck are verification steps, not code changes."
+        },
+        "risk": {
+          "value": "low",
+          "confidence": "high",
+          "evidence": "No critical risk paths in scope; strong verification catches issues; patch releases are safe by convention."
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Task and acceptance criteria are explicit: update to latest patch and verify tests/typecheck pass."
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Version string in package.json is directly verifiable; typecheck and test pass/fail are unambiguous."
+        },
+        "kind": {
+          "value": "chore",
+          "confidence": "high",
+          "evidence": "Dependency maintenance—not a feature, bugfix, test, or refactor."
+        },
+        "domains": [
+          "package-management",
+          "markdown"
+        ],
+        "requires": [
+          "edit",
+          "shell",
+          "network"
+        ]
+      }
+    },
+    "security-token-logging": {
+      "cardHash": "0fa272d3",
+      "answer": {
+        "kind": {
+          "value": "bugfix",
+          "confidence": "high",
+          "evidence": "Task explicitly fixes a security issue where bearer tokens are inappropriately logged during authentication failures."
+        },
+        "complexity": {
+          "value": "routine",
+          "confidence": "medium",
+          "evidence": "Clear task to find and modify log statements, but exact patterns and edge cases unknown without seeing the code."
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Scope explicitly limited to src/auth/client.ts, confirmed as 1 file in task scope."
+        },
+        "risk": {
+          "value": "high",
+          "confidence": "high",
+          "evidence": "Authentication and secrets are listed as repository risk paths; incomplete fix leaves tokens exposed, aggressive fix could break logging."
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Acceptance criteria are explicit: no token in logs, status code and request ID still logged on failures."
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "high",
+          "evidence": "Tests can verify status/request ID logging, but proving absence of tokens everywhere requires comprehensive test coverage and code review."
+        },
+        "domains": [
+          "typescript",
+          "authentication",
+          "security"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "single-file-bug": {
+      "cardHash": "d2c47a68",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Classic off-by-one pagination error, likely a simple fix to use ceiling division instead of floor division"
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Scope explicitly lists exactly 1 file: src/core/parser.ts with localized pagination logic"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "Pagination is core functionality but change is isolated, well-tested, low-impact with no matching repository risk paths"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Problem precisely stated with explicit test case: 20 items with page size 10 must yield 2 pages, and existing tests must pass"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Concrete test case provided, existing test suite must pass, configured verification includes test and typecheck"
+        },
+        "kind": {
+          "value": "bugfix",
+          "confidence": "high",
+          "evidence": "Task objective explicitly states 'Fix the pagination parser' addressing a specific bug behavior"
+        },
+        "domains": [
+          "typescript",
+          "parser",
+          "pagination"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "trivial-but-critical": {
+      "cardHash": "1fa9b978",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Simple permission constant change from 0644 to 0600, one straightforward implementation path"
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Scope is explicitly 1 file (src/core/sessionFile.ts), localized change to file mode constant"
+        },
+        "risk": {
+          "value": "high",
+          "confidence": "high",
+          "evidence": "Session files hold credentials; incorrect permissions (0644) leave sensitive data world-readable; security-critical domain"
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Task explicitly specifies changing mode from 0644 to 0600; no design decisions or uncertainty"
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "File mode is deterministic and directly testable via fs.stat() or similar; test verification is planned per facts"
+        },
+        "kind": {
+          "value": "bugfix",
+          "confidence": "high",
+          "evidence": "Security hardening to restrict session file access from world-readable to owner-only, protecting stored credentials"
+        },
+        "domains": [
+          "typescript",
+          "security",
+          "fileio"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "unit-test-generation": {
+      "cardHash": "8cb73eb3",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "high",
+          "evidence": "Three specific test cases are enumerated; standard test-writing task with no design decisions needed."
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Only test file being modified; implementation file read to understand behavior."
+        },
+        "risk": {
+          "value": "low",
+          "confidence": "high",
+          "evidence": "Tests don't affect production behavior; worst case is poor coverage or false negatives."
+        },
+        "ambiguity": {
+          "value": "clear",
+          "confidence": "high",
+          "evidence": "Three test cases explicitly specified; acceptance criteria precisely define what is needed."
+        },
+        "verifiability": {
+          "value": "strong",
+          "confidence": "high",
+          "evidence": "Test pass/fail is objective; configured verification includes test execution."
+        },
+        "kind": {
+          "value": "test",
+          "confidence": "high",
+          "evidence": "Task explicitly requests 'add unit tests' for three named cases."
+        },
+        "domains": [
+          "typescript",
+          "test"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "unity-shader-tweak": {
+      "cardHash": "90bb83f8",
+      "answer": {
+        "complexity": {
+          "value": "involved",
+          "confidence": "medium",
+          "evidence": "Shader math needed for depth-based fading, but follows established fade-effect patterns; design choices about depth calculation and curve shape exist but aren't subtle."
+        },
+        "breadth": {
+          "value": "single-file",
+          "confidence": "high",
+          "evidence": "Scope explicitly limited to Assets/Shaders/Water.shader with no cross-file dependencies mentioned."
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "medium",
+          "evidence": "Shader errors degrade visuals but won't cause crashes, data loss, or break other systems; mistakes are visible and testable."
+        },
+        "ambiguity": {
+          "value": "minor-gaps",
+          "confidence": "high",
+          "evidence": "Goal is clear (smooth 1m fade), but depth measurement method and fade curve shape are unspecified; shoreline detection mechanism assumed existing."
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "medium",
+          "evidence": "Editmode tests can verify opacity behavior with depth; visual smoothness requires human judgment; planned test coverage is partial."
+        },
+        "kind": {
+          "value": "bugfix",
+          "confidence": "high",
+          "evidence": "Task frames current behavior (fixed-line cutoff) as undesirable and replaces it with improved behavior (smooth fade)."
+        },
+        "domains": [
+          "shader",
+          "graphics"
+        ],
+        "requires": [
+          "edit"
+        ]
+      }
+    },
+    "unity-ui-panel": {
+      "cardHash": "89c9676b",
+      "answer": {
+        "complexity": {
+          "value": "routine",
+          "confidence": "medium",
+          "evidence": "Standard game development pattern: create panel, wire input, connect button callbacks. Well-trodden path with one obvious implementation approach."
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "high",
+          "evidence": "Scope explicitly defines 2 files (HUD.prefab, PauseMenu.cs) in a single UI subsystem."
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "high",
+          "evidence": "Broken pause impairs gameplay but doesn't affect data, critical systems, or dependencies. Mistakes are recoverable."
+        },
+        "ambiguity": {
+          "value": "minor-gaps",
+          "confidence": "high",
+          "evidence": "Core functionality (Escape toggle, Resume/Quit actions) is clear; implementation details like animation and styling unspecified."
+        },
+        "verifiability": {
+          "value": "partial",
+          "confidence": "high",
+          "evidence": "Task documents editmode-test verification; button clicks and scene transitions testable, but UI visual aspects harder to verify automatically."
+        },
+        "kind": {
+          "value": "feature",
+          "confidence": "high",
+          "evidence": "Task adds new UI functionality (pause menu panel) to existing system."
+        },
+        "domains": [
+          "ui",
+          "input",
+          "gamedev",
+          "scripting"
+        ],
+        "requires": [
+          "edit",
+          "shell"
+        ]
+      }
+    },
+    "vague-request": {
+      "cardHash": "c1a5ac01",
+      "answer": {
+        "kind": {
+          "value": "feature",
+          "confidence": "low",
+          "evidence": "Task objective is vague; could be feature, refactor, chore, or even a planning task requiring scope definition first"
+        },
+        "complexity": {
+          "value": "involved",
+          "confidence": "low",
+          "evidence": "Dashboard work typically requires design and functional decisions, but without knowing what 'better' means, I'm guessing at depth"
+        },
+        "breadth": {
+          "value": "few-files",
+          "confidence": "low",
+          "evidence": "Could range from UI-only changes to cross-system integration; no predictive data and vague objective make this a guess"
+        },
+        "risk": {
+          "value": "moderate",
+          "confidence": "low",
+          "evidence": "Dashboards affect user experience and business operations, but risk level depends on unknown scope and implementation"
+        },
+        "ambiguity": {
+          "value": "open-ended",
+          "confidence": "high",
+          "evidence": "No acceptance criteria, no scope definition, and 'better' is entirely subjective—task needs scope planning before starting"
+        },
+        "verifiability": {
+          "value": "weak",
+          "confidence": "high",
+          "evidence": "No acceptance criteria provided and task plans zero verification; completion cannot be measured objectively"
+        },
+        "requires": [
+          "edit",
+          "vision",
+          "browser"
+        ],
+        "domains": [
+          "ui",
+          "frontend"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "trivial-but-critical",
+  "case": "trivial but critical",
+  "card": {
+    "objective": "Change the default mode for newly written session files from 0644 to 0600.",
+    "acceptanceCriteria": ["New session files are created with mode 0600."],
+    "scope": ["src/core/sessionFile.ts"],
+    "verification": ["test"],
+    "repo": {
+      "files": { "src/core/sessionFile.ts": 4000, "src/core/store.ts": 22000, "test/sessionFile.test.ts": 3000 },
+      "verification": ["test", "typecheck"],
+      "risk": [{ "paths": ["src/core/sessionFile.ts"], "level": "critical", "why": "session files can hold credentials" }]
+    }
+  },
+  "labels": { "complexity": "trivial", "breadth": "single-file", "risk": "critical", "ambiguity": "clear", "verifiability": "partial", "kind": "chore" },
+  "expect": {
+    "tierIn": ["expert"],
+    "effortIn": ["low", "medium"],
+    "gates": ["human-review"],
+    "never": [{ "tier": "basic" }, { "tier": "standard" }, { "effort": "max" }]
+  }
+}

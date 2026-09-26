@@ -1,0 +1,20 @@
+{
+  "id": "regression-test",
+  "case": "test generation for a known crash",
+  "card": {
+    "objective": "Add a regression test for the crash when a transcript line is empty.",
+    "acceptanceCriteria": ["The test feeds an empty line and asserts no exception is thrown."],
+    "scope": ["test/transcript.test.ts"],
+    "verification": ["test"],
+    "repo": {
+      "files": { "src/core/transcript.ts": 13000, "test/transcript.test.ts": 6000, "package.json": 1500 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "single-file", "risk": "low", "ambiguity": "clear", "verifiability": "partial", "kind": "test" },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low", "medium"],
+    "never": [{ "tier": "expert" }]
+  }
+}

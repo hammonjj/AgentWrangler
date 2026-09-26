@@ -1,0 +1,29 @@
+{
+  "id": "vague-request",
+  "case": "vague request",
+  "card": {
+    "objective": "Make the dashboard better.",
+    "acceptanceCriteria": [],
+    "scope": [],
+    "verification": [],
+    "repo": {
+      "files": { "src/ui/dashboard.ts": 20000, "src/ui/dashboard.css": 8000, "src/ui/table.ts": 16000 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": {
+    "complexity": "involved",
+    "breadth": "subsystem",
+    "risk": "low",
+    "ambiguity": "open-ended",
+    "verifiability": "weak",
+    "kind": "feature",
+    "confidence": { "complexity": "low", "breadth": "low", "risk": "low", "kind": "low" }
+  },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "gates": ["plan-first"],
+    "never": [{ "tier": "basic" }, { "effort": "low" }]
+  }
+}

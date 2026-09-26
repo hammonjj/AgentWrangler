@@ -1,0 +1,27 @@
+{
+  "id": "unity-ui-panel",
+  "case": "Unity UI",
+  "card": {
+    "objective": "Add a pause menu panel with Resume and Quit buttons to the main HUD, opened with Escape.",
+    "acceptanceCriteria": ["Escape opens and closes the panel.", "Resume closes it; Quit returns to the title scene."],
+    "scope": ["Assets/UI/HUD.prefab", "Assets/Scripts/UI/PauseMenu.cs"],
+    "verification": ["editmode-test"],
+    "repo": {
+      "files": {
+        "Assets/UI/HUD.prefab": 40000,
+        "Assets/Scripts/UI/PauseMenu.cs": 3000,
+        "Assets/Scripts/UI/HudController.cs": 8000,
+        "Assets/Scenes/Title.unity": 90000
+      },
+      "verification": ["editmode-test"],
+      "exclusive": [{ "id": "unity-editor:Game", "paths": ["Assets"] }]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "few-files", "risk": "low", "ambiguity": "minor-gaps", "verifiability": "weak", "kind": "feature", "domains": ["unity", "ui"] },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "requires": ["exclusive:unity-editor:Game"],
+    "never": [{ "tier": "basic" }]
+  }
+}

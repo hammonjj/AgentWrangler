@@ -148,7 +148,12 @@ describe('the deterministic pass', () => {
     [['src/a.ts'], 'single-file'],
     [['src/a.ts', 'src/b.ts'], 'few-files'],
     [['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts'], 'subsystem'],
-    [['src/a.ts', 'test/b.ts'], 'cross-cutting'],
+    [['src/a.ts', 'lib/b.ts'], 'cross-cutting'],
+    // A source file and its test are one area, even though tests live in a tree of their own.
+    [['src/a.ts', 'test/a.test.ts'], 'few-files'],
+    [['test/a.test.ts', 'e2e/b.spec.ts'], 'cross-cutting'],
+    // Two files at the root are one place, not two top-level directories.
+    [['package.json', 'package-lock.json'], 'few-files'],
   ])('reads %s as %s', (files, expected) => {
     const rules = deterministicPass({ task: task(), policy: DEFAULT_REPO_POLICY, facts: facts(files) });
     expect(rules.dimensions.breadth!.value).toBe(expected);
@@ -311,6 +316,27 @@ describe('combining rules with the model (§8.3)', () => {
     expect(c.dimensions.ambiguity).toMatchObject({ value: 'clear', from: 'model' });
   });
 
+  it('lets the model raise the no-criteria ambiguity floor, never lower it', () => {
+    const rules = deterministicPass({ task: task({ acceptanceCriteria: [] }), policy: DEFAULT_REPO_POLICY, facts: NO_SCOPE_FACTS });
+    const open = combine(rules, { ...MODEL, ambiguity: { value: 'open-ended', confidence: 'medium', evidence: 'nothing says what better means' } });
+    expect(open.dimensions.ambiguity).toMatchObject({ value: 'open-ended', from: 'model' });
+    const clear = combine(rules, MODEL);
+    expect(clear.dimensions.ambiguity).toMatchObject({ value: 'underspecified', from: 'rule' });
+  });
+
+  it('lets the model overrule a kind guessed from a verb, but not one the files decide', () => {
+    // "fix" reads as a bugfix; the model, which saw the whole objective, says chore.
+    const verb = deterministicPass({ task: task({ objective: 'Fix the lint warnings in the utils folder' }), policy: DEFAULT_REPO_POLICY, facts: NO_SCOPE_FACTS });
+    expect(verb.kind).toMatchObject({ value: 'bugfix', confidence: 'low' });
+    const chore = { ...MODEL, kind: { value: 'chore' as const, confidence: 'high' as const, evidence: 'lint only' } };
+    expect(combine(verb, chore).kind).toMatchObject({ value: 'chore', from: 'model' });
+    // With no model answer the verb is all there is.
+    expect(combine(verb, undefined).kind).toMatchObject({ value: 'bugfix', from: 'rule' });
+    // Every file is documentation: that is not a guess.
+    const docs = deterministicPass({ task: task({ objective: 'Fix the install steps' }), policy: DEFAULT_REPO_POLICY, facts: facts(['README.md']) });
+    expect(combine(docs, chore).kind).toMatchObject({ value: 'docs', from: 'rule' });
+  });
+
   it('merges domains, and takes only the tool needs a model is allowed to name', () => {
     // `telepathy` could only arrive from a model that ignored the schema; it is dropped, not stored.
     const c = combine(deterministicPass(riskyInput), { ...MODEL, requires: ['edit', 'vision', 'telepathy'] });
@@ -401,6 +427,6 @@ describe('the inputs hash', () => {
 
   it('carries the assessor version, so an older assessor’s answer is never reused', () => {
     expect(inputsHash(base)).toMatch(/^asm-[0-9a-f]{8}$/);
-    expect(ASSESSOR_VERSION).toBe('asm-1');
+    expect(ASSESSOR_VERSION).toBe('asm-2');
   });
 });

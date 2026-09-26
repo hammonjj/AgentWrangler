@@ -1,0 +1,20 @@
+{
+  "id": "docs-changelog-unverified",
+  "case": "documentation in a repo with no verification",
+  "card": {
+    "objective": "Add the 1.4.0 entry to the changelog listing the three merged changes.",
+    "acceptanceCriteria": ["The changelog has a 1.4.0 section above 1.3.2 with three entries."],
+    "scope": ["CHANGELOG.md"],
+    "verification": [],
+    "repo": {
+      "files": { "CHANGELOG.md": 11000, "README.md": 4000, "src/main.py": 6000 },
+      "verification": []
+    }
+  },
+  "labels": { "complexity": "trivial", "breadth": "single-file", "risk": "low", "ambiguity": "clear", "verifiability": "none", "kind": "docs" },
+  "expect": {
+    "tierIn": ["standard"],
+    "effortIn": ["low", "medium"],
+    "never": [{ "tier": "basic" }, { "tier": "expert" }]
+  }
+}

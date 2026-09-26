@@ -1,0 +1,28 @@
+{
+  "id": "architecture-change",
+  "case": "architecture change",
+  "card": {
+    "objective": "Redesign the session registry so sessions are keyed by origin rather than by id, including its on-disk format and how older files are read.",
+    "acceptanceCriteria": ["A session keeps its row across an id change.", "Registry files written by the previous build still load."],
+    "scope": ["src/core/registry"],
+    "verification": ["test"],
+    "repo": {
+      "files": {
+        "src/core/registry/index.ts": 5000,
+        "src/core/registry/registry.ts": 24000,
+        "src/core/registry/format.ts": 8000,
+        "src/core/registry/migrate.ts": 6000,
+        "src/core/registry/origin.ts": 4000,
+        "test/registry.test.ts": 12000
+      },
+      "verification": ["test", "typecheck"],
+      "risk": [{ "paths": ["src/core/registry"], "level": "high", "why": "persisted registry format read by older builds" }]
+    }
+  },
+  "labels": { "complexity": "hard", "breadth": "subsystem", "risk": "high", "ambiguity": "minor-gaps", "verifiability": "partial", "kind": "architecture" },
+  "expect": {
+    "tierIn": ["expert"],
+    "effortIn": ["high", "max"],
+    "never": [{ "tier": "basic" }, { "tier": "standard" }, { "effort": "low" }]
+  }
+}

@@ -19,6 +19,7 @@ import { TaskRunner, type NewTask, type TaskRunnerDeps } from '../../src/orchest
 import { createSimulatedExecutors, SimulatedHarness } from '../../src/orchestration/harness/simulatedHarness';
 import type { AgentHarness } from '../../src/orchestration/harness/types';
 import { SimulatedCompletion } from '../../src/orchestration/completion/simulatedCompletion';
+import { ASSESSOR_VERSION } from '../../src/orchestration/policy/assessment';
 import { Assessor } from '../../src/orchestration/policy/assessor';
 import { RepoPolicyStore, identityFor, worktreeRootPath } from '../../src/orchestration/policy/repoPolicyStore';
 import { MissionStore } from '../../src/orchestration/store/missionStore';
@@ -480,7 +481,7 @@ describe('TaskRunner', () => {
 
     await until(() => attemptOf(r.runner.get(id))?.state === 'succeeded', 8000, 'the attempt to finish');
     const rec = r.telemetry.find((t): t is AttemptRecord => t.type === 'attempt')!;
-    expect(rec.assessment).toMatchObject({ assessorVersion: 'asm-1', dimensions: { complexity: { value: 'routine' } } });
+    expect(rec.assessment).toMatchObject({ assessorVersion: ASSESSOR_VERSION,dimensions: { complexity: { value: 'routine' } } });
     expect(JSON.stringify(rec)).not.toContain('Synthetic objective');
   });
 

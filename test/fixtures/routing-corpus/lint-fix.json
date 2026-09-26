@@ -1,0 +1,20 @@
+{
+  "id": "lint-fix",
+  "case": "mechanical chore whose verb reads as a bugfix",
+  "card": {
+    "objective": "Fix the unused-import lint warnings in the utils folder.",
+    "acceptanceCriteria": ["Lint reports no warnings in src/util."],
+    "scope": ["src/util"],
+    "verification": ["lint", "typecheck"],
+    "repo": {
+      "files": { "src/util/strings.ts": 4000, "src/util/dates.ts": 3000, "src/util/paths.ts": 2500, "src/index.ts": 4000 },
+      "verification": ["lint", "typecheck", "test"]
+    }
+  },
+  "labels": { "complexity": "trivial", "breadth": "few-files", "risk": "low", "ambiguity": "clear", "verifiability": "weak", "kind": "chore" },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low"],
+    "never": [{ "tier": "expert" }]
+  }
+}
