@@ -20,6 +20,7 @@ import { TaskRunner } from './engine/taskRunner';
 import { ClaudeCodeHarness } from './harness/claudeCodeHarness';
 import { CodexHarness } from './harness/codexHarness';
 import type { AgentHarness } from './harness/types';
+import { Assessor } from './policy/assessor';
 import { RepoPolicyStore, repoPoliciesDir, worktreeRootPath } from './policy/repoPolicyStore';
 import { MissionStore } from './store/missionStore';
 import type { Exec } from './worktrees/exec';
@@ -79,6 +80,8 @@ export interface Orchestration extends Disposable {
   readonly completion?: StructuredCompletion;
   /** Per-repository policies (§13.6), when enabled. Read by the task runner at each launch. */
   readonly repoPolicies?: RepoPolicyStore;
+  /** Describes what a task's work is like (#37), when enabled. */
+  readonly assessor?: Assessor;
   /** Runs tasks (#33), when enabled. */
   readonly tasks?: TaskRunner;
   /** Resolves when the startup pass is over (immediately when disabled). */
@@ -106,6 +109,8 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     ? new ClaudeStructuredCompletion({ ...deps.completion, log: (m) => deps.log(`orchestration: ${m}`) })
     : undefined;
   const repoPolicies = new RepoPolicyStore(repoPoliciesDir(deps.dataDir), { log });
+  // Without a completion the assessor still runs, from rules alone, at low confidence (§8.3).
+  const assessor = new Assessor({ completion, log: deps.log });
   const tasks = new TaskRunner({
     store,
     harnesses,
@@ -125,6 +130,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
       ),
     launchDefaults: deps.launchDefaults,
     cannotLaunch: (harness) => (harness === 'claude-code' && deps.hostsEnabled?.() !== true ? HOSTS_REQUIRED : undefined),
+    assessor,
     tierOf: deps.tierOf,
     telemetry: deps.telemetry,
     onTurnRecord: deps.onTurnRecord,
@@ -139,5 +145,5 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     .catch(() => undefined)
     .then(() => tasks.recover())
     .catch((e) => log(`recovery failed: ${String(e)}`));
-  return { enabled: true, store, harnesses, completion, repoPolicies, tasks, ready, dispose: () => tasks.dispose() };
+  return { enabled: true, store, harnesses, completion, repoPolicies, assessor, tasks, ready, dispose: () => tasks.dispose() };
 }

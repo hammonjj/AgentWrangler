@@ -47,6 +47,25 @@ export function waitedMs(a: ExecutionAttempt, now: Millis): number {
 }
 
 /**
+ * The assessment this attempt's task carried when it ran (§16.2, #37):
+ * dimension values, how sure each was, and which assessor said so. Values and
+ * levels only — the evidence lines quote the objective, and the telemetry log
+ * holds no user text.
+ */
+function assessmentSnapshot(
+  mission: Mission,
+  a: ExecutionAttempt,
+): { snapshot: NonNullable<AttemptRecord['assessment']>; confidence: string } | undefined {
+  const forTask = mission.assessments.filter((x) => x.taskId === a.taskId);
+  const latest = forTask[forTask.length - 1];
+  if (!latest) return undefined;
+  const dimensions: Record<string, { value: string; confidence: string }> = {};
+  for (const [name, d] of Object.entries(latest.dimensions)) dimensions[name] = { value: d.value, confidence: d.confidence };
+  dimensions.kind = { value: latest.kind.value, confidence: latest.kind.confidence };
+  return { snapshot: { dimensions, assessorVersion: latest.assessorVersion }, confidence: latest.confidence };
+}
+
+/**
  * The `attempt` record for an attempt that has ended. `partial` for an
  * interrupted one: what happened after the core lost sight of it is unknown.
  * The id is the attempt's, so writing it twice records it once.
@@ -57,6 +76,7 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
   const decision = mission.decisions.find((d) => d.id === a.routingDecisionId);
   if (!decision) return undefined;
   const target = decision.resolution.target;
+  const assessment = assessmentSnapshot(mission, a);
   const ended = a.endedAt ?? now;
   const waited = waitedMs(a, ended);
   const record: AttemptRecord = {
@@ -70,6 +90,7 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     n: a.n,
     mode: decision.mode,
     repoPolicyVersion: a.repoPolicyVersion,
+    ...(assessment ? { assessment: assessment.snapshot, routingConfidence: assessment.confidence } : {}),
     target: { ...target, ...(decision.requirement.effort ? { effortRequested: decision.requirement.effort } : {}) },
     queuedAt: a.timing?.queuedAt,
     startedAt: a.launchedAt,

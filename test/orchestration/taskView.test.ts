@@ -4,6 +4,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  assessmentChipTitle,
+  assessmentRowTitle,
   attemptLine,
   diffStatText,
   routeChipText,
@@ -18,7 +20,7 @@ import {
 } from '../../src/shared/orchestration/taskView';
 import { currentAttemptOf, sessionKeyFor, taskBadges, taskViewOf } from '../../src/orchestration/view/taskViews';
 import type { Mission, RoutingDecision } from '../../src/shared/orchestration/types';
-import { attempt, mission, task, T0 } from './fixtures';
+import { assessment, attempt, mission, task, T0 } from './fixtures';
 
 const route = (o: Partial<TaskRouteView> = {}): TaskRouteView => ({
   harness: 'claude-code',
@@ -296,6 +298,60 @@ describe('taskBadges', () => {
     m.tasks.push(task('t2'));
     expect(taskBadges([m]).get('claude:s2')!.multiTask).toBe(true);
     expect(taskBadges([twoAttempts()]).get('claude:s2')!.multiTask).toBeUndefined();
+  });
+});
+
+describe('the assessment on the strip (#37)', () => {
+  const withAssessment = (a = assessment('as1', 't1')): Mission => {
+    const m = mission();
+    m.tasks[0].assessmentIds = [a.id];
+    m.assessments = [a];
+    return m;
+  };
+
+  it('is absent until the assessor has answered', () => {
+    expect(taskViewOf(mission(), [])!.assessment).toBeUndefined();
+  });
+
+  it('shows every dimension with its confidence and where it came from', () => {
+    const v = taskViewOf(withAssessment(), [])!.assessment!;
+    expect(v.summary).toBe('feature · involved · risk moderate');
+    expect(v.confidence).toBe('medium');
+    expect(v.rows.map((r) => r.label)).toEqual(['Kind', 'Complexity', 'Breadth', 'Risk', 'Ambiguity', 'Verifiability', 'Context load']);
+    expect(v.rows.find((r) => r.label === 'Verifiability')).toMatchObject({ value: 'partial', from: 'rule', fromLabel: 'rule' });
+    expect(v.rows.find((r) => r.label === 'Risk')).toMatchObject({ from: 'model', fromLabel: 'model', evidence: 'because moderate' });
+  });
+
+  it('marks the values a reader must not miss', () => {
+    const a = assessment('as1', 't1');
+    a.dimensions.risk = { value: 'critical', confidence: 'high', from: 'rule', evidence: 'a path rule' };
+    const v = taskViewOf(withAssessment(a), [])!.assessment!;
+    expect(v.rows.find((r) => r.label === 'Risk')!.emphasis).toBe(true);
+    expect(v.rows.find((r) => r.label === 'Kind')!.emphasis).toBeUndefined();
+  });
+
+  it('names a user’s edit as theirs', () => {
+    const a = assessment('as1', 't1');
+    a.kind = { value: 'chore', confidence: 'high', from: 'user' };
+    expect(taskViewOf(withAssessment(a), [])!.assessment!.rows[0]).toMatchObject({ from: 'user', fromLabel: 'you' });
+  });
+
+  it('carries the note a rules-only assessment leaves, and its tooltips say the rest', () => {
+    const a = assessment('as1', 't1', { confidence: 'low', evidence: ['the assessment model call did not produce a usable answer'] });
+    const v = taskViewOf(withAssessment(a), [])!.assessment!;
+    expect(v.note).toContain('did not produce a usable answer');
+    expect(assessmentChipTitle(v)).toContain('low confidence overall');
+    expect(assessmentChipTitle(v)).toContain('needs: edit, shell');
+    expect(assessmentRowTitle(v.rows[1])).toContain('medium confidence · from the model');
+  });
+
+  it('shows the newest assessment when a task has been assessed more than once', () => {
+    const m = mission();
+    const older = assessment('as1', 't1');
+    const newer = assessment('as2', 't1', { kind: { value: 'bugfix', confidence: 'high', from: 'model' } });
+    m.tasks[0].assessmentIds = [older.id, newer.id];
+    m.assessments = [older, newer];
+    expect(taskViewOf(m, [])!.assessment!.summary).toContain('bugfix');
   });
 });
 

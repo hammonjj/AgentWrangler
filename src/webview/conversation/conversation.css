@@ -217,9 +217,55 @@ body,
   border-color: var(--vscode-charts-green, #89d185);
   color: var(--vscode-charts-green, #89d185);
 }
+#taskStrip .tschip.assess {
+  border-style: dashed;
+}
+/* A dimension a reader must not miss: critical risk, nothing to verify with. */
+#taskStrip .tschip.assess.loud {
+  border-style: solid;
+  border-color: var(--vscode-charts-red, #f48771);
+  color: var(--vscode-charts-red, #f48771);
+}
 #taskStrip .tsmeta {
   color: var(--vscode-descriptionForeground);
   font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+/* The assessment panel. It is a list, not a table: the pane can be 300px wide,
+   and the evidence line has to be able to wrap under its row (§18.3). */
+#taskStrip .tsassess {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.85em;
+}
+#taskStrip .tsassessrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  color: var(--vscode-descriptionForeground);
+}
+#taskStrip .tsassesslabel {
+  min-width: 7em;
+}
+#taskStrip .tsassessvalue {
+  color: var(--vscode-foreground);
+}
+#taskStrip .tsassessrow.loud .tsassessvalue {
+  color: var(--vscode-charts-red, #f48771);
+  font-weight: 600;
+}
+#taskStrip .tsassesswhy {
+  flex: 1 1 100%;
+  padding-left: 7em;
+  opacity: 0.8;
+  overflow-wrap: anywhere;
+}
+#taskStrip .tsassessfoot {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  opacity: 0.8;
   overflow-wrap: anywhere;
 }
 #taskStrip .tsactions {
