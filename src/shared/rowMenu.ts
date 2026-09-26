@@ -45,6 +45,21 @@ export function canCloseSession(s: SessionDTO): boolean {
 }
 
 /**
+ * What the row's hover-reveal × button does, which depends on whether there is
+ * anything left to stop.
+ *
+ * The button means "I am done with this agent", so on a live session it ends
+ * the process (`dismiss` — `close` with the confirm reserved for a turn in
+ * flight) and lets the row fall to Ended, which ages out of the table on its
+ * own. A session with no process to end cannot be *stopped* any further, so
+ * there the same button falls back to `archive`, which is what "off my table"
+ * means once nothing is running.
+ */
+export function dismissAction(s: SessionDTO): Extract<DashboardAction, 'dismiss' | 'archive'> {
+  return canCloseSession(s) ? 'dismiss' : 'archive';
+}
+
+/**
  * Whether there is a process to freeze.
  *
  * Stricter than `canCloseSession` in the one case that matters: a runner-owned

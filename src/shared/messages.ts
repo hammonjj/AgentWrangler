@@ -93,6 +93,12 @@ export type DashboardAction =
   | 'archive'
   | 'copyId'
   | 'close'
+  /**
+   * The row's × button: `close`, but the modal is only raised when a turn is in
+   * flight. Nothing else about it differs — the process ends and the transcript
+   * is kept either way.
+   */
+  | 'dismiss'
   /** Stop this session's process (SIGSTOP) so it spends nothing. */
   | 'pause'
   /** Let a paused session run again (SIGCONT). */
