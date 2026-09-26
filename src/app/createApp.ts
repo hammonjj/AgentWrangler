@@ -2280,13 +2280,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
       // Off by default, so this normally reads the setting and stops.
       void syncRemote();
       // The list the daemon follows is complete once the Claude provider's
-      // first scan is in; adopted hosts get a few seconds more to catch up.
-      void remoteFirstScan.then(() =>
-        setTimeout(() => {
-          remoteReady = true;
-          remoteLink?.pushSoon();
-        }, 3000),
-      );
+      // first scan is in, Codex threads are rejoined, and every adopted host
+      // has caught up (its view has left `starting`/`connecting`, so its
+      // pending asks are known), or after 30 s at most. Until then the daemon
+      // keeps following its own feed, which already sees those hosts' asks.
+      void Promise.all([remoteFirstScan, startupSettled]).then(async () => {
+        const deadline = Date.now() + 30_000;
+        const catchingUp = () => runners.list().some((r) => r.hosted && (r.lifecycle === 'starting' || r.lifecycle === 'connecting'));
+        while (Date.now() < deadline && catchingUp()) await new Promise((r) => setTimeout(r, 250));
+        remoteReady = true;
+        remoteLink?.pushSoon();
+      });
       // After the store's first scan, so "is it running elsewhere?" has an answer.
       setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), 2000);
       void rejoinCodexThreads()

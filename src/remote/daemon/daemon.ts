@@ -111,13 +111,19 @@ class AppFeed implements FeedSource, Disposable {
     this.emitter.dispose();
   }
 
+  /**
+   * Throws when the app could not be asked (it went, or took too long). That
+   * is not "already answered": the reconciler then keeps the card and says the
+   * press could not be applied, and the ask is still there to press again,
+   * from whichever feed is followed next.
+   */
   private async ask(method: string, params: unknown): Promise<PermissionDecisionOutcome> {
     try {
       const r = await this.peer.request<{ outcome: PermissionDecisionOutcome }>(method, params, { timeoutMs: APP_PRESS_TIMEOUT_MS });
       return r.outcome;
     } catch (err) {
       this.log(`the app could not apply ${method}: ${String(err)}`);
-      return 'gone';
+      throw err;
     }
   }
 }

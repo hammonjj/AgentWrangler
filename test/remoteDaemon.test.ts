@@ -128,6 +128,7 @@ let appSessions: { list: SessionDTO[]; ready: boolean; changed: Emitter<void> };
 let appDecided: string[];
 let config: WranglerConfig;
 let token: string | null;
+let appFails = false;
 
 function newLink(): RemoteDaemonLink {
   return new RemoteDaemonLink({
@@ -147,6 +148,7 @@ function newLink(): RemoteDaemonLink {
     extras: () => ({ archived: [], nicknames: {} }),
     actions: {
       decidePermission: async (key, behavior) => {
+        if (appFails) throw new Error('the app is going away');
         appDecided.push(`${key}:${behavior}`);
         return 'applied';
       },
@@ -162,6 +164,7 @@ beforeEach(async () => {
   transports = [];
   own = new FakeFeed();
   appDecided = [];
+  appFails = false;
   config = enabled;
   token = 'tok-1';
   appSessions = { list: [], ready: false, changed: new Emitter<void>() };
@@ -275,6 +278,31 @@ describe('remote daemon', () => {
     expect(transport().closed.map((c) => c.outcome)).toEqual(['cancelled']);
     expect(transport().connected).toBe(false);
     expect(daemon.status().hasToken).toBe(false);
+  });
+
+  it('keeps the card when the app cannot apply a press, rather than calling it answered', async () => {
+    appFails = true;
+    link = newLink();
+    link.start();
+    await until(() => transports.length === 1 && transport().connected);
+    appSessions.list = [blocked()];
+    appSessions.ready = true;
+    link.pushSoon();
+    await until(() => transport().published.length === 1);
+    transport().press('allow');
+    await until(() => transport().replies.length === 1);
+    expect(transport().replies[0]).toMatch(/could not apply/);
+    await daemon.whenIdle();
+    expect(transport().closed).toEqual([]);
+  });
+
+  it('stops promptly even while a connect is still in flight', async () => {
+    link = newLink();
+    link.start();
+    const stopped = link.stop();
+    await expect(Promise.race([stopped.then(() => 'stopped'), new Promise((r) => setTimeout(() => r('hung'), 2000))])).resolves.toBe('stopped');
+    expect(link.connected).toBe(false);
+    link = undefined;
   });
 
   it('forwards notices from the app', async () => {

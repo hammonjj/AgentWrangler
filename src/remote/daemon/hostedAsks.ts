@@ -54,6 +54,7 @@ export type AskOutcome = 'applied' | 'stale' | 'gone';
 
 export class HostedAsks implements Disposable {
   private followed = new Map<string, Followed>();
+  private unreadable = new Set<string>();
   private timer?: ReturnType<typeof setInterval>;
   private emitter = new Emitter<void>();
   private disposed = false;
@@ -80,7 +81,9 @@ export class HostedAsks implements Disposable {
    */
   async whenSettled(maxMs = 5000): Promise<void> {
     const deadline = Date.now() + maxMs;
-    while (Date.now() < deadline && [...this.followed.values()].some((f) => f.state === 'connecting')) {
+    // A host found gone reports its exit without ever leaving `connecting`.
+    const pending = (f: Followed) => f.state === 'connecting' && !f.link.snapshot().exit;
+    while (Date.now() < deadline && [...this.followed.values()].some(pending)) {
       await new Promise((r) => setTimeout(r, 100));
     }
   }
@@ -162,13 +165,14 @@ export class HostedAsks implements Disposable {
     const pending = f.link.snapshot().pendingAsks.filter((a) => askKind(a.toolName) === kind);
     const ask = requestId !== undefined ? pending.find((a) => a.requestId === requestId) : pending.length === 1 ? pending[0] : undefined;
     if (!ask) return 'stale';
-    try {
-      const outcome = await f.link.respondAsk(ask.requestId, result(ask));
-      return outcome === 'applied' ? 'applied' : 'stale';
-    } catch (err) {
+    // A host that cannot be reached throws, and that is passed on: the ask is
+    // still pending there, so the card must stay answerable, not be closed as
+    // answered (HostClient's own contract for `respondAsk`).
+    const outcome = await f.link.respondAsk(ask.requestId, result(ask)).catch((err: unknown) => {
       this.opts.log(`host ${f.manifest.hostId}: respondAsk failed: ${String(err)}`);
-      return 'gone';
-    }
+      throw err;
+    });
+    return outcome === 'applied' ? 'applied' : 'stale';
   }
 
   private follow(manifest: HostManifest): void {
@@ -176,7 +180,9 @@ export class HostedAsks implements Disposable {
     try {
       token = fs.readFileSync(path.join(this.opts.runDir, `${manifest.hostId}.token`), 'utf8').trim();
     } catch (err) {
-      this.opts.log(`host ${manifest.hostId}: token unreadable (${String(err)})`);
+      // Written before the host starts, so a missing one stays missing: say so once.
+      if (!this.unreadable.has(manifest.hostId)) this.opts.log(`host ${manifest.hostId}: token unreadable (${String(err)})`);
+      this.unreadable.add(manifest.hostId);
       return;
     }
     const link = (this.opts.connect ?? ((m, t) => this.connect(m, t)))(manifest, token);

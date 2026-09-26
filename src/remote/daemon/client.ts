@@ -44,6 +44,12 @@ export interface RemoteDaemonLinkOptions {
 }
 
 const PUSH_DEBOUNCE_MS = 100;
+/**
+ * `configure` answers once it has taken effect, and switching off means
+ * editing every open card first, at Discord's rate limit. Generous, so the
+ * caller does not stop the daemon halfway through.
+ */
+const CONFIGURE_TIMEOUT_MS = 120_000;
 const RETRY_FIRST_MS = 1000;
 const RETRY_MAX_MS = 15_000;
 /** Ask `ensure` again after this many failed connects in a row: launchd may have given up on it. */
@@ -99,7 +105,7 @@ export class RemoteDaemonLink implements Disposable {
     const peer = this.peer;
     if (!peer || peer.isClosed) return;
     try {
-      await peer.request('configure', await this.opts.configure(), { timeoutMs: 10_000 });
+      await peer.request('configure', await this.opts.configure(), { timeoutMs: CONFIGURE_TIMEOUT_MS });
     } catch (err) {
       this.opts.log(`remote daemon: configure failed: ${String(err)}`);
     }
@@ -184,6 +190,12 @@ export class RemoteDaemonLink implements Disposable {
       s.once('connect', () => resolve(s));
       s.once('error', reject);
     });
+    // Held at once, so a `stop()` that lands mid-handshake can close it.
+    this.socket = socket;
+    if (this.stopped) {
+      socket.destroy();
+      throw new Error('stopped');
+    }
     const peer = new NdjsonPeer({
       write: (line) => {
         if (!socket.destroyed) socket.write(line);
@@ -218,10 +230,15 @@ export class RemoteDaemonLink implements Disposable {
       await this.opts.ensure('outdated');
       throw new Error('replaced an outdated daemon');
     }
-    this.socket = socket;
+    try {
+      if (this.stopped) throw new Error('stopped');
+      await peer.request('configure', await this.opts.configure(), { timeoutMs: CONFIGURE_TIMEOUT_MS });
+    } catch (err) {
+      socket.destroy();
+      throw err;
+    }
     this.peer = peer;
     this.opts.log(`remote daemon: connected (build ${this.hello.build}, pid ${this.hello.pid})`);
-    await peer.request('configure', await this.opts.configure(), { timeoutMs: 10_000 });
     this.push();
     return closed;
   }
