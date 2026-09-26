@@ -10,6 +10,7 @@ import * as fs from 'node:fs/promises';
 import { archivePage, archivedTool, subagentPath } from '../../claude/conversationArchive';
 import { transcriptPathFor } from '../../claude/transcriptHistory';
 import * as path from 'node:path';
+import { projectNameFor } from '../../core/checkout';
 import type { HostDialogs } from '../../host/hostServices';
 import type { RunnerService } from '../../claude/runner/runnerService';
 import { DictationSetupError, type DictationService } from '../../core/dictation';
@@ -624,7 +625,7 @@ function liveSessionRow(handle: SessionHandle, store: SessionStore): AgentSessio
     title: path.basename(handle.cwd) || 'New conversation',
     nickname: store.nicknameOf(key),
     cwd: handle.cwd,
-    projectName: path.basename(handle.cwd),
+    projectName: projectNameFor(handle.cwd),
     status,
     lastActivityAt: Date.now(),
     startedAt: handle.startedAt,

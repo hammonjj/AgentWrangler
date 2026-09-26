@@ -6,6 +6,7 @@
  * notifications and requests for one thread into blocks and a composer.
  */
 import * as path from 'node:path';
+import { projectNameFor } from '../core/checkout';
 import { Emitter, type Disposable } from '../core/events';
 import { finishedTurnStatus } from '../core/needsReply';
 import type {
@@ -149,7 +150,7 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
     const blockedReason = this.pendingQuestions.size > 0 ? 'Question' : this.pendingApprovals.size > 0 ? 'Approval' : undefined;
     return {
       provider: 'codex', sessionId: this.threadId, key: `codex:${this.threadId.toLowerCase()}`,
-      title: path.basename(this.cwd) || 'New Codex conversation', cwd: this.cwd, projectName: path.basename(this.cwd),
+      title: path.basename(this.cwd) || 'New Codex conversation', cwd: this.cwd, projectName: projectNameFor(this.cwd),
       model: this.currentModel,
       status: blockedReason ? 'blocked' : this.composer.busy ? 'busy' : this.idleStatus,
       blockedReason,

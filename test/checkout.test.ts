@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { checkoutFor, parseHead } from '../src/core/checkout';
+import { checkoutFor, parseHead, projectNameFor } from '../src/core/checkout';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-checkout-'));
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -34,6 +34,32 @@ describe('checkoutFor', () => {
     write(path.join(repo, '.git', 'HEAD'), '0123456789abcdef0123456789abcdef01234567\n');
     expect(checkoutFor(repo)).toEqual({ repoRoot: repo, branch: undefined });
     expect(checkoutFor(fs.mkdtempSync(path.join(os.tmpdir(), 'aw-nogit-')))).toEqual({});
+  });
+});
+
+describe('projectNameFor', () => {
+  it('names a linked worktree and a subfolder after the main checkout', () => {
+    const repo = path.join(root, 'Proj');
+    const wt = path.join(root, 'Proj-feature');
+    write(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    write(path.join(repo, '.git', 'worktrees', 'Proj-feature', 'HEAD'), 'ref: refs/heads/feat/x\n');
+    write(path.join(wt, '.git'), `gitdir: ${path.join(repo, '.git', 'worktrees', 'Proj-feature')}\n`);
+    fs.mkdirSync(path.join(repo, 'packages', 'web'), { recursive: true });
+    fs.mkdirSync(path.join(wt, 'src'), { recursive: true });
+    expect(projectNameFor(repo, '/Users/test')).toBe('Proj');
+    expect(projectNameFor(wt, '/Users/test')).toBe('Proj');
+    expect(projectNameFor(path.join(wt, 'src'), '/Users/test')).toBe('Proj');
+    expect(projectNameFor(path.join(repo, 'packages', 'web'), '/Users/test')).toBe('Proj');
+  });
+
+  it('uses the folder\'s own name outside git, or under a repository at home', () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-plain-'));
+    expect(projectNameFor(plain)).toBe(path.basename(plain));
+    const home = path.join(root, 'home');
+    write(path.join(home, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    fs.mkdirSync(path.join(home, 'scratch'), { recursive: true });
+    expect(projectNameFor(path.join(home, 'scratch'), home)).toBe('scratch');
+    expect(projectNameFor(undefined)).toBeUndefined();
   });
 });
 

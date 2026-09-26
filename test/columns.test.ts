@@ -25,7 +25,7 @@ describe('visibleColumns', () => {
 
   it('drops what the user hid', () => {
     const prefs: ColumnPrefs = { hidden: ['branch', 'pr'] };
-    expect(visibleColumns(prefs, false).map((c) => c.id)).toEqual(['proj', 'worktree', 'model', 'usage', 'subagents', 'eta', 'age']);
+    expect(visibleColumns(prefs, false).map((c) => c.id)).toEqual(['proj', 'worktree', 'model', 'usage', 'eta', 'age']);
   });
 
   it('folds the location columns away in a narrow dock', () => {

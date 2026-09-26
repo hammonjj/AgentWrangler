@@ -31,7 +31,6 @@ export type HostToDashboard =
       codexUsage?: UsageState;
       /** Saved column layout. Absent only before the host has read storage once. */
       columns?: ColumnPrefs;
-      showCodexSubagents?: boolean;
       /**
        * The toolbar's Discord button. `configured` is what makes it exist at
        * all — with the integration off there is nothing to mute — and `on` is
@@ -131,7 +130,6 @@ export type DashboardToHost =
   | { type: 'installHooks' }
   /** A column was dragged, hidden or shown — persist this layout for every dashboard. */
   | { type: 'setColumns'; prefs: ColumnPrefs }
-  | { type: 'setShowCodexSubagents'; value: boolean }
   /** The bar's Discord button: post announcements to the channel, or go quiet. */
   | { type: 'setDiscordNotifications'; value: boolean }
   /** Start a Claude Code conversation in `cwd`, this window running it, and show the pane. */

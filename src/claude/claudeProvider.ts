@@ -5,7 +5,7 @@ import { Emitter, type Disposable } from '../core/events';
 import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import type { TurnStats } from '../core/turnStats';
 import { clearWorktreeCache, worktreeFor } from '../core/worktree';
-import { clearCheckoutRootCache } from '../core/checkout';
+import { clearCheckoutRootCache, projectNameFor } from '../core/checkout';
 import type { AgentSession, HookHealth, TurnProgress } from '../shared/model';
 import { settleBlockAt, statusFromHookState, turnBlockedMsAt, type HookSessionState } from './hookEvents';
 import { currentState, type InstallState } from './hookInstall';
@@ -215,7 +215,7 @@ export class ClaudeProvider implements AgentProvider {
       title: this.title(s, r.name, r.sessionId),
       subtitle: s?.lastPrompt,
       cwd,
-      projectName: cwd ? path.basename(cwd) : undefined,
+      projectName: projectNameFor(cwd),
       worktree: wt?.name,
       worktreePath: wt?.root,
       gitBranch: s?.gitBranch,
@@ -293,7 +293,7 @@ export class ClaudeProvider implements AgentProvider {
       title: this.title(s, undefined, t.sessionId),
       subtitle: s.lastPrompt,
       cwd: s.cwd,
-      projectName: s.cwd ? path.basename(s.cwd) : undefined,
+      projectName: projectNameFor(s.cwd),
       worktree: wt?.name,
       worktreePath: wt?.root,
       gitBranch: s.gitBranch,

@@ -119,10 +119,6 @@ export class DashboardHost {
         // The Discord button is a view onto two settings, either of which can be
         // changed from the Preferences window or the other dashboard.
         if (affects('remote.enabled') || affects('remote.notificationsEnabled')) void this.pushSnapshot();
-        if (affects('showCodexSubagents')) {
-          this.actions.refreshAll();
-          void this.pushSnapshot();
-        }
       }),
       this.archive.onDidChange(() => this.pushSnapshot()),
       // The store only fires on material session changes, so an install that
@@ -229,7 +225,6 @@ export class DashboardHost {
       usage: this.usage.enabled ? this.usage.usage : undefined,
       codexUsage: this.codexUsage.enabled ? this.codexUsage.usage : undefined,
       columns: this.columns.value,
-      showCodexSubagents: this.settings.get('showCodexSubagents', false),
       discord: {
         configured: this.settings.get('remote.enabled', false),
         on: this.settings.get('remote.notificationsEnabled', true),
@@ -310,14 +305,6 @@ export class DashboardHost {
         break;
       case 'installHooks':
         this.actions.installHooks();
-        break;
-      case 'setShowCodexSubagents':
-        if (typeof m.value === 'boolean') {
-          void this.settings.update('showCodexSubagents', m.value).catch((error: unknown) => {
-            this.dialogs.error(`Could not change Codex session visibility: ${String(error)}`);
-            void this.pushSnapshot();
-          });
-        }
         break;
       case 'setDiscordNotifications':
         if (typeof m.value === 'boolean') {
