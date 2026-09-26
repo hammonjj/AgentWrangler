@@ -4,6 +4,7 @@
  */
 import type { SessionUsage } from './sessionUsage';
 import type { SessionProvider } from './harness';
+import type { TaskBadge } from './orchestration/taskView';
 
 /**
  * `waiting` and `done` both mean the agent has finished its turn and is idle at
@@ -83,6 +84,12 @@ export interface AgentSession {
   subagents?: SubagentSummary;
   /** What this session has used, from its telemetry records (#28). Absent when it has none. */
   usage?: SessionUsage;
+  /**
+   * This session is running an orchestrated task's attempt, and these are the
+   * chips its row shows (host decorates, #34). Absent — and it is absent for
+   * almost every session — the row is drawn exactly as it always was.
+   */
+  task?: TaskBadge;
   /**
    * The harness this session runs in (`shared/harness.ts`): not the model
    * source, which is `ModelChoice.provider`.

@@ -16,6 +16,18 @@ import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { displayTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
 import { modelLabel } from '../../shared/modelName';
+import {
+  attemptLine,
+  diffStatText,
+  routeChipText,
+  routeChipTitle,
+  routeIsLoud,
+  routeModeMarker,
+  taskStateLabel,
+  TASK_ACTION_LABEL,
+  TASK_STRIP_ACTIONS,
+  type TaskView,
+} from '../../shared/orchestration/taskView';
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { paneApi } from '../common/paneApi';
 
@@ -64,6 +76,7 @@ app.innerHTML = `
   <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
   <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
 </div>
+<div id="taskStrip" hidden></div>
 <div id="banner" hidden></div>
 <form id="findbar"><input id="find" type="search" placeholder="Find in conversation" aria-label="Find in conversation"><button>Find</button><button type="button" id="clearfind">Clear</button></form>
 <div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div></div>
@@ -111,6 +124,7 @@ const meta = document.getElementById('meta')!;
 // document. Sharing the id made this line overwrite the plan cards.
 const usageEl = document.getElementById('convUsage')!;
 const banner = document.getElementById('banner')!;
+const taskStrip = document.getElementById('taskStrip')!;
 const scroller = document.getElementById('scroll')!;
 const notch = document.getElementById('notch')!;
 const blocksEl = document.getElementById('blocks')!;
@@ -1196,6 +1210,133 @@ function setBanner(next: ConversationCapabilities): void {
   banner.append(text, install);
 }
 
+// ---- the task strip (#34) ----
+
+/**
+ * The task this conversation is an attempt of, or nothing.
+ *
+ * Kept so a click on an attempt line knows which mission it belongs to without
+ * re-deriving it, and so the expanded/collapsed state survives the strip being
+ * re-pushed (which happens on every tick of a running task — the diff stat
+ * moves constantly, and a list that collapsed under the user each time would
+ * be unusable).
+ */
+let task: TaskView | undefined;
+let attemptsOpen = false;
+
+/**
+ * Draw the strip.
+ *
+ * Built as DOM rather than as HTML for the reason the rest of this pane is:
+ * the objective and the branch are the user's own words and paths, and the
+ * only way to be sure they are never parsed as markup is never to concatenate
+ * them into any. Every string here goes in through `textContent`.
+ *
+ * What the strip says is decided in `shared/orchestration/taskView.ts`; this
+ * function decides only where it goes on screen.
+ */
+function renderTask(): void {
+  taskStrip.replaceChildren();
+  if (!task) {
+    taskStrip.hidden = true;
+    return;
+  }
+  taskStrip.hidden = false;
+  const t = task;
+
+  const head = document.createElement('div');
+  head.className = 'tshead';
+  const title = document.createElement('span');
+  title.className = 'tstitle';
+  title.textContent = t.title;
+  title.title = t.objective;
+  const state = document.createElement('span');
+  state.className = `tschip st-${t.state}`;
+  state.textContent = taskStateLabel(t.state);
+  if (t.stateReason) state.title = t.stateReason;
+  head.append(title, state);
+
+  if (t.route) {
+    const route = document.createElement('span');
+    route.className = routeIsLoud(t.route) ? 'tschip route loud' : 'tschip route';
+    const marker = routeModeMarker(t.route.mode);
+    route.textContent = marker ? `${routeChipText(t.route)} · ${marker}` : routeChipText(t.route);
+    route.title = routeChipTitle(t.route);
+    head.append(route);
+  }
+  if (t.attempt) {
+    const n = document.createElement('span');
+    n.className = 'tschip';
+    n.textContent = `attempt ${t.attempt.n}/${t.attempt.of}`;
+    head.append(n);
+  }
+  taskStrip.append(head);
+
+  // The second line: where the work is. A branch and a diff stat are what tell
+  // the user whether there is anything to look at yet.
+  const meta = document.createElement('div');
+  meta.className = 'tsmeta';
+  const bits: string[] = [];
+  if (t.branch) bits.push(t.branch);
+  if (t.worktreeState === 'missing') bits.push('worktree missing');
+  const diff = diffStatText(t.diff);
+  if (diff) bits.push(diff);
+  if (bits.length > 0) {
+    meta.textContent = bits.join(' · ');
+    if (t.worktreePath) meta.title = t.worktreePath;
+    taskStrip.append(meta);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'tsactions';
+  for (const a of TASK_STRIP_ACTIONS) {
+    if (!t.actions.includes(a)) continue;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = a === 'cancel' ? 'tsbtn danger' : 'tsbtn';
+    b.textContent = TASK_ACTION_LABEL[a];
+    b.addEventListener('click', () => post({ type: 'taskAction', missionId: t.missionId, action: a }));
+    actions.append(b);
+  }
+  // More than one attempt is history worth reaching; one is the conversation
+  // already on screen, and a disclosure that opens onto itself is noise.
+  if (t.attempts.length > 1) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tsbtn link';
+    toggle.setAttribute('aria-expanded', String(attemptsOpen));
+    toggle.textContent = attemptsOpen ? 'Hide attempts' : `${t.attempts.length} attempts`;
+    toggle.addEventListener('click', () => {
+      attemptsOpen = !attemptsOpen;
+      renderTask();
+    });
+    actions.append(toggle);
+  }
+  if (actions.childElementCount > 0) taskStrip.append(actions);
+
+  if (attemptsOpen && t.attempts.length > 1) {
+    const list = document.createElement('div');
+    list.className = 'tsattempts';
+    for (const a of t.attempts) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = a.current ? 'tsattempt current' : 'tsattempt';
+      row.textContent = attemptLine(a, t.attempts.length, Date.now());
+      // An attempt whose session is gone has nothing to open; it still shows,
+      // because the fact that it happened is the point of the list.
+      if (a.sessionKey) {
+        const key = a.sessionKey;
+        row.addEventListener('click', () => post({ type: 'openAttempt', sessionKey: key }));
+      } else {
+        row.disabled = true;
+        row.title = 'This attempt’s session is no longer on this machine.';
+      }
+      list.append(row);
+    }
+    taskStrip.append(list);
+  }
+}
+
 function autoGrow(): void {
   msgEl.style.height = 'auto';
   msgEl.style.height = `${Math.min(msgEl.scrollHeight, MAX_COMPOSER_PX)}px`;
@@ -1913,6 +2054,11 @@ vscodeApi.onMessage((body) => {
       if (m.composer) setComposer(m.composer);
       else clearComposer();
       setBanner(m.caps);
+      // A different conversation is a different task (usually none at all), so
+      // the attempts list starts closed rather than inheriting the last one's.
+      if (task?.missionId !== m.task?.missionId) attemptsOpen = false;
+      task = m.task;
+      renderTask();
       stick = true;
       appendBlocks(m.blocks);
       // Opening a pane on a session that is already waiting lands on what it is
@@ -1948,6 +2094,11 @@ vscodeApi.onMessage((body) => {
       setStatus(m.session.status, m.caps.estimated);
       setCaps(m.caps);
       setBanner(m.caps);
+      break;
+    case 'task':
+      if (task?.missionId !== m.task?.missionId) attemptsOpen = false;
+      task = m.task;
+      renderTask();
       break;
     case 'composer':
       setComposer(m.composer);

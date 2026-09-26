@@ -249,6 +249,7 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       host.settings,
       host.dialogs,
       app.models,
+      app.taskPanes,
     );
     this.conversation = new ConversationHost(
       paneChannel(transport, 'conversation'),
@@ -264,6 +265,7 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       // does not follow the session — the pane shows the name in its header.
       () => undefined,
       ui,
+      app.taskPanes,
     );
     this.windowSubs.push(this.dashboard, this.conversation);
 

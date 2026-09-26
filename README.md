@@ -295,6 +295,14 @@ new worktree and branch of the chosen folder's repository:
   the diff. There is no verification yet, so the task waits for you: *Accept the result*,
   *Retry fresh* or *Cancel*. Accepting keeps the branch for you to merge. An attempt that
   changed nothing, or whose last turn ended in an error, fails and waits the same way.
+- **Where you see it.** A task's session is an ordinary row, with two extra chips: which task it
+  is for, and what it ran on (`Opus 5 · high`). An expensive route — the `expert` tier, or `max`
+  effort — is filled rather than outlined, so it is visible without opening anything. Click the
+  row and the conversation opens under a **task strip**: the objective, the route, attempt
+  *n/N*, the branch and its diff stat, and buttons for whatever the task can do now (*Open
+  diff*, *Accept*, *Resume*, *Retry*, *Cancel*). After a retry the strip lists every attempt;
+  clicking one opens that attempt's own conversation in the same pane. Nothing here opens a
+  window, and the chips fold onto the row's second line in a narrow pane.
 - **Restarts.** A task's conversation is an ordinary row in the table. It survives quitting and
   reinstalling (Claude tasks need *Keep conversations running when Agent Wrangler quits*, and
   are refused without it). On relaunch the task is picked up where it is. If its session was

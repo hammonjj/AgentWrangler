@@ -152,6 +152,133 @@ body,
   background: var(--vscode-button-hoverBackground);
 }
 
+/* ---- the task strip (#34) ----
+
+   Above the transcript and below the header: what this conversation is an
+   attempt of, what it ran on, and what can be done about it. Everything wraps,
+   because the pane can be 300px wide inside a 2000px window and none of this
+   may push the conversation out of reach. */
+
+#taskStrip {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 12px;
+  font-size: 0.9em;
+  background: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.08));
+  border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, #555));
+}
+#taskStrip .tshead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+#taskStrip .tstitle {
+  font-weight: 600;
+  /* The one thing allowed to be cut: the chips beside it say the state, and
+     losing those is worse than losing the tail of a title the tooltip keeps. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 4em;
+}
+#taskStrip .tschip {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, #555));
+  border-radius: 9px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#taskStrip .tschip.route {
+  border-color: var(--vscode-textLink-foreground, #569cd6);
+  color: var(--vscode-textLink-foreground, #569cd6);
+}
+/* The expensive routes, filled so they read at a glance. */
+#taskStrip .tschip.route.loud {
+  border-color: var(--vscode-charts-orange, #d7ba7d);
+  background: var(--vscode-charts-orange, #d7ba7d);
+  color: var(--vscode-editor-background);
+  font-weight: 600;
+}
+#taskStrip .tschip.st-needs-human {
+  border-color: var(--vscode-charts-yellow, #d7ba7d);
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
+#taskStrip .tschip.st-failed,
+#taskStrip .tschip.st-cancelled {
+  border-color: var(--vscode-errorForeground, #f48771);
+  color: var(--vscode-errorForeground, #f48771);
+}
+#taskStrip .tschip.st-done {
+  border-color: var(--vscode-charts-green, #89d185);
+  color: var(--vscode-charts-green, #89d185);
+}
+#taskStrip .tsmeta {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+#taskStrip .tsactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#taskStrip .tsbtn {
+  padding: 2px 8px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.2));
+  font: inherit;
+  font-size: 0.9em;
+  cursor: pointer;
+}
+#taskStrip .tsbtn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(127, 127, 127, 0.35));
+}
+#taskStrip .tsbtn.danger {
+  color: var(--vscode-errorForeground, #f48771);
+}
+#taskStrip .tsbtn.link {
+  border-color: transparent;
+  background: none;
+  color: var(--vscode-textLink-foreground, #569cd6);
+}
+#taskStrip .tsattempts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* A button, not a row: each one opens that attempt's conversation, and it has
+   to be reachable from the keyboard like anything else that navigates. */
+#taskStrip .tsattempt {
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: var(--vscode-descriptionForeground);
+  font: inherit;
+  font-size: 0.85em;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+#taskStrip .tsattempt:hover:not(:disabled) {
+  background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.15));
+}
+#taskStrip .tsattempt.current {
+  color: var(--vscode-foreground);
+  border-color: var(--vscode-panel-border, var(--vscode-widget-border, #555));
+}
+#taskStrip .tsattempt:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 /* ---- transcript ---- */
 
 #scroll {
