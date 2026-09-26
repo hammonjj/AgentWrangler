@@ -204,15 +204,20 @@ const ICON_COLUMNS =
 const ICON_DISMISS =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
 
-/** Says which of the two things the × is about to do, since they differ. */
+/** Says which of the three things the × is about to do, since they differ. */
 function dismissTitle(s: SessionDTO): string {
-  if (dismissAction(s) === 'dismiss') {
-    return 'Done with this agent: ends the process running it and drops the row to Ended, where it ages out. '
-      + 'The transcript is kept, so it can be resumed. Asks first if it is working right now.';
+  const kept = 'The transcript is kept, so it can be resumed. Asks first if it is working right now.';
+  switch (dismissAction(s, tableView)) {
+    case 'dismiss':
+      return `Done with this agent: ends the process running it and drops the row to Ended, where it ages out. ${kept}`;
+    case 'dismissHide':
+      return `Done with this agent: ends the process running it and takes the row off this tab. ${kept} `
+        + 'It is still in the Status tab, under Archived.';
+    default:
+      return s.archived
+        ? 'Unarchive: bring it back into its status section'
+        : 'Remove from this table: moves it to the Archived section, out of the way. Reversible; nothing is running.';
   }
-  return s.archived
-    ? 'Unarchive: bring it back into its status section'
-    : 'Remove from this table: moves it to the Archived section, out of the way. Reversible; nothing is running.';
 }
 
 function clickHint(s: SessionDTO): string {
@@ -255,7 +260,7 @@ function rowMenuHtml(): string {
 }
 
 /**
- * Distinct project groups among the given sessions, for the By Project tab:
+ * Distinct project groups among the given sessions, for the Project tab:
  * alphabetical, with the Uncategorized fallback bucket always last. Dynamic,
  * unlike `SECTION_ORDER` — there is no fixed list of project names, only
  * whatever `projectName` the current sessions happen to report.
@@ -658,7 +663,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   ${cols()
     .map((c) => CELL[c.id](s))
     .join('')}
-  <td class="c-act"><button class="dismiss" data-row-action="${dismissAction(s)}" title="${esc(dismissTitle(s))}">${ICON_DISMISS}</button></td>
+  <td class="c-act"><button class="dismiss" data-row-action="${dismissAction(s, tableView)}" title="${esc(dismissTitle(s))}">${ICON_DISMISS}</button></td>
 </tr>${permissionRow(s, span)}`;
 }
 
@@ -1295,19 +1300,26 @@ function render(): void {
   // so widths live on the header cells and a column that is switched off simply
   // is not rendered.
   const span = cols().length + 3; // dot + agent + data columns + actions
-  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<div class="tabletabs" role="tablist" aria-label="Conversation grouping"><button role="tab" aria-selected="${tableView === 'status'}" data-table-view="status">Status</button><button role="tab" aria-selected="${tableView === 'project'}" data-table-view="project">By Project</button></div><table>${headHtml()}`;
+  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<div class="tabletabs" role="tablist" aria-label="Conversation grouping"><button role="tab" aria-selected="${tableView === 'status'}" data-table-view="status">Status</button><button role="tab" aria-selected="${tableView === 'project'}" data-table-view="project">Project</button></div><table>${headHtml()}`;
 
   const groups = new Map<string, SessionDTO[]>();
   for (const s of visibleSessions) {
+    // The Project tab has no Archived group to put an archived row in — its
+    // groups are project names — so archived means gone from it, which is what
+    // its × relies on to take a finished agent off the table. The Status tab
+    // still shows them, collapsed, at the bottom, so nothing is unreachable.
+    if (tableView === 'project' && s.archived) continue;
     const group = tableView === 'status' ? sectionOf(s) : projectGroupOf(s);
     const list = groups.get(group);
     if (list) list.push(s);
     else groups.set(group, [s]);
   }
-  const groupOrder = tableView === 'status' ? SECTION_ORDER : projectGroups(visibleSessions);
+  const groupOrder = tableView === 'status' ? SECTION_ORDER : projectGroups([...groups.values()].flat());
   for (const group of groupOrder) {
     const rows = groups.get(group) ?? [];
-    if (tableView === 'status' && rows.length === 0) continue;
+    // A project whose every row was archived is not a project with no rows —
+    // it is one that is finished with, and an empty heading is noise.
+    if (rows.length === 0) continue;
     // Newest first, except that a permission prompt outranks activity inside
     // the Waiting section: it is the one row in the table where the agent is
     // stopped until you press something, and burying it under a conversation

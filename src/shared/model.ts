@@ -326,7 +326,7 @@ export function compareSessions(a: AgentSession, b: AgentSession): number {
   return b.lastActivityAt - a.lastActivityAt;
 }
 
-/** Dashboard status sections. The By Project view groups by `projectGroupOf` instead. */
+/** Dashboard status sections. The Project view groups by `projectGroupOf` instead. */
 export type SectionId = SessionStatus | 'paused' | 'archived';
 
 /**
@@ -374,13 +374,13 @@ export function sectionOf(s: AgentSession): SectionId {
 }
 
 /**
- * The always-present fallback bucket for the By Project view: sessions with no
+ * The always-present fallback bucket for the Project view: sessions with no
  * known project name land here rather than being dropped from the table.
  */
 export const UNCATEGORIZED_PROJECT = 'Uncategorized';
 
 /**
- * Which project-group a row belongs to for the By Project view: its project
+ * Which project-group a row belongs to for the Project view: its project
  * name, or the fallback bucket. Derived, unlike `sectionOf` — there is no
  * per-row assignment to make or persist, only `projectName` to read.
  */

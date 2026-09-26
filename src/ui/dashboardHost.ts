@@ -278,8 +278,17 @@ export class DashboardHost {
         else if (m.action === 'copyId') this.actions.copyId(m.key);
         else if (m.action === 'close') this.actions.closeSession(m.key);
         // The row's × button. Same close, minus the modal on a session that is
-        // not mid-turn: the gesture is meant to cost one click.
-        else if (m.action === 'dismiss') this.actions.closeSession(m.key, { confirmOnlyIfWorking: true });
+        // not mid-turn: the gesture is meant to cost one click. `dismissHide`
+        // is the Project tab's version — that tab has no Ended section to drop
+        // the row into, so it archives too, but only once the close has really
+        // happened: a declined confirm must not hide a running agent.
+        else if (m.action === 'dismiss' || m.action === 'dismissHide') {
+          const hide = m.action === 'dismissHide';
+          const key = m.key;
+          void this.actions.closeSession(key, { confirmOnlyIfWorking: true }).then((closed) => {
+            if (closed && hide) this.archive.set(key, true);
+          });
+        }
         else if (m.action === 'pause') this.actions.pauseSession(m.key, true);
         else if (m.action === 'unpause') this.actions.pauseSession(m.key, false);
         else if (m.action === 'allow' || m.action === 'deny' || m.action === 'always') {

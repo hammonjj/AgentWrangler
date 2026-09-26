@@ -724,7 +724,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const confirmAndCloseSession = async (
     s: AgentSession,
     opts: { confirmOnlyIfWorking?: boolean } = {},
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     const label = displayLabel(s);
     const ours = runners.owns(s.sessionId) || codexRunners.owns(s.sessionId);
     if (!ours && s.pid === undefined) {
@@ -732,7 +732,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         `Agent Wrangler: no process is known for ${label}, so there is nothing to close.`,
         {},
       );
-      return;
+      return false;
     }
 
     const working = s.status === 'busy' || s.status === 'stuck' || s.status === 'blocked';
@@ -754,7 +754,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // point of it.
     if (!(opts.confirmOnlyIfWorking && !working)) {
       const choice = await dialogs.warn(`Close ${label}?`, { modal: true, detail }, 'Close session');
-      if (choice !== 'Close session') return;
+      if (choice !== 'Close session') return false;
     }
 
     // It may have finished, or ended on its own, while the dialog was up.
@@ -766,6 +766,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
           'End it from its own terminal.',
       );
     }
+    // `nothing` counts as closed: the process was gone by the time we looked,
+    // which is the state the click was asking for.
+    return outcome !== 'refused' && outcome !== 'hostRefused';
   };
 
   /**
@@ -1516,8 +1519,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     },
     closeSession(key, opts) {
       const s = store.get(key);
-      if (!s) return;
-      void confirmAndCloseSession(s, opts ?? {});
+      if (!s) return Promise.resolve(false);
+      return confirmAndCloseSession(s, opts ?? {});
     },
     pauseSession(key, wanted) {
       const s = store.get(key);
