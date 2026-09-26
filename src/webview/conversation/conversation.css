@@ -596,9 +596,20 @@ body,
    the block's top-right padding, out of the text column, and the reveal is on
    the whole block — the pointer is rarely on the button itself when the reader
    decides they want it. */
+/* Zero-height sticky spacer: it pins to the top of the scroll viewport for as
+   long as any part of the enclosing `.blk.assistant` is on screen, without
+   taking up space in flow, so the button underneath stays reachable while a
+   long reply scrolls instead of scrolling away with the top of the bubble. */
+.blockcopy-sticky {
+  position: sticky;
+  top: 4px;
+  height: 0;
+  z-index: 3;
+  pointer-events: none;
+}
 .blockcopy {
   position: absolute;
-  top: 2px;
+  top: 0;
   right: 2px;
   display: flex;
   align-items: center;
@@ -612,6 +623,7 @@ body,
   color: var(--vscode-descriptionForeground);
   cursor: pointer;
   opacity: 0;
+  pointer-events: auto;
 }
 .blockcopy .cicon {
   width: 13px;

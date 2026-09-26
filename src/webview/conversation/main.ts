@@ -264,7 +264,14 @@ function appendBlockCopy(el: HTMLElement, b: ConvBlock): void {
     flashCopy(btn, 'Fetching the rest…', 'busy', 4000);
     post({ type: 'requestBlockText', id: b.id });
   });
-  el.appendChild(btn);
+  // Wrapped in a zero-height sticky spacer: the wrapper pins to the top of the
+  // scroll viewport while any part of `el` is still on screen, but takes no
+  // space in flow, so the button stays reachable on long replies instead of
+  // scrolling away with the top of the bubble.
+  const sticky = document.createElement('div');
+  sticky.className = 'blockcopy-sticky';
+  sticky.appendChild(btn);
+  el.appendChild(sticky);
 }
 
 function decorateCodeBlocks(root: HTMLElement): void {
