@@ -264,14 +264,16 @@ function appendBlockCopy(el: HTMLElement, b: ConvBlock): void {
     flashCopy(btn, 'Fetching the rest…', 'busy', 4000);
     post({ type: 'requestBlockText', id: b.id });
   });
-  // Wrapped in a zero-height sticky spacer: the wrapper pins to the top of the
-  // scroll viewport while any part of `el` is still on screen, but takes no
-  // space in flow, so the button stays reachable on long replies instead of
-  // scrolling away with the top of the bubble.
+  // Wrapped in a zero-height sticky spacer so the button follows the reader down
+  // a long reply instead of scrolling away with its first line. The spacer must
+  // be the block's FIRST child: a sticky box only ever slides down from its
+  // place in flow, so one placed after the body sits at the bottom and never
+  // comes up. From the top it rides down with `top`, and stops at the block's
+  // end because a sticky box never leaves its parent.
   const sticky = document.createElement('div');
   sticky.className = 'blockcopy-sticky';
   sticky.appendChild(btn);
-  el.appendChild(sticky);
+  el.prepend(sticky);
 }
 
 function decorateCodeBlocks(root: HTMLElement): void {
