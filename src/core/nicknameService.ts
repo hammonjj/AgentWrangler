@@ -64,7 +64,7 @@ export class NicknameService {
     const clean = cleanNickname(nickname);
     if (clean === this.names.get(key)) return;
     // One change applied to what storage says now, not this window's whole map
-    // written back — see `PinService.set` for why that distinction matters.
+    // written back, so a name set elsewhere between reads is not clobbered.
     const merged = this.read();
     if (clean) merged.set(key, clean);
     else merged.delete(key);

@@ -1203,11 +1203,6 @@ tr.row .dismiss svg {
   border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
   box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
 }
-.rowmenu.sections-open {
-  width: 240px;
-  max-height: calc(100vh - 8px);
-  overflow-y: auto;
-}
 .rowmenu .rmrow {
   display: block;
   width: 100%;
@@ -1223,32 +1218,6 @@ tr.row .dismiss svg {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.rowmenu .rmadd,
-.rowmenu .rmsection,
-.rowmenu .rmcreate {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.rowmenu .rmadd { justify-content: space-between; }
-.rowmenu .rmsection span,
-.rowmenu .rmcreate span {
-  width: 16px;
-  flex: 0 0 16px;
-  text-align: center;
-}
-.rowmenu .rmsub {
-  margin: 3px 0;
-  padding: 3px 0;
-  border-top: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
-  border-bottom: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
-}
-.rowmenu .rmsection.current { font-weight: 600; }
-.rowmenu .rmcreate {
-  margin-top: 3px;
-  padding-top: 6px;
-  border-top: 1px solid var(--vscode-menu-separatorBackground, rgba(128, 128, 128, 0.25));
 }
 .rowmenu .rmrow:hover {
   background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground));

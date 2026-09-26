@@ -31,10 +31,11 @@ import {
   formatDuration,
   GLOBAL_PROJECT_DIR,
   hookBanner,
+  projectGroupOf,
   SECTION_LABEL,
   SECTION_ORDER,
   sectionOf,
-  UNCATEGORIZED_SECTION,
+  UNCATEGORIZED_PROJECT,
   workingElapsedMs,
   type HookHealth,
   type ProjectDTO,
@@ -54,7 +55,7 @@ import {
 
 interface WebviewState {
   collapsed?: string[];
-  tableView?: 'status' | 'sections';
+  tableView?: 'status' | 'project';
   /** Hook-health kind whose banner the user hid. A different kind brings the banner back. */
   bannerDismissed?: string;
   /**
@@ -77,7 +78,6 @@ let sessions: SessionDTO[] = [];
 let hooks: HookHealth | undefined;
 let usage: UsageState | undefined;
 let codexUsage: UsageState | undefined;
-let conversationSections = [UNCATEGORIZED_SECTION];
 /** The bar's Discord button, absent until the first snapshot says whether it exists. */
 let discord: { configured: boolean; on: boolean } | undefined;
 type QuestionDraft = { step: number; selected: Record<number, string[]>; other: Record<number, string> };
@@ -101,7 +101,7 @@ let narrow = app.clientWidth > 0 && app.clientWidth < NARROW_PX;
 /** Open column picker, or undefined. The number is where to pin it vertically. */
 let menuPosition: { top: number; left: number } | undefined;
 /** Open row context menu: which row it belongs to, and where it was asked for. */
-let rowMenu: { key: string; x: number; y: number; showSections?: boolean } | undefined;
+let rowMenu: { key: string; x: number; y: number } | undefined;
 /** A drag owns the table until it ends: snapshots arriving mid-drag are deferred. */
 let dragging = false;
 let renderDeferred = false;
@@ -132,7 +132,7 @@ const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
 let providerFilter: 'all' | 'claude' | 'codex' = saved?.provider ?? 'all';
-let tableView: 'status' | 'sections' = saved?.tableView ?? 'status';
+let tableView: 'status' | 'project' = saved?.tableView ?? 'status';
 
 function saveState(): void {
   vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, provider: providerFilter, tableView });
@@ -225,19 +225,11 @@ function rowMenuHtml(): string {
   if (!s) return '';
 
   const items = rowMenuItems(s);
-  const expanded = rowMenu.showSections === true;
-  const menuSize = expanded
-    ? { width: 240, height: 38 + conversationSections.length * 30 + 42 + items.length * 30 }
-    : rowMenuSize([...items, { action: 'rename', label: 'Add to…' }]);
+  const menuSize = rowMenuSize(items);
   const { left, top } = clampMenuPosition(rowMenu, menuSize, {
     width: document.documentElement.clientWidth,
     height: document.documentElement.clientHeight,
   });
-  const sectionRows = expanded
-    ? `<div class="rmsub" role="group" aria-label="Conversation sections">${conversationSections.map((section) =>
-        `<button class="rmrow rmsection${section === (s.conversationSection ?? UNCATEGORIZED_SECTION) ? ' current' : ''}" role="menuitemradio" aria-checked="${section === (s.conversationSection ?? UNCATEGORIZED_SECTION)}" data-section="${esc(section)}"><span>${section === (s.conversationSection ?? UNCATEGORIZED_SECTION) ? '✓' : ''}</span>${esc(section)}</button>`,
-      ).join('')}<button class="rmrow rmcreate" role="menuitem" data-create-section><span>＋</span>Create new section…</button></div>`
-    : '';
   const rows = items
     .map(
       (i) =>
@@ -246,7 +238,19 @@ function rowMenuHtml(): string {
         }>${esc(i.label)}</button>`,
     )
     .join('');
-  return `<div class="rowmenu${expanded ? ' sections-open' : ''}" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}"><button class="rmrow rmadd" role="menuitem" data-add-to>Add to…<span>›</span></button>${sectionRows}${rows}</div>`;
+  return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}">${rows}</div>`;
+}
+
+/**
+ * Distinct project groups among the given sessions, for the By Project tab:
+ * alphabetical, with the Uncategorized fallback bucket always last. Dynamic,
+ * unlike `SECTION_ORDER` — there is no fixed list of project names, only
+ * whatever `projectName` the current sessions happen to report.
+ */
+function projectGroups(list: SessionDTO[]): string[] {
+  const names = new Set(list.map(projectGroupOf));
+  const named = [...names].filter((n) => n !== UNCATEGORIZED_PROJECT).sort((a, b) => a.localeCompare(b));
+  return names.has(UNCATEGORIZED_PROJECT) ? [...named, UNCATEGORIZED_PROJECT] : named;
 }
 
 /**
@@ -1278,16 +1282,16 @@ function render(): void {
   // so widths live on the header cells and a column that is switched off simply
   // is not rendered.
   const span = cols().length + 3; // dot + agent + data columns + actions
-  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<div class="tabletabs" role="tablist" aria-label="Conversation grouping"><button role="tab" aria-selected="${tableView === 'status'}" data-table-view="status">Status</button><button role="tab" aria-selected="${tableView === 'sections'}" data-table-view="sections">Sections</button></div><table>${headHtml()}`;
+  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<div class="tabletabs" role="tablist" aria-label="Conversation grouping"><button role="tab" aria-selected="${tableView === 'status'}" data-table-view="status">Status</button><button role="tab" aria-selected="${tableView === 'project'}" data-table-view="project">By Project</button></div><table>${headHtml()}`;
 
   const groups = new Map<string, SessionDTO[]>();
   for (const s of visibleSessions) {
-    const group = tableView === 'status' ? sectionOf(s) : (s.conversationSection ?? UNCATEGORIZED_SECTION);
+    const group = tableView === 'status' ? sectionOf(s) : projectGroupOf(s);
     const list = groups.get(group);
     if (list) list.push(s);
     else groups.set(group, [s]);
   }
-  const groupOrder = tableView === 'status' ? SECTION_ORDER : conversationSections;
+  const groupOrder = tableView === 'status' ? SECTION_ORDER : projectGroups(visibleSessions);
   for (const group of groupOrder) {
     const rows = groups.get(group) ?? [];
     if (tableView === 'status' && rows.length === 0) continue;
@@ -1327,7 +1331,6 @@ vscodeApi.onMessage((body) => {
   }
   if (m.type === 'snapshot') {
     sessions = m.sessions;
-    conversationSections = m.conversationSections;
     if (m.projects) {
       projects = m.projects;
       renderLauncher();
@@ -1530,28 +1533,6 @@ app.addEventListener('click', (e) => {
   // whether that click picks an item or dismisses it. In particular a click on
   // a row must dismiss and stop there, rather than also opening that session.
   if (rowMenu) {
-    if (target.closest('[data-add-to]')) {
-      rowMenu.showSections = !rowMenu.showSections;
-      render();
-      e.stopPropagation();
-      return;
-    }
-    const section = target.closest<HTMLElement>('[data-section]');
-    if (section) {
-      const key = rowMenu.key;
-      const name = section.dataset.section!;
-      closeRowMenu();
-      post({ type: 'setConversationSection', key, section: name });
-      e.stopPropagation();
-      return;
-    }
-    if (target.closest('[data-create-section]')) {
-      const key = rowMenu.key;
-      closeRowMenu();
-      post({ type: 'createConversationSection', key });
-      e.stopPropagation();
-      return;
-    }
     const item = target.closest('[data-row-action]') as HTMLElement | null;
     const key = rowMenu.key;
     closeRowMenu();
@@ -1562,7 +1543,7 @@ app.addEventListener('click', (e) => {
 
   const viewTab = target.closest<HTMLElement>('[data-table-view]');
   if (viewTab) {
-    tableView = viewTab.dataset.tableView as 'status' | 'sections';
+    tableView = viewTab.dataset.tableView as 'status' | 'project';
     saveState();
     render();
     return;
