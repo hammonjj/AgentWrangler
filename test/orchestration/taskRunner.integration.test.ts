@@ -86,10 +86,17 @@ beforeEach(() => {
   git(repo, 'commit', '-q', '-m', 'init');
   fs.mkdirSync(path.join(repo, 'node_modules', 'dep'), { recursive: true });
   fs.writeFileSync(path.join(repo, 'node_modules', 'dep', 'index.js'), 'module.exports = 1;\n');
+  // A check the repository actually defines, so every task here is verified
+  // for real (#35). A script rather than `npm run typecheck`: these tests run
+  // it on every attempt, and twice more against the base commit when it fails.
+  // `check.flag` is what a test writes to make it fail.
+  fs.writeFileSync(path.join(repo, 'check.sh'), '#!/bin/sh\nif [ -f check.flag ]; then echo " FAIL  test/a.test.ts"; exit 1; fi\nexit 0\n', { mode: 0o755 });
+  git(repo, 'add', '.');
+  git(repo, 'commit', '-q', '-m', 'check');
   const policies = new RepoPolicyStore(path.join(dataDir, 'repos'));
   const saved = policies.save(identityFor(repo), {
     worktrees: { setup: [{ link: 'node_modules' }] },
-    verification: { typecheck: { run: ['npm', 'run', 'typecheck'] } },
+    verification: { check: { run: ['/bin/sh', 'check.sh'] } },
   });
   expect(saved.ok).toBe(true);
   rigs = [];
@@ -139,6 +146,7 @@ function rig(attempt: SimAttempt, s: Shared = shared(), overrides: Partial<TaskR
     telemetry: { append: (r) => (s.telemetry.push(r), true) },
     notify: (n) => s.notices.push(n),
     diffsDir: path.join(dataDir, 'orchestration', 'diffs'),
+    logsDir: path.join(dataDir, 'orchestration', 'logs'),
     settleMs: 30,
     ...overrides,
   });
@@ -196,7 +204,7 @@ describe('TaskRunner', () => {
     expect(record.origin).toEqual({ kind: 'orchestration', missionId: id, taskId: m.tasks[0].id, attemptId: a.id });
     expect(record.cwd).toBe(wt.path);
     expect(record.launch).toMatchObject({ model: 'claude-simulated', effort: 'low', permissionMode: 'auto' });
-    expect(record.launch.policy?.claude?.allowedTools).toEqual(expect.arrayContaining(['Bash(npm run typecheck:*)', 'Bash(git commit:*)']));
+    expect(record.launch.policy?.claude?.allowedTools).toEqual(expect.arrayContaining(['Bash(/bin/sh check.sh:*)', 'Bash(git commit:*)']));
     expect(record.launch.policy?.claude?.disallowedTools).toEqual(
       expect.arrayContaining(['Bash(git push:*)', 'Bash(npm run app:install:*)', `Edit(/${repo}/**)`]),
     );
@@ -448,5 +456,104 @@ describe('TaskRunner', () => {
     fs.mkdirSync(outside);
     await expect(r.runner.start({ ...TASK, folder: outside })).rejects.toThrow(/not in a git repository/);
     expect(r.runner.list()).toEqual([]);
+  });
+
+  // ---- verification (#35) ----
+
+  describe('verification', () => {
+    /** Run a task to its terminal state and hand back the mission. */
+    async function runToEnd(r: Rig): Promise<Mission> {
+      const started = await r.runner.start({ ...TASK, folder: repo });
+      await until(
+        () => ['succeeded', 'failed'].includes(attemptOf(r.runner.get(started.id))?.state ?? ''),
+        20_000,
+        'the attempt to finish',
+      );
+      return r.runner.get(started.id)!;
+    }
+
+    it('passes a result that passes the repository’s checks, and records the stages', async () => {
+      const m = await runToEnd(rig(EDIT));
+      const a = attemptOf(m)!;
+
+      expect(a.state).toBe('succeeded');
+      expect(a.verification.map((v) => [v.strategy, v.outcome])).toEqual([
+        ['diff-sanity', 'passed'],
+        ['command:check', 'passed'],
+      ]);
+      expect(m.tasks[0].state).toBe('needs-human');
+      expect(m.tasks[0].stateReason).toContain('passed');
+    });
+
+    it('fails the attempt when a required check fails, and says which test', async () => {
+      // The agent's edit trips the repository's own check.
+      const r = rig({ behaviour: 'edit', files: { 'src/a.ts': 'export const a = 1;\n', 'check.flag': 'x\n' } });
+      const m = await runToEnd(r);
+      const a = attemptOf(m)!;
+
+      expect(a.state).toBe('failed');
+      expect(a.outcome).toMatchObject({ status: 'failed', category: 'quality-new' });
+      expect(a.outcome?.signature).toBeDefined();
+      const check = a.verification.find((v) => v.strategy === 'command:check')!;
+      expect(check.outcome).toBe('failed');
+      expect(check.evidence?.failing).toEqual(['test/a.test.ts']);
+      // The log is on disk for the user to open.
+      expect(fs.readFileSync(check.evidence!.logPath!, 'utf8')).toContain('FAIL');
+      expect(m.tasks[0].state).toBe('needs-human');
+      expect(r.notices.some((n) => n.title.includes('failed verification'))).toBe(true);
+    });
+
+    it('carries the stage results into the attempt’s telemetry record', async () => {
+      const r = rig(EDIT);
+      await runToEnd(r);
+      const rec = r.telemetry.find((t): t is AttemptRecord => t.type === 'attempt')!;
+
+      expect(rec.verification).toEqual([
+        { strategy: 'diff-sanity', outcome: 'passed', flaky: undefined, preExisting: undefined, durationMs: expect.any(Number) },
+        { strategy: 'command:check', outcome: 'passed', flaky: undefined, preExisting: undefined, durationMs: expect.any(Number) },
+      ]);
+    });
+
+    it('a repository with no checks produces a result nothing vouched for', async () => {
+      // Replace the policy with one that defines no commands at all.
+      const policies = new RepoPolicyStore(path.join(dataDir, 'repos'));
+      expect(policies.save(identityFor(repo), { worktrees: { setup: [{ link: 'node_modules' }] } }).ok).toBe(true);
+
+      const m = await runToEnd(rig(EDIT));
+      const a = attemptOf(m)!;
+
+      // It still succeeds — nothing said it was wrong — but it is explicitly
+      // unverified, and only the user can turn that into `done`.
+      expect(a.state).toBe('succeeded');
+      expect(m.tasks[0].state).toBe('needs-human');
+      expect(m.tasks[0].stateReason).toContain('unverified');
+      expect(a.verification.map((v) => v.strategy)).toEqual(['diff-sanity']);
+    });
+
+    it('does not fail an attempt for a check that was already failing on the base commit', async () => {
+      // The check is red at the base commit: the flag is committed before the task starts.
+      fs.writeFileSync(path.join(repo, 'check.flag'), 'x\n');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-q', '-m', 'break the check');
+
+      const m = await runToEnd(rig(EDIT));
+      const a = attemptOf(m)!;
+      const check = a.verification.find((v) => v.strategy === 'command:check')!;
+
+      expect(check).toMatchObject({ outcome: 'inconclusive', preExisting: true });
+      expect(a.state).toBe('succeeded');
+      expect(a.outcome?.category).toBeUndefined();
+      expect(m.tasks[0].stateReason).toContain('base commit');
+    });
+
+    it('fails an attempt whose diff would not survive review, before running any command', async () => {
+      const r = rig({ behaviour: 'edit', files: { 'src/a.ts': '<<<<<<< HEAD\nconst a = 1;\n=======\nconst a = 2;\n>>>>>>> other\n' } });
+      const m = await runToEnd(r);
+      const a = attemptOf(m)!;
+
+      expect(a.state).toBe('failed');
+      expect(a.verification.map((v) => v.strategy)).toEqual(['diff-sanity']);
+      expect(a.outcome?.signature).toBe('diff-sanity:conflict-markers');
+    });
   });
 });

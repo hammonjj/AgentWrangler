@@ -115,6 +115,7 @@ function core(attempt: SimAttempt, opts: { adopt?: boolean } = {}) {
     openWorktrees: (loaded, record) => WorktreeManager.open({ repoRoot: loaded.repo.primaryRoot, root: worktreeRootPath(loaded) }, { record }),
     launchDefaults: new LaunchDefaults({ get: <T>(_k: string, f: T) => f }),
     diffsDir: path.join(dataDir, 'diffs'),
+    logsDir: path.join(dataDir, 'logs'),
     settleMs: 50,
   });
   const quit = () => {

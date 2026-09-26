@@ -394,6 +394,56 @@ export class WorktreeManager {
 
   // ---- Setup ----
 
+  /**
+   * Run something in a throwaway checkout of `baseCommit`, then take it away.
+   *
+   * This is how a failure is checked against the base commit (§14.3): if the
+   * repository's tests were already red before the agent touched anything,
+   * that is not the agent's failure and must not be recorded as one.
+   *
+   * Three things make it a fair comparison rather than a second guess:
+   * - it is a **detached** worktree with no branch, so it can never be
+   *   confused with a task's tree, left behind in `git worktree list` as
+   *   something AW owns, or merged;
+   * - it gets **the same setup steps** the task's tree got, so `npm test`
+   *   finds the same linked `node_modules`. Without that the base would fail
+   *   to start and every failure would look pre-existing;
+   * - it lives under the same worktree root, so a `.gitignore`d sibling
+   *   directory is all a user ever sees of it.
+   *
+   * It is removed whatever happens, including when `fn` throws. A tree left
+   * behind by a crash is registered with git, so the next call clears it
+   * rather than failing on an occupied path.
+   */
+  async withBaseCheckout<T>(baseCommit: string, fn: (tree: string) => Promise<T>): Promise<T> {
+    if (!FULL_SHA.test(baseCommit)) throw this.fail('invalid-name', `base must be a full commit id, not "${baseCommit}"`);
+    const tree = path.join(this.root, `.base-${baseCommit.slice(0, 12)}`);
+    await this.clearBaseCheckout(tree);
+    fs.mkdirSync(path.dirname(tree), { recursive: true });
+    const add = await this.git(['worktree', 'add', '--detach', tree, baseCommit], this.repoRoot, ADD_TIMEOUT_MS);
+    if (add.code !== 0) throw this.fail('git-failed', `could not check out ${baseCommit.slice(0, 8)}: ${add.stderr.trim().slice(0, 300)}`);
+    try {
+      await this.applySetup(tree);
+      return await fn(tree);
+    } finally {
+      await this.clearBaseCheckout(tree);
+    }
+  }
+
+  /** Take away a base checkout at `tree`, whatever state it is in. Never throws. */
+  private async clearBaseCheckout(tree: string): Promise<void> {
+    try {
+      // The symlinks setup made are removed with the tree; `--force` is safe
+      // here in a way it never is for a task's tree, because nothing in a base
+      // checkout is anybody's work — it is a read-only copy of a commit.
+      await this.git(['worktree', 'remove', '--force', tree], this.repoRoot, ADD_TIMEOUT_MS);
+      fs.rmSync(tree, { recursive: true, force: true });
+      await this.git(['worktree', 'prune'], this.repoRoot);
+    } catch (e) {
+      this.log(`base checkout: could not clear ${tree}: ${String(e)}`);
+    }
+  }
+
   private async applySetup(tree: string): Promise<void> {
     for (const step of this.setupSteps) {
       if ('link' in step) {
@@ -567,6 +617,27 @@ export class WorktreeManager {
       if (m[2] !== '-') deletions += Number(m[2]);
     }
     return { headCommit: head, commits: Number(count.stdout.trim()) || 0, filesChanged, insertions, deletions };
+  }
+
+  /**
+   * Which files the branch changed, and by how much (#35's `diff-sanity`).
+   *
+   * Separate from `diffStats`, which totals the same numbers, because a
+   * per-file view is what the checks need: a test file with deletions and no
+   * insertions is a deleted test, and a patch alone cannot show that — a file
+   * that was only deleted contributes no `+` lines to read its path from.
+   * A binary file's counts are `-` in git's output and 0 here.
+   */
+  async changedFiles(a: WorktreeAssignment): Promise<{ file: string; insertions: number; deletions: number }[]> {
+    const head = await this.branchHead(a.branch);
+    const numstat = await this.gitOk(['diff', '--numstat', '-z', '--no-renames', `${a.baseCommit}..${head}`], 'git-failed');
+    const out: { file: string; insertions: number; deletions: number }[] = [];
+    for (const rec of numstat.stdout.split('\0')) {
+      const m = /^(-|\d+)\t(-|\d+)\t(.*)$/s.exec(rec);
+      if (!m || m[3] === '') continue;
+      out.push({ file: m[3], insertions: m[1] === '-' ? 0 : Number(m[1]), deletions: m[2] === '-' ? 0 : Number(m[2]) });
+    }
+    return out;
   }
 
   /** The branch's changes since its base, as a patch (a summary first). */

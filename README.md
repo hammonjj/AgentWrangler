@@ -291,10 +291,35 @@ new worktree and branch of the chosen folder's repository:
   commit.
 - **How it ends.** When the agent's turn is over, it is idle, nothing is pending and nothing
   runs in the background. Agent Wrangler then commits anything left uncommitted on the task's
-  branch and shows a notification. Click it (or *Tasks → the task → Open the diff*) to read
-  the diff. There is no verification yet, so the task waits for you: *Accept the result*,
-  *Retry fresh* or *Cancel*. Accepting keeps the branch for you to merge. An attempt that
-  changed nothing, or whose last turn ended in an error, fails and waits the same way.
+  branch, **verifies the result** (below) and shows a notification. Click it (or *Tasks → the
+  task → Open the diff*) to read the diff. The task then waits for you either way: *Accept the
+  result*, *Retry fresh* or *Cancel*. Accepting keeps the branch for you to merge. An attempt
+  that changed nothing, or whose last turn ended in an error, fails and waits the same way.
+- **Verification.** A task is finished because checks passed on its result, not because the
+  agent stopped talking. Agent Wrangler runs, in the task's own worktree:
+  - `diff-sanity` — the attempt changed something, and the diff has no conflict markers and
+    nothing that looks like a credential in it. Deleted or newly skipped tests, and changes
+    outside the task's expected area, are warnings rather than failures.
+  - **your repository's own commands**, from its policy (below) — and only those. Agent
+    Wrangler has no built-in idea of how to test your code, and a model can never supply a
+    command.
+
+  The commands run as child processes with the same stripped environment a hosted agent gets,
+  each with the timeout its policy gives it, and their output goes to
+  `orchestration/logs/<attempt>/` for *Open log*. Four things it is careful about:
+  - a check that **fails and then passes on a re-run** of the unchanged tree is marked *flaky*,
+    not a failure;
+  - a check that **also fails at the commit the task started from** is reported as "the base is
+    red" and is not blamed on the agent. That answer is worked out in a throwaway checkout of
+    the base commit, set up the same way, and remembered for the rest of the session;
+  - a check that **times out or cannot start** is an error — our problem, not the agent's — and
+    never counts against it;
+  - a repository with **no commands** gives a result marked *unverified*. That is deliberately
+    not a pass: `diff-sanity` alone only proves that files changed, so the result is one only
+    you can accept.
+
+  The verdict shows as a badge on the session's row and in the task strip, with a line per
+  stage and a button to open the failing log.
 - **Where you see it.** A task's session is an ordinary row, with two extra chips: which task it
   is for, and what it ran on (`Opus 5 · high`). An expensive route — the `expert` tier, or `max`
   effort — is filled rather than outlined, so it is visible without opening anything. Click the

@@ -13,11 +13,13 @@
  * pane can be sent without starting anything.
  */
 import { modelLabel } from '../../shared/modelName';
+import { stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
 import type {
   TaskAttemptView,
   TaskBadge,
   TaskDiffView,
   TaskRouteView,
+  TaskVerificationView,
   TaskView,
   TaskViewAction,
 } from '../../shared/orchestration/taskView';
@@ -70,6 +72,37 @@ export function routeViewOf(m: Mission, a: ExecutionAttempt | undefined): TaskRo
     tier: t.tier,
     mode: d.mode,
     location: t.location,
+  };
+}
+
+/**
+ * What the checks said about an attempt (#35).
+ *
+ * Only once they have finished: an attempt that is still `verifying` has an
+ * incomplete list, and summing that would show `unverified` — which is a
+ * verdict, not a progress report — while the checks are still running.
+ */
+export function verificationViewOf(
+  task: Task,
+  a: ExecutionAttempt | undefined,
+): TaskVerificationView | undefined {
+  const results = a?.verification ?? [];
+  if (results.length === 0) return undefined;
+  if (results.some((r) => r.state === 'running')) return undefined;
+  const summary = summariseVerification(task.verification, results);
+  const badge = verificationBadge(summary);
+  return {
+    glyph: badge.glyph,
+    text: badge.text,
+    title: badge.title,
+    verdict: summary.verdict,
+    baseIsRed: summary.baseIsRed || undefined,
+    stages: results.map(stageLine),
+    // The log of whatever went wrong, or of the last stage that wrote one:
+    // the thing a user clicking "open log" is looking for is the failure.
+    logPath:
+      results.find((r) => r.outcome === 'failed' || r.outcome === 'inconclusive' || r.outcome === 'error')?.evidence?.logPath ??
+      [...results].reverse().find((r) => r.evidence?.logPath)?.evidence?.logPath,
   };
 }
 
@@ -151,6 +184,7 @@ export function taskViewOf(m: Mission, actions: TaskViewAction[]): TaskView | un
     worktreePath: wt?.path,
     worktreeState: wt?.state,
     diff: diffOf(current),
+    verification: verificationViewOf(task, current),
     attempts: attempts.map((a) => attemptViewOf(m, a, a.id === current?.id)),
     actions,
   };
@@ -168,6 +202,7 @@ export function taskBadgeOf(m: Mission, attempt: ExecutionAttempt): TaskBadge | 
     attempt: { n: attempt.n, of: task.attemptIds.length },
     route: routeViewOf(m, attempt),
     multiTask: m.tasks.length > 1 || undefined,
+    verification: verificationViewOf(task, attempt),
   };
 }
 

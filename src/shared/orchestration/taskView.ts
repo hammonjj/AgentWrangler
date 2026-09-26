@@ -92,6 +92,21 @@ export type TaskViewAction =
   | 'recreate-worktree'
   | 'cancel';
 
+/** How an attempt's verification came out, as the strip and the row show it (#35). */
+export interface TaskVerificationView {
+  /** `✓`, `✗`, `~`, `?`, `!`. */
+  glyph: string;
+  text: string;
+  title: string;
+  verdict: string;
+  /** A required check failed on the base commit too: the repository was already red. */
+  baseIsRed?: boolean;
+  /** One line per stage, in the order they ran. */
+  stages: string[];
+  /** The log of the first stage worth opening, when one was written. */
+  logPath?: string;
+}
+
 /** The task strip above the conversation (§18.3). Built by the host, drawn by the pane. */
 export interface TaskView {
   missionId: string;
@@ -110,6 +125,8 @@ export interface TaskView {
   worktreePath?: string;
   worktreeState?: WorktreeState;
   diff?: TaskDiffView;
+  /** What the checks said about the current attempt (#35). Absent: none have run. */
+  verification?: TaskVerificationView;
   /** Newest last, so the list reads in the order the attempts happened. */
   attempts: TaskAttemptView[];
   actions: TaskViewAction[];
@@ -125,11 +142,13 @@ export interface TaskBadge {
   route?: TaskRouteView;
   /** The mission holds more than one task, so the task chip says which one. */
   multiTask?: boolean;
+  /** The verification badge, once the checks have run (#35). */
+  verification?: TaskVerificationView;
 }
 
 /** A chip as the panes draw it: text, its tooltip, and whether it is loud. */
 export interface TaskChip {
-  kind: 'task' | 'route';
+  kind: 'task' | 'route' | 'verify';
   text: string;
   title: string;
   emphasis?: boolean;
@@ -200,6 +219,17 @@ export function taskChips(b: TaskBadge): TaskChip[] {
       text: marker ? `${routeChipText(b.route)} · ${marker}` : routeChipText(b.route),
       title: routeChipTitle(b.route),
       emphasis: routeIsLoud(b.route) || undefined,
+    });
+  }
+  // The verdict last, so it reads as the conclusion of the row rather than as
+  // another property of the agent. Absent until the checks have run: a task
+  // that is still working has nothing to say here, and a `?` while it runs
+  // would be mistaken for "unverified".
+  if (b.verification) {
+    chips.push({
+      kind: 'verify',
+      text: `${b.verification.glyph} ${b.verification.text}`,
+      title: b.verification.title,
     });
   }
   return chips;
