@@ -14,7 +14,8 @@ import type { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionRegistry } from '../core/session/sessionRegistry';
 import type { ModelChoice } from '../shared/conversation';
 import type { TelemetryRecord, TurnRecord } from '../shared/orchestration/telemetry';
-import type { HarnessId, ModelSourceId } from '../shared/orchestration/types';
+import { EFFORT_LEVELS, type EffortLevel, type HarnessId, type ModelSourceId, type RouteCaps } from '../shared/orchestration/types';
+import type { ResolverSnapshot } from './policy/resolver';
 import { ClaudeStructuredCompletion, type CompletionQueryFn, type StructuredCompletion } from './completion/structuredCompletion';
 import { TaskRunner } from './engine/taskRunner';
 import { ClaudeCodeHarness } from './harness/claudeCodeHarness';
@@ -69,6 +70,30 @@ export interface OrchestrationDeps {
   models?: () => ModelChoice[];
   /** How structured completions reach Claude: the SDK's `query` and the `claude` to run (§6.1). */
   completion?: { query: CompletionQueryFn; binary: () => string | undefined };
+  /** The catalog and source health, read fresh for each recommendation (#38). Absent: no routing. */
+  routingSnapshot?: () => ResolverSnapshot;
+}
+
+/**
+ * How new tasks are routed (#38): `{ "mode": "manual" | "assisted", "maxTier"?, "maxEffort"? }`.
+ * `manual` (the default) runs on the launcher's route and records the router's
+ * choice in shadow; `assisted` proposes a route and waits for a click. The caps
+ * are frozen into each mission's policy when it is recorded.
+ */
+export const ROUTING_KEY = 'orchestration.routing';
+
+export interface RoutingSettings {
+  mode: 'manual' | 'assisted';
+  caps: RouteCaps;
+}
+
+/** Trust nothing in `settings.json`. */
+export function parseRoutingSettings(raw: unknown): RoutingSettings {
+  const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const caps: RouteCaps = {};
+  if (typeof r.maxTier === 'string' && r.maxTier.trim() !== '') caps.maxTier = r.maxTier.trim();
+  if (typeof r.maxEffort === 'string' && (EFFORT_LEVELS as readonly string[]).includes(r.maxEffort)) caps.maxEffort = r.maxEffort as EffortLevel;
+  return { mode: r.mode === 'assisted' ? 'assisted' : 'manual', caps };
 }
 
 export interface Orchestration extends Disposable {
@@ -136,6 +161,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     assessor,
     reviewer,
     tierOf: deps.tierOf,
+    ...(deps.routingSnapshot ? { routing: { snapshot: deps.routingSnapshot } } : {}),
     telemetry: deps.telemetry,
     onTurnRecord: deps.onTurnRecord,
     notify: deps.notify,

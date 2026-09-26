@@ -27,6 +27,8 @@ import { WorktreeManager, canonicalPath } from '../../src/orchestration/worktree
 import type { SimAttempt } from '../../src/shared/orchestration/simulation';
 import type { AttemptRecord, TelemetryRecord } from '../../src/shared/orchestration/telemetry';
 import type { Mission } from '../../src/shared/orchestration/types';
+import { taskViewOf } from '../../src/orchestration/view/taskViews';
+import { catalog, snapshot } from './routingFixtures';
 
 const savedEnv: Record<string, string | undefined> = {};
 let gitConfig: string;
@@ -494,6 +496,119 @@ describe('TaskRunner', () => {
     expect(a.confidence).toBe('low');
     expect(a.llm).toBeUndefined();
     expect(r.runner.get(id)!.tasks[0].state).toBe('needs-human');
+  });
+
+  // ---- routing (#38) ----
+
+  describe('routing', () => {
+    const ANSWER = {
+      complexity: { value: 'routine', confidence: 'high', evidence: 'one constant' },
+      breadth: { value: 'single-file', confidence: 'high', evidence: 'one file' },
+      risk: { value: 'low', confidence: 'high', evidence: 'nothing depends on it' },
+      ambiguity: { value: 'clear', confidence: 'high', evidence: 'the criterion is testable' },
+      verifiability: { value: 'strong', confidence: 'high', evidence: 'a check covers it' },
+      kind: { value: 'feature', confidence: 'high', evidence: 'it adds a constant' },
+      domains: ['typescript'],
+      requires: ['edit'],
+    };
+    const routed = (s: Shared = shared(), over: Partial<TaskRunnerDeps> = {}) =>
+      rig(EDIT, s, {
+        assessor: new Assessor({ completion: new SimulatedCompletion([{ output: ANSWER }]) }),
+        routing: { snapshot: () => snapshot({ catalog: catalog({ openai: false }) }) },
+        ...over,
+      });
+    const DRAFT = { title: TASK.title, objective: TASK.objective, acceptanceCriteria: TASK.acceptanceCriteria, policy: { preferences: { harness: 'claude-code' } } };
+
+    it('manual: every attempt records the router’s shadow beside the route the user picked', async () => {
+      const r = routed();
+      const id = (await r.runner.start({ ...TASK, folder: repo })).id;
+      await until(() => !!r.runner.get(id)?.decisions[0]?.shadow, 8000, 'the shadow');
+      const d = r.runner.get(id)!.decisions[0];
+      expect(d).toMatchObject({ mode: 'manual', decidedBy: 'user', resolution: { target: { model: 'claude-simulated' } } });
+      expect(d.shadow).toMatchObject({ verdict: 'route', requirement: { minTier: 'standard', effort: 'medium' }, resolution: { target: { model: 'sonnet', tier: 'standard' } } });
+      expect(d.agreement).toBe('changed-tier');
+      expect(d.overrides).toEqual(['model', 'tier', 'effort']);
+      const routing = r.telemetry.find((t) => t.type === 'routing');
+      expect(routing).toMatchObject({ mode: 'manual', agreement: 'changed-tier', recommended: { model: 'sonnet' }, ran: { model: 'claude-simulated' } });
+      expect(JSON.stringify(routing)).not.toContain('Synthetic objective');
+
+      await until(() => attemptOf(r.runner.get(id))?.state === 'succeeded', 8000, 'the attempt to finish');
+      const rec = r.telemetry.find((t): t is AttemptRecord => t.type === 'attempt')!;
+      expect(rec).toMatchObject({ mode: 'manual', shadow: { tier: 'standard', effort: 'medium', verdict: 'route' }, agreement: 'changed-tier' });
+
+      // A retry is decided with the assessment already in: the shadow is there at launch.
+      await r.runner.retry(id);
+      const d2 = r.runner.get(id)!.decisions[1];
+      expect(d2.shadow?.resolution.target?.model).toBe('sonnet');
+    });
+
+    it('assisted: proposes before anything runs, and one click runs the proposal', async () => {
+      const r = routed();
+      const { mission, recommendation } = await r.runner.propose({ ...DRAFT, folder: repo });
+      expect(recommendation.resolution.target).toMatchObject({ model: 'sonnet', effortNative: 'medium' });
+      expect(mission.state).toBe('draft');
+      expect(mission.tasks[0]).toMatchObject({ state: 'routed', recommendation: { verdict: 'route' } });
+      expect(mission.attempts).toEqual([]);
+      expect(mission.worktrees).toEqual([]);
+      expect(r.runner.actions(mission.id)).toEqual(['cancel']);
+
+      await r.runner.startProposed(mission.id);
+      const m = r.runner.get(mission.id)!;
+      const d = m.decisions[0];
+      expect(d).toMatchObject({ mode: 'assisted', decidedBy: 'router', agreement: 'accepted', overrides: [], policyVersion: 'rtr-1' });
+      expect(d.resolution.target).toMatchObject({ model: 'sonnet', tier: 'standard' });
+      expect(d.reasons.map((x) => x.ruleId)).toEqual(expect.arrayContaining(['tier.band', 'effort.complexity', 'assisted.accepted']));
+      expect(r.registry.get(attemptOf(m)!.assignment.sessionIds[0])?.launch).toMatchObject({ model: 'sonnet', effort: 'medium', permissionMode: 'auto' });
+      expect(r.telemetry.find((t) => t.type === 'routing')).toMatchObject({ mode: 'assisted', decidedBy: 'router', agreement: 'accepted' });
+      await expect(r.runner.startProposed(mission.id)).rejects.toThrow(/no proposal waiting/);
+
+      // The why-panel names the rules, the inputs' levels and the models passed over.
+      const view = taskViewOf(r.runner.get(mission.id)!, [])!;
+      expect(view.routing).toMatchObject({ decided: 'Recommended and accepted', headline: 'Sonnet 5 · medium (standard)' });
+      expect(view.routing!.rules.map((x) => x.ruleId)).toContain('tier.band');
+      expect(view.routing!.rejected).toEqual(expect.arrayContaining(['Haiku 4.5: basic is below the required standard']));
+      expect(view.route?.why).toMatch(/Standard because Score 1 from complexity routine/);
+    });
+
+    it('assisted: a change is recorded as a labelled disagreement, naming what changed', async () => {
+      const r = routed();
+      const { mission } = await r.runner.propose({ ...DRAFT, folder: repo });
+      await r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'sonnet', effort: 'high' } });
+      const d = r.runner.get(mission.id)!.decisions[0];
+      expect(d).toMatchObject({ mode: 'assisted', decidedBy: 'user', agreement: 'changed-effort', overrides: ['effort'] });
+      expect(d.shadow?.resolution.target?.effortNative).toBe('medium');
+      expect(d.reasons[0]).toMatchObject({ ruleId: 'assisted.changed', text: 'Changed from the recommendation: effort.' });
+      const view = taskViewOf(r.runner.get(mission.id)!, [])!;
+      expect(view.routing?.decided).toBe('Changed from the recommendation (effort)');
+      expect(view.routing?.comparison).toMatch(/would have picked Sonnet 5 · medium \(standard\): this is a different effort/);
+    });
+
+    it('assisted: a change may not break the mission’s tier cap', async () => {
+      const r = routed();
+      const { mission } = await r.runner.propose({ ...DRAFT, folder: repo, policy: { caps: { maxTier: 'standard' } } });
+      await expect(r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'opus' } })).rejects.toThrow(/is expert; this task is capped at standard/);
+      expect(r.runner.get(mission.id)!.attempts).toEqual([]);
+    });
+
+    it('assisted: work above the cap waits for a person, with both reasons, and runs nothing', async () => {
+      const r = routed(shared(), {
+        assessor: new Assessor({ completion: new SimulatedCompletion([{ output: { ...ANSWER, kind: { value: 'architecture', confidence: 'high', evidence: 'a redesign' } } }]) }),
+      });
+      const { mission, recommendation } = await r.runner.propose({ ...DRAFT, folder: repo, policy: { caps: { maxTier: 'standard' } } });
+      expect(recommendation.verdict).toBe('needs-human');
+      expect(recommendation.note).toMatch(/needs expert but the mission is capped at standard/);
+      expect(mission.tasks[0].state).toBe('needs-human');
+      await expect(r.runner.startProposed(mission.id)).rejects.toThrow(/capped at standard/);
+      // The user can still pick a route within the cap.
+      await r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'sonnet', effort: 'medium' } });
+      expect(r.runner.get(mission.id)!.decisions[0]).toMatchObject({ decidedBy: 'user', agreement: 'no-recommendation' });
+    });
+
+    it('propose refuses without a catalog, and records nothing it cannot finish', async () => {
+      const r = rig(EDIT, shared(), { assessor: new Assessor({ completion: new SimulatedCompletion([{ output: ANSWER }]) }) });
+      await expect(r.runner.propose({ ...DRAFT, folder: repo })).rejects.toThrow(/model catalog/);
+      expect(r.runner.list()).toEqual([]);
+    });
   });
 
   it('refuses a folder outside git, and records nothing', async () => {

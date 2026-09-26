@@ -352,9 +352,26 @@ new worktree and branch of the chosen folder's repository:
   rule from the repository policy, the cheap model that reads the objective (never the code), or
   you. Risk a policy path rule raised is never talked down by the model, and nothing can be
   called verifiable that the repository has no command for. The strip shows a summary chip and an
-  *Assessment* button that opens the lot. Nothing routes on it yet; it does not hold the task up,
-  and if the model answers nothing usable the description is the rules' alone, marked low
-  confidence.
+  *Assessment* button that opens the lot. It does not hold a manual task up, and if the model
+  answers nothing usable the description is the rules' alone, marked low confidence.
+- **Which route it should run on.** From that description a router works out what the work
+  *needs* — a capability tier (`basic`/`standard`/`expert`), an effort level, hard needs such as
+  context size, and gates (`plan-first` for an open-ended task, `human-review` for a critical
+  one) — and a resolver picks a model from Preferences → Orchestration that meets it, is
+  enabled and assigned a tier, and whose usage window has room. Tier and effort come from
+  different things: risk and breadth raise the tier, weak checks and ambiguity raise the
+  effort. How it routes is set by `orchestration.routing` in `settings.json`:
+  - `{"mode": "manual"}` (the default): the task runs on the launcher's model and effort, as
+    before, and the router's choice is recorded beside it for comparison.
+  - `{"mode": "assisted"}`: *Run a new task…* assesses first and shows the proposed route.
+    One click runs it; *Change effort…* or *Change model…* runs yours instead, and the change
+    is recorded. Dismissing it leaves the proposal in the Tasks menu.
+  - `"maxTier"` and `"maxEffort"` cap every new task. A cap is never exceeded: work that needs
+    more than the cap waits for you, saying both why it needs more and what the cap is.
+
+  **Why this route** in the task strip (and the route chip's tooltip) shows the rules that
+  fired and on what, the requirement, the fallbacks, and every model that was not picked and
+  why — read back from what was recorded when the attempt started, not worked out again.
 - **Restarts.** A task's conversation is an ordinary row in the table. It survives quitting and
   reinstalling (Claude tasks need *Keep conversations running when Agent Wrangler quits*, and
   are refused without it). On relaunch the task is picked up where it is. If its session was
@@ -362,7 +379,9 @@ new worktree and branch of the chosen folder's repository:
   same session id, and *Retry fresh*. It never resumes by itself.
 - **Records.** Missions are `orchestration/missions/<id>.json` under the app's support folder.
   Each attempt adds one `attempt` line to the usage records, with its route, timings, usage
-  summed from its turns, git numbers and flags. Like the turn lines, it holds metadata only.
+  summed from its turns, git numbers and flags, and a `routing` line records what the router
+  recommended, what ran, and which dimensions differed. Like the turn lines, they hold metadata
+  only.
 
 ## Repository policies (orchestration)
 

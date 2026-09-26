@@ -42,13 +42,17 @@ import {
   type AttemptState,
   type EffortLevel,
   type ExecutionAttempt,
+  type ExecutionPolicy,
   type ExecutionTarget,
   type HarnessId,
   type Mission,
   type ModelSourceId,
   type OrchestrationOrigin,
   type OutcomeCategory,
+  type RouteRecommendation,
   type RoutingDecision,
+  type RoutingReason,
+  type TaskAssessment,
   type Task,
   type TaskKind,
   type TaskState,
@@ -67,7 +71,10 @@ import type { WorktreeManager } from '../worktrees/worktreeManager';
 import type { Reviewer } from '../verify/reviewer';
 import { Verifier } from '../verify/verifier';
 import { buildVerificationPlan, summariseVerification } from '../../shared/orchestration/verification';
-import { attemptRecord, addTurnUsage } from './attemptRecord';
+import { tierRank } from '../../shared/orchestration/catalog';
+import type { ResolverSnapshot } from '../policy/resolver';
+import { compareRoutes, recommendRoute } from '../policy/recommend';
+import { attemptRecord, addTurnUsage, routingRecord } from './attemptRecord';
 import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from './attemptPolicy';
 import { sessionVerdict, turnFailure, turnMessageIds, type HandleView, type SessionVerdict } from './sessionVerdict';
 
@@ -100,6 +107,20 @@ export interface NewTask {
   route: TaskRoute;
   /** What the branch is cut from. Default: the primary checkout's `HEAD`. */
   baseRef?: string;
+  /**
+   * The mission's policy, frozen when it is recorded (§10.2): caps, preferences
+   * and exclusions the router and resolver honour. `mode` is set by the entry
+   * point — `start` is `manual`, `propose` is `assisted` — not by this field.
+   */
+  policy?: ExecutionPolicy;
+}
+
+/** A task the router is to propose a route for (`assisted`, #38): everything but the route. */
+export type NewTaskDraft = Omit<NewTask, 'route'>;
+
+/** What the user did with an `assisted` proposal: took it (no route), or changed it (their route). */
+export interface ProposalChoice {
+  route?: TaskRoute;
 }
 
 /** A refusal or failure the user should read. */
@@ -133,6 +154,12 @@ export interface TaskRunnerDeps {
   assessor?: Pick<Assessor, 'assess'>;
   /** The catalog's tier for a model, recorded on the routing decision as history. */
   tierOf?: (source: ModelSourceId, model: string) => string | undefined;
+  /**
+   * The catalog and source health the resolver decides against (#38), read
+   * fresh for every recommendation. Absent: no recommendations — `manual`
+   * attempts record no shadow and `propose` refuses.
+   */
+  routing?: { snapshot(): ResolverSnapshot };
   /** `attempt` records go here (the telemetry log); turn records carry the attempt id already (#27). */
   telemetry?: { append(record: TelemetryRecord): boolean };
   /** Every turn record as it is written, to sum each attempt's usage. */
@@ -244,7 +271,8 @@ export class TaskRunner implements Disposable {
     if (this.handleOf(missionId)) out.push('show-session');
     const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
     if (a?.git && a.git.filesChanged > 0 && wt && wt.state !== 'removed') out.push('open-diff');
-    if (task.state === 'needs-human') {
+    // A proposal nobody has started (#38) is started from the launcher's task menu, not retried.
+    if (task.state === 'needs-human' && task.attemptIds.length > 0) {
       if (a?.state === 'succeeded') out.push('accept');
       if (a?.state === 'interrupted' && a.resumable && wt?.state !== 'missing') out.push('resume');
       if (wt?.state === 'missing') out.push('recreate-worktree');
@@ -263,9 +291,93 @@ export class TaskRunner implements Disposable {
    * mission that got as far as being recorded stays recorded, saying why.
    */
   async start(req: NewTask): Promise<Mission> {
+    this.checkRoute(req.route);
+    const id = await this.record(req, {
+      ...req.policy,
+      mode: 'manual',
+    }, { pins: routePins(req.route) });
+    await this.queue(id, () => this.launch(id, { mode: 'fresh', route: req.route }));
+    this.scheduleAssessment(id);
+    return this.missions.get(id)!;
+  }
+
+  /**
+   * `assisted` (§10.1, #38): record the task, assess it, and route it — but
+   * launch nothing. Resolves with the proposal once the assessment is in
+   * (one structured call, or the rules alone at low confidence when it fails),
+   * with the task `routed`, or `needs-human` when the proposal says a person
+   * must decide (a cap below what the work needs, a plan-first gate, nothing
+   * allowed that can run it). `startProposed` launches it; `cancel` drops it.
+   */
+  async propose(req: NewTaskDraft): Promise<{ mission: Mission; recommendation: RouteRecommendation }> {
+    if (!this.deps.assessor) throw new TaskError('Proposing a route needs the assessor, which is not running.');
+    if (!this.deps.routing) throw new TaskError('Proposing a route needs the model catalog, which is not available.');
+    const id = await this.record(req, { ...req.policy, mode: 'assisted' });
+    try {
+      return await this.queue(id, async () => {
+        let m = this.need(id);
+        const now = this.now();
+        for (const to of ['ready', 'assessing'] as TaskState[]) {
+          m = this.patchTask(m, (t) => transitionTask(m, t, to, { now, reason: to === 'assessing' ? 'assessing before it is routed' : undefined }));
+        }
+        this.put(m);
+        await this.assess(id);
+        m = this.need(id);
+        const assessment = latestAssessment(m);
+        const rec = assessment && this.recommendationFor(m, assessment);
+        if (!rec) throw new TaskError('The task could not be routed: no assessment or no catalog.');
+        const at = this.now();
+        m = this.patchTask(m, (t) => transitionTask(m, { ...t, recommendation: rec }, 'routed', { now: at, reason: 'route proposed; waiting for you to accept or change it' }));
+        if (rec.verdict !== 'route') m = this.patchTask(m, (t) => transitionTask(m, t, 'needs-human', { now: at, reason: rec.note ?? 'a person has to decide the route' }));
+        this.put(m);
+        this.log(`task ${id}: proposed ${rec.requirement.minTier}/${rec.requirement.effort} → ${rec.resolution.target?.model ?? rec.verdict}`);
+        return { mission: this.need(id), recommendation: rec };
+      });
+    } catch (e) {
+      // A proposal that could not be made is not left looking like one waiting for the user.
+      await this.cancel(id).catch(() => undefined);
+      throw e;
+    }
+  }
+
+  /**
+   * Launch an `assisted` task: on the proposal as offered (one click), or on
+   * the route the user changed it to, which is recorded as a labelled
+   * disagreement (§10.1). A changed route may not break the mission's tier cap
+   * (§10.2: a pin that violates a cap is refused when it is set).
+   */
+  startProposed(missionId: string, choice: ProposalChoice = {}): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      const m = this.need(missionId);
+      const task = m.tasks[0];
+      const rec = task.recommendation;
+      if (!rec || task.attemptIds.length > 0 || !['routed', 'needs-human'].includes(task.state)) {
+        throw new TaskError('There is no proposal waiting to be started.');
+      }
+      let route = choice.route;
+      const accepted = !route;
+      if (!route) {
+        const t = rec.resolution.target;
+        if (!t || rec.verdict === 'blocked') throw new TaskError(rec.note ?? 'There is no recommended route to accept; pick one.');
+        route = { harness: t.harness, model: t.model, ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
+      }
+      this.checkRoute(route);
+      const target = accepted ? rec.resolution.target! : this.targetFor(route);
+      const tiers = this.deps.routing?.snapshot().catalog.tiers;
+      const cap = m.policy.caps?.maxTier;
+      if (!accepted && cap && tiers && tierRank(tiers, target.tier) > tierRank(tiers, cap) && tierRank(tiers, cap) >= 0) {
+        throw new TaskError(`${target.model || 'That model'} is ${target.tier}; this task is capped at ${cap}.`);
+      }
+      this.put(this.patchTask(m, (t) => ({ ...t, overrides: { ...t.overrides, pins: routePins(route!) } })));
+      await this.launch(missionId, { mode: 'fresh', route, routing: { recommendation: rec, offered: true, accepted } });
+      return this.need(missionId);
+    });
+  }
+
+  /** Record a new single-task mission, not yet started. */
+  private async record(req: NewTaskDraft, policy: ExecutionPolicy, overrides?: Task['overrides']): Promise<string> {
     const objective = req.objective.trim();
     if (!objective) throw new TaskError('A task needs an objective.');
-    this.checkRoute(req.route);
     const loaded = this.deps.repoPolicies.forFolder(req.folder);
     if (!loaded) throw new TaskError(`${req.folder} is not in a git repository. A task runs in a worktree of one.`);
     const manager = await this.manager(loaded);
@@ -284,11 +396,12 @@ export class TaskRunner implements Disposable {
       acceptanceCriteria: req.acceptanceCriteria.map((c) => c.trim()).filter(Boolean),
       scope: { paths: [], subsystems: [], confidence: 'low' },
       dependsOn: [],
-      overrides: { pins: routePins(req.route) },
+      ...(overrides ? { overrides } : {}),
       // Built from the repository's own policy, and frozen on the task: the
       // checks a result is judged by must be the ones that were in force when
       // it started, not whatever the policy says by the time it finishes (#35).
       kindHint: req.kind ?? 'feature',
+      ...(req.kind ? {} : { kindDefaulted: true }),
       verification: buildVerificationPlan({
         kind: req.kind ?? 'feature',
         policy: loaded.policy,
@@ -309,7 +422,7 @@ export class TaskRunner implements Disposable {
       repoRoot: manager.repoRoot,
       base: { ref: baseRef, commit: baseCommit },
       integration: 'none',
-      policy: {},
+      policy,
       policyChanges: [],
       state: 'draft',
       source: { kind: 'user', trusted: true },
@@ -322,10 +435,8 @@ export class TaskRunner implements Disposable {
       updatedAt: now,
     };
     this.put(mission);
-    this.log(`task ${id}: recorded in ${mission.repoRoot}`);
-    await this.queue(id, () => this.launch(id, { mode: 'fresh', route: req.route }));
-    this.scheduleAssessment(id);
-    return this.missions.get(id)!;
+    this.log(`task ${id}: recorded in ${mission.repoRoot} (${policy.mode ?? 'manual'} routing)`);
+    return id;
   }
 
   /** Resume an interrupted attempt: the same session id, through #4's Resume (orphan sweep first). */
@@ -562,7 +673,9 @@ export class TaskRunner implements Disposable {
    */
   private async launch(
     missionId: string,
-    opts: { mode: 'fresh'; route: TaskRoute } | { mode: 'continue'; resumeOf: ExecutionAttempt; auto?: boolean },
+    opts:
+      | { mode: 'fresh'; route: TaskRoute; routing?: DecisionRouting }
+      | { mode: 'continue'; resumeOf: ExecutionAttempt; auto?: boolean },
   ): Promise<void> {
     let m = this.need(missionId);
     const task = m.tasks[0];
@@ -607,8 +720,11 @@ export class TaskRunner implements Disposable {
     if (wt.state !== 'in-use') wt = await manager.markInUse(wt);
     m = this.need(missionId);
 
-    // The routing decision: manual, the user's, immutable (§7.2).
-    const decision = this.decision(m, task, n, route, harness);
+    // The routing decision, immutable (§7.2). Beside a route the user picked,
+    // what the router would have picked, whenever there is an assessment to route from.
+    const routing: DecisionRouting =
+      (opts.mode === 'fresh' ? opts.routing : undefined) ?? { recommendation: this.recommendationFor(m), offered: false, accepted: false };
+    const decision = this.decision(m, task, n, route, harness, routing);
     const provider = PROVIDER[route.harness] ?? 'claude';
     const preassigned = harness.capabilities().preassignedSessionId;
     const sessionIds = opts.mode === 'continue' ? [...opts.resumeOf.assignment.sessionIds] : preassigned ? [randomUUID()] : [];
@@ -637,6 +753,7 @@ export class TaskRunner implements Disposable {
     m = this.patchAttempt(m, attempt.id, (x) => transitionAttempt(m, x, 'launching', { now }));
     // Write-ahead: the attempt, its session id and origin are on disk before anything starts.
     this.put(m);
+    this.writeRouting(m, decision);
 
     const policy: LaunchPolicy = attemptLaunchPolicy({ harness: route.harness, primaryRoot: m.repoRoot, repoPolicy: loaded.policy });
     const prompt = opts.mode === 'continue' ? CONTINUE_PROMPT : attemptPrompt(task, { harness: route.harness, branch: wt.branch });
@@ -674,6 +791,8 @@ export class TaskRunner implements Disposable {
   private advanceTaskToRunning(m: Mission, now: number): Mission {
     const steps: Partial<Record<TaskState, TaskState[]>> = {
       pending: ['ready', 'assessing', 'routed', 'queued', 'running'],
+      // An `assisted` task, proposed and now accepted or changed (#38).
+      routed: ['queued', 'running'],
       'needs-human': ['queued', 'running'],
       queued: ['running'],
     };
@@ -708,33 +827,110 @@ export class TaskRunner implements Disposable {
     return this.patchTask(m, (t) => ({ ...t, stateReason: why }));
   }
 
-  private decision(m: Mission, task: Task, n: number, route: TaskRoute, harness: AgentHarness): RoutingDecision {
+  /**
+   * What a route the user named resolves to: the catalog entry that has the
+   * model as an alias (the harness's own default, for an empty model), or the
+   * bare route when the catalog has never seen it.
+   */
+  private targetFor(route: TaskRoute): ExecutionTarget {
     const source = SOURCE[route.harness] ?? route.harness;
     const model = route.model?.trim() ?? '';
-    const tier = (model && this.deps.tierOf?.(source, model)) || 'unassigned';
-    const target: ExecutionTarget = {
-      harness: harness.id,
+    const alias = model || (route.harness === 'claude-code' ? 'default' : '');
+    const entry = alias
+      ? this.deps.routing?.snapshot().catalog.entries.find((e) => e.descriptor.source === source && e.aliases.includes(alias))
+      : undefined;
+    const tier = entry?.tier ?? ((model && this.deps.tierOf?.(source, model)) || 'unassigned');
+    return {
+      harness: route.harness,
       source,
       model,
+      ...(entry?.descriptor.resolvedId ? { resolvedModel: entry.descriptor.resolvedId } : {}),
       tier,
       effortNative: route.effort?.trim() || 'none',
-      location: 'hosted',
+      location: entry?.descriptor.location ?? 'hosted',
     };
+  }
+
+  private decision(m: Mission, task: Task, n: number, route: TaskRoute, harness: AgentHarness, routing: DecisionRouting): RoutingDecision {
+    const rec = routing.recommendation;
+    const accepted = routing.accepted && !!rec?.resolution.target;
+    const target: ExecutionTarget = accepted ? rec!.resolution.target! : { ...this.targetFor(route), harness: harness.id };
     const appDefault = this.deps.launchDefaults.for('claude').permissionMode;
-    const mode = PROVIDER[route.harness] === 'claude' ? attemptPermissionMode(route.permissionMode, appDefault) : undefined;
+    const permissionMode = PROVIDER[route.harness] === 'claude' ? attemptPermissionMode(route.permissionMode, appDefault) : undefined;
+    const inputs = permissionMode ? { inputs: { permissionMode } } : {};
+    const cmp = rec ? compareRoutes(rec.resolution.target, target, routing.offered) : undefined;
+    const mode = m.policy.mode ?? 'manual';
+    let reasons: RoutingReason[];
+    if (accepted) reasons = [...rec!.reasons, { ruleId: 'assisted.accepted', text: 'Recommendation accepted.', ...inputs }];
+    else if (routing.offered && cmp) reasons = [{ ruleId: 'assisted.changed', text: `Changed from the recommendation: ${cmp.changed.join(', ') || 'nothing'}.`, ...inputs }];
+    else reasons = [{ ruleId: 'manual', text: 'Route picked by the user.', ...inputs }];
     return {
       id: this.id(),
       taskId: task.id,
       attemptN: n,
-      mode: 'manual',
-      policyVersion: 'manual',
-      requirement: { minTier: tier, maxTier: tier, effort: awEffort(route.effort), needs: [], gates: [] },
-      reasons: [{ ruleId: 'manual', text: 'Route picked by the user.', ...(mode ? { inputs: { permissionMode: mode } } : {}) }],
-      overrides: [],
-      resolution: { target, candidates: [{ target, verdict: 'chosen', reason: 'picked by the user' }], catalogVersion: 'manual' },
-      decidedBy: 'user',
+      mode,
+      ...(rec ? { assessmentId: rec.assessmentId } : {}),
+      policyVersion: accepted ? rec!.policyVersion : 'manual',
+      requirement: accepted
+        ? rec!.requirement
+        : { minTier: target.tier, maxTier: target.tier, effort: awEffort(route.effort), needs: [], gates: [] },
+      reasons,
+      overrides: cmp?.changed ?? [],
+      resolution: accepted
+        ? { target, candidates: rec!.resolution.candidates, catalogVersion: rec!.resolution.catalogVersion, ...(rec!.resolution.note ? { note: rec!.resolution.note } : {}) }
+        : { target, candidates: [{ target, verdict: 'chosen', reason: 'picked by the user' }], catalogVersion: 'manual' },
+      ...(rec ? { shadow: rec, agreement: cmp!.agreement } : {}),
+      decidedBy: accepted ? 'router' : 'user',
       decidedAt: this.now(),
     };
+  }
+
+  // ---- Recommendation (#38) ----
+
+  /**
+   * What the router and resolver would pick for this task now, from its newest
+   * assessment and a fresh snapshot. Undefined when there is no assessment or
+   * no catalog. Never throws: a routing bug must not stop a launch.
+   */
+  private recommendationFor(m: Mission, assessment: TaskAssessment | undefined = latestAssessment(m)): RouteRecommendation | undefined {
+    if (!assessment || !this.deps.routing) return undefined;
+    try {
+      return recommendRoute(assessment, m.policy, this.deps.routing.snapshot(), this.now());
+    } catch (e) {
+      this.log(`task ${m.id}: could not route: ${errorText(e)}`);
+      return undefined;
+    }
+  }
+
+  /**
+   * The shadow for a `manual` decision made before its task was assessed:
+   * filled in once, when the assessment lands (the one exception to a
+   * decision's immutability, `RoutingDecision`). The attempt may have ended by
+   * then; its record is still what the comparison report reads.
+   */
+  private fillShadow(missionId: string): void {
+    let m = this.need(missionId);
+    const a = this.currentAttempt(m);
+    const d = a && m.decisions.find((x) => x.id === a.routingDecisionId);
+    if (!d || d.shadow || d.mode !== 'manual') return;
+    const rec = this.recommendationFor(m);
+    if (!rec) return;
+    const cmp = compareRoutes(rec.resolution.target, d.resolution.target, false);
+    const filled: RoutingDecision = { ...d, assessmentId: rec.assessmentId, shadow: rec, agreement: cmp.agreement, overrides: cmp.changed };
+    m = { ...m, decisions: m.decisions.map((x) => (x.id === d.id ? filled : x)) };
+    this.put(m);
+    this.writeRouting(m, filled);
+    this.log(`task ${missionId}: shadow ${rec.requirement.minTier}/${rec.requirement.effort} → ${rec.resolution.target?.model ?? rec.verdict} (${cmp.agreement})`);
+  }
+
+  private writeRouting(m: Mission, d: RoutingDecision): void {
+    const record = routingRecord(m, d, this.now());
+    if (!record) return;
+    try {
+      this.deps.telemetry?.append(record);
+    } catch (e) {
+      this.log(`task ${m.id}: could not write its routing record: ${String(e)}`);
+    }
   }
 
   // ---- Assessment (#37) ----
@@ -769,7 +965,8 @@ export class TaskRunner implements Disposable {
         objective: task.objective,
         acceptanceCriteria: task.acceptanceCriteria,
         scope: task.scope,
-        kindHint: task.kindHint,
+        // A defaulted kind is the runner's guess, not the user's: the assessor decides it.
+        kindHint: task.kindDefaulted ? undefined : task.kindHint,
         verification: task.verification,
         createdBy: task.createdBy,
       },
@@ -789,6 +986,8 @@ export class TaskRunner implements Disposable {
     this.log(
       `task ${missionId}: assessed ${assessment.kind.value}, complexity ${d.complexity.value}, risk ${d.risk.value}, verifiability ${d.verifiability.value} (${assessment.confidence} confidence)`,
     );
+    // In `manual`, the router runs in shadow beside the route the user picked (§27.3).
+    this.fillShadow(missionId);
   }
 
   // ---- Watching ----
@@ -1366,9 +1565,24 @@ function routeFromDecision(d: RoutingDecision | undefined, a: ExecutionAttempt):
   return { harness: t.harness, model: t.model, effort: t.effortNative === 'none' ? undefined : t.effortNative, permissionMode: decisionMode(d) };
 }
 
+/** The permission mode a decision launched with: on its `manual` or `assisted.*` reason. */
 function decisionMode(d: RoutingDecision): PermissionModeName | undefined {
-  const mode = d.reasons.find((r) => r.ruleId === 'manual')?.inputs?.permissionMode;
+  const mode = d.reasons.find((r) => typeof r.inputs?.permissionMode === 'string')?.inputs?.permissionMode;
   return typeof mode === 'string' ? (mode as PermissionModeName) : undefined;
+}
+
+/** How a decision relates to the router: the recommendation, whether the user was shown it, whether they took it. */
+interface DecisionRouting {
+  recommendation?: RouteRecommendation;
+  offered: boolean;
+  accepted: boolean;
+}
+
+/** The newest assessment of the mission's task. */
+function latestAssessment(m: Mission): TaskAssessment | undefined {
+  const task = m.tasks[0];
+  const id = task?.assessmentIds.at(-1);
+  return id ? m.assessments.find((a) => a.id === id) : undefined;
 }
 
 /** A native effort level on AW's scale, for the routing record: `xhigh` and above are `max`. */
