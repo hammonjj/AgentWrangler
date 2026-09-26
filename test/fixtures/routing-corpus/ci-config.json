@@ -1,0 +1,21 @@
+{
+  "id": "ci-config",
+  "case": "CI configuration",
+  "card": {
+    "objective": "Add a macOS job to the CI workflow that runs the unit tests on Node 20 alongside the existing Linux job.",
+    "acceptanceCriteria": ["The workflow has a macOS job on Node 20.", "The Linux job is unchanged."],
+    "scope": [".github/workflows/ci.yml"],
+    "verification": [],
+    "repo": {
+      "files": { ".github/workflows/ci.yml": 3000, ".github/workflows/release.yml": 4000, "package.json": 1500, "src/index.ts": 4000 },
+      "verification": ["test", "typecheck"],
+      "risk": [{ "paths": [".github"], "level": "high", "why": "CI decides what gets built and published" }]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "single-file", "risk": "high", "ambiguity": "clear", "verifiability": "weak", "kind": "chore", "domains": ["config"] },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "never": [{ "tier": "basic" }]
+  }
+}

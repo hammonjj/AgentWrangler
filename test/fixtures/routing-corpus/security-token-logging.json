@@ -1,0 +1,22 @@
+{
+  "id": "security-token-logging",
+  "case": "security fix",
+  "card": {
+    "objective": "Stop logging the bearer token when an authentication request fails; log the status code and request id instead.",
+    "acceptanceCriteria": ["No log line contains the token.", "Failures still log the status code and request id."],
+    "scope": ["src/auth/client.ts"],
+    "verification": ["test"],
+    "repo": {
+      "files": { "src/auth/client.ts": 8000, "src/auth/refresh.ts": 5000, "src/log.ts": 3000, "test/auth.test.ts": 7000 },
+      "verification": ["test", "typecheck"],
+      "risk": [{ "paths": ["src/auth"], "level": "critical", "why": "authentication and secrets" }]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "single-file", "risk": "critical", "ambiguity": "clear", "verifiability": "partial", "kind": "bugfix" },
+  "expect": {
+    "tierIn": ["expert"],
+    "effortIn": ["low", "medium", "high"],
+    "gates": ["human-review"],
+    "never": [{ "tier": "basic" }, { "tier": "standard" }]
+  }
+}

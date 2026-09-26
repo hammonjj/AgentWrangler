@@ -1,0 +1,20 @@
+{
+  "id": "css-tweak",
+  "case": "trivial style change no test covers",
+  "card": {
+    "objective": "Increase the row padding in the session table from 4px to 6px.",
+    "acceptanceCriteria": ["Table rows have 6px vertical padding."],
+    "scope": ["src/ui/table.css"],
+    "verification": [],
+    "repo": {
+      "files": { "src/ui/table.css": 5000, "src/ui/table.ts": 16000, "test/table.test.ts": 6000 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "trivial", "breadth": "single-file", "risk": "low", "ambiguity": "clear", "verifiability": "weak", "kind": "chore", "domains": ["ui"] },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low"],
+    "never": [{ "tier": "expert" }]
+  }
+}

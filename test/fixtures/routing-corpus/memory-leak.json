@@ -1,0 +1,26 @@
+{
+  "id": "memory-leak",
+  "case": "hard bug that needs investigation",
+  "card": {
+    "objective": "Work out why memory grows steadily while a long session streams, and fix the leak.",
+    "acceptanceCriteria": ["Heap size is flat over a 30-minute synthetic stream.", "The cause is named in the commit message."],
+    "scope": ["src/core/transcript"],
+    "verification": [],
+    "repo": {
+      "files": {
+        "src/core/transcript/tail.ts": 14000,
+        "src/core/transcript/index.ts": 9000,
+        "src/core/transcript/parse.ts": 11000,
+        "src/core/transcript/cache.ts": 6000,
+        "src/core/transcript/watch.ts": 7000
+      },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "hard", "breadth": "subsystem", "risk": "moderate", "ambiguity": "minor-gaps", "verifiability": "weak", "kind": "bugfix" },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["high", "max"],
+    "never": [{ "tier": "basic" }, { "effort": "low" }]
+  }
+}

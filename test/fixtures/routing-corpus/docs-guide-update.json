@@ -1,0 +1,20 @@
+{
+  "id": "docs-guide-update",
+  "case": "documentation, with a docs check configured",
+  "card": {
+    "objective": "Document the new export command in the user guide and the CLI reference.",
+    "acceptanceCriteria": ["Both pages describe the export command and its flags.", "The docs link check passes."],
+    "scope": ["docs/guide.md", "docs/cli.md"],
+    "verification": ["docs-check"],
+    "repo": {
+      "files": { "docs/guide.md": 14000, "docs/cli.md": 9000, "docs/faq.md": 5000, "src/cli/export.ts": 7000 },
+      "verification": ["docs-check", "test"]
+    }
+  },
+  "labels": { "complexity": "trivial", "breadth": "few-files", "risk": "low", "ambiguity": "clear", "verifiability": "partial", "kind": "docs" },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low", "medium"],
+    "never": [{ "tier": "expert" }]
+  }
+}

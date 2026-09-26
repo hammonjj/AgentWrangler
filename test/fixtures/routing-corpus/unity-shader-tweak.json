@@ -1,0 +1,26 @@
+{
+  "id": "unity-shader-tweak",
+  "case": "Unity shader",
+  "card": {
+    "objective": "Make the water shader's shoreline foam fade out with depth instead of cutting off at a fixed line.",
+    "acceptanceCriteria": ["Foam opacity falls off smoothly over the first metre of depth."],
+    "scope": ["Assets/Shaders/Water.shader"],
+    "verification": ["editmode-test"],
+    "repo": {
+      "files": {
+        "Assets/Shaders/Water.shader": 12000,
+        "Assets/Shaders/Common.hlsl": 6000,
+        "Assets/Scripts/WaterController.cs": 5000
+      },
+      "verification": ["editmode-test"],
+      "exclusive": [{ "id": "unity-editor:Game", "paths": ["Assets"] }]
+    }
+  },
+  "labels": { "complexity": "involved", "breadth": "single-file", "risk": "moderate", "ambiguity": "minor-gaps", "verifiability": "weak", "kind": "feature", "domains": ["unity", "shader"] },
+  "expect": {
+    "tierIn": ["standard", "expert"],
+    "effortIn": ["medium", "high"],
+    "requires": ["exclusive:unity-editor:Game"],
+    "never": [{ "tier": "basic" }]
+  }
+}

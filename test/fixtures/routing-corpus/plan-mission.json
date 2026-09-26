@@ -1,0 +1,21 @@
+{
+  "id": "plan-mission",
+  "case": "mission planning",
+  "card": {
+    "objective": "Break the offline-mode feature into tasks with dependencies, scopes and acceptance criteria.",
+    "acceptanceCriteria": ["Every task has acceptance criteria and a predicted scope.", "The dependencies form a graph with no cycles."],
+    "scope": [],
+    "kindHint": "plan",
+    "verification": [],
+    "repo": {
+      "files": { "src/remote/transport.ts": 12000, "src/core/store.ts": 22000, "src/ui/status.ts": 6000 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "hard", "breadth": "cross-cutting", "risk": "moderate", "ambiguity": "underspecified", "verifiability": "weak", "kind": "plan" },
+  "expect": {
+    "tierIn": ["expert"],
+    "effortIn": ["high", "max"],
+    "never": [{ "tier": "basic" }, { "tier": "standard" }, { "effort": "low" }]
+  }
+}

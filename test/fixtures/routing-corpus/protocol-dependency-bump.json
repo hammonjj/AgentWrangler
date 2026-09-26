@@ -1,0 +1,22 @@
+{
+  "id": "protocol-dependency-bump",
+  "case": "dependency bump on a protocol path",
+  "card": {
+    "objective": "Bump the frame encoder dependency to 3.x; it encodes the host protocol, so frames from older hosts must still decode.",
+    "acceptanceCriteria": ["The encoder is on 3.x.", "The protocol round-trip tests pass, including the recorded 2.x frames."],
+    "scope": ["package.json", "package-lock.json"],
+    "verification": ["test", "typecheck"],
+    "repo": {
+      "files": { "package.json": 2500, "package-lock.json": 300000, "src/shared/protocol.ts": 14000, "test/protocol.test.ts": 9000 },
+      "verification": ["test", "typecheck"],
+      "risk": [{ "paths": ["package.json", "package-lock.json", "src/shared/protocol.ts"], "level": "critical", "why": "pins the host protocol encoder; older hosts must still decode" }]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "few-files", "risk": "critical", "ambiguity": "clear", "verifiability": "strong", "kind": "chore", "domains": ["config"] },
+  "expect": {
+    "tierIn": ["expert"],
+    "effortIn": ["low", "medium", "high"],
+    "gates": ["human-review"],
+    "never": [{ "tier": "basic" }, { "tier": "standard" }]
+  }
+}

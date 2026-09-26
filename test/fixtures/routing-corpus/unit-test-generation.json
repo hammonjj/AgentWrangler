@@ -1,0 +1,20 @@
+{
+  "id": "unit-test-generation",
+  "case": "test generation",
+  "card": {
+    "objective": "Add unit tests for the slugify helper covering unicode input, repeated separators and the empty string.",
+    "acceptanceCriteria": ["Each of the three cases has a test.", "The tests pass against the current implementation."],
+    "scope": ["src/util/slugify.ts", "test/slugify.test.ts"],
+    "verification": ["test"],
+    "repo": {
+      "files": { "src/util/slugify.ts": 2500, "src/util/strings.ts": 4000, "test/slugify.test.ts": 1200, "package.json": 1500 },
+      "verification": ["test", "typecheck"]
+    }
+  },
+  "labels": { "complexity": "routine", "breadth": "few-files", "risk": "low", "ambiguity": "clear", "verifiability": "partial", "kind": "test" },
+  "expect": {
+    "tierIn": ["basic", "standard"],
+    "effortIn": ["low", "medium"],
+    "never": [{ "tier": "expert" }]
+  }
+}
