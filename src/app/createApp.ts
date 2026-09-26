@@ -721,7 +721,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * that has wedged, which is `stuck` or `busy` by definition. The modal is
    * where that cost gets stated instead.
    */
-  const confirmAndCloseSession = async (s: AgentSession): Promise<void> => {
+  const confirmAndCloseSession = async (
+    s: AgentSession,
+    opts: { confirmOnlyIfWorking?: boolean } = {},
+  ): Promise<void> => {
     const label = displayLabel(s);
     const ours = runners.owns(s.sessionId) || codexRunners.owns(s.sessionId);
     if (!ours && s.pid === undefined) {
@@ -745,8 +748,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
       .filter(Boolean)
       .join('\n\n');
 
-    const choice = await dialogs.warn(`Close ${label}?`, { modal: true, detail }, 'Close session');
-    if (choice !== 'Close session') return;
+    // The dashboard row's × asks only when a turn would be thrown away: the
+    // rest of the modal's text is the reassurance (transcript kept, resumable)
+    // that the button's own tooltip already carries, and one click is the whole
+    // point of it.
+    if (!(opts.confirmOnlyIfWorking && !working)) {
+      const choice = await dialogs.warn(`Close ${label}?`, { modal: true, detail }, 'Close session');
+      if (choice !== 'Close session') return;
+    }
 
     // It may have finished, or ended on its own, while the dialog was up.
     const outcome = await closeSessionNow(store.get(s.key) ?? s);
@@ -1505,10 +1514,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
         log(`released ${s.sessionId} to a terminal`);
       })();
     },
-    closeSession(key) {
+    closeSession(key, opts) {
       const s = store.get(key);
       if (!s) return;
-      void confirmAndCloseSession(s);
+      void confirmAndCloseSession(s, opts ?? {});
     },
     pauseSession(key, wanted) {
       const s = store.get(key);

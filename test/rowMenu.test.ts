@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionDTO } from '../src/shared/model';
-import { canCloseSession, clampMenuPosition, rowMenuItems, rowMenuSize, ROW_MENU_WIDTH } from '../src/shared/rowMenu';
+import {
+  canCloseSession,
+  clampMenuPosition,
+  dismissAction,
+  rowMenuItems,
+  rowMenuSize,
+  ROW_MENU_WIDTH,
+} from '../src/shared/rowMenu';
 
 function session(over: Partial<SessionDTO> = {}): SessionDTO {
   return {
@@ -109,6 +116,19 @@ describe('rowMenuItems', () => {
       'archive',
       'close',
     ]);
+  });
+});
+
+describe('dismissAction', () => {
+  it('ends the process when there is one — the × is not a hide button on a live row', () => {
+    expect(dismissAction(session())).toBe('dismiss');
+    expect(dismissAction(session({ pid: undefined, runnerOwned: true }))).toBe('dismiss');
+    expect(dismissAction(session({ provider: 'codex', pid: undefined, runnerOwned: true }))).toBe('dismiss');
+  });
+
+  it('falls back to archiving when nothing is left to stop', () => {
+    expect(dismissAction(session({ status: 'ended' }))).toBe('archive');
+    expect(dismissAction(session({ pid: undefined }))).toBe('archive');
   });
 });
 

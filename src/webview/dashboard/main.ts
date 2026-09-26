@@ -21,7 +21,7 @@ import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../sh
 import { modelLabel } from '../../shared/modelName';
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
-import { canPauseSession, clampMenuPosition, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
+import { canPauseSession, clampMenuPosition, dismissAction, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
 import {
   askLine,
   capitalize,
@@ -196,11 +196,24 @@ function paint(html: string): void {
 const ICON_COLUMNS =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1"/><path d="M6.4 2.8v10.4M10.4 2.8v10.4"/></svg>';
 
-// Same close glyph as everywhere else in the app that dismisses something —
-// deliberately not the row menu's danger red: this doesn't end anything, it
-// just takes the row off the table.
+// Same close glyph as everywhere else in the app that dismisses something.
+// Not the row menu's danger red even when it ends a process: the row menu's
+// Close session… is the deliberate, spelled-out version, and this is the "I'm
+// done with this one" gesture — reversible in the sense that matters, since the
+// transcript is kept and the session can be resumed.
 const ICON_DISMISS =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+
+/** Says which of the two things the × is about to do, since they differ. */
+function dismissTitle(s: SessionDTO): string {
+  if (dismissAction(s) === 'dismiss') {
+    return 'Done with this agent: ends the process running it and drops the row to Ended, where it ages out. '
+      + 'The transcript is kept, so it can be resumed. Asks first if it is working right now.';
+  }
+  return s.archived
+    ? 'Unarchive: bring it back into its status section'
+    : 'Remove from this table: moves it to the Archived section, out of the way. Reversible; nothing is running.';
+}
 
 function clickHint(s: SessionDTO): string {
   if (s.runnerOwned) return 'Click to open the conversation — this window runs it, so you can type into it';
@@ -645,7 +658,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   ${cols()
     .map((c) => CELL[c.id](s))
     .join('')}
-  <td class="c-act"><button class="dismiss" data-row-action="archive" title="${s.archived ? 'Unarchive: bring it back into its status section' : 'Remove from this table: moves it to the Archived section, out of the way. Reversible; the process (if any) keeps running.'}">${ICON_DISMISS}</button></td>
+  <td class="c-act"><button class="dismiss" data-row-action="${dismissAction(s)}" title="${esc(dismissTitle(s))}">${ICON_DISMISS}</button></td>
 </tr>${permissionRow(s, span)}`;
 }
 

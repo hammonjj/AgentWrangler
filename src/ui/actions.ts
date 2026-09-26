@@ -43,8 +43,12 @@ export interface SessionActions {
    * Unlike `adopt` this is offered while a turn is in flight — a wedged agent
    * is the main reason to reach for it — so the implementation confirms first
    * and says plainly when a turn is about to be thrown away.
+   *
+   * `confirmOnlyIfWorking` narrows that confirm to the case it exists for — a
+   * turn being thrown away. The dashboard row's × passes it, so ending an idle
+   * agent costs one click; the row menu and the tray do not.
    */
-  closeSession(key: string): void;
+  closeSession(key: string, opts?: { confirmOnlyIfWorking?: boolean }): void;
   /**
    * Freeze one session's process, or thaw it. Unlike `closeSession` this keeps
    * the process — it simply stops running — so it is offered without a confirm:
