@@ -22,6 +22,7 @@ import { SimulatedCompletion } from '../../src/orchestration/completion/simulate
 import { Assessor } from '../../src/orchestration/policy/assessor';
 import { RepoPolicyStore, identityFor, worktreeRootPath } from '../../src/orchestration/policy/repoPolicyStore';
 import { MissionStore } from '../../src/orchestration/store/missionStore';
+import { Reviewer } from '../../src/orchestration/verify/reviewer';
 import { WorktreeManager, canonicalPath } from '../../src/orchestration/worktrees/worktreeManager';
 import type { SimAttempt } from '../../src/shared/orchestration/simulation';
 import type { AttemptRecord, TelemetryRecord } from '../../src/shared/orchestration/telemetry';
@@ -525,6 +526,8 @@ describe('TaskRunner', () => {
       expect(a.verification.map((v) => [v.strategy, v.outcome])).toEqual([
         ['diff-sanity', 'passed'],
         ['command:check', 'passed'],
+        // The advisory review: planned, but this rig has no reviewer, and it says so.
+        ['review', 'unavailable'],
       ]);
       expect(m.tasks[0].state).toBe('needs-human');
       expect(m.tasks[0].stateReason).toContain('passed');
@@ -554,8 +557,9 @@ describe('TaskRunner', () => {
       const rec = r.telemetry.find((t): t is AttemptRecord => t.type === 'attempt')!;
 
       expect(rec.verification).toEqual([
-        { strategy: 'diff-sanity', outcome: 'passed', flaky: undefined, preExisting: undefined, durationMs: expect.any(Number) },
-        { strategy: 'command:check', outcome: 'passed', flaky: undefined, preExisting: undefined, durationMs: expect.any(Number) },
+        { strategy: 'diff-sanity', outcome: 'passed', durationMs: expect.any(Number) },
+        { strategy: 'command:check', outcome: 'passed', durationMs: expect.any(Number) },
+        { strategy: 'review', outcome: 'unavailable', durationMs: expect.any(Number) },
       ]);
     });
 
@@ -572,7 +576,72 @@ describe('TaskRunner', () => {
       expect(a.state).toBe('succeeded');
       expect(m.tasks[0].state).toBe('needs-human');
       expect(m.tasks[0].stateReason).toContain('unverified');
-      expect(a.verification.map((v) => v.strategy)).toEqual(['diff-sanity']);
+      expect(a.verification.map((v) => v.strategy)).toEqual(['diff-sanity', 'review']);
+    });
+
+    // ---- the review verifier (#36) ----
+
+    const reviewAnswer = (verdict: 'met' | 'unmet' | 'unclear') => ({
+      output: { criteria: [{ id: 'c1', verdict, why: 'src/a.ts line 1.' }], concerns: verdict === 'met' ? [] : ['No test covers the new constant.'] },
+      costUsd: 0.02,
+    });
+
+    it('records an advisory review verdict per criterion, read-only in the worktree, and its cost in telemetry', async () => {
+      const completion = new SimulatedCompletion([reviewAnswer('unmet')]);
+      const r = rig(EDIT, shared(), { reviewer: new Reviewer({ completion }) });
+      const m = await runToEnd(r);
+      const a = attemptOf(m)!;
+      const review = a.verification.find((v) => v.strategy === 'review')!;
+
+      expect(review.outcome).toBe('failed');
+      expect(review.review?.criteria).toEqual([{ id: 'c1', verdict: 'unmet', why: 'src/a.ts line 1.' }]);
+      expect(review.review?.concerns).toEqual(['No test covers the new constant.']);
+      // Advisory: an unmet criterion is a warning on a passing result, not a failure.
+      expect(a.state).toBe('succeeded');
+      expect(m.tasks[0].stateReason).toContain('advisory');
+      // It ran where the result is, with nothing but read-only tools, in plan mode.
+      const call = completion.calls[0];
+      expect(call.options.cwd).toBe(m.worktrees[0].path);
+      expect(call.options.tools).toEqual(['Read', 'Grep', 'Glob']);
+      expect(call.options.permissionMode).toBe('plan');
+      expect(call.prompt).toContain('c1: a.ts exports a');
+      expect(call.prompt).toContain('+export const a = 1;');
+
+      const rec = r.telemetry.find((t): t is AttemptRecord => t.type === 'attempt')!;
+      const entry = rec.verification.find((v) => v.strategy === 'review')!;
+      expect(entry.review).toMatchObject({ met: 0, unmet: 1, unclear: 0, concerns: 1, costUsd: 0.02 });
+      // Counts, never the reviewer's words.
+      expect(JSON.stringify(rec)).not.toContain('src/a.ts line 1.');
+    });
+
+    it('a required review whose verdict is unclear is inconclusive, not passed', async () => {
+      const policies = new RepoPolicyStore(path.join(dataDir, 'repos'));
+      const saved = policies.save(identityFor(repo), {
+        worktrees: { setup: [{ link: 'node_modules' }] },
+        verification: { check: { run: ['/bin/sh', 'check.sh'] } },
+        review: { requiredFor: ['feature'] },
+      });
+      expect(saved.ok).toBe(true);
+
+      const r = rig(EDIT, shared(), { reviewer: new Reviewer({ completion: new SimulatedCompletion([reviewAnswer('unclear')]) }) });
+      const m = await runToEnd(r);
+      const a = attemptOf(m)!;
+
+      expect(m.tasks[0].verification.stages.find((s) => s.strategy === 'review')).toMatchObject({ required: true });
+      expect(a.verification.find((v) => v.strategy === 'review')?.outcome).toBe('inconclusive');
+      expect(a.state).toBe('succeeded');
+      expect(m.tasks[0].stateReason).toMatch(/^inconclusive:/);
+    });
+
+    it('a review that met every criterion still leaves a repository with no checks unverified', async () => {
+      const policies = new RepoPolicyStore(path.join(dataDir, 'repos'));
+      expect(policies.save(identityFor(repo), { worktrees: { setup: [{ link: 'node_modules' }] } }).ok).toBe(true);
+
+      const r = rig(EDIT, shared(), { reviewer: new Reviewer({ completion: new SimulatedCompletion([reviewAnswer('met')]) }) });
+      const m = await runToEnd(r);
+
+      expect(attemptOf(m)!.verification.find((v) => v.strategy === 'review')?.outcome).toBe('passed');
+      expect(m.tasks[0].stateReason).toMatch(/^unverified:/);
     });
 
     it('does not fail an attempt for a check that was already failing on the base commit', async () => {

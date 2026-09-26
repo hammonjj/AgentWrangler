@@ -115,7 +115,30 @@ export interface AttemptRecord extends RecordBase {
   git?: { filesChanged: number; insertions: number; deletions: number; commits: number };
   /** Fraction of changed files inside the predicted scope. */
   scopeAccuracy?: number;
-  verification: { strategy: string; outcome: VerificationOutcomeKind; flaky?: boolean; preExisting?: boolean; durationMs?: number }[];
+  verification: {
+    strategy: string;
+    outcome: VerificationOutcomeKind;
+    flaky?: boolean;
+    preExisting?: boolean;
+    skipped?: boolean;
+    durationMs?: number;
+    /**
+     * A `review` stage's verdict, as counts and cost (#36): enough to ask later
+     * whether the reviewer catches what the commands miss, with none of what it
+     * wrote (its reasons quote the code).
+     */
+    review?: {
+      met: number;
+      unmet: number;
+      unclear: number;
+      concerns: number;
+      repaired?: number;
+      model: string;
+      inputTokens?: number;
+      outputTokens?: number;
+      costUsd?: number;
+    };
+  }[];
   flags: AttemptFlags;
   /** The record was written for an interrupted attempt and may be incomplete. */
   partial?: boolean;

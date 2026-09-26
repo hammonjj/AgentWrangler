@@ -20,6 +20,7 @@
  *   never dropped, so every chip here has to be short enough to survive that.
  */
 import { formatDuration } from '../model';
+import { modelLabel } from '../modelName';
 import { formatTokens, formatUsd } from '../sessionUsage';
 import type {
   AttemptState,
@@ -142,6 +143,20 @@ export interface TaskVerificationView {
   stages: string[];
   /** The log of the first stage worth opening, when one was written. */
   logPath?: string;
+  /** The reviewer's verdict per acceptance criterion, when a review ran (#36). */
+  review?: TaskReviewView;
+}
+
+/** A `review` stage's verdict as the strip shows it (#36). */
+export interface TaskReviewView {
+  /** Required by the repository's policy; otherwise advisory. */
+  required: boolean;
+  /** The stage outcome: `passed`, `failed`, `inconclusive`. */
+  outcome: string;
+  criteria: { id: string; text: string; verdict: 'met' | 'unmet' | 'unclear'; why: string }[];
+  concerns: string[];
+  model: string;
+  costUsd?: number;
 }
 
 /** The task strip above the conversation (§18.3). Built by the host, drawn by the pane. */
@@ -351,6 +366,25 @@ export function assessmentChipTitle(a: TaskAssessmentView): string {
   if (a.requires.length > 0) parts.push(`needs: ${a.requires.join(', ')}`);
   if (a.note) parts.push(a.note);
   return parts.join('\n');
+}
+
+/** A criterion verdict's glyph in the strip's review list (#36). */
+export const CRITERION_GLYPH: Record<TaskReviewView['criteria'][number]['verdict'], string> = {
+  met: '✓',
+  unmet: '✗',
+  unclear: '?',
+};
+
+/**
+ * The review list's heading: "Review (advisory) · sonnet · $0.12".
+ * Advisory or required first, because it decides whether the verdict below
+ * can hold the task back.
+ */
+export function reviewHeadText(r: TaskReviewView): string {
+  const parts = [`Review (${r.required ? 'required' : 'advisory'})`];
+  if (r.model) parts.push(modelLabel(r.model) ?? r.model);
+  if (r.costUsd !== undefined) parts.push(formatUsd(r.costUsd));
+  return parts.join(' · ');
 }
 
 /** The strip's one-line summary, used as its collapsed state and its tooltip. */

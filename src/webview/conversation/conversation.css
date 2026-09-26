@@ -255,6 +255,45 @@ body,
 #taskStrip .tsmeta.base-red {
   color: var(--vscode-charts-yellow, #d7ba7d);
 }
+/* The reviewer's verdict per acceptance criterion (#36). */
+#taskStrip .tsreview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.85em;
+}
+#taskStrip .tsreview-head {
+  color: var(--vscode-descriptionForeground);
+}
+#taskStrip .tscrit {
+  display: grid;
+  grid-template-columns: 1.2em minmax(0, 1fr);
+  column-gap: 4px;
+}
+#taskStrip .tscrit-glyph {
+  text-align: center;
+}
+#taskStrip .tscrit-text {
+  overflow-wrap: anywhere;
+}
+#taskStrip .tscrit-why {
+  grid-column: 2;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+#taskStrip .tscrit.v-met .tscrit-glyph {
+  color: var(--vscode-charts-green, #89d185);
+}
+#taskStrip .tscrit.v-unmet .tscrit-glyph {
+  color: var(--vscode-errorForeground, #f48771);
+}
+#taskStrip .tscrit.v-unclear .tscrit-glyph,
+#taskStrip .tsconcern {
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
+#taskStrip .tsconcern {
+  overflow-wrap: anywhere;
+}
 #taskStrip .tsmeta {
   color: var(--vscode-descriptionForeground);
   font-size: 0.85em;
