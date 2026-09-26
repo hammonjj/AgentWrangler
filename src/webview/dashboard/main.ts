@@ -196,6 +196,12 @@ function paint(html: string): void {
 const ICON_COLUMNS =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1"/><path d="M6.4 2.8v10.4M10.4 2.8v10.4"/></svg>';
 
+// Same close glyph as everywhere else in the app that dismisses something —
+// deliberately not the row menu's danger red: this doesn't end anything, it
+// just takes the row off the table.
+const ICON_DISMISS =
+  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>';
+
 function clickHint(s: SessionDTO): string {
   if (s.runnerOwned) return 'Click to open the conversation — this window runs it, so you can type into it';
   return s.interrupted
@@ -635,7 +641,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   ${cols()
     .map((c) => CELL[c.id](s))
     .join('')}
-  <td class="c-act"></td>
+  <td class="c-act"><button class="dismiss" data-row-action="archive" title="${s.archived ? 'Unarchive: bring it back into its status section' : 'Remove from this table: moves it to the Archived section, out of the way. Reversible; the process (if any) keeps running.'}">${ICON_DISMISS}</button></td>
 </tr>${permissionRow(s, span)}`;
 }
 
@@ -1666,6 +1672,12 @@ app.addEventListener('click', (e) => {
   }
   if (pr) {
     post({ type: 'openExternal', url: pr.dataset.url! });
+    e.stopPropagation();
+    return;
+  }
+  const dismissBtn = target.closest('button.dismiss') as HTMLElement | null;
+  if (dismissBtn && row) {
+    post({ type: 'action', key: row.dataset.key!, action: dismissBtn.dataset.rowAction as DashboardAction });
     e.stopPropagation();
     return;
   }

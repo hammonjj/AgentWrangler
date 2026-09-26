@@ -466,10 +466,10 @@ body {
 #app th.h-dot {
   width: 26px;
 }
-/* The column picker's button and nothing else: the row actions it used to sit
-   above are in the right-click menu now, so this is a 20px button plus the
-   cell's own padding rather than a 66px two-button tray. The ~32px that frees
-   goes to the Agent column, which is the one that is always short of room. */
+/* The column picker's button, sized the same as the one body rows show on
+   hover (.dismiss) — a single 20px button plus the cell's own padding rather
+   than the old two-button tray most of these actions still live in (the
+   right-click menu). */
 #app th.h-act {
   width: 36px;
 }
@@ -1149,11 +1149,42 @@ button.colcfg svg {
 
 /* ---- row actions ---- */
 
-/* Empty in every body row: the column exists only so the header has somewhere
-   to hang the column picker. Row actions live in the right-click menu. */
+/* Holds the column picker in the header and, per body row, the dismiss
+   button — hidden until the row is hovered so a settled table stays quiet. */
 .c-act {
   text-align: right;
   text-overflow: clip;
+}
+
+/* Same treatment as button.colcfg (transparent, dims to the description
+   colour, brightens on hover) but invisible until the row it belongs to is
+   hovered or the button itself has focus — a settled row shows nothing here,
+   the same way it shows nothing extra anywhere else. Never rendered inside
+   the permission card's own row, which has its own buttons and its own rules
+   about what a click there does. */
+tr.row .dismiss {
+  background: transparent;
+  border: none;
+  padding: 2px 3px;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  opacity: 0;
+  vertical-align: middle;
+}
+tr.row:hover .dismiss,
+tr.row .dismiss:focus-visible {
+  opacity: 0.55;
+}
+tr.row .dismiss:hover {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.3));
+  color: var(--vscode-foreground);
+}
+tr.row .dismiss svg {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 /* The row's right-click menu. Fixed, not absolute, for the same reason the
