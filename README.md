@@ -328,6 +328,15 @@ new worktree and branch of the chosen folder's repository:
   diff*, *Accept*, *Resume*, *Retry*, *Cancel*). After a retry the strip lists every attempt;
   clicking one opens that attempt's own conversation in the same pane. Nothing here opens a
   window, and the chips fold onto the row's second line in a narrow pane.
+- **What the work is like.** Beside the running attempt, Agent Wrangler describes the task:
+  its kind, how complex, how broad, how risky, how ambiguous, how well a machine could check it,
+  and how much there is to read. Each value says how sure it is and where it came from — a path
+  rule from the repository policy, the cheap model that reads the objective (never the code), or
+  you. Risk a policy path rule raised is never talked down by the model, and nothing can be
+  called verifiable that the repository has no command for. The strip shows a summary chip and an
+  *Assessment* button that opens the lot. Nothing routes on it yet; it does not hold the task up,
+  and if the model answers nothing usable the description is the rules' alone, marked low
+  confidence.
 - **Restarts.** A task's conversation is an ordinary row in the table. It survives quitting and
   reinstalling (Claude tasks need *Keep conversations running when Agent Wrangler quits*, and
   are refused without it). On relaunch the task is picked up where it is. If its session was

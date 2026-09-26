@@ -1,4 +1,4 @@
-import type { ExecutionAttempt, Mission, Task } from '../../src/shared/orchestration/types';
+import type { Assessed, ExecutionAttempt, Mission, Task, TaskAssessment } from '../../src/shared/orchestration/types';
 
 export const T0 = 1_790_000_000_000;
 
@@ -18,6 +18,38 @@ export function task(id: string, overrides: Partial<Task> = {}): Task {
     attemptIds: [],
     escalations: [],
     createdBy: 'user',
+    ...overrides,
+  };
+}
+
+/** An assessment as the assessor writes one (#37): every dimension, with how sure it is and who said so. */
+export function assessment(id: string, taskId: string, overrides: Partial<TaskAssessment> = {}): TaskAssessment {
+  const d = <T extends string>(value: T, from: TaskAssessment['kind']['from'] = 'model'): Assessed<T> => ({
+    value,
+    confidence: 'medium',
+    from,
+    evidence: `because ${value}`,
+  });
+  return {
+    id,
+    taskId,
+    taskRevision: 1,
+    inputsHash: 'asm-00000000',
+    assessorVersion: 'asm-1',
+    dimensions: {
+      complexity: d('involved'),
+      breadth: d('few-files'),
+      risk: d('moderate'),
+      ambiguity: d('clear'),
+      verifiability: d('partial', 'rule'),
+      contextLoad: d('small', 'rule'),
+    },
+    kind: d('feature'),
+    domains: ['typescript'],
+    requires: ['edit', 'shell'],
+    confidence: 'medium',
+    evidence: [],
+    createdAt: T0,
     ...overrides,
   };
 }

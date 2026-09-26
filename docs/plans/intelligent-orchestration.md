@@ -908,6 +908,46 @@ assessment at `confidence: low`, which routes conservatively. Assessment never b
 | LLM dimensions | one `basic`/`low` call; a few thousand tokens | medium; this is what the evaluation corpus (§27) and shadow mode measure |
 | Planner-supplied hints | free (already paid for in planning) | medium; shown in plan review |
 
+### 8.5 As built (#37, 2026-09-26)
+
+- **Where it lives.** `src/orchestration/policy/assessment.ts` is the pure part: the ordinals, the
+  deterministic pass, the JSON schema, the prompt, the combine step and `inputsHash`, with
+  `ASSESSOR_VERSION = 'asm-1'` over all of it. `src/orchestration/policy/assessor.ts` adds the
+  three things rules cannot have — the repository on disk, the completion and a cache.
+  `src/orchestration/policy/globs.ts` is the glob matching risk paths and exclusive resources
+  need; a wildcard-free pattern also matches what is under it, and `globsOverlap` compares two
+  globs conservatively, because before any file exists a missed risk path is the expensive
+  mistake (§9.2).
+- **When it runs.** After the launch, not before it (`TaskRunner.scheduleAssessment`). The route
+  in P3/P5 `manual` mode is the user's, so nothing about the attempt depends on the answer, and
+  making "Start task" wait on a model call would buy nothing. It goes through the same per-mission
+  queue as every other mutation, and is skipped when the task's current revision already has one.
+  From #38, a task the router decides for assesses before it is routed, in the `assessing` state
+  the machine already has.
+- **`contextLoad` is not asked of the model.** It is `bytes / 4 + 20,000` tokens of fixed
+  allowance, banded at 30k/100k/250k. A scope that names no files, or that could not be read, is
+  `known: false` — "nobody predicted what this touches" is not "it touches nothing", and the two
+  are indistinguishable from the walk, so neither is claimed. Today `TaskRunner` always creates
+  tasks with an empty scope, so this is the usual case until the planner (#44) fills one in.
+- **Verifiability is `configured` first.** A task whose plan names commands is judged on those
+  (`strong` needs a behavioural command plus another); a task with no plan of its own is judged
+  one band lower on what the repository has, because nothing has said those commands cover this
+  work. `none` when the policy configures nothing at all.
+- **What a model may not do.** It cannot lower a rule's risk, cannot raise verifiability above
+  what is configured, cannot name a tool need outside `edit · shell · network · vision · browser`
+  (`exclusive:<id>` comes from repo policy alone), and is never sent a model name, a tier or an
+  effort level to reason about.
+- **Failure.** `StructuredCompletion` already retries invalid output once; a second bad answer,
+  an API error, a timeout or no completion configured at all all end in the rules-only assessment
+  at `confidence: low`. `assess` does not reject.
+- **Where it shows.** `TaskView.assessment` (`shared/orchestration/taskView.ts`), built by
+  `assessmentViewOf`: a summary chip and an *Assessment* disclosure listing every dimension with
+  its confidence, its source and its evidence line. `critical` risk, `open-ended` ambiguity and
+  `none` verifiability are drawn loudly.
+- **Telemetry.** `attemptRecord` puts the newest assessment for the task on the `attempt` record
+  as values and levels (plus `kind`), with `routingConfidence`. The evidence lines quote the
+  objective, so they stay out of it.
+
 ---
 
 ## 9. Routing

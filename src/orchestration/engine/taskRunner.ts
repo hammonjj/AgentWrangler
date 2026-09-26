@@ -34,6 +34,7 @@ import type { SessionHandle, SessionViewEvent } from '../../core/session/session
 import type { SessionRecord, SessionRegistry } from '../../core/session/sessionRegistry';
 import type { PermissionModeName } from '../../shared/conversation';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
+import { DEFAULT_REPO_POLICY } from '../../shared/orchestration/repoPolicy';
 import type { TelemetryRecord, TurnRecord } from '../../shared/orchestration/telemetry';
 import {
   EFFORT_LEVELS,
@@ -57,6 +58,7 @@ import {
 import { ulid } from '../domain/ids';
 import { transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
 import type { AgentHarness } from '../harness/types';
+import type { Assessor } from '../policy/assessor';
 import type { LoadedRepoPolicy, RepoPolicyStore } from '../policy/repoPolicyStore';
 import type { MissionStore } from '../store/missionStore';
 import { slugify } from '../worktrees/naming';
@@ -121,6 +123,13 @@ export interface TaskRunnerDeps {
   launchDefaults: Pick<LaunchDefaults, 'for'>;
   /** Why an attempt on this harness cannot start now (G1: Claude attempts need session hosts), or undefined. */
   cannotLaunch?: (harness: HarnessId) => string | undefined;
+  /**
+   * Describes what the work is like (#37). Absent: tasks run unassessed, as
+   * they did before P5. It never gates a launch — the route here is the
+   * user's, so the assessment is recorded beside the running attempt, for the
+   * strip, the telemetry and (from #38) the shadow router.
+   */
+  assessor?: Pick<Assessor, 'assess'>;
   /** The catalog's tier for a model, recorded on the routing decision as history. */
   tierOf?: (source: ModelSourceId, model: string) => string | undefined;
   /** `attempt` records go here (the telemetry log); turn records carry the attempt id already (#27). */
@@ -308,6 +317,7 @@ export class TaskRunner implements Disposable {
     this.put(mission);
     this.log(`task ${id}: recorded in ${mission.repoRoot}`);
     await this.queue(id, () => this.launch(id, { mode: 'fresh', route: req.route }));
+    this.scheduleAssessment(id);
     return this.missions.get(id)!;
   }
 
@@ -664,7 +674,17 @@ export class TaskRunner implements Disposable {
     if (!path) throw new TaskError(`The task is ${m.tasks[0].state}; it cannot start an attempt.`);
     for (const to of path) {
       m = this.patchTask(m, (t) =>
-        transitionTask(m, t, to, { now, reason: to === 'routed' ? 'route picked by the user' : to === 'assessing' ? 'manual route: not assessed' : undefined }),
+        transitionTask(m, t, to, {
+          now,
+          reason:
+            to === 'routed'
+              ? 'route picked by the user'
+              : to === 'assessing'
+                ? this.deps.assessor
+                  ? 'manual route: assessed beside the attempt'
+                  : 'manual route: not assessed'
+                : undefined,
+        }),
       );
     }
     return m;
@@ -708,6 +728,60 @@ export class TaskRunner implements Disposable {
       decidedBy: 'user',
       decidedAt: this.now(),
     };
+  }
+
+  // ---- Assessment (#37) ----
+
+  /**
+   * Describe the work, beside the attempt that is already running.
+   *
+   * It runs after the launch, not before it, and it is never awaited by
+   * anything the user is waiting on: the route is the user's here (§9.1
+   * `manual`), so nothing about this attempt depends on the answer, and a
+   * classifier that made "Start task" wait on a model call would be a worse
+   * app for no routing gain. `assess` never rejects (§8.3), but the queue and
+   * the store can, so the whole thing is caught and logged.
+   */
+  private scheduleAssessment(missionId: string): void {
+    if (!this.deps.assessor || this.disposed) return;
+    void this.queue(missionId, () => this.assess(missionId)).catch((e) => this.log(`task ${missionId}: assessment failed: ${errorText(e)}`));
+  }
+
+  private async assess(missionId: string): Promise<void> {
+    const assessor = this.deps.assessor;
+    const before = this.missions.get(missionId);
+    if (!assessor || !before || this.disposed) return;
+    const task = before.tasks[0];
+    // Immutable records: one assessment per task revision, and it is not made twice.
+    if (before.assessments.some((a) => a.taskId === task.id && a.taskRevision === task.revision)) return;
+    const loaded = this.deps.repoPolicies.forFolder(before.repoRoot);
+    const assessment = await assessor.assess({
+      taskId: task.id,
+      taskRevision: task.revision,
+      task: {
+        objective: task.objective,
+        acceptanceCriteria: task.acceptanceCriteria,
+        scope: task.scope,
+        kindHint: task.kindHint,
+        verification: task.verification,
+        createdBy: task.createdBy,
+      },
+      repoRoot: before.repoRoot,
+      policy: loaded?.policy ?? DEFAULT_REPO_POLICY,
+      repoPolicyVersion: loaded?.version ?? 'default',
+      upstream: [],
+    });
+    // The mission moved on while the model was thinking; take it as it is now.
+    const m = this.missions.get(missionId);
+    if (!m || m.assessments.some((a) => a.id === assessment.id)) return;
+    const next = this.patchTask({ ...m, assessments: [...m.assessments, assessment] }, (t) =>
+      t.assessmentIds.includes(assessment.id) ? t : { ...t, assessmentIds: [...t.assessmentIds, assessment.id] },
+    );
+    this.put(next);
+    const d = assessment.dimensions;
+    this.log(
+      `task ${missionId}: assessed ${assessment.kind.value}, complexity ${d.complexity.value}, risk ${d.risk.value}, verifiability ${d.verifiability.value} (${assessment.confidence} confidence)`,
+    );
   }
 
   // ---- Watching ----

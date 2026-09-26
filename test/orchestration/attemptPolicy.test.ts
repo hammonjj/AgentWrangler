@@ -3,7 +3,8 @@ import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from '../..
 import { addTurnUsage, attemptRecord } from '../../src/orchestration/engine/attemptRecord';
 import { DEFAULT_REPO_POLICY, type RepoPolicy } from '../../src/shared/orchestration/repoPolicy';
 import type { TurnRecord } from '../../src/shared/orchestration/telemetry';
-import { attempt, mission, T0 } from './fixtures';
+import type { Mission } from '../../src/shared/orchestration/types';
+import { assessment, attempt, mission, T0 } from './fixtures';
 
 describe('attemptPermissionMode (§24.1)', () => {
   it('defaults to auto, capped by the app default, never bypass', () => {
@@ -87,6 +88,36 @@ describe('attempt usage and record (§16.2)', () => {
     expect(u).toMatchObject({ turns: 2, inputTokens: 20, outputTokens: 4, costUsd: 0.02, costBasis: 'harness-estimate', byModel: { m: { in: 20, out: 4, costUsd: 0.02 } } });
   });
 
+  /** A mission with the one routing decision an attempt record needs to exist at all. */
+  const withDecision = (overrides: Partial<Mission> = {}): Mission =>
+    mission({
+      decisions: [
+        {
+          id: 'd1',
+          taskId: 't1',
+          attemptN: 1,
+          mode: 'manual',
+          policyVersion: 'manual',
+          requirement: { minTier: 'unassigned', maxTier: 'unassigned', effort: 'low', needs: [], gates: [] },
+          reasons: [],
+          overrides: [],
+          resolution: { target: { harness: 'claude-code', source: 'anthropic', model: 'x', tier: 'unassigned', effortNative: 'low', location: 'hosted' }, candidates: [], catalogVersion: 'manual' },
+          decidedBy: 'user',
+          decidedAt: T0,
+        },
+      ],
+      ...overrides,
+    });
+
+  const endedAttempt = () =>
+    attempt('a1', 't1', {
+      routingDecisionId: 'd1',
+      state: 'succeeded',
+      launchedAt: T0 + 1000,
+      endedAt: T0 + 11_000,
+      outcome: { status: 'succeeded' },
+    });
+
   it('builds a metadata-only record with timings; partial when interrupted', () => {
     const m = mission({
       decisions: [
@@ -117,5 +148,40 @@ describe('attempt usage and record (§16.2)', () => {
     const rec = attemptRecord(m, a, T0 + 12_000)!;
     expect(rec).toMatchObject({ id: 'attempt:a1', outcome: 'interrupted', partial: true, activeMs: 8000, queueMs: 1000, waitedOnHumanMs: 2000, turns: 1, cost: { usd: 0.01, basis: 'harness-estimate' } });
     expect(JSON.stringify(rec)).not.toContain('Synthetic objective');
+    // Nothing assessed this task, so the record says nothing about an assessment (§16.2).
+    expect(rec.assessment).toBeUndefined();
+  });
+
+  it('carries the task’s assessment as values and levels, and none of its evidence (#37)', () => {
+    const m = withDecision({
+      assessments: [assessment('as1', 't1', { evidence: ['a path rule about Synthetic objective'] })],
+    });
+    m.tasks[0].assessmentIds = ['as1'];
+    const rec = attemptRecord(m, endedAttempt(), T0 + 12_000)!;
+    expect(rec.assessment).toEqual({
+      assessorVersion: 'asm-1',
+      dimensions: {
+        complexity: { value: 'involved', confidence: 'medium' },
+        breadth: { value: 'few-files', confidence: 'medium' },
+        risk: { value: 'moderate', confidence: 'medium' },
+        ambiguity: { value: 'clear', confidence: 'medium' },
+        verifiability: { value: 'partial', confidence: 'medium' },
+        contextLoad: { value: 'small', confidence: 'medium' },
+        kind: { value: 'feature', confidence: 'medium' },
+      },
+    });
+    expect(rec.routingConfidence).toBe('medium');
+    // The evidence quotes the objective; the telemetry log holds no user text.
+    expect(JSON.stringify(rec)).not.toContain('Synthetic objective');
+  });
+
+  it('takes the newest assessment when a task has more than one', () => {
+    const m = withDecision({
+      assessments: [assessment('as1', 't1'), assessment('as2', 't1', { confidence: 'low', assessorVersion: 'asm-2' })],
+    });
+    m.tasks[0].assessmentIds = ['as1', 'as2'];
+    const rec = attemptRecord(m, endedAttempt(), T0 + 12_000)!;
+    expect(rec.assessment?.assessorVersion).toBe('asm-2');
+    expect(rec.routingConfidence).toBe('low');
   });
 });

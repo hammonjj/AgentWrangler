@@ -14,7 +14,10 @@
  */
 import { modelLabel } from '../../shared/modelName';
 import { stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
+import { PROVENANCE_LABEL } from '../policy/assessment';
 import type {
+  AssessmentRowView,
+  TaskAssessmentView,
   TaskAttemptView,
   TaskBadge,
   TaskDiffView,
@@ -24,6 +27,7 @@ import type {
   TaskViewAction,
 } from '../../shared/orchestration/taskView';
 import type {
+  Assessed,
   ExecutionAttempt,
   HarnessId,
   Mission,
@@ -155,6 +159,52 @@ function totalTokens(a: ExecutionAttempt): number | undefined {
   return parts.reduce<number>((sum, p) => sum + (p ?? 0), 0);
 }
 
+/** Values a reader should not miss, whatever else the strip is saying (§18.1). */
+const LOUD_VALUES = new Set(['critical', 'open-ended', 'none']);
+
+/**
+ * The task's assessment, as the strip shows it: the newest one for the task,
+ * every dimension with how sure it is and who said so (§8.2, #37).
+ *
+ * The evidence lines come through as they are. They are one sentence each, and
+ * they are the only reason a person can tell "risk: critical because a path
+ * rule says so" from "risk: critical because a model had a feeling".
+ */
+export function assessmentViewOf(m: Mission): TaskAssessmentView | undefined {
+  const task = taskOf(m);
+  if (!task) return undefined;
+  const id = task.assessmentIds.at(-1);
+  const a = (id && m.assessments.find((x) => x.id === id)) || undefined;
+  if (!a) return undefined;
+  const row = (label: string, d: Assessed<string>): AssessmentRowView => ({
+    label,
+    value: d.value,
+    confidence: d.confidence,
+    from: d.from,
+    fromLabel: PROVENANCE_LABEL[d.from],
+    evidence: d.evidence,
+    emphasis: LOUD_VALUES.has(d.value) || undefined,
+  });
+  const d = a.dimensions;
+  return {
+    summary: [a.kind.value, d.complexity.value, `risk ${d.risk.value}`].join(' · '),
+    confidence: a.confidence,
+    rows: [
+      row('Kind', a.kind),
+      row('Complexity', d.complexity),
+      row('Breadth', d.breadth),
+      row('Risk', d.risk),
+      row('Ambiguity', d.ambiguity),
+      row('Verifiability', d.verifiability),
+      row('Context load', d.contextLoad),
+    ],
+    domains: a.domains,
+    requires: a.requires,
+    note: a.evidence.length > 0 ? a.evidence.join(' · ') : undefined,
+    assessorVersion: a.assessorVersion,
+  };
+}
+
 /**
  * The strip above the conversation.
  *
@@ -179,6 +229,7 @@ export function taskViewOf(m: Mission, actions: TaskViewAction[]): TaskView | un
     state: task.state,
     stateReason: task.stateReason,
     route: routeViewOf(m, current),
+    assessment: assessmentViewOf(m),
     attempt: current ? { n: current.n, of: attempts.length } : undefined,
     branch: wt?.branch,
     worktreePath: wt?.path,

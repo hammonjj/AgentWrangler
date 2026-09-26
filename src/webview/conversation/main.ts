@@ -17,6 +17,8 @@ import type { ConversationToHost, HostToConversation } from '../../shared/messag
 import { displayTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
 import { modelLabel } from '../../shared/modelName';
 import {
+  assessmentChipTitle,
+  assessmentRowTitle,
   attemptLine,
   diffStatText,
   routeChipText,
@@ -1223,6 +1225,51 @@ function setBanner(next: ConversationCapabilities): void {
  */
 let task: TaskView | undefined;
 let attemptsOpen = false;
+let assessmentOpen = false;
+
+/**
+ * The assessment panel: one line per dimension, each saying its value, how
+ * sure it is and who said so (§8.2). Built as DOM, like the rest of the strip,
+ * because the evidence lines quote the user's own objective back at them.
+ */
+function assessmentPanel(a: NonNullable<TaskView['assessment']>): HTMLElement {
+  const box = document.createElement('div');
+  box.className = 'tsassess';
+  for (const r of a.rows) {
+    const row = document.createElement('div');
+    row.className = r.emphasis ? 'tsassessrow loud' : 'tsassessrow';
+    row.title = assessmentRowTitle(r);
+    const label = document.createElement('span');
+    label.className = 'tsassesslabel';
+    label.textContent = r.label;
+    const value = document.createElement('span');
+    value.className = 'tsassessvalue';
+    value.textContent = r.value;
+    const meta = document.createElement('span');
+    meta.className = 'tsassessmeta';
+    meta.textContent = `${r.confidence} · ${r.fromLabel}`;
+    row.append(label, value, meta);
+    if (r.evidence) {
+      const why = document.createElement('span');
+      why.className = 'tsassesswhy';
+      why.textContent = r.evidence;
+      row.append(why);
+    }
+    box.append(row);
+  }
+  const foot: string[] = [];
+  if (a.domains.length > 0) foot.push(a.domains.join(', '));
+  if (a.requires.length > 0) foot.push(`needs ${a.requires.join(', ')}`);
+  if (a.note) foot.push(a.note);
+  if (foot.length > 0) {
+    const f = document.createElement('div');
+    f.className = 'tsassessfoot';
+    f.textContent = foot.join(' · ');
+    f.title = `assessor ${a.assessorVersion}`;
+    box.append(f);
+  }
+  return box;
+}
 
 /**
  * Draw the strip.
@@ -1263,6 +1310,13 @@ function renderTask(): void {
     route.textContent = marker ? `${routeChipText(t.route)} · ${marker}` : routeChipText(t.route);
     route.title = routeChipTitle(t.route);
     head.append(route);
+  }
+  if (t.assessment) {
+    const a = document.createElement('span');
+    a.className = t.assessment.rows.some((r) => r.emphasis) ? 'tschip assess loud' : 'tschip assess';
+    a.textContent = t.assessment.summary;
+    a.title = assessmentChipTitle(t.assessment);
+    head.append(a);
   }
   if (t.attempt) {
     const n = document.createElement('span');
@@ -1354,7 +1408,24 @@ function renderTask(): void {
     });
     actions.append(toggle);
   }
+  // The assessment is what the router will act on from #38, so it is reachable
+  // rather than only a tooltip: a person has to be able to see a `critical`
+  // risk and where it came from before they trust anything routed by it.
+  if (t.assessment) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tsbtn link';
+    toggle.setAttribute('aria-expanded', String(assessmentOpen));
+    toggle.textContent = assessmentOpen ? 'Hide assessment' : 'Assessment';
+    toggle.addEventListener('click', () => {
+      assessmentOpen = !assessmentOpen;
+      renderTask();
+    });
+    actions.append(toggle);
+  }
   if (actions.childElementCount > 0) taskStrip.append(actions);
+
+  if (assessmentOpen && t.assessment) taskStrip.append(assessmentPanel(t.assessment));
 
   if (attemptsOpen && t.attempts.length > 1) {
     const list = document.createElement('div');
@@ -2097,8 +2168,9 @@ vscodeApi.onMessage((body) => {
       else clearComposer();
       setBanner(m.caps);
       // A different conversation is a different task (usually none at all), so
-      // the attempts list starts closed rather than inheriting the last one's.
-      if (task?.missionId !== m.task?.missionId) attemptsOpen = false;
+      // the attempts list and the assessment start closed rather than
+      // inheriting the last one's.
+      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = false;
       task = m.task;
       renderTask();
       stick = true;
@@ -2138,7 +2210,7 @@ vscodeApi.onMessage((body) => {
       setBanner(m.caps);
       break;
     case 'task':
-      if (task?.missionId !== m.task?.missionId) attemptsOpen = false;
+      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = false;
       task = m.task;
       renderTask();
       break;

@@ -23,8 +23,10 @@ import { formatDuration } from '../model';
 import { formatTokens, formatUsd } from '../sessionUsage';
 import type {
   AttemptState,
+  Confidence,
   EffortLevel,
   HarnessId,
+  Provenance,
   OutcomeCategory,
   RoutingMode,
   TaskState,
@@ -75,6 +77,41 @@ export interface TaskAttemptView {
   current?: boolean;
 }
 
+/**
+ * One dimension of an assessment as the strip draws it (§8.2, #37).
+ *
+ * `from` is on the row for a reason: a value a path rule produced and a value
+ * a cheap model guessed are worth different amounts of the reader's trust, and
+ * the plan's rule is never to claim more certainty than the source gives
+ * (§2.2). The pane shows both, and neither is styled away.
+ */
+export interface AssessmentRowView {
+  /** `Complexity`, `Risk`, … */
+  label: string;
+  value: string;
+  confidence: Confidence;
+  from: Provenance;
+  /** `rule`, `model`, `planner`, `you`. */
+  fromLabel: string;
+  evidence?: string;
+  /** The value is one a reader should not miss: `critical` risk, `none` verifiability. */
+  emphasis?: boolean;
+}
+
+/** What the work is like, as the conversation's task strip shows it. */
+export interface TaskAssessmentView {
+  /** "feature · involved · risk high" — the chip. */
+  summary: string;
+  /** The assessment as a whole, which is its least sure dimension. */
+  confidence: Confidence;
+  rows: AssessmentRowView[];
+  domains: string[];
+  requires: string[];
+  /** Why this assessment is thinner than usual, e.g. the model call failed. */
+  note?: string;
+  assessorVersion: string;
+}
+
 export interface TaskDiffView {
   filesChanged: number;
   insertions: number;
@@ -119,6 +156,8 @@ export interface TaskView {
   stateReason?: string;
   /** The route the current attempt ran on. Absent before the first attempt launches. */
   route?: TaskRouteView;
+  /** What the work is like (#37). Absent until the assessor has answered. */
+  assessment?: TaskAssessmentView;
   /** `n` of `of`: the attempt on screen, and how many there have been. */
   attempt?: { n: number; of: number };
   branch?: string;
@@ -298,6 +337,21 @@ export const TASK_STRIP_ACTIONS: readonly TaskViewAction[] = [
   'cancel',
   'recreate-worktree',
 ];
+
+/** "involved · medium confidence · from the model" — a row's tooltip, evidence and all. */
+export function assessmentRowTitle(r: AssessmentRowView): string {
+  const parts = [`${r.label}: ${r.value}`, `${r.confidence} confidence`, `from the ${r.fromLabel}`];
+  return r.evidence ? `${parts.join(' · ')}\n${r.evidence}` : parts.join(' · ');
+}
+
+/** The assessment chip's tooltip: the summary, how sure it is, and anything that went wrong. */
+export function assessmentChipTitle(a: TaskAssessmentView): string {
+  const parts = [`What this work is like: ${a.summary}`, `${a.confidence} confidence overall`];
+  if (a.domains.length > 0) parts.push(`domains: ${a.domains.join(', ')}`);
+  if (a.requires.length > 0) parts.push(`needs: ${a.requires.join(', ')}`);
+  if (a.note) parts.push(a.note);
+  return parts.join('\n');
+}
 
 /** The strip's one-line summary, used as its collapsed state and its tooltip. */
 export function taskSummaryLine(v: TaskView): string {

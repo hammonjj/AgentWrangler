@@ -18,6 +18,8 @@ import { SessionRegistry } from '../../src/core/session/sessionRegistry';
 import { TaskRunner, type NewTask, type TaskRunnerDeps } from '../../src/orchestration/engine/taskRunner';
 import { createSimulatedExecutors, SimulatedHarness } from '../../src/orchestration/harness/simulatedHarness';
 import type { AgentHarness } from '../../src/orchestration/harness/types';
+import { SimulatedCompletion } from '../../src/orchestration/completion/simulatedCompletion';
+import { Assessor } from '../../src/orchestration/policy/assessor';
 import { RepoPolicyStore, identityFor, worktreeRootPath } from '../../src/orchestration/policy/repoPolicyStore';
 import { MissionStore } from '../../src/orchestration/store/missionStore';
 import { WorktreeManager, canonicalPath } from '../../src/orchestration/worktrees/worktreeManager';
@@ -448,6 +450,49 @@ describe('TaskRunner', () => {
     expect(m.worktrees[0].state).toBe('retained');
     expect(git(repo, 'branch', '--list', m.worktrees[0].branch)).not.toBe('');
     await until(() => r.executors.sessions.get(sid) === undefined, 3000, 'the session to end');
+  });
+
+  // #37: the assessment is recorded beside the attempt, and never in its way.
+  it('assesses the task beside the running attempt, and puts the snapshot on its telemetry', async () => {
+    const answer = {
+      complexity: { value: 'routine', confidence: 'high', evidence: 'one constant' },
+      breadth: { value: 'single-file', confidence: 'high', evidence: 'one file' },
+      risk: { value: 'low', confidence: 'high', evidence: 'nothing depends on it' },
+      ambiguity: { value: 'clear', confidence: 'high', evidence: 'the criterion is testable' },
+      verifiability: { value: 'strong', confidence: 'high', evidence: 'typecheck covers it' },
+      kind: { value: 'feature', confidence: 'high', evidence: 'it adds a constant' },
+      domains: ['typescript'],
+      requires: ['edit'],
+    };
+    const r = rig(EDIT, shared(), { assessor: new Assessor({ completion: new SimulatedCompletion([{ output: answer }]) }) });
+    const started = await r.runner.start({ ...TASK, folder: repo });
+    const id = started.id;
+    await until(() => (r.runner.get(id)?.assessments.length ?? 0) > 0, 8000, 'the assessment');
+    const m = r.runner.get(id)!;
+    const a = m.assessments[0];
+    expect(m.tasks[0].assessmentIds).toEqual([a.id]);
+    expect(a.dimensions.complexity).toMatchObject({ value: 'routine', from: 'model' });
+    // The task plans one behavioural check (#35), so the model's `strong` is capped at `partial`.
+    expect(a.dimensions.verifiability).toMatchObject({ value: 'partial', from: 'rule' });
+
+    await until(() => attemptOf(r.runner.get(id))?.state === 'succeeded', 8000, 'the attempt to finish');
+    const rec = r.telemetry.find((t): t is AttemptRecord => t.type === 'attempt')!;
+    expect(rec.assessment).toMatchObject({ assessorVersion: 'asm-1', dimensions: { complexity: { value: 'routine' } } });
+    expect(JSON.stringify(rec)).not.toContain('Synthetic objective');
+  });
+
+  it('runs the task anyway when the assessment model never answers usably', async () => {
+    const r = rig(EDIT, shared(), {
+      assessor: new Assessor({ completion: new SimulatedCompletion([{ raw: 'nonsense' }, { raw: 'still nonsense' }]) }),
+    });
+    const started = await r.runner.start({ ...TASK, folder: repo });
+    const id = started.id;
+    await until(() => attemptOf(r.runner.get(id))?.state === 'succeeded', 8000, 'the attempt to finish');
+    await until(() => (r.runner.get(id)?.assessments.length ?? 0) > 0, 8000, 'the assessment');
+    const a = r.runner.get(id)!.assessments[0];
+    expect(a.confidence).toBe('low');
+    expect(a.llm).toBeUndefined();
+    expect(r.runner.get(id)!.tasks[0].state).toBe('needs-human');
   });
 
   it('refuses a folder outside git, and records nothing', async () => {
