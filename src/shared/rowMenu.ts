@@ -46,17 +46,28 @@ export function canCloseSession(s: SessionDTO): boolean {
 
 /**
  * What the row's hover-reveal × button does, which depends on whether there is
- * anything left to stop.
+ * anything left to stop — and, for the row's fate afterwards, on which tab the
+ * table is showing.
  *
  * The button means "I am done with this agent", so on a live session it ends
  * the process (`dismiss` — `close` with the confirm reserved for a turn in
- * flight) and lets the row fall to Ended, which ages out of the table on its
- * own. A session with no process to end cannot be *stopped* any further, so
- * there the same button falls back to `archive`, which is what "off my table"
- * means once nothing is running.
+ * flight). A session with no process to end cannot be *stopped* any further, so
+ * there the same button falls back to `archive`.
+ *
+ * Where the row goes then differs by tab, because the tabs mean different
+ * things. The Status tab groups by what the agent is doing, so a closed session
+ * has somewhere to land — Ended, which ages out on its own, and is a true
+ * statement about it. The Project tab groups by *where* it ran, which a closed
+ * session still answers, so it would sit in its project for ever: there the ×
+ * archives as well (`dismissHide`), which is the only way that tab can honour
+ * "take it off my table".
  */
-export function dismissAction(s: SessionDTO): Extract<DashboardAction, 'dismiss' | 'archive'> {
-  return canCloseSession(s) ? 'dismiss' : 'archive';
+export function dismissAction(
+  s: SessionDTO,
+  view: 'status' | 'project',
+): Extract<DashboardAction, 'dismiss' | 'dismissHide' | 'archive'> {
+  if (!canCloseSession(s)) return 'archive';
+  return view === 'project' ? 'dismissHide' : 'dismiss';
 }
 
 /**

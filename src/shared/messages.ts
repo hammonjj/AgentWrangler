@@ -99,6 +99,13 @@ export type DashboardAction =
    * is kept either way.
    */
   | 'dismiss'
+  /**
+   * The same, plus archiving it once it is actually closed: the Project tab's
+   * × , which has no Ended section to drop the row into. Archiving only after
+   * the close went through is what keeps a cancelled confirm from hiding a row
+   * that is still running.
+   */
+  | 'dismissHide'
   /** Stop this session's process (SIGSTOP) so it spends nothing. */
   | 'pause'
   /** Let a paused session run again (SIGCONT). */

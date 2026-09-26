@@ -121,14 +121,22 @@ describe('rowMenuItems', () => {
 
 describe('dismissAction', () => {
   it('ends the process when there is one — the × is not a hide button on a live row', () => {
-    expect(dismissAction(session())).toBe('dismiss');
-    expect(dismissAction(session({ pid: undefined, runnerOwned: true }))).toBe('dismiss');
-    expect(dismissAction(session({ provider: 'codex', pid: undefined, runnerOwned: true }))).toBe('dismiss');
+    expect(dismissAction(session(), 'status')).toBe('dismiss');
+    expect(dismissAction(session({ pid: undefined, runnerOwned: true }), 'status')).toBe('dismiss');
+    expect(dismissAction(session({ provider: 'codex', pid: undefined, runnerOwned: true }), 'status')).toBe('dismiss');
   });
 
-  it('falls back to archiving when nothing is left to stop', () => {
-    expect(dismissAction(session({ status: 'ended' }))).toBe('archive');
-    expect(dismissAction(session({ pid: undefined }))).toBe('archive');
+  // The Project tab groups by where a session ran, which a closed one still
+  // answers, so closing alone would leave the row exactly where it was.
+  it('also hides the row on the Project tab, where Ended is not a place to land', () => {
+    expect(dismissAction(session(), 'project')).toBe('dismissHide');
+    expect(dismissAction(session({ pid: undefined, runnerOwned: true }), 'project')).toBe('dismissHide');
+  });
+
+  it('falls back to archiving when nothing is left to stop, on either tab', () => {
+    expect(dismissAction(session({ status: 'ended' }), 'status')).toBe('archive');
+    expect(dismissAction(session({ pid: undefined }), 'status')).toBe('archive');
+    expect(dismissAction(session({ status: 'ended' }), 'project')).toBe('archive');
   });
 });
 

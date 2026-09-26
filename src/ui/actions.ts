@@ -47,8 +47,14 @@ export interface SessionActions {
    * `confirmOnlyIfWorking` narrows that confirm to the case it exists for — a
    * turn being thrown away. The dashboard row's × passes it, so ending an idle
    * agent costs one click; the row menu and the tray do not.
+   *
+   * Resolves `true` when the process was actually ended (or was already gone),
+   * `false` when the confirm was declined, there was nothing to close, or it
+   * refused to die — so a caller with follow-up work (the Project tab's ×,
+   * which archives the row afterwards) can tell the two apart. Callers that
+   * only want the close may ignore it.
    */
-  closeSession(key: string, opts?: { confirmOnlyIfWorking?: boolean }): void;
+  closeSession(key: string, opts?: { confirmOnlyIfWorking?: boolean }): Promise<boolean>;
   /**
    * Freeze one session's process, or thaw it. Unlike `closeSession` this keeps
    * the process — it simply stops running — so it is offered without a confirm:
