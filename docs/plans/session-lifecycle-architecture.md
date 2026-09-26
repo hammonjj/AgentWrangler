@@ -1660,6 +1660,23 @@ When to escalate: App Nap / power / dock-hide interactions misbehave → Opus Hi
 
 ### Stage 7: UI/core process split (decision gate; likely never)
 
+- **Decided 2026-09-26 (#20 → #74): go, for remote control only.** The trigger arrived:
+  Discord must keep working while the app is fully quit, crashed or mid-reinstall. What moved
+  is the smallest piece that needs to: the Discord connection and the reconciler, into a
+  LaunchAgent daemon (`src/remoteDaemon/main.ts`, `src/remote/daemon/*`) run from the hosts'
+  cloned runtime. Choices at the gate:
+  - **secrets:** the token stays in the app's `safeStorage`; the app hands it over the
+    daemon's private socket and the daemon holds it in memory. Cost, accepted: after a reboot
+    or a daemon restart, Discord waits until the app is opened once;
+  - **launch model:** LaunchAgent (`KeepAlive.SuccessfulExit = false`), installed while
+    `remote.enabled` is on and removed when it goes off; unpackaged builds spawn it detached;
+  - **single instance:** launchd's label, plus a socket probe at start (a second copy exits 0);
+  - **leader lease:** still not needed. Only the daemon ever connects to Discord, so there is
+    one gateway socket by construction;
+  - **UI relay:** none. The app is the daemon's preferred feed while it runs (its decorated
+    list, and it applies presses through `SessionActions`), and the daemon follows its own
+    feed (Claude provider + passive clients of every live host) otherwise.
+  The rest of the core stays in Electron main; this gate stays open for it.
 - **Gate.** Proceed only if a front end that is not Electron must orchestrate while the app is
   **fully quit**, or if launch-at-login without an Electron process becomes a requirement.
 - **If proceeding:**

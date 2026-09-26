@@ -37,6 +37,7 @@ import { JsonStore } from './jsonStore';
 import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
 import { BUILD_ID, createSessionHostRuntime } from './sessionHostRuntime';
+import { createRemoteDaemonAgent } from './remoteDaemonAgent';
 import { MenuBar, menuBarSessions } from './tray';
 import { WorkbenchWindow } from './workbenchWindow';
 
@@ -106,15 +107,18 @@ void app.whenReady().then(() => {
   // *it*, for `pick` and `input`. The indirection is the same one `parentWindow`
   // uses and for the same reason: a `let` the closures read when called.
   let palette: PaletteWindow | undefined;
+  // One runtime for both: the remote daemon runs from the session hosts' clone.
+  const runtime = createSessionHostRuntime({ userDataDir, appRoot: APP_ROOT, isPackaged: app.isPackaged, execPath: process.execPath, log });
+  const hostDirs = {
+    runDir: path.join(userDataDir, 'run'),
+    fallbackRunDir: path.join(os.homedir(), '.agentwrangler', 'run'),
+    logDir: path.join(userDataDir, 'logs'),
+  };
   const host = createElectronHost({
     userDataDir,
     log,
-    sessionHosts: {
-      runtime: createSessionHostRuntime({ userDataDir, appRoot: APP_ROOT, isPackaged: app.isPackaged, execPath: process.execPath, log }),
-      runDir: path.join(userDataDir, 'run'),
-      fallbackRunDir: path.join(os.homedir(), '.agentwrangler', 'run'),
-      logDir: path.join(userDataDir, 'logs'),
-    },
+    sessionHosts: { runtime, ...hostDirs },
+    remoteDaemon: createRemoteDaemonAgent({ runDirs: hostDirs, logDir: hostDirs.logDir, runtime, isPackaged: app.isPackaged, log }),
     palette: {
       pick: (items, options) => palette?.pick(items, options) ?? Promise.resolve(undefined),
       input: (options) => palette?.input(options) ?? Promise.resolve(undefined),

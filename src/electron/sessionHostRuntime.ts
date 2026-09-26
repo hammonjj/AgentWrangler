@@ -22,6 +22,7 @@ import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { SessionHostRuntime } from '../core/session/hostSupervisor';
+import { REMOTE_MANIFEST_NAME } from '../remote/daemon/protocol';
 
 declare const AW_BUILD_ID: string | undefined;
 export const BUILD_ID = typeof AW_BUILD_ID === 'string' ? AW_BUILD_ID : 'dev';
@@ -61,7 +62,12 @@ export function createSessionHostRuntime(opts: RuntimeOptions): SessionHostRunti
       preparing = undefined;
       throw err;
     })),
-    gc(inUse: Set<string>) {
+    gc(hostsInUse: Set<string>) {
+      // The remote daemon (#74) runs from one of these clones too, and a new
+      // build only moves it on once the app has connected to it.
+      const inUse = new Set(hostsInUse);
+      const daemonRuntime = remoteDaemonRuntime(path.join(opts.userDataDir, 'run', REMOTE_MANIFEST_NAME));
+      if (daemonRuntime) inUse.add(daemonRuntime);
       let names: string[];
       try {
         names = fs.readdirSync(runtimesDir);
@@ -79,6 +85,18 @@ export function createSessionHostRuntime(opts: RuntimeOptions): SessionHostRunti
       }
     },
   };
+}
+
+/** The runtime a live remote daemon runs from, from its manifest. */
+function remoteDaemonRuntime(manifestPath: string): string | undefined {
+  try {
+    const m = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as { pid?: unknown; runtimeDir?: unknown };
+    if (typeof m.pid !== 'number' || typeof m.runtimeDir !== 'string') return undefined;
+    process.kill(m.pid, 0); // throws if it is gone
+    return m.runtimeDir;
+  } catch {
+    return undefined;
+  }
 }
 
 /** `.../X.app/Contents/MacOS/X` → `.../X.app`. */

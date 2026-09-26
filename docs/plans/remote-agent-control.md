@@ -493,6 +493,11 @@ files. Left alone that is five bots and five messages for one prompt.
 
 ### The leader lease was cut. Here is why
 
+> **Update 2026-09-26 (#74).** The daemon this section anticipated now exists, and it still
+> does not need the lease: it is the *only* process that connects to Discord. The app no
+> longer holds a transport at all; it feeds the daemon and applies the presses it is sent.
+> See `session-lifecycle-architecture.md` Stage 7.
+
 Earlier drafts of this plan specified a lock file with a heartbeat, so exactly one process owned
 the Discord connection. **It is not being built**, because on 2026-09-22 it turned out to be
 defending against a state that cannot be reached. Three independent things already prevent it:

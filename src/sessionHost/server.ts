@@ -15,6 +15,7 @@ import type { Disposable } from '../core/events';
 import { NdjsonPeer, type IncomingRequest } from '../core/rpc/ndjsonPeer';
 import { ResyncNeeded } from '../core/session/seqLog';
 import {
+  CLIENT_CAPABILITY_PASSIVE,
   CONTROL_OPS,
   HOST_PROTOCOL_VERSION,
   MAX_FRAME_BYTES,
@@ -64,6 +65,8 @@ interface Conn {
   peer: NdjsonPeer;
   queue: OutQueue;
   role?: ClientRole;
+  /** Said `passive` in `hello`: not counted by the idle-orphan rule. */
+  passive?: boolean;
   events?: Disposable;
   /** The last event seq this client was handed, for the drain check. */
   lastSent: number;
@@ -113,9 +116,9 @@ export class HostServer {
     return [...this.conns].filter((c) => c.events).length;
   }
 
-  /** Connected clients that got past `hello`: what the idle-orphan rule counts. */
+  /** Connected clients that got past `hello` and are not passive: what the idle-orphan rule counts. */
   get clients(): number {
-    return [...this.conns].filter((c) => c.role).length;
+    return [...this.conns].filter((c) => c.role && !c.passive).length;
   }
 
   /**
@@ -296,6 +299,7 @@ export class HostServer {
     }
     // Only a client that says it is the core may command; anything else watches.
     conn.role = p.client?.role === 'core' ? 'core' : 'observer';
+    conn.passive = Array.isArray(p.client?.capabilities) && p.client.capabilities.includes(CLIENT_CAPABILITY_PASSIVE);
     const snap = this.opts.session.snapshot();
     return {
       ...this.opts.describe(),

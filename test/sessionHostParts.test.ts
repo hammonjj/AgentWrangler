@@ -13,6 +13,7 @@ import { OutQueue } from '../src/sessionHost/outQueue';
 import { HostServer } from '../src/sessionHost/server';
 import { MAX_INLINE_IMAGE_CHARS, slimForWire } from '../src/sessionHost/wire';
 import {
+  CLIENT_CAPABILITY_PASSIVE,
   MAX_PAGE_BYTES,
   RPC_FORBIDDEN,
   RPC_RESYNC,
@@ -186,14 +187,14 @@ describe('HostServer', () => {
       describe: () => ({ hostId: 'h', hostBuild: 'b', provider: 'claude', sdkVersion: 'x', hostPid: process.pid, cwd: '/Users/test/proj', startedAt: 0, capabilities: [] }),
     });
     await server.listen(sock);
-    const client = async (role: 'core' | 'observer' = 'core') => {
+    const client = async (role: 'core' | 'observer' = 'core', capabilities: string[] = []) => {
       const socket = net.createConnection(sock);
       await new Promise((r) => socket.once('connect', r));
       const events: HostEvent[] = [];
       const peer = new NdjsonPeer({ jsonrpc: true, write: (l) => socket.write(l) });
       peer.onNotification((n) => n.method === 'event' && events.push((n.params as { event: HostEvent }).event));
       socket.on('data', (c: Buffer) => peer.feed(c));
-      await peer.request('hello', { client: { role, build: 't', pid: 1 }, protocol: { min: 1, max: 1 }, token: 'secret' });
+      await peer.request('hello', { client: { role, build: 't', pid: 1, capabilities }, protocol: { min: 1, max: 1 }, token: 'secret' });
       return { peer, events, close: () => socket.destroy() };
     };
     return { server, client };
@@ -247,6 +248,19 @@ describe('HostServer', () => {
     await expect(observer.peer.request('snapshot', {})).resolves.toMatchObject({ sessionId: 's1' });
     core.close();
     observer.close();
+    await server.close();
+  });
+
+  it('does not count a passive client (the remote daemon) for the idle-orphan rule, and lets it answer', async () => {
+    const s = await session();
+    const { server, client } = await serve(s);
+    const passive = await client('core', [CLIENT_CAPABILITY_PASSIVE]);
+    expect(server.clients).toBe(0);
+    await expect(passive.peer.request('respondAsk', { requestId: 'none', result: { behavior: 'deny', message: 'x' } })).resolves.toBeDefined();
+    const looking = await client('core');
+    expect(server.clients).toBe(1);
+    passive.close();
+    looking.close();
     await server.close();
   });
 

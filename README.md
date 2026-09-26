@@ -52,7 +52,8 @@ Its menu lists every live agent — needing you first — with **Open** and **St
 **Open Agent Wrangler**, **Settings…** and both quits. While the window is closed, a session
 that needs permission, is waiting on you, or is done raises a macOS notification; clicking it
 opens that session (*Notify while the window is closed*, on by default; *Notify when an agent
-needs you* does the same while the window is open). Discord keeps answering throughout.
+needs you* does the same while the window is open). Discord keeps answering throughout, and
+after a full quit too (see *Remote control*).
 **Open at login** (off by default) starts it in the menu bar without a window; it is a login
 item only, and nothing relaunches the app after a quit or a crash. While an agent the app runs
 is working or asking permission, it holds an App Nap assertion, which also defers idle sleep.
@@ -104,7 +105,11 @@ waits, and Agent Wrangler reconnects to it when it opens again.
   usual. Never one that is working, waiting on a question or permission, or running background
   tasks, and time the machine spends asleep does not count.
 - While a conversation is working, the Mac is kept from *idle* sleep (a lid close still sleeps).
-  On wake, the app rechecks its hosts and reconnects Discord at once.
+  On wake, the app rechecks its hosts, and the remote daemon reconnects Discord at once.
+- The remote daemon's connection to a host is *passive*: it does not count as Agent Wrangler
+  being connected, so it never keeps an idle conversation from being parked. (A host started
+  by a build older than #74 does not know the flag, and counts it until it next moves to a
+  new build.)
 - Still experimental until a week of daily use has shown the recovery paths behave (#15).
 
 **Codex conversations survive a quit.** Agent Wrangler runs every Codex thread in one
@@ -458,6 +463,33 @@ not already offering.
    (User Settings → Advanced) to copy IDs. An empty allowlist means **nobody**,
    and nothing is published at all.
 
+**It keeps working when the app is closed.** The Discord connection is not held
+by the app but by a small background service, the *remote daemon* (#74): a
+LaunchAgent (`com.hammonjj.agentwrangler.remote`) that starts when Discord
+integration is switched on, runs from the same cloned runtime as session hosts
+(so a reinstall does not pull it out from under itself), and is restarted by
+launchd if it crashes. Switching the integration off stops it and removes it.
+
+- **While the app runs,** the daemon follows the app's own list, exactly what
+  the table shows, and hands presses back to the app to apply. Nothing about
+  what gets posted changes.
+- **When the app quits, crashes or is being reinstalled,** the daemon carries on
+  from its own view of the machine: the hook log (a permission is answered by
+  writing a decision file) and every live session host, which it follows as a
+  *passive* client (it can answer an ask, and it does not stop an idle host from
+  parking). Permission prompts, questions and plans from hosted conversations,
+  permission prompts from terminal sessions, and "done" messages all keep
+  coming. Codex questions wait for the app: only the app can answer them.
+- A card is not reposted across the handover. Both lists name an ask the same
+  way, and while neither is complete (the few seconds after a switch), nothing is
+  closed and a press is asked to try again.
+- **The token stays in the app.** The app hands it to the daemon over its
+  private socket (0700 directory, 0600 socket, token-authenticated), and the
+  daemon keeps it in memory only. So after a reboot, or if the daemon itself
+  restarts, it waits, connected to nothing, until you open Agent Wrangler once.
+- Its log is `~/Library/Application Support/Agent Wrangler/logs/remote-daemon.log`,
+  and **Test remote control** says whether it is running and connected.
+
 **What you get.** When an agent hits a permission prompt, one message appears
 naming the agent, repository, branch, worktree and tool, with the command in a
 code block and Claude's own reason. It carries **Allow once**, **Deny**, and
@@ -498,15 +530,16 @@ still waiting in Agent Wrangler, and switching the button back on republishes
 whatever is still being asked. It is the same thing as `remote.notificationsEnabled`
 in Preferences, and appears in the toolbar only once Discord is configured.
 
-**Questions and plans are mirrored too, for conversations this window runs.**
+**Questions and plans are mirrored too, for conversations Agent Wrangler runs.**
 A permission prompt is answerable from anywhere because answering one is a file
 write into a directory every process shares. An `AskUserQuestion` and an
 `ExitPlanMode` are not: they are settled by resolving a callback that exists
-only inside the process running the session. Since Agent Wrangler holds a
-single-instance lock, that process is the one holding the Discord connection, so
-a conversation **started in the app** mirrors its questions and plans as well as
-its permissions. A session running in a terminal still mirrors permissions only —
-there is no callback here to resolve.
+only inside the process running the session. For a conversation in a session
+host, that callback is reachable over the host's socket, by the app or by the
+remote daemon; for one running inside the app (hosts off, or a Codex thread),
+only the app can reach it, so those are mirrored while the app runs. A session
+running in a terminal still mirrors permissions only: there is no callback
+anywhere to resolve.
 
 A question posts one button per option, and the card lists each option with its
 description, since a button label cannot carry one. A plan posts with **Approve**
@@ -542,7 +575,9 @@ your home directory is folded to `~`. Every publish, press, refusal and
 resolution is appended to `~/.cache/agent-wrangler/remote/audit.log`, which
 records IDs and tool names but not command text — the channel already has that.
 
-**Exactly one gateway socket, always.** Discord will happily let one bot hold
+**Exactly one gateway socket, always.** Only the remote daemon connects, and
+there is only ever one daemon (launchd runs one per label, and a second copy
+that finds the socket answering exits). Discord will happily let one bot hold
 several connections at once, and they are not redundancy: every socket receives
 every interaction, all of them race to acknowledge the press, and the losers get
 `404 Unknown interaction` — which the card renders as *"The application didn't

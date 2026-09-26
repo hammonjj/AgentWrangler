@@ -32,6 +32,8 @@
 import type { Disposable } from '../core/events';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import type { SessionHostRuntime } from '../core/session/hostSupervisor';
+import type { EnsureReason } from '../remote/daemon/client';
+import type { RemoteDaemonPaths } from '../remote/daemon/paths';
 
 /**
  * Persisted key/value, the same structural shape `ArchiveService` and
@@ -195,6 +197,19 @@ export interface HostServices {
     /** For sockets when `runDir`'s path is too long for macOS (`~/.agentwrangler/run`). */
     fallbackRunDir: string;
     logDir: string;
+  };
+  /**
+   * The remote daemon (#74): the process that holds the Discord connection and
+   * outlives the app. Absent means remote control is not available here.
+   */
+  remoteDaemon?: {
+    paths: RemoteDaemonPaths;
+    /** Replace a daemon of another build (the packaged app); unpackaged, use whatever runs. */
+    replaceOutdated: boolean;
+    /** Install, start, or bring it up to this build. Idempotent. */
+    ensure(why: EnsureReason): Promise<void>;
+    /** Stop it and take it out of login items: remote control was switched off. */
+    remove(): Promise<void>;
   };
   /** Directory for caches this host owns, e.g. the shared usage read. Must exist. */
   storageDir: string;

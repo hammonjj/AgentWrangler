@@ -80,6 +80,17 @@ const sessionHost = {
 };
 
 /**
+ * The remote daemon (#74): holds the Discord connection and outlives the app.
+ * Plain Node, no `electron`; run by launchd from the session hosts' cloned
+ * runtime with ELECTRON_RUN_AS_NODE.
+ */
+const remoteDaemon = {
+  ...sessionHost,
+  entryPoints: ['src/remoteDaemon/main.ts'],
+  outfile: 'dist/remoteDaemon/main.js',
+};
+
+/**
  * The `aw` command-line client (#21). Plain Node, no `electron`: `bin/aw` runs
  * it with the installed app's own binary under ELECTRON_RUN_AS_NODE, straight
  * out of app.asar, the way session hosts run.
@@ -135,7 +146,7 @@ const web = {
   plugins: [watchLogger],
 };
 
-const configs = [web, electronMain, electronPreload, sessionHost, cli];
+const configs = [web, electronMain, electronPreload, sessionHost, remoteDaemon, cli];
 
 if (watch) {
   const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));

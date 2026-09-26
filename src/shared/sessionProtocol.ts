@@ -316,6 +316,15 @@ export type ClientRole = 'core' | 'observer';
 export const CAPABILITY_CONFIGURE_IDLE = 'configure.orphanIdleHours';
 
 /**
+ * A client capability, in `hello`: this client follows the host without being
+ * someone looking at the session, so the idle-orphan rule does not count it.
+ * The remote daemon (#74) connects to every live host to see its asks; without
+ * this, no host would ever park while it runs. Additive: an older host ignores
+ * it and counts the client, as it counts any.
+ */
+export const CLIENT_CAPABILITY_PASSIVE = 'passive';
+
+/**
  * `configure`: settings the core owns that the host must apply while no core
  * is connected. Fields a host does not know are ignored.
  */

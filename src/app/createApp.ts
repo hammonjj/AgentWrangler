@@ -98,12 +98,8 @@ import { TurnStats } from '../core/turnStats';
 import { FileUsageCache } from '../core/usageCache';
 import { UsageService } from '../core/usageService';
 import { FileSuggestService } from '../core/fileSuggest';
-import { FileAuditLog } from '../remote/audit';
-import { DiscordTransport } from '../remote/discord/transport';
-import { MirrorStore } from '../remote/mirrorStore';
-import { auditFile, DISCORD_BOT_TOKEN_KEY, mirrorFile } from '../remote/paths';
-import { RemoteControlService } from '../remote/service';
-import type { RemoteTransport } from '../remote/transport';
+import { RemoteDaemonLink } from '../remote/daemon/client';
+import { DISCORD_BOT_TOKEN_KEY } from '../remote/paths';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { PermissionModeName } from '../shared/conversation';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
@@ -177,8 +173,6 @@ export interface AgentWranglerApp {
   taskPanes?: TaskBadgeSource & TaskPaneSource;
   dictation: DictationService;
   files: FileSuggestService;
-  /** Mirrors permission prompts to a remote surface. Inert until given a transport. */
-  remoteControl: RemoteControlService;
   actions: SessionActions;
   getConfig: ConfigGetter;
 
@@ -1411,9 +1405,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     await host.secrets.store(DISCORD_BOT_TOKEN_KEY, token.trim());
     log(`remote: stored a bot token for ${who.username ?? 'the bot'}`);
     // A stored token changes nothing a settings listener would see, so the
-    // reconnect has to be asked for here.
-    await disconnectTransport();
-    await syncRemoteTransport();
+    // handover has to be asked for here. The daemon reconnects with it.
+    await syncRemote();
 
     const cfg = getConfig();
     const missing = [
@@ -1486,7 +1479,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (cfg.remoteAuthorizedUserIds.length === 0) bad('No authorised users, so nothing will be published at all');
       else ok(`${cfg.remoteAuthorizedUserIds.length} authorised user(s)`);
 
-      lines.push(remoteControl.connected ? '✓  Connected to the Discord gateway' : '✗  Not connected to the gateway yet');
+      // The connection is the daemon's, not this process's (#74).
+      const status = await remoteLink?.status();
+      if (!status) {
+        bad('The background service that holds the Discord connection is not running. It starts when Discord integration is on; see logs/remote-daemon.log');
+      } else {
+        ok(`The background service is running (pid ${status.pid}), so Discord keeps working when Agent Wrangler is closed`);
+        if (!status.hasToken) bad('The background service has no bot token yet');
+        lines.push(status.connected ? '✓  Connected to the Discord gateway' : '✗  Not connected to the gateway yet');
+      }
 
       // Only post when everything else passed: a card in a channel nobody can
       // act on is litter, and the lines above already say why.
@@ -1521,7 +1522,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
   const disconnectDiscord = async (): Promise<{ ok: boolean; lines: string[] }> => {
     await host.secrets.delete(DISCORD_BOT_TOKEN_KEY);
-    await disconnectTransport();
+    // The daemon forgets its copy and hangs up.
+    await remoteLink?.reconfigure();
     log('remote: token removed and disconnected');
     return { ok: true, lines: ['✓  The bot token has been removed and the connection closed.'] };
   };
@@ -1860,27 +1862,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const files = new FileSuggestService();
 
   /**
-   * Mirroring permission prompts to a remote surface.
-   *
-   * Constructed always, connected never — so far. It holds no transport until
-   * something hands it one, and with none it does nothing at all: no file is
-   * written, no message is posted, and `remote.enabled` does not exist as a
-   * setting yet. The transport and the leader lease that decides which process
-   * gets it arrive in later phases; this is here so the wiring is reviewed
-   * once, against a service whose whole behaviour is already covered by tests.
-   */
-  const remoteConfig = () => {
-    const cfg = getConfig();
-    return {
-      enabled: cfg.remoteEnabled,
-      notificationsEnabled: cfg.remoteNotificationsEnabled,
-      guildId: cfg.remoteGuildId,
-      channelId: cfg.remoteChannelId,
-      authorizedUserIds: cfg.remoteAuthorizedUserIds,
-      homeDir: os.homedir(),
-    };
-  };
-  /**
    * The store as the remote layer must see it: with the archive and the pause
    * state applied.
    *
@@ -1913,86 +1894,93 @@ export function createApp(host: HostServices): AgentWranglerApp {
     [archive, pause, runnerOwnership],
   );
   host.subscribe(remoteSessions);
-  const remoteControl = new RemoteControlService(
-    remoteSessions,
-    actions,
-    new MirrorStore(mirrorFile()),
-    remoteConfig,
-    new FileAuditLog(auditFile()),
-    (message) => log(`remote: ${message}`),
-  );
-  host.subscribe(remoteControl);
-  announceRemote = (notice) => void remoteControl.notify(notice);
-
   /**
-   * Connect the transport, or take it away — whichever the settings now say.
+   * Remote control runs in the remote daemon (#74), not here.
    *
-   * The token is read on every connect rather than held: it can be replaced or
-   * revoked while the app runs, and a cached copy would keep a dead credential
-   * alive until a restart. Nothing is constructed at all until the setting is
-   * on and a token exists, so the default configuration opens no socket and
-   * touches no file.
+   * The daemon holds the Discord connection and the reconciler, and keeps both
+   * going while this app is quit, crashed or being reinstalled. This process is
+   * its best feed while it runs: it hands over the settings and the bot token
+   * (which stays in `safeStorage`; the daemon keeps it in memory), streams
+   * `remoteSessions`, and applies the presses the daemon sends back through
+   * `actions`, the same calls the dashboard's buttons make. Nothing is started
+   * until `remote.enabled` is on, so the default configuration runs no daemon.
+   *
+   * The list is not offered as complete (`ready`) until the Claude provider's
+   * first scan is in and adopted hosts have had a moment to catch up: until
+   * then the daemon keeps following its own feed, rather than close cards for
+   * asks this process has not seen yet.
    */
-  let transport: RemoteTransport | undefined;
-  let syncing: Promise<void> = Promise.resolve();
+  let remoteReady = false;
+  const remoteLink = host.remoteDaemon
+    ? new RemoteDaemonLink({
+        paths: host.remoteDaemon.paths,
+        build: host.sessionHosts?.runtime.buildId ?? 'dev',
+        log: (m) => log(`remote: ${m}`),
+        ensure: (why) => host.remoteDaemon!.ensure(why),
+        replaceOutdated: host.remoteDaemon.replaceOutdated,
+        configure: async () => ({
+          config: getConfig(),
+          homeDir: os.homedir(),
+          botToken: getConfig().remoteEnabled ? ((await host.secrets.get(DISCORD_BOT_TOKEN_KEY)) ?? null) : null,
+        }),
+        sessions: remoteSessions,
+        ready: () => remoteReady,
+        extras: () => {
+          const nicknamed: Record<string, string> = {};
+          const archived: string[] = [];
+          for (const s of store.sessions) {
+            const name = nicknames.get(s.key);
+            if (name) nicknamed[s.key] = name;
+            if (archive.isArchived(s.key)) archived.push(s.key);
+          }
+          return { archived, nicknames: nicknamed };
+        },
+        actions,
+      })
+    : undefined;
+  if (remoteLink) host.subscribe(remoteLink);
+  announceRemote = (notice) => void remoteLink?.notify(notice);
 
-  const disconnectTransport = async (): Promise<void> => {
-    if (!transport) return;
-    remoteControl.setTransport(undefined);
-    const going = transport;
-    transport = undefined;
-    await going.disconnect();
-    going.dispose();
-  };
-
-  const syncRemoteTransport = (): Promise<void> => {
-    syncing = syncing.then(async () => {
-      const cfg = remoteConfig();
-      const token = cfg.enabled ? await host.secrets.get(DISCORD_BOT_TOKEN_KEY) : undefined;
-      const wanted = cfg.enabled && !!token && !!cfg.guildId && !!cfg.channelId;
-
-      if (!wanted) {
-        if (transport) log('remote: disconnecting');
-        await disconnectTransport();
+  /** Start following the daemon, hand it new settings, or stop it: whichever `remote.enabled` now says. */
+  let remoteWanted = false;
+  let remoteSyncing: Promise<void> = Promise.resolve();
+  const syncRemote = (): Promise<void> => {
+    remoteSyncing = remoteSyncing.then(async () => {
+      if (!remoteLink || !host.remoteDaemon) return;
+      if (getConfig().remoteEnabled) {
+        if (!remoteWanted) {
+          remoteWanted = true;
+          remoteLink.start(); // configures on connect
+        } else {
+          await remoteLink.reconfigure();
+        }
         return;
       }
-      if (transport) return; // already connected, and the token is read per connect
-
-      const next = new DiscordTransport({
-        config: () => ({ guildId: cfg.guildId, channelId: cfg.channelId }),
-        restDeps: { token: () => token!, log: (m) => log(`remote: ${m}`) },
-        // No `gatewayUrl`: the transport asks `GET /gateway/bot` through its
-        // own REST client, which already has the token and the rate limiter.
-        gatewayDeps: { token: () => token!, log: (m) => log(`remote: ${m}`) },
-        log: (m) => log(`remote: ${m}`),
-      });
-      transport = next;
-      remoteControl.setTransport(next);
-      try {
-        await next.connect();
-        log('remote: connecting to Discord');
-      } catch (err) {
-        log(`remote: could not connect — ${String(err)}`);
+      if (remoteWanted) {
+        remoteWanted = false;
+        // Told first, so it closes its cards and hangs up before it is stopped.
+        await remoteLink.reconfigure();
+        await remoteLink.stop();
       }
+      await host.remoteDaemon.remove().catch((err) => log(`remote: could not remove the daemon: ${String(err)}`));
     });
-    return syncing;
+    return remoteSyncing;
   };
 
-  host.subscribe({ dispose: () => void disconnectTransport() });
   host.subscribe(
     host.settings.onDidChange((affects) => {
       if (
         affects('remote.enabled') ||
         affects('remote.discord.guildId') ||
         affects('remote.discord.channelId') ||
-        affects('remote.discord.authorizedUserIds')
+        affects('remote.discord.authorizedUserIds') ||
+        // The toolbar button: the daemon closes the open cards when it goes
+        // off, and republishes whatever is still being asked when it comes on.
+        affects('remote.notificationsEnabled') ||
+        affects('remote.notifyOnDone')
       ) {
-        void syncRemoteTransport();
+        void syncRemote();
       }
-      // The toolbar button. Nothing about the connection changes, but what may
-      // be published does, so the surface has to be reconciled: off closes the
-      // open cards, on republishes whatever is still being asked.
-      if (affects('remote.notificationsEnabled')) void remoteControl.reconcile();
     }),
   );
 
@@ -2361,9 +2349,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
       await runners.endAllForQuit(withinMs, opts);
     },
     onSystemResume() {
-      log('woke from sleep: rechecking session hosts and the remote connection');
+      // The Discord connection is the daemon's, which notices the sleep itself.
+      log('woke from sleep: rechecking session hosts');
       runners.wakeAll();
-      transport?.wake?.();
     },
     restartCodexServer,
     runnerOwnership,
@@ -2380,7 +2368,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
     dictation,
     files,
     actions,
-    remoteControl,
     getConfig,
 
     attachSurface(next) {
@@ -2409,12 +2396,24 @@ export function createApp(host: HostServices): AgentWranglerApp {
     start() {
       usage.start();
       codexUsage.start();
-      void store.register(provider).catch((err) => log(`provider start failed: ${String(err)}`));
+      const remoteFirstScan = store.register(provider).catch((err) => log(`provider start failed: ${String(err)}`));
       void store.register(codexProvider).catch((err) => log(`Codex provider start failed: ${String(err)}`));
       log('Agent Wrangler started');
       void checkHookHealth();
       // Off by default, so this normally reads the setting and stops.
-      void syncRemoteTransport();
+      void syncRemote();
+      // The list the daemon follows is complete once the Claude provider's
+      // first scan is in, Codex threads are rejoined, and every adopted host
+      // has caught up (its view has left `starting`/`connecting`, so its
+      // pending asks are known), or after 30 s at most. Until then the daemon
+      // keeps following its own feed, which already sees those hosts' asks.
+      void Promise.all([remoteFirstScan, startupSettled]).then(async () => {
+        const deadline = Date.now() + 30_000;
+        const catchingUp = () => runners.list().some((r) => r.hosted && (r.lifecycle === 'starting' || r.lifecycle === 'connecting'));
+        while (Date.now() < deadline && catchingUp()) await new Promise((r) => setTimeout(r, 250));
+        remoteReady = true;
+        remoteLink?.pushSoon();
+      });
       // After the store's first scan, so "is it running elsewhere?" has an answer.
       setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), 2000);
       void rejoinCodexThreads()

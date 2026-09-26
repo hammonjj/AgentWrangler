@@ -42,6 +42,13 @@ import type { RemoteClose, RemoteInvocation, RemoteTransport } from './transport
 /** Just enough of the store to reconcile against, so tests need no real one. */
 export interface SessionSnapshot {
   readonly sessions: SessionDTO[];
+  /**
+   * False while the list is not yet the whole truth (the remote daemon between
+   * feeds, a first scan still running). A pass then leaves the surface alone:
+   * an empty list read as "nothing is being asked" would close every card.
+   * Absent means always ready.
+   */
+  readonly ready?: boolean;
   onDidUpdate(listener: () => void): Disposable;
 }
 
@@ -190,6 +197,7 @@ export class RemoteControlService implements Disposable {
       return;
     }
     if (!transport.connected) return; // reconnect fires onDidChangeConnection
+    if (this.sessions.ready === false) return; // the source fires once it is
 
     // Fail closed: with nobody authorised, a published card is a button that
     // can only ever be refused. Say so once rather than on every pass.
@@ -303,7 +311,13 @@ export class RemoteControlService implements Disposable {
     }
 
     // 4. Is this still the ask it was posted for? Re-derived now, from the
-    //    store, rather than trusted from the message.
+    //    store, rather than trusted from the message. Not while the list is
+    //    incomplete (the daemon switching feeds): a missing session would read
+    //    as "answered", and close a card that is still being asked.
+    if (this.sessions.ready === false) {
+      await transport.reply(invocation, 'Agent Wrangler is catching up. Try again in a few seconds.');
+      return;
+    }
     const session = this.sessions.sessions.find((s) => s.key === mirror.sessionKey);
     const ask = session ? remoteAskFor(session) : undefined;
     if (!ask || ask.askKey !== mirror.askKey) {
