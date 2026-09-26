@@ -13,7 +13,7 @@
  * pane can be sent without starting anything.
  */
 import { modelLabel } from '../../shared/modelName';
-import { stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
+import { REVIEW, stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
 import { PROVENANCE_LABEL } from '../policy/assessment';
 import type {
   AssessmentRowView,
@@ -21,6 +21,7 @@ import type {
   TaskAttemptView,
   TaskBadge,
   TaskDiffView,
+  TaskReviewView,
   TaskRouteView,
   TaskVerificationView,
   TaskView,
@@ -33,6 +34,7 @@ import type {
   Mission,
   RoutingDecision,
   Task,
+  VerificationResult,
 } from '../../shared/orchestration/types';
 
 /** How a harness's sessions are keyed in the table (`${provider}:${sessionId}`). */
@@ -107,6 +109,22 @@ export function verificationViewOf(
     logPath:
       results.find((r) => r.outcome === 'failed' || r.outcome === 'inconclusive' || r.outcome === 'error')?.evidence?.logPath ??
       [...results].reverse().find((r) => r.evidence?.logPath)?.evidence?.logPath,
+    review: reviewViewOf(task, results),
+  };
+}
+
+/** The last review verdict among the results, with each criterion's own text beside its verdict (#36). */
+export function reviewViewOf(task: Task, results: readonly VerificationResult[]): TaskReviewView | undefined {
+  const r = [...results].reverse().find((x) => x.strategy === REVIEW && x.review);
+  if (!r?.review) return undefined;
+  const v = r.review;
+  return {
+    required: task.verification.stages.some((s) => s.strategy === REVIEW && s.required),
+    outcome: r.outcome ?? 'no result',
+    criteria: v.criteria.map((c, i) => ({ id: c.id, text: task.acceptanceCriteria[i] ?? c.id, verdict: c.verdict, why: c.why })),
+    concerns: v.concerns,
+    model: v.model,
+    ...(v.usage?.costUsd !== undefined ? { costUsd: v.usage.costUsd } : {}),
   };
 }
 

@@ -22,7 +22,10 @@
  */
 import { commandForStrategy, hasVerification, type RepoPolicy } from './repoPolicy';
 import type {
+  ReviewVerdict,
+  Risk,
   TaskKind,
+  Verifiability,
   VerificationOutcomeKind,
   VerificationPlan,
   VerificationResult,
@@ -40,8 +43,10 @@ import type {
 export const DIFF_SANITY = 'diff-sanity';
 export const REGRESSION_TEST = 'regression-test';
 export const HUMAN = 'human';
-/** The review-agent verifier. Declared here so a plan can name it; #36 runs it. */
+/** The review-agent verifier (#36): a read-only reviewer's verdict per acceptance criterion. */
 export const REVIEW = 'review';
+/** How long a review may take before it is abandoned as `error`. */
+export const REVIEW_TIMEOUT_SEC = 600;
 
 /** Strategy ids that are built in rather than named commands. */
 export const BUILT_IN_STRATEGIES: readonly string[] = [DIFF_SANITY, REGRESSION_TEST, HUMAN, REVIEW];
@@ -103,6 +108,8 @@ export function buildVerificationPlan(opts: {
   suggested?: readonly string[];
   /** The user asked to approve this task by hand whatever the checks say. */
   requireHuman?: boolean;
+  /** How many acceptance criteria the task has. None: there is nothing for a reviewer to judge. */
+  criteria?: number;
 }): VerificationPlan {
   const { kind, policy, suggested, requireHuman } = opts;
   const stages: VerificationStage[] = [];
@@ -128,9 +135,53 @@ export function buildVerificationPlan(opts: {
     stages.push({ strategy: REGRESSION_TEST, required: false });
   }
 
+  const review = reviewStage(kind, policy, opts.criteria ?? 0);
+  if (review) stages.push(review);
+
   if (requireHuman) stages.push({ strategy: HUMAN, required: true });
 
   return { stages };
+}
+
+/**
+ * The `review` stage a task gets, if any (#36).
+ *
+ * Last of the automatic stages, because it is the most expensive one and the
+ * least certain: a result that already failed its tests is not worth a
+ * reviewer's time, and the runner stops at the first required failure.
+ *
+ * A kind the policy lists in `requiredFor` always gets a required review,
+ * whatever `when` says — naming a kind there is the more specific instruction.
+ * Otherwise the review is advisory, and under `auto` it only runs when the
+ * assessment says the repository's own checks say little about the task.
+ */
+function reviewStage(kind: TaskKind | undefined, policy: RepoPolicy, criteria: number): VerificationStage | undefined {
+  if (criteria === 0) return undefined;
+  const required = kind !== undefined && policy.review.requiredFor.includes(kind);
+  if (required) return { strategy: REVIEW, required: true, timeoutSec: REVIEW_TIMEOUT_SEC };
+  if (policy.review.when === 'never') return undefined;
+  return {
+    strategy: REVIEW,
+    required: false,
+    timeoutSec: REVIEW_TIMEOUT_SEC,
+    ...(policy.review.when === 'auto' ? { onlyIf: 'risky-or-weakly-verified' as const } : {}),
+  };
+}
+
+/**
+ * Whether a stage with `onlyIf` should run, given what the assessment said.
+ *
+ * No assessment (the assessor is off, or has not answered yet) runs it: not
+ * knowing the risk is not knowing it is low, and a review that was not needed
+ * costs a little money where one that was skipped costs a bad merge.
+ */
+export function stageApplies(
+  stage: VerificationStage,
+  assessment: { risk: Risk; verifiability: Verifiability } | undefined,
+): boolean {
+  if (stage.onlyIf !== 'risky-or-weakly-verified') return true;
+  if (!assessment) return true;
+  return assessment.risk !== 'low' || assessment.verifiability === 'none' || assessment.verifiability === 'weak';
 }
 
 /**
@@ -486,6 +537,99 @@ export function outputTail(output: string, maxChars = 2000): string {
 }
 
 // ---------------------------------------------------------------------------
+// The reviewer's verdict (#36)
+// ---------------------------------------------------------------------------
+
+/** The id the reviewer is asked to use for the task's `i`th criterion (0-based). */
+export function criterionId(i: number): string {
+  return `c${i + 1}`;
+}
+
+const MAX_WHY = 500;
+const MAX_CONCERNS = 10;
+
+/**
+ * Turn what the reviewer said into one entry per criterion, in the task's order.
+ *
+ * The schema already guarantees the shape; this guarantees the *coverage*,
+ * which a schema cannot: a criterion the reviewer skipped is `unclear` rather
+ * than silently absent, a criterion it answered twice keeps its first answer,
+ * and an id that names no criterion is dropped. Each repair is counted, so a
+ * reviewer that keeps getting this wrong shows up in telemetry.
+ */
+export function normaliseReview(
+  criteriaCount: number,
+  raw: { criteria: readonly { id: string; verdict: string; why: string }[]; concerns: readonly string[] },
+): { criteria: ReviewVerdict['criteria']; concerns: string[]; repaired: number } {
+  const byId = new Map<string, { verdict: ReviewVerdict['criteria'][number]['verdict']; why: string }>();
+  let repaired = 0;
+  for (const c of raw.criteria) {
+    const id = c.id.trim().toLowerCase();
+    const verdict = c.verdict === 'met' || c.verdict === 'unmet' || c.verdict === 'unclear' ? c.verdict : undefined;
+    if (!verdict || byId.has(id)) {
+      repaired++;
+      continue;
+    }
+    byId.set(id, { verdict, why: clip(c.why.trim(), MAX_WHY) });
+  }
+  const criteria: ReviewVerdict['criteria'] = [];
+  for (let i = 0; i < criteriaCount; i++) {
+    const id = criterionId(i);
+    const got = byId.get(id);
+    if (got) {
+      criteria.push({ id, ...got });
+      byId.delete(id);
+    } else {
+      repaired++;
+      criteria.push({ id, verdict: 'unclear', why: 'The reviewer gave no verdict for this criterion.' });
+    }
+  }
+  // Whatever is left named no criterion.
+  repaired += byId.size;
+  const concerns = raw.concerns
+    .map((c) => clip(c.trim(), MAX_WHY))
+    .filter((c) => c !== '')
+    .slice(0, MAX_CONCERNS);
+  return { criteria, concerns, repaired };
+}
+
+function clip(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max - 1)}…`;
+}
+
+export function reviewCounts(v: ReviewVerdict): { met: number; unmet: number; unclear: number } {
+  const out = { met: 0, unmet: 0, unclear: 0 };
+  for (const c of v.criteria) out[c.verdict]++;
+  return out;
+}
+
+/**
+ * What a review verdict means as a stage outcome.
+ *
+ * Any `unmet` fails it, any `unclear` (with nothing unmet) is `inconclusive`,
+ * and only every criterion `met` passes. Whether that outcome then decides
+ * the task is the plan's business: advisory unless the policy made it
+ * required, and never counted as verification on its own (`verifies`).
+ */
+export function reviewOutcome(v: ReviewVerdict): { outcome: VerificationOutcomeKind; summary: string } {
+  const n = reviewCounts(v);
+  const total = v.criteria.length;
+  const ids = (verdict: 'unmet' | 'unclear') =>
+    v.criteria
+      .filter((c) => c.verdict === verdict)
+      .map((c) => c.id)
+      .join(', ');
+  if (total === 0) return { outcome: 'unavailable', summary: 'the task has no acceptance criteria to review' };
+  if (n.unmet > 0) {
+    return { outcome: 'failed', summary: `the reviewer found ${n.unmet} of ${total} criteria unmet (${ids('unmet')})` };
+  }
+  if (n.unclear > 0) {
+    return { outcome: 'inconclusive', summary: `the reviewer could not tell whether ${n.unclear} of ${total} criteria are met (${ids('unclear')})` };
+  }
+  return { outcome: 'passed', summary: `the reviewer found all ${total} ${total === 1 ? 'criterion' : 'criteria'} met` };
+}
+
+// ---------------------------------------------------------------------------
 // Adding the stages up (§14.3)
 // ---------------------------------------------------------------------------
 
@@ -663,7 +807,13 @@ export function verificationBadge(s: VerificationSummary): VerificationBadge {
 export function stageLine(r: VerificationResult): string {
   const parts = [r.strategy];
   if (r.state === 'running') parts.push('running');
+  else if (r.skipped) parts.push('skipped');
   else parts.push(r.outcome ?? 'no result');
+  if (r.review) {
+    const n = reviewCounts(r.review);
+    const bits = [n.met > 0 ? `${n.met} met` : '', n.unmet > 0 ? `${n.unmet} unmet` : '', n.unclear > 0 ? `${n.unclear} unclear` : ''].filter(Boolean);
+    if (bits.length > 0) parts.push(bits.join(', '));
+  }
   if (r.preExisting) parts.push('base is red');
   if (r.flaky) parts.push('flaky');
   if (r.durationMs !== undefined) parts.push(formatMs(r.durationMs));

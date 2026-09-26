@@ -7,7 +7,8 @@
  * nobody reported is absent, never zero.
  */
 import { TELEMETRY_SCHEMA_VERSION, type AttemptRecord, type TurnRecord } from '../../shared/orchestration/telemetry';
-import type { ExecutionAttempt, Millis, Mission, UsageSummary } from '../../shared/orchestration/types';
+import type { ExecutionAttempt, Millis, Mission, ReviewVerdict, UsageSummary } from '../../shared/orchestration/types';
+import { reviewCounts } from '../../shared/orchestration/verification';
 
 /** Fold one turn record into an attempt's usage. A record already counted is ignored. */
 export function addTurnUsage(usage: UsageSummary | undefined, r: TurnRecord): UsageSummary {
@@ -103,7 +104,17 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     signature: a.outcome?.signature,
     verification: a.verification
       .filter((v) => v.outcome !== undefined)
-      .map((v) => ({ strategy: v.strategy, outcome: v.outcome!, flaky: v.flaky, preExisting: v.preExisting, durationMs: v.durationMs })),
+      .map((v) =>
+        prune({
+          strategy: v.strategy,
+          outcome: v.outcome!,
+          flaky: v.flaky,
+          preExisting: v.preExisting,
+          skipped: v.skipped,
+          durationMs: v.durationMs,
+          review: v.review ? reviewTelemetry(v.review) : undefined,
+        }),
+      ),
     flags: { ...a.flags },
   };
   if (a.launchedAt !== undefined) {
@@ -114,6 +125,20 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
   if (a.git) record.git = { filesChanged: a.git.filesChanged, insertions: a.git.insertions, deletions: a.git.deletions, commits: a.git.commits };
   if (outcome === 'interrupted') record.partial = true;
   return prune(record);
+}
+
+/** A review verdict as numbers: counts, the model and its cost, never its reasons. */
+function reviewTelemetry(v: ReviewVerdict): NonNullable<AttemptRecord['verification'][number]['review']> {
+  const n = reviewCounts(v);
+  return prune({
+    ...n,
+    concerns: v.concerns.length,
+    repaired: v.repaired,
+    model: v.model,
+    inputTokens: v.usage?.inputTokens,
+    outputTokens: v.usage?.outputTokens,
+    costUsd: v.usage?.costUsd,
+  });
 }
 
 function prune<T extends object>(o: T): T {

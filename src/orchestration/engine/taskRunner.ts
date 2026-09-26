@@ -64,6 +64,7 @@ import type { MissionStore } from '../store/missionStore';
 import { slugify } from '../worktrees/naming';
 import { nodeExec, type Exec } from '../worktrees/exec';
 import type { WorktreeManager } from '../worktrees/worktreeManager';
+import type { Reviewer } from '../verify/reviewer';
 import { Verifier } from '../verify/verifier';
 import { buildVerificationPlan, summariseVerification } from '../../shared/orchestration/verification';
 import { attemptRecord, addTurnUsage } from './attemptRecord';
@@ -143,6 +144,8 @@ export interface TaskRunnerDeps {
   logsDir: string;
   /** How verification commands are run. Injected so a test can script pass, fail, flaky and timeout. */
   exec?: Exec;
+  /** The review-agent verifier (#36). Absent: `review` stages are `unavailable`. */
+  reviewer?: Pick<Reviewer, 'review'>;
   /** Asked to open a diff file once one is written for a notification click. */
   openFile?: (file: string) => void;
   now?: () => number;
@@ -286,7 +289,11 @@ export class TaskRunner implements Disposable {
       // checks a result is judged by must be the ones that were in force when
       // it started, not whatever the policy says by the time it finishes (#35).
       kindHint: req.kind ?? 'feature',
-      verification: buildVerificationPlan({ kind: req.kind ?? 'feature', policy: loaded.policy }),
+      verification: buildVerificationPlan({
+        kind: req.kind ?? 'feature',
+        policy: loaded.policy,
+        criteria: req.acceptanceCriteria.filter((c) => c.trim()).length,
+      }),
       revision: 1,
       state: 'pending',
       assessmentIds: [],
@@ -1101,15 +1108,20 @@ export class TaskRunner implements Disposable {
         withBaseCheckout: (base, fn) => manager.withBaseCheckout(base, fn),
         diffText: () => manager.diffText(wt),
         changedFiles: () => manager.changedFiles(wt),
+        reviewer: this.deps.reviewer,
         now: this.now,
         log: this.log,
       });
+      const assessment = m.assessments.filter((x) => x.taskId === task.id).at(-1);
       return await verifier.run(task.verification, {
         attemptId: a.id,
         task,
         policy: loaded.policy,
         worktree: wt,
         headCommit,
+        ...(assessment
+          ? { assessment: { risk: assessment.dimensions.risk.value, verifiability: assessment.dimensions.verifiability.value } }
+          : {}),
       });
     } catch (e) {
       this.log(`task ${missionId}: verification could not run: ${errorText(e)}`);

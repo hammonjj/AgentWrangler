@@ -20,7 +20,9 @@ import {
   assessmentChipTitle,
   assessmentRowTitle,
   attemptLine,
+  CRITERION_GLYPH,
   diffStatText,
+  reviewHeadText,
   routeChipText,
   routeChipTitle,
   routeIsLoud,
@@ -1228,6 +1230,48 @@ let attemptsOpen = false;
 let assessmentOpen = false;
 
 /**
+ * The reviewer's verdict (#36): one row per acceptance criterion — its glyph,
+ * the criterion as the user wrote it, and the reviewer's reason under it —
+ * then any concerns. Always open: a verdict whose reasons are behind a click
+ * is one the user takes on trust. DOM and `textContent` throughout, because
+ * the reasons quote the code and the criteria are the user's own text.
+ */
+function reviewPanel(r: NonNullable<NonNullable<TaskView['verification']>['review']>): HTMLElement {
+  const box = document.createElement('div');
+  box.className = 'tsreview';
+  const head = document.createElement('div');
+  head.className = 'tsreview-head';
+  head.textContent = reviewHeadText(r);
+  box.append(head);
+  for (const c of r.criteria) {
+    const row = document.createElement('div');
+    row.className = `tscrit v-${c.verdict}`;
+    row.title = `${c.id}: ${c.verdict}`;
+    const glyph = document.createElement('span');
+    glyph.className = 'tscrit-glyph';
+    glyph.textContent = CRITERION_GLYPH[c.verdict];
+    const text = document.createElement('span');
+    text.className = 'tscrit-text';
+    text.textContent = c.text;
+    row.append(glyph, text);
+    if (c.why) {
+      const why = document.createElement('span');
+      why.className = 'tscrit-why';
+      why.textContent = c.why;
+      row.append(why);
+    }
+    box.append(row);
+  }
+  for (const concern of r.concerns) {
+    const row = document.createElement('div');
+    row.className = 'tsconcern';
+    row.textContent = `⚠ ${concern}`;
+    box.append(row);
+  }
+  return box;
+}
+
+/**
  * The assessment panel: one line per dimension, each saying its value, how
  * sure it is and who said so (§8.2). Built as DOM, like the rest of the strip,
  * because the evidence lines quote the user's own objective back at them.
@@ -1371,6 +1415,7 @@ function renderTask(): void {
       }
       taskStrip.append(list);
     }
+    if (v.review) taskStrip.append(reviewPanel(v.review));
   }
 
   const actions = document.createElement('div');
