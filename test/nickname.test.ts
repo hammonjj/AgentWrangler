@@ -96,7 +96,7 @@ describe('NicknameService', () => {
     expect(() => new NicknameService(store)).not.toThrow();
   });
 
-  // Same reasoning as PinService: a window writes one change, not its whole map.
+  // A window writes one change, not its whole map.
   it('does not drop a name another window set, or resurrect one it cleared', () => {
     const other = new NicknameService(store);
     svc.set('claude:a', 'from A');

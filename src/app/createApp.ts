@@ -84,7 +84,6 @@ import { FavouriteProjectsService } from '../core/favouriteProjects';
 import { HiddenProjectsService } from '../core/hiddenProjects';
 import { CapabilityCatalog } from '../core/capabilityCatalog';
 import { MAX_NICKNAME_LENGTH, NicknameService } from '../core/nicknameService';
-import { PinService } from '../core/pinService';
 import { autoPauseDecision, maxUsagePercent } from '../core/autoPause';
 import { PauseService } from '../core/pauseService';
 import { readStoppedPids } from '../core/procTree';
@@ -149,7 +148,6 @@ export interface AgentWranglerApp {
   sessionRegistry: SessionRegistry;
   runnerOwnership: RunnerOwnership;
   archive: ArchiveService;
-  pins: PinService;
   nicknames: NicknameService;
   columns: ColumnPrefsService;
   /** Every model the CLIs report, by capability, with AW's tier for each (#29). */
@@ -375,9 +373,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     },
     log,
   );
-  // Rows kept at the top, and the names the user gave them. Global state like
-  // the archive: both are about the session, not about the window looking at it.
-  const pins = new PinService(host.globalState);
+  // The names the user gave sessions. Global state like the archive: both are
+  // about the session, not about the window looking at it.
   const nicknames = new NicknameService(host.globalState);
   // Applied in the store rather than at each render, because the dashboard, the
   // conversation pane, the status bar, the quick picks, the toasts and the
@@ -2163,7 +2160,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
     restartCodexServer,
     runnerOwnership,
     archive,
-    pins,
     nicknames,
     columns,
     models,

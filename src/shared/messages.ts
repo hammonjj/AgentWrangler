@@ -39,8 +39,6 @@ export type HostToDashboard =
        * read settings once.
        */
       discord?: { configured: boolean; on: boolean };
-      /** Always starts with Uncategorized, followed by user-created organizational sections. */
-      conversationSections: string[];
       /**
        * What the launcher's model and effort dropdowns show: the models the
        * last conversation reported, and the defaults a new one will start on.
@@ -114,8 +112,6 @@ export type DashboardToHost =
    */
   | { type: 'action'; key: string; action: DashboardAction; requestId?: string }
   | { type: 'answerQuestion'; key: string; requestId: string; answers: Record<string, string> }
-  | { type: 'setConversationSection'; key: string; section: string }
-  | { type: 'createConversationSection'; key: string }
   | { type: 'openExternal'; url: string }
   | { type: 'refresh' }
   /** Banner button: runs the same confirm-then-install flow as the palette command. */

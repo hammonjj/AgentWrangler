@@ -246,7 +246,6 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       app.projects,
       app.launcher,
       app.pause,
-      app.pins,
       host.settings,
       host.dialogs,
       app.models,

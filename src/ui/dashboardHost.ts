@@ -2,7 +2,6 @@ import type { ArchiveService } from '../core/archive';
 import type { ColumnPrefsService } from '../core/columnPrefs';
 import type { Disposable } from '../core/events';
 import type { PauseService } from '../core/pauseService';
-import type { PinService } from '../core/pinService';
 import type { SessionStore } from '../core/sessionStore';
 import { withHostedPermission, type HostedPermission } from '../core/sessionView';
 import type { CapabilityCatalog } from '../core/capabilityCatalog';
@@ -101,7 +100,6 @@ export class DashboardHost {
     private projects: ProjectSource,
     private launcher: ConversationLauncher,
     private pause: PauseService,
-    private pins: PinService,
     private settings: HostSettings,
     private dialogs: HostDialogs,
     private models: Pick<CapabilityCatalog, 'value' | 'onDidChange'>,
@@ -143,8 +141,6 @@ export class DashboardHost {
       // Pausing is machine-wide and its record is global state, so a pause from
       // any window has to reach every dashboard's rows and its bar button.
       this.pause.onDidChange(() => this.pushSnapshot()),
-      // Section assignments do not change anything the session store tracks.
-      this.pins.onDidChange(() => this.pushSnapshot()),
     );
   }
 
@@ -195,8 +191,6 @@ export class DashboardHost {
       return {
         ...s,
         archived: this.archive.isArchived(s.key),
-        conversationSection: this.pins.sectionFor(s.key),
-        sectionAssignedAt: this.pins.assignedAt(s.key),
         paused: this.pause.isPaused(s.pid) || undefined,
         runnerOwned: runnerOwned || undefined,
         pendingQuestion,
@@ -240,7 +234,6 @@ export class DashboardHost {
         configured: this.settings.get('remote.enabled', false),
         on: this.settings.get('remote.notificationsEnabled', true),
       },
-      conversationSections: this.pins.names,
       launcher: {
         tasks: this.launcher.taskMenu !== undefined,
         models: this.models.value,
@@ -271,12 +264,6 @@ export class DashboardHost {
         break;
       case 'rowClick':
         this.actions.smartOpen(m.key);
-        break;
-      case 'setConversationSection':
-        this.pins.assign(m.key, m.section);
-        break;
-      case 'createConversationSection':
-        void this.createConversationSection(m.key);
         break;
       case 'action':
         if (m.action === 'openInTab') this.actions.openInTab(m.key);
@@ -380,27 +367,6 @@ export class DashboardHost {
       this.dialogs.flash('Agent Wrangler: that question has already been answered.', 4000);
     }
     this.pushSnapshot();
-  }
-
-  private async createConversationSection(key: string): Promise<void> {
-    const value = await this.dialogs.input({
-      title: 'Create conversation section',
-      prompt: 'Name the new section. This conversation will be added to it.',
-      placeHolder: 'Section name',
-      validateInput: (input) => {
-        const name = input.trim();
-        if (!name) return 'Enter a section name.';
-        if (name.length > 50) return 'Keep it to 50 characters or fewer.';
-        if (this.pins.names.some((section) => section.toLocaleLowerCase() === name.toLocaleLowerCase())) {
-          return 'A section with that name already exists.';
-        }
-        return undefined;
-      },
-    });
-    if (value === undefined) return;
-    const name = value.trim();
-    if (!this.pins.create(name)) return;
-    this.pins.assign(key, name);
   }
 
   /** Re-scan, then push only if the scan actually changed the list. */

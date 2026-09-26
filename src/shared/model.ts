@@ -145,10 +145,6 @@ export interface AgentSession {
   prLink?: PrLink;
   /** User shoved this session out of the way (host decorates from ArchiveService). */
   archived?: boolean;
-  /** User-defined organizational section; absent means the always-present Uncategorized section. */
-  conversationSection?: string;
-  /** When this conversation was assigned to its section. */
-  sectionAssignedAt?: number;
   /**
    * A name the user gave this conversation, shown instead of `title` (host
    * decorates from NicknameService). The original title is never overwritten,
@@ -330,14 +326,7 @@ export function compareSessions(a: AgentSession, b: AgentSession): number {
   return b.lastActivityAt - a.lastActivityAt;
 }
 
-/**
- * The always-present conversation section every session starts in. Shared
- * because both the store (which persists assignments) and the dashboard pane
- * (which renders the section menu and group headers) have to agree on it.
- */
-export const UNCATEGORIZED_SECTION = 'Uncategorized';
-
-/** Dashboard status sections. Named conversation sections are a separate view. */
+/** Dashboard status sections. The By Project view groups by `projectGroupOf` instead. */
 export type SectionId = SessionStatus | 'paused' | 'archived';
 
 /**
@@ -382,6 +371,21 @@ export function sectionOf(s: AgentSession): SectionId {
   // distinction survives where it is actionable: a blocked row sorts to the top
   // of the section and opens a card with buttons, a waiting one does not.
   return s.status === 'blocked' ? 'waiting' : s.status;
+}
+
+/**
+ * The always-present fallback bucket for the By Project view: sessions with no
+ * known project name land here rather than being dropped from the table.
+ */
+export const UNCATEGORIZED_PROJECT = 'Uncategorized';
+
+/**
+ * Which project-group a row belongs to for the By Project view: its project
+ * name, or the fallback bucket. Derived, unlike `sectionOf` — there is no
+ * per-row assignment to make or persist, only `projectName` to read.
+ */
+export function projectGroupOf(s: Pick<AgentSession, 'projectName'>): string {
+  return s.projectName ?? UNCATEGORIZED_PROJECT;
 }
 
 /**
