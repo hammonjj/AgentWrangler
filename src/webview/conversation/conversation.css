@@ -297,6 +297,34 @@ body,
   opacity: 0.8;
   overflow-wrap: anywhere;
 }
+/* "Why this route" (#38): the same list shape as the assessment, a section per
+   heading, every line allowed to wrap at 300px. */
+#taskStrip .tsroutewhy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+#taskStrip .tsroutewhy .tsroutesum {
+  color: var(--vscode-foreground);
+}
+#taskStrip .tsroutewhy .tsroutehead {
+  margin-top: 2px;
+  font-weight: 600;
+}
+#taskStrip .tsroutewhy .tsrouterule {
+  padding-left: 1em;
+}
+#taskStrip .tsroutewhy .tsrouteid {
+  opacity: 0.75;
+  font-family: var(--vscode-editor-font-family, monospace);
+  margin-right: 6px;
+}
+#taskStrip .tsroutewhy .tsroutefoot {
+  opacity: 0.7;
+}
 #taskStrip .tsactions {
   display: flex;
   flex-wrap: wrap;

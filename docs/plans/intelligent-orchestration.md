@@ -1069,6 +1069,66 @@ assembled from the stored decision, not regenerated:
 
 Rendered in the task detail (§18) and as the tooltip of the route chip.
 
+### 9.6 As built (#38, 2026-09-26)
+
+- **Where it lives.** `src/orchestration/policy/router.ts` (pure; `ROUTER_VERSION = 'rtr-1'`,
+  recorded as a decision's `policyVersion`): `TIER_RULES` and `EFFORT_RULES` are arrays of
+  `{id, apply, text, inputs}` evaluated in §9.3's order, and every rule that changes the result
+  adds a `RoutingReason` with its id and the levels it read. `resolver.ts` (pure) takes a
+  `ResolverSnapshot {catalog, sources, now}` — a value, so a stored decision replays.
+  `recommend.ts` runs one then the other into a `RouteRecommendation`, and `compareRoutes` says
+  how a route that ran differs from it. `view/routeExplain.ts` builds "why this route" from what
+  was stored.
+- **Tier names.** The rules say `basic`/`standard`/`expert`; a tier list that renames or inserts
+  tiers maps onto them by position among the `route`-reachable ones (weakest, second,
+  strongest), so an extra tier never leaves a rule pointing at nothing.
+- **Caps.** Everything the router computes is a floor, so a `minTier` above the mission's
+  `maxTier` is `needs-human` with the rule that set the tier and the cap in one sentence — never
+  a clamp. `maxEffort` *is* a clamp, with a `cap.effort` reason: effort buys deliberation from
+  the same model, and asking for less of it never runs work on something too weak. A cap naming a
+  tier that does not exist is ignored and said so (`cap.unknown`).
+- **Context.** `contextLoad`'s band top (30k/100k/250k, 400k for `very-large`) × 1.5, written
+  into `requirement.needs` as `context:<tokens>` so a replay resolves against the same need.
+  **Deviation from §9.4 step 1** ("context window known"): Claude reports a window only after a
+  model's first use and Codex never does (§6.5), so requiring a known window would make almost
+  every hosted model unroutable. An unreported *hosted* window is assumed to hold up to 200k
+  (`ASSUMED_HOSTED_WINDOW`; every hosted coding model offered today has at least that), and the
+  chosen candidate's reason says it was assumed. A local model is never assumed (§19.6).
+- **Availability.** A source `down` with a `backoffUntil` (a full window), or at or above the
+  admission threshold (`caps.maxUsageWindowPercent`, default 95%), rejects its models with the
+  reason. If only capacity stands in the way the result is `blocked`; if policy or the catalog
+  allow nothing, `needs-human`. A source nobody has read does not block. Tool needs (`edit`,
+  `shell`, `network`) are both harnesses'; `vision` needs a model that *reported* taking images;
+  `exclusive:` is a lease, #68's.
+- **Rank.** Preferred harness, preferred source, prefer-local, effort control when `high`/`max` is
+  wanted (soft, §6.4), known price, then catalog order. The launcher's harness is the mission's
+  `preferences.harness`, so a task started from the Codex launcher prefers a Codex model of the
+  tier it needs.
+- **`manual`.** The decision is the user's, made at launch, before the assessment (§8.5). When the
+  assessment lands, the decision's `shadow`, `agreement` and `overrides` are filled in **once** —
+  the single, documented exception to its immutability; nothing already on it changes. A retry
+  or resume is decided with the assessment in hand, so its shadow is there from the start.
+- **`assisted`.** `TaskRunner.propose` records the mission, moves the task `ready → assessing`,
+  awaits the assessment (rules only at low confidence if the call fails), and stops at `routed`
+  with the proposal on `task.recommendation` — or at `needs-human` for a cap conflict, a
+  `plan-first` gate or nothing routable. Nothing is launched and no worktree made.
+  `startProposed(id)` runs the proposal (`decidedBy: 'router'`, `agreement: 'accepted'`, the
+  router's reasons and candidates on the decision); `startProposed(id, {route})` runs the user's
+  route (`decidedBy: 'user'`, `overrides` naming every changed dimension, `agreement` the most
+  significant: tier, harness, model, effort) and refuses one above the tier cap (§10.2). The UI
+  is a quick pick in the launcher's task flow: *Run on …*, *Change effort…*, *Change model…*
+  (only models within the cap), *Why this route?*. Dismissing leaves it in the Tasks menu.
+- **Kind.** The runner defaults an unspecified task's `kindHint` to `feature` so an empty diff
+  still fails verification (#35). That default is now marked `kindDefaulted` and not passed to
+  the assessor, which otherwise took it as the user's word at high confidence and left every
+  kind floor and ceiling dead.
+- **Setting.** `orchestration.routing: {mode: 'manual' | 'assisted', maxTier?, maxEffort?}`,
+  default `manual`, frozen into each mission's policy when it is recorded. Not in Preferences yet.
+- **Telemetry.** A `routing` record per decision once it carries a recommendation (rule ids,
+  levels, both targets, `agreement`, `changed`, candidate counts; never reason texts, which can
+  quote a risk path's description). The `attempt` record gains `requirement`, `shadow`,
+  `agreement` and `changed`.
+
 ---
 
 ## 10. Routing modes, overrides and trust

@@ -15,8 +15,10 @@
 import { modelLabel } from '../../shared/modelName';
 import { stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
 import { PROVENANCE_LABEL } from '../policy/assessment';
+import { explainDecision } from './routeExplain';
 import type {
   AssessmentRowView,
+  RouteExplanationView,
   TaskAssessmentView,
   TaskAttemptView,
   TaskBadge,
@@ -76,7 +78,14 @@ export function routeViewOf(m: Mission, a: ExecutionAttempt | undefined): TaskRo
     tier: t.tier,
     mode: d.mode,
     location: t.location,
+    why: explainDecision(m, d).summary,
   };
+}
+
+/** Why the attempt runs where it does (#38), from its stored decision. */
+export function routingViewOf(m: Mission, a: ExecutionAttempt | undefined): RouteExplanationView | undefined {
+  const d = decisionOf(m, a);
+  return d ? explainDecision(m, d) : undefined;
 }
 
 /**
@@ -230,6 +239,7 @@ export function taskViewOf(m: Mission, actions: TaskViewAction[]): TaskView | un
     stateReason: task.stateReason,
     route: routeViewOf(m, current),
     assessment: assessmentViewOf(m),
+    routing: routingViewOf(m, current),
     attempt: current ? { n: current.n, of: attempts.length } : undefined,
     branch: wt?.branch,
     worktreePath: wt?.path,
