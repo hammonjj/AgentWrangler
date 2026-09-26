@@ -1523,6 +1523,10 @@ function sendMessage(): void {
 
 type MicState = 'idle' | 'recording' | 'transcribing';
 let micState: MicState = 'idle';
+// Set when Send is clicked mid-dictation: the recording stops like a normal
+// mic-button stop, but once the transcript lands it goes straight out instead
+// of just filling the box.
+let sendAfterDictation = false;
 
 const MIC_LABEL: Record<MicState, string> = {
   idle: 'Dictate a message',
@@ -1680,6 +1684,12 @@ function onDictationMessage(m: Extract<HostToConversation, { type: 'dictation' }
     dict.session = '';
   }
   setMicState(m.state, m.state === 'idle' ? undefined : m.message);
+  // Do this after setMicState so sendMessage sees mic back at idle, not still
+  // mid-transcription.
+  if (m.state === 'idle' && sendAfterDictation) {
+    sendAfterDictation = false;
+    sendMessage();
+  }
 }
 
 function onDictationPreview(m: Extract<HostToConversation, { type: 'dictationPreview' }>): void {
@@ -1695,6 +1705,7 @@ function onDictationPreview(m: Extract<HostToConversation, { type: 'dictationPre
 // is to stop and then delete whatever the room was transcribed as.
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && micState === 'recording') {
+    sendAfterDictation = false;
     resetDictationPreview();
     dict.session = '';
     setMicState('idle');
@@ -1740,7 +1751,15 @@ adoptBtn.addEventListener('click', () => {
 sendBtn.addEventListener('click', () => {
   if (pendingSend) post({ type: 'cancelSend' });
   else if (busy) post({ type: 'interrupt' });
-  else sendMessage();
+  else if (micState === 'recording') {
+    // Stop like the mic button would, but send the transcript once it lands
+    // instead of just dropping it in the box.
+    sendAfterDictation = true;
+    stopDictation();
+  } else if (micState === 'transcribing') {
+    // Already stopping from a mic-button click; ride that transcript out to a send.
+    sendAfterDictation = true;
+  } else sendMessage();
 });
 modeSel.addEventListener('change', () => post({ type: 'setPermissionMode', mode: modeSel.value as PermissionModeName }));
 modelSel.addEventListener('change', () => post({ type: 'setModel', model: modelSel.value }));
