@@ -11,11 +11,30 @@ export interface ExecResult {
   code: number;
   stdout: string;
   stderr: string;
+  /**
+   * Why there is no exit code, when there is none.
+   *
+   * A non-zero exit and a program that never ran are the same `-1` to
+   * `execFile`, and verification has to tell them apart: a test suite that
+   * failed is the agent's problem, while a command that timed out or was not
+   * found is ours (§14.3, `error` rather than `failed`). Absent when the
+   * program ran and exited on its own, whatever it exited with.
+   */
+  failure?: 'timeout' | 'spawn';
 }
 
 export interface ExecOptions {
   cwd: string;
   timeoutMs?: number;
+  /**
+   * The child's environment, replacing (not extending) the default.
+   *
+   * Git is run with the parent's environment plus a few forced settings, which
+   * is right for git and wrong for a repository's own commands: those get the
+   * stripped environment an agent gets (`agentEnv`), so a test suite never
+   * inherits `ELECTRON_*` and decides it is running inside Electron.
+   */
+  env?: Record<string, string>;
 }
 
 export type Exec = (file: string, args: readonly string[], opts: ExecOptions) => Promise<ExecResult>;
@@ -33,12 +52,17 @@ export const nodeExec: Exec = (file, args, opts) =>
         maxBuffer: 32 * 1024 * 1024,
         encoding: 'utf8',
         // Never wait on a credential prompt; English messages; no background lock-taking by `status`.
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' },
+        env: opts.env ?? { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C', GIT_OPTIONAL_LOCKS: '0' },
       },
       (err, stdout, stderr) => {
         if (!err) return resolve({ code: 0, stdout, stderr });
-        const code = typeof (err as { code?: unknown }).code === 'number' && !err.killed ? ((err as { code: number }).code) : -1;
-        resolve({ code, stdout: stdout ?? '', stderr: stderr || err.message });
+        const numeric = typeof (err as { code?: unknown }).code === 'number' && !err.killed;
+        const code = numeric ? (err as { code: number }).code : -1;
+        // `killed` is how a timeout arrives; a string `code` (ENOENT, EACCES)
+        // is a program that never started. Anything else with no numeric code
+        // is treated as a spawn failure too: it did not run, so it did not fail.
+        const failure = numeric ? undefined : err.killed ? 'timeout' : 'spawn';
+        resolve({ code, stdout: stdout ?? '', stderr: stderr || err.message, failure });
       },
     );
   });

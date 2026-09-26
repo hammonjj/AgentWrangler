@@ -226,6 +226,35 @@ body,
   border-color: var(--vscode-charts-red, #f48771);
   color: var(--vscode-charts-red, #f48771);
 }
+/* The verification verdict (#35): green when something actually vouched for
+   the result, red when a check failed, and neither when nothing could say —
+   an unverified result must not be coloured like a passing one. */
+#taskStrip .tschip.verify.v-passed {
+  border-color: var(--vscode-charts-green, #89d185);
+  color: var(--vscode-charts-green, #89d185);
+}
+#taskStrip .tschip.verify.v-failed {
+  border-color: var(--vscode-errorForeground, #f48771);
+  color: var(--vscode-errorForeground, #f48771);
+}
+#taskStrip .tschip.verify.v-inconclusive,
+#taskStrip .tschip.verify.v-error {
+  border-color: var(--vscode-charts-yellow, #d7ba7d);
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
+#taskStrip .tsstages {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+#taskStrip .tsstage {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+#taskStrip .tsmeta.base-red {
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
 #taskStrip .tsmeta {
   color: var(--vscode-descriptionForeground);
   font-size: 0.85em;
