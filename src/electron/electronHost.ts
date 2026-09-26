@@ -51,6 +51,8 @@ export interface ElectronHostOptions {
   };
   /** Where session hosts live and run from. Built by `main.ts`, which knows the bundle. */
   sessionHosts?: HostServices['sessionHosts'];
+  /** The remote daemon's LaunchAgent. Built by `main.ts`, for the same reason. */
+  remoteDaemon?: HostServices['remoteDaemon'];
 }
 
 /**
@@ -234,6 +236,7 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     workspaceState: new JsonStore(path.join(userDataDir, 'surface.json')),
     sessionState: new JsonStore(path.join(userDataDir, 'sessions.json')),
     sessionHosts: opts.sessionHosts,
+    remoteDaemon: opts.remoteDaemon,
     storageDir,
     dataDir: userDataDir,
     dialogs: dialogsFor(opts),

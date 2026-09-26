@@ -31,6 +31,7 @@ import { NdjsonPeer, RpcRemoteError } from '../rpc/ndjsonPeer';
 import { isSameProcessAlive } from '../procStart';
 import {
   CAPABILITY_CONFIGURE_IDLE,
+  CLIENT_CAPABILITY_PASSIVE,
   HOST_PROTOCOL_VERSION,
   MAX_FRAME_BYTES,
   MAX_PAGE_BYTES,
@@ -76,6 +77,8 @@ export interface HostClientOptions {
   log: (msg: string) => void;
   /** The idle-orphan rule's hours, pushed to a host that takes `configure` on every connect. */
   orphanIdleHours?: () => number;
+  /** Follow without counting as someone looking (the remote daemon): see `CLIENT_CAPABILITY_PASSIVE`. */
+  passive?: boolean;
   /** Heartbeat and waits, injectable for tests. */
   pingIntervalMs?: number;
   pingMisses?: number;
@@ -415,7 +418,12 @@ export class HostClient {
       this.hello = await peer.request<HelloResult>(
         'hello',
         {
-          client: { role: 'core', build: this.opts.build, pid: process.pid, capabilities: [] },
+          client: {
+            role: 'core',
+            build: this.opts.build,
+            pid: process.pid,
+            capabilities: this.opts.passive ? [CLIENT_CAPABILITY_PASSIVE] : [],
+          },
           protocol: { min: HOST_PROTOCOL_VERSION, max: HOST_PROTOCOL_VERSION },
           token: this.opts.token,
         },

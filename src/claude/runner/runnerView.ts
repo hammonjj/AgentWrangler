@@ -27,7 +27,6 @@ import type {
   ImageAttachment,
   ModelChoice,
   PermissionModeName,
-  QuestionView,
 } from '../../shared/conversation';
 import { capBlock } from '../../shared/conversation';
 import { modelChoiceLabel } from '../../shared/modelName';
@@ -45,6 +44,7 @@ import { backgroundTaskCount } from '../../shared/sessionProtocol';
 import { parsePermissionSuggestions, permissionDetail, suggestionLabels } from '../permissionDetail';
 import type { ConversationHistory } from '../transcriptHistory';
 import { createRunnerState, noteBlock, reduceRunnerMessage, type RunnerBlocksState } from './runnerBlocks';
+import { parseQuestions, permissionResult, planResult, questionResult } from './askResults';
 
 /**
  * What `RunnerView` needs from the execution layer: the session protocol,
@@ -460,34 +460,21 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
   async decide(requestId: string, decision: 'allow' | 'always' | 'deny', message?: string): Promise<CommandOutcome> {
     const ask = this.claim(requestId);
     if (!ask) return 'stale';
-    const result: RawPermissionResult =
-      decision === 'deny'
-        ? { behavior: 'deny', message: message?.trim() || 'Denied from Agent Wrangler.' }
-        : {
-            behavior: 'allow',
-            updatedInput: ask.input,
-            // "Always allow" is Claude Code's own don't-ask-again: hand its own
-            // suggestion back and it writes and persists the rule itself.
-            ...(decision === 'always' && ask.suggestions?.length ? { updatedPermissions: ask.suggestions } : {}),
-          };
-    return this.respond(requestId, ask, result, decision === 'deny' ? 'denied' : 'allowed');
+    return this.respond(requestId, ask, permissionResult(ask, decision, message), decision === 'deny' ? 'denied' : 'allowed');
   }
 
   /** Answer an `AskUserQuestion`, which is allowed *with* the answers filled in. */
   async answer(requestId: string, answers: Record<string, string>): Promise<CommandOutcome> {
     const ask = this.claim(requestId, 'question');
     if (!ask) return 'stale';
-    return this.respond(requestId, ask, { behavior: 'allow', updatedInput: { ...ask.input, answers } }, 'allowed', { answers });
+    return this.respond(requestId, ask, questionResult(ask, answers), 'allowed', { answers });
   }
 
   /** Approve or reject a plan. Rejecting sends the feedback back to the model. */
   async decidePlan(requestId: string, approve: boolean, feedback?: string): Promise<CommandOutcome> {
     const ask = this.claim(requestId, 'plan');
     if (!ask) return 'stale';
-    const result: RawPermissionResult = approve
-      ? { behavior: 'allow', updatedInput: ask.input }
-      : { behavior: 'deny', message: feedback?.trim() || 'Keep planning: that plan was not approved.' };
-    return this.respond(requestId, ask, result, approve ? 'allowed' : 'denied');
+    return this.respond(requestId, ask, planResult(ask, approve, feedback), approve ? 'allowed' : 'denied');
   }
 
   /** Stop the agent with the playbook's end sequence (§7.1). */
@@ -890,31 +877,4 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     if (next === 'ended' || next === 'error') this.setComposer({ busy: false, queued: 0 });
     this.emitLifecycle(next);
   }
-}
-
-/** `AskUserQuestion`'s input, defensively: it is foreign JSON like any tool's. */
-function parseQuestions(raw: unknown): QuestionView[] {
-  if (!Array.isArray(raw)) return [];
-  const out: QuestionView[] = [];
-  for (const q of raw) {
-    if (!q || typeof q !== 'object') continue;
-    const qq = q as Record<string, unknown>;
-    if (typeof qq.question !== 'string') continue;
-    const options = Array.isArray(qq.options)
-      ? qq.options
-          .filter((o): o is Record<string, unknown> => !!o && typeof o === 'object')
-          .map((o) => ({
-            label: typeof o.label === 'string' ? o.label : '',
-            description: typeof o.description === 'string' ? o.description : '',
-          }))
-          .filter((o) => o.label !== '')
-      : [];
-    out.push({
-      question: qq.question,
-      header: typeof qq.header === 'string' ? qq.header : '',
-      multiSelect: qq.multiSelect === true,
-      options,
-    });
-  }
-  return out;
 }
