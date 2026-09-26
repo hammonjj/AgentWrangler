@@ -23,6 +23,8 @@ import { imageMediaType, mentionForPath } from '../../shared/attachments';
 import type { ConversationCapabilities, ImageAttachment } from '../../shared/conversation';
 import { MAX_IMAGE_BYTES, rememberFullText } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
+import type { Disposable } from '../../core/events';
+import type { TaskView, TaskViewAction } from '../../shared/orchestration/taskView';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
 import type { PaneChannel } from '../paneChannel';
@@ -51,6 +53,22 @@ export interface ConversationHostUi {
    * simply report it.
    */
   offerDictationSetup(err: DictationSetupError): Promise<void>;
+}
+
+/**
+ * The task strip above the conversation (#34), behind an interface so the pane
+ * host never imports the orchestrator. Absent while orchestration is off, and
+ * then no conversation has a strip.
+ *
+ * `viewFor` is keyed by session key because that is all the pane knows about
+ * what it is showing; working out which mission and attempt that is belongs on
+ * the other side of this interface.
+ */
+export interface TaskPaneSource {
+  viewFor(sessionKey: string): TaskView | undefined;
+  /** Run one of the strip's buttons. Rejects with a message the user should read. */
+  run(missionId: string, action: TaskViewAction): Promise<void>;
+  onDidChange(listener: () => void): Disposable;
 }
 
 /** Provider surface the pane needs: transcript growth, and answering a permission prompt. */
@@ -102,6 +120,7 @@ export class ConversationHost {
     private files: FileSuggestService,
     private onTitle: (title: string) => void,
     private ui: ConversationHostUi,
+    private tasks?: TaskPaneSource,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: ConversationToHost) => void this.onMessage(m)),
@@ -110,6 +129,22 @@ export class ConversationHost {
       // the pane can offer even when the store has not moved.
       this.sessions.onDidChange(() => this.onStoreUpdate()),
     );
+    // The strip moves on its own clock — a new attempt, a diff stat, an action
+    // that stopped being offered — none of which the store or the executors
+    // notice. Pushed on its own so the conversation is not re-initialised under
+    // the user every time a task ticks.
+    if (this.tasks) this.subs.push(this.tasks.onDidChange(() => this.pushTask()));
+  }
+
+  /** The strip for whatever the pane is showing now, or nothing. */
+  private taskView(): TaskView | undefined {
+    const key = this.session?.key;
+    return key ? this.tasks?.viewFor(key) : undefined;
+  }
+
+  private pushTask(): void {
+    if (!this.ready) return;
+    this.post({ type: 'task', task: this.taskView() });
   }
 
   get sessionKey(): string | undefined {
@@ -225,6 +260,7 @@ export class ConversationHost {
       truncated: init.truncated,
       caps: await this.caps(session),
       composer: source.composer,
+      task: this.taskView(),
     });
   }
 
@@ -460,7 +496,34 @@ export class ConversationHost {
       case 'openFile':
         this.actions.openFile(m.path);
         return;
+      case 'taskAction':
+        await this.runTaskAction(m.missionId, m.action);
+        return;
+      case 'openAttempt':
+        // The same path a row click takes, so an attempt opens here rather
+        // than anywhere else — a task's history must never cost a window.
+        this.show(m.sessionKey);
+        return;
     }
+  }
+
+  /**
+   * A button on the task strip.
+   *
+   * Failures are shown rather than swallowed: these are the actions that end a
+   * session or throw a worktree away, and "nothing happened" is the one
+   * response that leaves the user unable to tell whether it worked. The strip
+   * is re-pushed either way, because a refused action still proves what the
+   * task's state actually is.
+   */
+  private async runTaskAction(missionId: string, action: TaskViewAction): Promise<void> {
+    if (!this.tasks) return;
+    try {
+      await this.tasks.run(missionId, action);
+    } catch (error) {
+      this.ui.dialogs.error(`Agent Wrangler: ${(error as Error).message ?? String(error)}`);
+    }
+    this.pushTask();
   }
 
   /**

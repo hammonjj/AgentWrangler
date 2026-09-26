@@ -7,6 +7,7 @@ import { withHostedPermission, type HostedPermission } from '../core/sessionView
 import type { CapabilityCatalog } from '../core/capabilityCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
+import type { TaskBadge } from '../shared/orchestration/taskView';
 import { displayTitle, GLOBAL_PROJECT_DIR, type HookHealth, type ProjectDTO } from '../shared/model';
 import { checkoutRootFor } from '../core/checkout';
 import { occupantsOf, occupiesCheckout, sharedCheckouts, type CheckoutEntry } from '../core/sharedCheckout';
@@ -75,6 +76,20 @@ export interface ProjectSource {
   onDidChange(listener: () => void): Disposable;
 }
 
+/**
+ * The task chips on a row (#34), behind an interface for the same reason as
+ * everything else here: the dashboard must not know that orchestration exists
+ * as a subsystem, only that some sessions have chips.
+ *
+ * Absent entirely while orchestration is off — which is the default — and then
+ * no row carries a task and nothing about the snapshot changes.
+ */
+export interface TaskBadgeSource {
+  /** Every session key that is running (or ran) a task attempt, with its chips. */
+  badges(): Map<string, TaskBadge>;
+  onDidChange(listener: () => void): Disposable;
+}
+
 /** Starting a conversation is the extension's job, not the dashboard's; it only asks. */
 export interface ConversationLauncher {
   newConversation(cwd: string, provider?: 'claude' | 'codex'): Promise<unknown>;
@@ -103,6 +118,7 @@ export class DashboardHost {
     private settings: HostSettings,
     private dialogs: HostDialogs,
     private models: Pick<CapabilityCatalog, 'value' | 'onDidChange'>,
+    private tasks?: TaskBadgeSource,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
@@ -138,6 +154,9 @@ export class DashboardHost {
       // any window has to reach every dashboard's rows and its bar button.
       this.pause.onDidChange(() => this.pushSnapshot()),
     );
+    // A task starting, finishing or being retried changes what its session's
+    // row says without the store moving at all.
+    if (this.tasks) this.subs.push(this.tasks.onDidChange(() => this.pushSnapshot()));
   }
 
   dispose(): void {
@@ -208,9 +227,15 @@ export class DashboardHost {
       label: displayTitle(s),
     }));
     const shared = sharedCheckouts(occupants);
+    // Orchestration's chips, joined on the session key. Built once per snapshot
+    // rather than per row: the map is over every attempt of every active
+    // mission, and a table of forty rows must not walk it forty times.
+    const badges = this.tasks?.badges();
     const sessions = decorated.map((s) => {
       const hit = shared.get(s.key);
-      return hit ? { ...s, sharedCheckout: hit } : s;
+      const task = badges?.get(s.key);
+      if (!hit && !task) return s;
+      return { ...s, sharedCheckout: hit ?? s.sharedCheckout, task };
     });
     const projects = this.projects.value.map((p) => {
       if (p.dir === GLOBAL_PROJECT_DIR) return p;

@@ -18,6 +18,7 @@ import {
 } from '../../shared/columns';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
+import { taskChips } from '../../shared/orchestration/taskView';
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
 import { canPauseSession, clampMenuPosition, dismissAction, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
@@ -310,6 +311,29 @@ function sharedChip(s: SessionDTO): string {
   if (!shared) return '';
   const title = `Shares this checkout with ${shared.others.length === 1 ? 'another live session' : `${shared.others.length} other live sessions`}:\n${shared.others.map((o) => `• ${o}`).join('\n')}\n${shared.root}\nOne index, one working tree: a commit by either can pick up the other's edits. Give each its own worktree.`;
   return `<span class="chip shared" title="${esc(title)}">shared checkout</span>`;
+}
+
+/**
+ * The task and route chips of an orchestrated session (§18.1, #34).
+ *
+ * The webview decides nothing here: `taskChips` already worked out what each
+ * chip says, what its tooltip says and whether it is the loud kind (the
+ * `expert` tier, `max` effort), so a new tier or a local model changes the
+ * shared formatter and not this line. Almost every session has no task and
+ * gets no chips at all.
+ *
+ * They sit with the other chips rather than in a column of their own, which is
+ * what makes them survive a 300 px pane: `#app.narrow` drops the whole chip
+ * strip onto the row's second line.
+ */
+function taskChipsHtml(s: SessionDTO): string {
+  if (!s.task) return '';
+  return taskChips(s.task)
+    .map(
+      (c) =>
+        `<span class="chip task ${c.kind}${c.emphasis ? ' loud' : ''}" title="${esc(c.title)}">${esc(c.text)}</span>`,
+    )
+    .join('');
 }
 
 function statusChip(s: SessionDTO): string {
@@ -649,7 +673,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${pausedChip(s)}${sharedChip(s)}${kindChip}${statusChip(s)}</span></div>
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -1532,11 +1556,19 @@ const measure = () => {
   const width = app.clientWidth;
   if (width === 0) return; // hidden pane: keep the last real answer
   narrow = width < NARROW_PX;
+  // The class is the other half of the answer. `narrow` folds columns away in
+  // `cols()`; `#app.narrow` is what the stylesheet keys its narrow layout on —
+  // the tighter cells, and the chips dropping onto the row's second line
+  // instead of pushing the title out of the pane. Both have to move together,
+  // and until #34 only the first one did, so every `#app.narrow` rule in
+  // `dashboard.css` was dead and a 300 px pane kept the wide chip layout.
+  app.classList.toggle('narrow', narrow);
   if (narrow !== lastNarrow) {
     lastNarrow = narrow;
     render();
   }
 };
+app.classList.toggle('narrow', narrow);
 new ResizeObserver(measure).observe(app);
 window.addEventListener('resize', measure);
 

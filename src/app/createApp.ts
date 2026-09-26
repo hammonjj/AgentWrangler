@@ -56,6 +56,8 @@ import { TaskError, type TaskAction, type TaskRunner } from '../orchestration/en
 import { Emitter } from '../core/events';
 import type { TurnRecord } from '../shared/orchestration/telemetry';
 import type { Mission } from '../shared/orchestration/types';
+import type { TaskView, TaskViewAction } from '../shared/orchestration/taskView';
+import { taskBadges, taskViewOf } from '../orchestration/view/taskViews';
 import { TelemetryLog } from '../core/telemetry/telemetryLog';
 import { TELEMETRY_ENABLED_KEY, TELEMETRY_PRICES_KEY, TurnTelemetry } from '../core/telemetry/turnTelemetry';
 import type { PriceTable } from '../core/telemetry/turnUsage';
@@ -104,7 +106,14 @@ import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
 import type { SessionActions } from '../ui/actions';
 import type { RunBy, StopOutcome } from '../core/control/protocol';
-import type { ConversationLauncher, ProjectSource, RunnerOwnership, UsageSource } from '../ui/dashboardHost';
+import type {
+  ConversationLauncher,
+  ProjectSource,
+  RunnerOwnership,
+  TaskBadgeSource,
+  UsageSource,
+} from '../ui/dashboardHost';
+import type { TaskPaneSource } from '../ui/conversation/conversationHost';
 import { adoptActionFor } from '../ui/openTarget';
 import { resumeInTerminal } from '../ui/terminal';
 
@@ -157,6 +166,11 @@ export interface AgentWranglerApp {
   codexUsage: UsageSource;
   projects: ProjectSource;
   launcher: ConversationLauncher;
+  /**
+   * Orchestration as the two panes see it: row chips and the task strip (#34).
+   * Absent while orchestration is off, and the panes then draw neither.
+   */
+  taskPanes?: TaskBadgeSource & TaskPaneSource;
   dictation: DictationService;
   files: FileSuggestService;
   /** Mirrors permission prompts to a remote surface. Inert until given a transport. */
@@ -1059,6 +1073,65 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   const tasks = orchestration.tasks;
+
+  /**
+   * What the two panes see of orchestration (#34): chips for the table, a strip
+   * for the conversation, and the strip's buttons.
+   *
+   * One object implementing both `TaskBadgeSource` and `TaskPaneSource`, so
+   * neither pane host imports the runner and both fire off the same change
+   * event. `undefined` while orchestration is off — which is the default — and
+   * then no row has chips and no conversation has a strip.
+   *
+   * The views are rebuilt on demand rather than cached: a snapshot is pushed
+   * when something moved, and a mission is a handful of records, so there is
+   * nothing here worth the risk of a stale copy.
+   */
+  const taskPanes = tasks
+    ? {
+        badges: () => taskBadges(tasks.list()),
+        viewFor: (sessionKey: string): TaskView | undefined => {
+          const badge = taskBadges(tasks.list()).get(sessionKey);
+          const mission = badge && tasks.get(badge.missionId);
+          return mission ? taskViewOf(mission, tasks.actions(mission.id)) : undefined;
+        },
+        run: async (missionId: string, action: TaskViewAction): Promise<void> => {
+          await runTaskAction(tasks, missionId, action);
+        },
+        onDidChange: (listener: () => void) => tasks.onDidChange(listener),
+      }
+    : undefined;
+
+  /**
+   * Run one of the strip's actions.
+   *
+   * `show-session` and `open-diff` are the two that are not the runner's to
+   * perform: one points a pane at a session and the other opens a file, both of
+   * which belong to the app. The rest go straight through.
+   */
+  async function runTaskAction(runner: TaskRunner, missionId: string, action: TaskViewAction): Promise<void> {
+    switch (action) {
+      case 'show-session': {
+        const handle = runner.handleOf(missionId);
+        if (handle) surface?.showSession(handle);
+        return;
+      }
+      case 'open-diff':
+        host.shell.openFile(await runner.diff(missionId));
+        return;
+      case 'accept':
+        return runner.accept(missionId);
+      case 'resume':
+        return runner.resume(missionId);
+      case 'retry':
+        return runner.retry(missionId);
+      case 'recreate-worktree':
+        return runner.recreateWorktree(missionId);
+      case 'cancel':
+        return runner.cancel(missionId);
+    }
+  }
+
   const launcher: ConversationLauncher = {
     newConversation: (cwd, selectedProvider) =>
       selectedProvider === 'codex' ? startCodexConversation(cwd) : newConversation(cwd),
@@ -2180,6 +2253,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     codexUsage,
     projects,
     launcher,
+    taskPanes,
     dictation,
     files,
     actions,

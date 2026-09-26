@@ -968,6 +968,22 @@ button.pbtn:disabled {
   color: var(--vscode-editor-background);
 }
 
+/* Orchestrated work (#34). The task chip is quiet — it says what this session
+   is for, not that anything is wrong — and the route chip beside it says what
+   it ran on. */
+.chip.task {
+  border-color: var(--vscode-textLink-foreground, #569cd6);
+  color: var(--vscode-textLink-foreground, #569cd6);
+}
+/* The expensive routes: the `expert` tier and `max` effort. Filled rather than
+   outlined, so a costly agent is visible across a table without reading it. */
+.chip.task.loud {
+  border-color: var(--vscode-charts-orange, #d7ba7d);
+  background: var(--vscode-charts-orange, #d7ba7d);
+  color: var(--vscode-editor-background);
+  font-weight: 600;
+}
+
 /* Another live agent is in this checkout. Outlined in the waiting colour: it is
    a heads-up, not a state the agent is in. */
 .chip.shared {

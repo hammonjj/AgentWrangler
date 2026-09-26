@@ -12,6 +12,7 @@ import type {
   PermissionModeName,
 } from './conversation';
 import type { HookHealth, ProjectDTO, SessionDTO } from './model';
+import type { TaskView, TaskViewAction } from './orchestration/taskView';
 import type { UsageState } from './usage';
 
 // ---- Dashboard ----
@@ -170,11 +171,25 @@ export type HostToConversation =
       truncated: boolean;
       caps: ConversationCapabilities;
       composer?: ComposerState;
+      /**
+       * This session is an orchestrated task's attempt: draw the task strip
+       * above the conversation (#34). Absent for an ordinary conversation, and
+       * the pane then has no strip at all.
+       */
+      task?: TaskView;
     }
   | { type: 'append'; blocks: ConvBlock[] }
   /** In-place update of one block: a tool's result, a streaming reply, an ask being settled. */
   | { type: 'patch'; id: string; block: Partial<ConvBlock> }
   | { type: 'session'; session: SessionDTO; caps: ConversationCapabilities }
+  /**
+   * The task strip's contents changed — a new attempt, a diff stat, an action
+   * that is no longer offered. Sent on its own so the strip can move without
+   * the conversation being re-initialised under it. `task` absent means the
+   * strip goes away (the task was cancelled, or this session stopped being an
+   * attempt's).
+   */
+  | { type: 'task'; task?: TaskView }
   | { type: 'composer'; composer: ComposerState }
   /**
    * The whole of a block the pane only got the start of — the answer to
@@ -253,6 +268,19 @@ export type ConversationToHost =
   | { type: 'openDiff'; file: string; patch: string }
   | { type: 'openExternal'; url: string }
   | { type: 'openFile'; path: string }
+  /**
+   * A button on the task strip (#34). The host runs it through the same task
+   * runner the launcher's menu uses, and answers by pushing a fresh `task`.
+   * `missionId` rides along so an action cannot land on a task the strip has
+   * since been replaced by.
+   */
+  | { type: 'taskAction'; missionId: string; action: TaskViewAction }
+  /**
+   * A line in the strip's attempts list: show that attempt's conversation in
+   * this pane. It is a session key, so it goes through the same path a row
+   * click does and never opens a window.
+   */
+  | { type: 'openAttempt'; sessionKey: string }
   /**
    * The microphone button. `stop` transcribes what was recorded and answers
    * with a `dictation` message — it never sends anything to the agent;
