@@ -214,9 +214,11 @@ body,
 }
 /* Room on the right for the copy button, which is absolutely positioned inside
    this block — without the reserve it would sit on top of the last line of a
-   reply whose first paragraph runs the full width. */
+   reply whose first paragraph runs the full width. Wider than the button
+   itself (22px + 2px offset) so long lines wrap clear of it instead of
+   running their last letters under it. */
 .blk.assistant {
-  padding: 2px 12px;
+  padding: 2px 30px 2px 12px;
   position: relative;
 }
 
@@ -604,6 +606,13 @@ body,
   position: sticky;
   top: 4px;
   height: 0;
+  /* Cancel the block's right padding: without this, this wrapper's box (and so
+     the button's `right: 2px` anchor) sits at the padding boundary, which is
+     also where wrapped text stops — so the button's 22px width still overlaps
+     the last ~24px of every full-width line. Pulling the wrapper back out to
+     the block's true right edge puts the button entirely inside the padding
+     gutter instead. */
+  margin-right: -30px;
   z-index: 3;
   pointer-events: none;
 }
