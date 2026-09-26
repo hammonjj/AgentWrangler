@@ -12,12 +12,18 @@
  * login like every other session. A completion cut off by a restart is simply
  * asked again.
  *
+ * The one exception to "no tools" is a request with a `workspace` (the review
+ * verifier, #36): it may read — only read, only inside that directory — for
+ * a few turns before it answers. Still not a session: the same no-row,
+ * no-transcript, no-settings rules hold.
+ *
  * The output is checked against the schema here as well, whatever the CLI
  * says: invalid output is retried once, with the problems named, and then
  * reported as `invalid-output`. API errors are reported at once; whether to
  * wait and ask again is the caller's decision.
  */
 import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Options, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { RouteRequirement } from '../../shared/orchestration/types';
 import { validateJson, type JsonSchema } from './jsonSchema';
@@ -36,7 +42,20 @@ export interface CompletionRequest {
   /** Give up after this long (default 120 s). */
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * Let the call look at a directory before it answers (the review verifier,
+   * #36). It runs there in `plan` permission mode with `READ_ONLY_TOOLS` and
+   * nothing else — the list is fixed here, not by the caller, so no request can
+   * hand a completion an edit or a shell — and up to `maxTurns` round trips.
+   * Absent: no tools, one turn, in the temp dir.
+   */
+  workspace?: { cwd: string; maxTurns?: number };
 }
+
+/** The only tools a completion with a workspace gets: it can look, never touch. */
+export const READ_ONLY_TOOLS: readonly string[] = ['Read', 'Grep', 'Glob'];
+/** Round trips a workspace completion may take by default: enough to open a handful of files. */
+const DEFAULT_WORKSPACE_TURNS = 16;
 
 export interface CompletionUsage {
   inputTokens?: number;
@@ -120,6 +139,31 @@ function usageOf(result: Record<string, unknown>): CompletionUsage {
   return out;
 }
 
+/**
+ * Whether a workspace completion may use a tool: only `READ_ONLY_TOOLS`, and
+ * only on paths inside the workspace. A tool with no path argument (a Grep of
+ * the working directory) is inside it by definition.
+ */
+export function workspaceToolDecision(
+  cwd: string,
+  name: string,
+  input: Record<string, unknown>,
+): { behavior: 'allow'; updatedInput: Record<string, unknown> } | { behavior: 'deny'; message: string } {
+  if (!READ_ONLY_TOOLS.includes(name)) {
+    return { behavior: 'deny', message: `This is a read-only review: only ${READ_ONLY_TOOLS.join(', ')} are available.` };
+  }
+  const root = path.resolve(cwd);
+  for (const key of ['file_path', 'path']) {
+    const v = input[key];
+    if (typeof v !== 'string' || v === '') continue;
+    const abs = path.resolve(root, v);
+    if (abs !== root && !abs.startsWith(root + path.sep)) {
+      return { behavior: 'deny', message: 'Only files inside the task’s worktree may be read.' };
+    }
+  }
+  return { behavior: 'allow', updatedInput: input };
+}
+
 function parseText(text: unknown): unknown {
   if (typeof text !== 'string') return undefined;
   const t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
@@ -178,13 +222,25 @@ export class ClaudeStructuredCompletion implements StructuredCompletion {
     if (req.signal?.aborted) onAbort();
     req.signal?.addEventListener('abort', onAbort, { once: true });
     const binary = this.deps.binary?.();
+    const ws = req.workspace;
     const options: Options = {
-      cwd: this.deps.cwd ?? os.tmpdir(),
+      cwd: ws?.cwd ?? this.deps.cwd ?? os.tmpdir(),
       model,
       ...(req.effort ? { effort: req.effort as Options['effort'] } : {}),
       systemPrompt: req.instructions,
-      tools: [],
-      maxTurns: 1,
+      ...(ws
+        ? {
+            tools: [...READ_ONLY_TOOLS],
+            permissionMode: 'plan' as const,
+            maxTurns: ws.maxTurns ?? DEFAULT_WORKSPACE_TURNS,
+            // Plan mode already refuses edits; this refuses everything else,
+            // should a tool the list did not name ever be offered, and any
+            // read outside the workspace (plan mode asks about those rather
+            // than allowing them) — the input may carry text written to
+            // steer the reviewer, and the rest of the disk is not its business.
+            canUseTool: async (name: string, input: Record<string, unknown>) => workspaceToolDecision(ws.cwd, name, input),
+          }
+        : { tools: [], maxTurns: 1 }),
       outputFormat: { type: 'json_schema', schema: req.schema as Record<string, unknown> },
       persistSession: false,
       settingSources: [],

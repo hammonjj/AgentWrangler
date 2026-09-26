@@ -16,7 +16,7 @@
  *   command by name (`command:<name>`), but nothing a model produces is ever
  *   parsed as a policy.
  */
-import type { MissionFinish, Risk } from './types';
+import { TASK_KINDS, type MissionFinish, type Risk, type TaskKind } from './types';
 
 export const REPO_POLICY_VERSION = 1;
 
@@ -53,6 +53,26 @@ export interface ExclusiveResource {
 
 export type FinishDefault = Exclude<MissionFinish, 'discard'>;
 
+/**
+ * When the review-agent verifier runs (#36, §14.1 `review`).
+ * - `auto`: when the task's assessed risk is `moderate` or higher, or its
+ *   verifiability `weak` or lower — the tasks the repository's own checks say
+ *   least about. An unassessed task is reviewed.
+ * - `always`: every task with acceptance criteria.
+ * - `never`: no task.
+ */
+export type ReviewWhen = 'auto' | 'always' | 'never';
+
+export interface ReviewPolicy {
+  when: ReviewWhen;
+  /**
+   * Kinds for which the review is a required stage rather than advisory, and
+   * runs whatever the assessment says. `unclear` on a required review is
+   * inconclusive; `unmet` fails the task.
+   */
+  requiredFor: TaskKind[];
+}
+
 export interface RepoPolicy {
   worktrees: {
     /** Where AW puts worktrees, relative to the primary checkout. `<repo>` is its folder name. */
@@ -65,6 +85,8 @@ export interface RepoPolicy {
     /** What runs on the mission branch after each merge (§14.4). */
     missionDefault: string[];
   };
+  /** The review-agent verifier (#36). Advisory, and only for risky or poorly verified tasks, by default. */
+  review: ReviewPolicy;
   risk: RiskRule[];
   exclusive: ExclusiveResource[];
   finish: {
@@ -80,6 +102,7 @@ export interface RepoPolicyFile {
   worktrees?: { root?: string; setup?: SetupStep[] };
   /** Named commands, plus `missionDefault` (the file format of §13.6). */
   verification?: { missionDefault?: string[] } & Record<string, { run: string[]; timeoutSec?: number } | string[] | undefined>;
+  review?: { when?: ReviewWhen; requiredFor?: TaskKind[] };
   risk?: RiskRule[];
   exclusive?: ExclusiveResource[];
   finish?: { default?: FinishDefault; gate?: string[] };
@@ -89,6 +112,7 @@ export interface RepoPolicyFile {
 export const DEFAULT_REPO_POLICY: RepoPolicy = Object.freeze({
   worktrees: { root: '../<repo>.aw', setup: [] },
   verification: { commands: {}, missionDefault: [] },
+  review: { when: 'auto', requiredFor: [] },
   risk: [],
   exclusive: [],
   finish: { default: 'merge-local', gate: [] },
@@ -111,6 +135,7 @@ export type ParseResult = { ok: true; file: RepoPolicyFile } | { ok: false; erro
 // ---------------------------------------------------------------------------
 
 const RISK_LEVELS: readonly Risk[] = ['low', 'moderate', 'high', 'critical'];
+const REVIEW_WHEN: readonly ReviewWhen[] = ['auto', 'always', 'never'];
 const FINISH_DEFAULTS: readonly FinishDefault[] = ['merge-local', 'pull-request', 'keep'];
 const COMMAND_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const RESOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
@@ -127,7 +152,7 @@ export function validateRepoPolicyFile(doc: unknown): ParseResult {
     err('', 'a policy must be a JSON object');
     return { ok: false, errors };
   }
-  unknownKeys(doc, ['$schema', 'v', 'worktrees', 'verification', 'risk', 'exclusive', 'finish'], '', err);
+  unknownKeys(doc, ['$schema', 'v', 'worktrees', 'verification', 'review', 'risk', 'exclusive', 'finish'], '', err);
   if ('v' in doc && doc.v !== REPO_POLICY_VERSION) err('v', `unsupported version ${JSON.stringify(doc.v)}; this build reads ${REPO_POLICY_VERSION}`);
 
   if ('worktrees' in doc) {
@@ -159,6 +184,25 @@ export function validateRepoPolicyFile(doc: unknown): ParseResult {
         command(value, p, err);
       }
       if ('missionDefault' in v) nameList(v.missionDefault, 'verification.missionDefault', err);
+    }
+  }
+
+  if ('review' in doc) {
+    const r = doc.review;
+    if (!isObject(r)) err('review', 'must be an object');
+    else {
+      unknownKeys(r, ['when', 'requiredFor'], 'review', err);
+      if ('when' in r && !REVIEW_WHEN.includes(r.when as ReviewWhen)) {
+        err('review.when', `must be one of ${REVIEW_WHEN.map((x) => JSON.stringify(x)).join(', ')}`);
+      }
+      if ('requiredFor' in r) {
+        if (!Array.isArray(r.requiredFor)) err('review.requiredFor', 'must be an array of task kinds');
+        else {
+          r.requiredFor.forEach((k, i) => {
+            if (!TASK_KINDS.includes(k as TaskKind)) err(`review.requiredFor[${i}]`, `must be a task kind: ${TASK_KINDS.join(', ')}`);
+          });
+        }
+      }
     }
   }
 
@@ -357,6 +401,7 @@ export function resolveRepoPolicy(
   const policy: RepoPolicy = {
     worktrees: { root: base.worktrees.root, setup: [...base.worktrees.setup] },
     verification: { commands: { ...base.verification.commands }, missionDefault: [...base.verification.missionDefault] },
+    review: { when: base.review.when, requiredFor: [...base.review.requiredFor] },
     risk: [...base.risk],
     exclusive: [...base.exclusive],
     finish: { default: base.finish.default, gate: [...base.finish.gate] },
@@ -371,6 +416,8 @@ export function resolveRepoPolicy(
       }
       if (layer.verification.missionDefault !== undefined) policy.verification.missionDefault = [...layer.verification.missionDefault];
     }
+    if (layer.review?.when !== undefined) policy.review.when = layer.review.when;
+    if (layer.review?.requiredFor !== undefined) policy.review.requiredFor = [...new Set(layer.review.requiredFor)];
     if (layer.risk !== undefined) policy.risk = layer.risk.map((r) => ({ paths: [...r.paths], level: r.level, why: r.why }));
     if (layer.exclusive !== undefined) policy.exclusive = layer.exclusive.map((r) => ({ ...r, ...(r.paths ? { paths: [...r.paths] } : {}) }));
     if (layer.finish?.default !== undefined) policy.finish.default = layer.finish.default;

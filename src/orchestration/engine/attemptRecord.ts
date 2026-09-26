@@ -7,7 +7,8 @@
  * nobody reported is absent, never zero.
  */
 import { TELEMETRY_SCHEMA_VERSION, type AttemptRecord, type RoutingRecord, type TurnRecord } from '../../shared/orchestration/telemetry';
-import type { ExecutionAttempt, Millis, Mission, RoutingDecision, UsageSummary } from '../../shared/orchestration/types';
+import type { ExecutionAttempt, Millis, Mission, ReviewVerdict, RoutingDecision, UsageSummary } from '../../shared/orchestration/types';
+import { reviewCounts } from '../../shared/orchestration/verification';
 
 /** Fold one turn record into an attempt's usage. A record already counted is ignored. */
 export function addTurnUsage(usage: UsageSummary | undefined, r: TurnRecord): UsageSummary {
@@ -116,7 +117,17 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     signature: a.outcome?.signature,
     verification: a.verification
       .filter((v) => v.outcome !== undefined)
-      .map((v) => ({ strategy: v.strategy, outcome: v.outcome!, flaky: v.flaky, preExisting: v.preExisting, durationMs: v.durationMs })),
+      .map((v) =>
+        prune({
+          strategy: v.strategy,
+          outcome: v.outcome!,
+          flaky: v.flaky,
+          preExisting: v.preExisting,
+          skipped: v.skipped,
+          durationMs: v.durationMs,
+          review: v.review ? reviewTelemetry(v.review) : undefined,
+        }),
+      ),
     flags: { ...a.flags },
   };
   if (a.launchedAt !== undefined) {
@@ -167,6 +178,20 @@ export function routingRecord(mission: Mission, d: RoutingDecision, now: Millis)
     agreement: d.agreement ?? 'no-recommendation',
     changed: [...d.overrides],
     candidates: { chosen: count('chosen'), fallback: count('fallback'), rejected: count('rejected') },
+  });
+}
+
+/** A review verdict as numbers: counts, the model and its cost, never its reasons. */
+function reviewTelemetry(v: ReviewVerdict): NonNullable<AttemptRecord['verification'][number]['review']> {
+  const n = reviewCounts(v);
+  return prune({
+    ...n,
+    concerns: v.concerns.length,
+    repaired: v.repaired,
+    model: v.model,
+    inputTokens: v.usage?.inputTokens,
+    outputTokens: v.usage?.outputTokens,
+    costUsd: v.usage?.costUsd,
   });
 }
 

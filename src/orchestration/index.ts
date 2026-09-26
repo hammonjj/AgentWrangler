@@ -24,6 +24,7 @@ import type { AgentHarness } from './harness/types';
 import { Assessor } from './policy/assessor';
 import { RepoPolicyStore, repoPoliciesDir, worktreeRootPath } from './policy/repoPolicyStore';
 import { MissionStore } from './store/missionStore';
+import { Reviewer } from './verify/reviewer';
 import type { Exec } from './worktrees/exec';
 import { WorktreeManager } from './worktrees/worktreeManager';
 
@@ -136,6 +137,8 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
   const repoPolicies = new RepoPolicyStore(repoPoliciesDir(deps.dataDir), { log });
   // Without a completion the assessor still runs, from rules alone, at low confidence (§8.3).
   const assessor = new Assessor({ completion, log: deps.log });
+  // Without a completion there is no reviewer, and `review` stages say so (#36).
+  const reviewer = completion ? new Reviewer({ completion }) : undefined;
   const tasks = new TaskRunner({
     store,
     harnesses,
@@ -156,6 +159,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     launchDefaults: deps.launchDefaults,
     cannotLaunch: (harness) => (harness === 'claude-code' && deps.hostsEnabled?.() !== true ? HOSTS_REQUIRED : undefined),
     assessor,
+    reviewer,
     tierOf: deps.tierOf,
     ...(deps.routingSnapshot ? { routing: { snapshot: deps.routingSnapshot } } : {}),
     telemetry: deps.telemetry,

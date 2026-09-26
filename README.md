@@ -320,6 +320,24 @@ new worktree and branch of the chosen folder's repository:
 
   The verdict shows as a badge on the session's row and in the task strip, with a line per
   stage and a button to open the failing log.
+- **Review.** Some acceptance criteria are not something a command can check ("the error names
+  the file"). For those, once the commands have passed, a **read-only reviewer** (Sonnet) is
+  given the objective, the criteria and the diff, may read files in the task's worktree and
+  nothing else — plan mode, `Read`/`Grep`/`Glob` only, reads outside the worktree refused — and
+  answers *met*, *unmet* or *unclear* for each criterion, plus any concerns. The strip lists
+  every criterion with its verdict and the reviewer's reason, and the review's cost.
+  - It is **advisory** by default: an *unmet* criterion is a warning on the result, not a
+    failure. A repository's policy can make it **required** for chosen kinds of task
+    (`review.requiredFor`); then *unmet* fails the task and *unclear* makes it inconclusive —
+    never a pass.
+  - By default it runs only when the task was assessed at **moderate risk or above, or weakly
+    verifiable or below** — the tasks its commands say least about (`review.when`: `auto`,
+    `always` or `never`). A task that has not been assessed is reviewed.
+  - Its verdict is evidence, not verification: a repository with no commands still gives
+    *unverified*, however many criteria the reviewer called met. It posts nothing anywhere.
+  - A review is a model session with the repository in view, and costs like one. Each is
+    recorded on the attempt's usage line as counts, model, tokens and cost (never the
+    reviewer's words), so whether it catches what tests miss can be judged later.
 - **Where you see it.** A task's session is an ordinary row, with two extra chips: which task it
   is for, and what it ran on (`Opus 5 · high`). An expensive route — the `expert` tier, or `max`
   effort — is filled rather than outlined, so it is visible without opening anything. Click the
@@ -376,7 +394,11 @@ plus a hash of its git common directory, so every worktree of a repository share
 - Commands are argv arrays (`["npm", "test"]`), never shell strings. A model can name a command
   (`command:unit`) but never add one.
 - A file is laid over the defaults field by field. With no file: no verification commands (results
-  are `unverified`), no risk paths, worktrees in `../<repo>.aw`, finish by merging locally.
+  are `unverified`), an advisory review for risky or weakly verified tasks, no risk paths,
+  worktrees in `../<repo>.aw`, finish by merging locally.
+- `"review": { "when": "auto" | "always" | "never", "requiredFor": ["migration", …] }` controls
+  the reviewer (above). A kind listed in `requiredFor` is always reviewed, and the review is
+  required for it, whatever `when` says.
 - A file with any error is ignored whole, with each error's path in the log, never half-applied.
 - Each attempt records the policy version it ran under (`default`, or `v1-<hash>` of the
   effective policy).

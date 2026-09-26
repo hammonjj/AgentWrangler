@@ -39,6 +39,7 @@ import type {
   Verifiability,
   VerificationPlan,
 } from '../../shared/orchestration/types';
+import { TASK_KINDS } from '../../shared/orchestration/types';
 import { matchesAny, overlapping } from './globs';
 
 /**
@@ -60,20 +61,7 @@ export const VERIFIABILITY_LEVELS: readonly Verifiability[] = ['none', 'weak', '
 export const CONTEXT_LOAD_LEVELS: readonly ContextLoad[] = ['small', 'medium', 'large', 'very-large'];
 export const CONFIDENCE_LEVELS: readonly Confidence[] = ['low', 'medium', 'high'];
 
-export const TASK_KINDS: readonly TaskKind[] = [
-  'docs',
-  'test',
-  'bugfix',
-  'feature',
-  'refactor',
-  'migration',
-  'architecture',
-  'investigation',
-  'review',
-  'chore',
-  'conflict-resolution',
-  'plan',
-];
+export { TASK_KINDS };
 
 /** The tool needs a route may have to satisfy (§8.2). `exclusive:<id>` comes from repo policy, never from a model. */
 export const REQUIREMENT_TOKENS: readonly string[] = ['edit', 'shell', 'network', 'vision', 'browser'];

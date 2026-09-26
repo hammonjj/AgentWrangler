@@ -1521,6 +1521,49 @@ a model can name a strategy but never supply a command.
 After each integration, and before mission review, `missionDefault` runs on the mission branch
 (§13.3). Its result is part of the mission's health indicator.
 
+### 14.5 As built: the review verifier (#36, 2026-09-26)
+
+- **A completion with a workspace, not a hosted attempt.** §14.1 calls the reviewer "a read-only
+  attempt routed as `kind: review`". What shipped is a `StructuredCompletion` given
+  `workspace: { cwd }` (`completion/structuredCompletion.ts`): the SDK's one-shot `query()` in the
+  task's worktree with `permissionMode: 'plan'`, `tools: ['Read', 'Grep', 'Glob']` (fixed in the
+  completion, not chosen by the caller), up to 16 turns and `outputFormat: json_schema`. No
+  session host, no row, no transcript, no settings or hooks — the same reasons a completion is not
+  a session (§6.1). A hosted attempt would have needed a structured final output #4's
+  `LaunchRequest` does not carry (`structuredFinalOutput: false`), and a row in the table for
+  something the user never asked to watch.
+- **Reads are confined to the worktree.** Verified against the SDK (2026-09-26): in plan mode a
+  `Read` inside `cwd` is allowed without asking, and one outside it goes to `canUseTool`, which
+  `workspaceToolDecision` denies. So the diff — which is agent-written and may carry text meant to
+  steer the reviewer — cannot get it to read anything but the result it is judging.
+- **Where it lives.** `verify/reviewer.ts`: schema (`REVIEW_SCHEMA`), instructions, input (criteria
+  numbered `c1…cN`, diff cut at 60k characters with a note to read the files) and `Reviewer`,
+  which never throws. `shared/orchestration/verification.ts`: `normaliseReview` (a skipped
+  criterion becomes `unclear`, a duplicate keeps its first answer, unknown ids are dropped, each
+  repair counted), `reviewOutcome` (any `unmet` → `failed`; else any `unclear` → `inconclusive`;
+  all `met` → `passed`), `stageApplies`, and the plan's `review` stage. Model `sonnet`, effort
+  `medium`, requirement `standard` — until #38 routes it.
+- **When it runs.** Repo policy gains `review: { when: 'auto' | 'always' | 'never', requiredFor:
+  TaskKind[] }`, default `auto` and none required. The plan (frozen at task start, like the rest of
+  it) gets an advisory `review` stage last among the automatic stages, before `human`, for any task
+  with acceptance criteria; under `auto` it carries `onlyIf: 'risky-or-weakly-verified'`, decided
+  at verify time from the task's newest assessment: risk ≥ `moderate` or verifiability ≤ `weak`.
+  No assessment runs it. A kind in `requiredFor` gets a required, ungated stage whatever `when`
+  says. A skipped stage is `unavailable` with `skipped: true` and costs nothing.
+- **What it can decide.** Advisory: nothing — an unmet or unclear verdict is "n advisory checks
+  failed" on an otherwise passing result. Required: `unmet` fails the attempt (`quality-new`,
+  signature `review:c2,…`), `unclear` is `inconclusive` (§14.3), and a reviewer that could not
+  answer is `error`. A required review with no reviewer configured is `inconclusive`, not a silent
+  pass. `review` is never in `verifies()`, so it cannot turn `unverified` into `passed`.
+- **Where it shows.** `VerificationResult.review` keeps the verdict; `TaskVerificationView.review`
+  pairs each verdict with the criterion's own text, and the strip draws it open under the stage
+  lines: glyph, criterion, reason, then concerns, headed "Review (advisory|required) · model ·
+  cost".
+- **Telemetry.** Each `review` entry on the `attempt` record carries `met`/`unmet`/`unclear`
+  counts, the number of concerns and repairs, the model, tokens and cost — never the reasons,
+  which quote the code. Beside the command stages on the same record, that is what "does it catch
+  what the tests miss" will be answered from.
+
 ---
 
 ## 15. Retry and escalation

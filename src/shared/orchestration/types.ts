@@ -212,6 +212,22 @@ export type TaskKind =
   | 'conflict-resolution'
   | 'plan';
 
+/** Every task kind, in the order the assessor's schema lists them. */
+export const TASK_KINDS: readonly TaskKind[] = [
+  'docs',
+  'test',
+  'bugfix',
+  'feature',
+  'refactor',
+  'migration',
+  'architecture',
+  'investigation',
+  'review',
+  'chore',
+  'conflict-resolution',
+  'plan',
+];
+
 /** The user's per-task overrides. The pin is the only model name a task may carry. */
 export interface TaskOverrides {
   pins?: RoutePins;
@@ -561,6 +577,12 @@ export interface VerificationStage {
   strategy: string;
   required: boolean;
   timeoutSec?: number;
+  /**
+   * Run the stage only when the task's assessment says the repository's own
+   * checks say little about it: risk `moderate` or higher, or verifiability
+   * `weak` or lower (#36, `review.when: auto`). Absent: always run.
+   */
+  onlyIf?: 'risky-or-weakly-verified';
 }
 
 export interface VerificationPlan {
@@ -579,6 +601,37 @@ export interface VerificationResult {
   preExisting?: boolean;
   startedAt: Millis;
   durationMs?: number;
+  /** What the reviewer said, for a `review` stage that reached a verdict (#36). */
+  review?: ReviewVerdict;
+  /** The stage's `onlyIf` did not hold, so it was not run (outcome `unavailable`). */
+  skipped?: boolean;
+}
+
+/** The reviewer's answer for one acceptance criterion (§14.1 `review`). */
+export type CriterionVerdict = 'met' | 'unmet' | 'unclear';
+
+export interface ReviewCriterion {
+  /** `c1`, `c2`, … — the criterion's position in `Task.acceptanceCriteria`, from 1. */
+  id: string;
+  verdict: CriterionVerdict;
+  why: string;
+}
+
+/**
+ * A `review` stage's verdict (#36): one entry per acceptance criterion, in
+ * the task's order, plus concerns the reviewer raised beyond them. Evidence,
+ * never a pass on its own: `review` does not count as verification for a task
+ * that nothing else verified (§14.3).
+ */
+export interface ReviewVerdict {
+  criteria: ReviewCriterion[];
+  concerns: string[];
+  /** The reviewer's model, as the completion reported it. */
+  model: string;
+  /** Tokens and cost of the review, when reported. */
+  usage?: { inputTokens?: number; outputTokens?: number; costUsd?: number };
+  /** Criteria the reviewer left out or answered twice, which were read as `unclear`. */
+  repaired?: number;
 }
 
 // ---------------------------------------------------------------------------
