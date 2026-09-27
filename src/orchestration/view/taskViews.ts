@@ -13,6 +13,17 @@
  * pane can be sent without starting anything.
  */
 import { modelLabel } from '../../shared/modelName';
+import { DEFAULT_TIERS } from '../../shared/orchestration/catalog';
+import {
+  describePolicy,
+  diffText,
+  missionLayers,
+  pinnedDimensions,
+  policyDiff,
+  resolveEffectivePolicy,
+  scopeTag,
+  type PolicyContext,
+} from '../../shared/orchestration/executionPolicy';
 import { REVIEW, stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
 import { PROVENANCE_LABEL } from '../policy/assessment';
 import { explainDecision } from './routeExplain';
@@ -23,6 +34,7 @@ import type {
   TaskAttemptView,
   TaskBadge,
   TaskDiffView,
+  TaskPolicyView,
   TaskReviewView,
   TaskRouteView,
   TaskVerificationView,
@@ -239,7 +251,42 @@ export function assessmentViewOf(m: Mission, taskId?: string): TaskAssessmentVie
  * session key that opens it — that is what lets the pane list them without
  * asking the host anything further.
  */
-export function taskViewOf(m: Mission, actions: TaskViewAction[], taskId?: string): TaskView | undefined {
+/**
+ * The mission header's policy (§10.2, #40): the controls in force for the
+ * task's next attempt, where each came from, and every change since the
+ * mission started. `ctx` gives the tier order; without it, the default tiers.
+ */
+export function policyViewOf(m: Mission, ctx: PolicyContext = { tiers: DEFAULT_TIERS }, taskId?: string): TaskPolicyView | undefined {
+  const task = taskOf(m, taskId);
+  if (!task) return undefined;
+  const eff = resolveEffectivePolicy(missionLayers(m, task), ctx);
+  const p = eff.policy;
+  // The chip is for limits the route chip does not already say: a task's own
+  // pins are the route it runs on, so only pins from a wider scope show here.
+  // The panel lists everything, task pins included.
+  const wider = (field: string) => eff.from[field] !== undefined && eff.from[field] !== 'task';
+  const chip: string[] = [];
+  if (p.caps?.maxTier) chip.push(`≤ ${p.caps.maxTier}`);
+  if (p.pins?.model && wider('pins.model')) chip.push(`${modelLabel(p.pins.model) ?? p.pins.model} (pinned)`);
+  if (p.pins?.effort && wider('pins.effort')) chip.push(`${p.pins.effort} effort (pinned)`);
+  else if (p.caps?.maxEffort) chip.push(`effort ≤ ${p.caps.maxEffort}`);
+  if (p.caps?.maxAttempts !== undefined) chip.push(`${p.caps.maxAttempts} attempt${p.caps.maxAttempts === 1 ? '' : 's'} max`);
+  if (p.caps?.location) chip.push(p.caps.location);
+  const lines = describePolicy(eff).map((l) => ({ label: l.label, value: l.value, from: scopeTag(l.from) }));
+  const started = task.attemptIds.length;
+  const changes = m.policyChanges.map((c) => ({
+    at: c.at,
+    scope: c.scope,
+    text: diffText(policyDiff(c.before, c.changed)) || c.fields.join(', '),
+    appliesFromAttempt: c.appliesFromAttempt,
+    pending: c.appliesFromAttempt > started,
+  }));
+  const conflicts = eff.conflicts.map((c) => c.message);
+  if (lines.length === 0 && changes.length === 0 && conflicts.length === 0) return undefined;
+  return { chip: chip.slice(0, 3).join(' · ') + (chip.length > 3 ? ` +${chip.length - 3}` : ''), lines, frozen: pinnedDimensions(p), changes, conflicts };
+}
+
+export function taskViewOf(m: Mission, actions: TaskViewAction[], taskId?: string, ctx?: PolicyContext): TaskView | undefined {
   const task = taskOf(m, taskId);
   if (!task) return undefined;
   const attempts = task.attemptIds
@@ -267,6 +314,7 @@ export function taskViewOf(m: Mission, actions: TaskViewAction[], taskId?: strin
     diff: diffOf(current),
     verification: verificationViewOf(task, current),
     attempts: attempts.map((a) => attemptViewOf(m, a, a.id === current?.id)),
+    policy: policyViewOf(m, ctx, task.id),
     actions,
   };
 }

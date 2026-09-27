@@ -1123,7 +1123,8 @@ Rendered in the task detail (§18) and as the tooltip of the route chip.
   the assessor, which otherwise took it as the user's word at high confidence and left every
   kind floor and ceiling dead.
 - **Setting.** `orchestration.routing: {mode: 'manual' | 'assisted', maxTier?, maxEffort?}`,
-  default `manual`, frozen into each mission's policy when it is recorded. Not in Preferences yet.
+  default `manual`, frozen into each mission's policy when it is recorded. Extended by #40 to the
+  whole global scope and edited in Preferences → Orchestration → Routing defaults (§10.2.1).
 - **Telemetry.** A `routing` record per decision once it carries a recommendation (rule ids,
   levels, both targets, `agreement`, `changed`, candidate counts; never reason texts, which can
   quote a risk path's description). The `attempt` record gains `requirement`, `shadow`,
@@ -1167,6 +1168,63 @@ Rules:
 - A mission's effective policy is frozen when it starts. A later change applies to attempts not
   yet started, is recorded as a policy-change event, and is shown in the mission header. Running
   attempts are not restarted.
+
+### 10.2.1 As built (#40, 2026-09-27)
+
+- **Where it lives.** `src/shared/orchestration/executionPolicy.ts`, pure and in `shared` so
+  the Preferences window validates with the code the runner enforces with.
+  `resolveEffectivePolicy(layers, ctx)` → `{policy, from, conflicts}`: `from` names the scope
+  each value in force came from; `ctx` is the catalog's tier order and a pinned-model lookup
+  (`policyContextFor(catalog)`). Table tests: `test/orchestration/executionPolicy.test.ts`.
+- **Precedence.** Layers apply widest first (global → repo → mission → task). Pins,
+  preferences and switches (`mode`, `autoRecover`, …): the narrower scope wins, one field at a
+  time. Caps (and `maxTasks`): the tightest wins. Exclusions accumulate — there is no way to
+  un-exclude below. A narrower cap looser than a wider one is a `cap-loosened` conflict (the
+  tighter stays in force); opposite locations are `location-conflict`; a tier name the catalog
+  lacks is `cap-unknown`.
+- **Validation at the time of setting.** A pin that breaks a cap or names something excluded
+  is a conflict whose message names both scopes. `checkPolicyEdit(layers, scope, next)` keeps
+  the conflicts the edited scope is party to; `TaskRunner.record`, `startProposed` and
+  `setPolicy` refuse with it and change nothing. A conflict between two *other* scopes does not
+  block an edit, but it does block the next launch (`launch` refuses while any conflict stands,
+  and the strip shows it in red).
+- **Where each scope is stored.** Global: `orchestration.routing` `{mode, pins?, caps?,
+  preferences?, exclusions?}` (#38's flat `maxTier`/`maxEffort` still read as caps; a
+  malformed group is dropped whole and reported). Repository: the policy file's `routing`
+  section (absent from the effective repo policy when unset, so existing policy versions do
+  not change). Mission: `Mission.policyLayers.mission`. Task: `Task.overrides`.
+- **Frozen at start.** `record` copies the global and repository layers into
+  `Mission.policyLayers`; `Mission.policy` is the three resolved and is recomputed only when the
+  mission layer is edited. A mission from before #40 reads its `policy` as its mission layer.
+- **Changes mid-mission.** `setPolicy(missionId, 'mission' | 'task', layer)` appends a
+  `PolicyChange {scope, fields, before, changed, appliesFromAttempt}` once anything has
+  started, and writes `override` (who, what, from, to, scope; `via: editor | proposal`) and
+  `policy-change` (fields, revision, applies-from, running attempts) telemetry. Each routing
+  decision records `policyRevision`, the number of changes in force when it was decided, so
+  "applied only to attempts not yet started" is checkable. On a proposal nobody has started the
+  change re-proposes instead (an `override`, no `policy-change`).
+- **Enforcement at launch.** The policy is resolved afresh for each attempt; pins replace the
+  route's own dimensions (a pinned effort is sent as the model's native level); then
+  `admissionRefusal` checks the count caps: attempts (resumes do not count), concurrent task
+  agents across every mission, estimated spend of the task's attempts (unknown cost is not
+  spend), and the source's usage window. A refusal leaves the task `needs-human` with the
+  sentence as its reason.
+- **Routing.** The router reads the effective policy; a pinned effort replaces the rules'
+  (`pin.effort` reason); the resolver rejects candidates off a pinned harness, source or model,
+  and uses a pinned model whatever tier the work was assessed at (within the tier cap), noting
+  it. In `manual` the shadow leaves the task's pins out — they are the user's route — so the
+  comparison still says what the router would have picked.
+- **Escalation (#41).** `pinnedDimensions(policy)` is what escalation may not move: harness,
+  model (and so tier) and effort, each when pinned.
+- **UI.** The task strip (the header of a single-task mission) shows a policy chip, the latest
+  policy change with the attempt it applies from, any standing conflict, and a *Pins & caps*
+  panel with every value and its scope. *Policy…* (strip, Tasks menu, proposal quick pick)
+  opens the mission or task editor: quick picks, one field at a time, each saved or refused on
+  the spot. Preferences → Orchestration → Routing defaults edits the global scope; the window
+  runs `routingPolicyUpdate` itself so an error shows as soon as a value is set, and the host
+  runs it again before writing.
+- **Deviation.** `maxConcurrentAgents` counts orchestrated attempts across all missions, at
+  whichever scope sets it: with single-task missions there is nothing narrower to count.
 
 ### 10.3 Trust
 
@@ -2020,6 +2078,36 @@ not the model):
   launch with a local `ANTHROPIC_BASE_URL`), reports false cost and window, and is ~13× slower
   per call here. Revisit when a runtime serves `/v1/messages` natively with prefix caching that
   holds across Claude's turns.
+
+### 19.7 As built (#51, 2026-09-27)
+
+Both slices, as §19.6 recommends. The Claude Code path is not built. Task, assessment and rule
+types are unchanged. What changed is adapters, settings and the catalog's inputs.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Registry | `shared/orchestration/localEndpoints.ts`, setting `orchestration.localEndpoints` | URL, name, optional runtime, slots, device, declared per-model facts. A loopback endpoint is on by default. Anything else is `location: 'hosted'`, off until turned on, never contacted while off, and labelled "data leaves this machine". Keys are in `safeStorage` under `localEndpoint:<id>`; the setting only records `hasKey`. |
+| Probe | `orchestration/local/probe.ts` | Detects the runtime (Ollama, LM Studio, llama.cpp, vLLM, MLX, generic), or takes a declared one. Reads models, context, vision and slots, plus constrained decoding (`schema` for the four that have it, `none` for MLX). Probes `/v1/responses` and `/v1/messages` with an empty POST: 404/405/501 means absent. |
+| Descriptors | `shared/orchestration/localModels.ts` | `measured` > `probed` > `declared` > unknown, per field. `nativeEffort: []`, `costBasis: 'none'`. Harness `codex` only where `/v1/responses` was probed. |
+| Catalog | `buildCatalog({ local })`, `CapabilityCatalog.setLocal` | Local models are never given a default tier, so they start unassigned. `routable` needs a tier, an enabled model, an endpoint that is on, and a harness. `completions` is the same without the harness. |
+| Service | `orchestration/local/localEndpointService.ts` | Probe at start and every 10 min. Health every 30 s from the runtime's cheapest route: one miss `degraded`, two `down`, then `onDown`. A failed re-probe keeps the last good probe. Slots are a gate for direct calls (`acquire`, whose wait is the queue delay). Attempts count against slots in the resolver snapshot. |
+| Qualification | `qualifyModel` | Stage 1 of §19.6 (10 tool calls, 10 round trips, 20 JSON replies, synthetic), shown beside the tier picker. Results are `measured` and persisted. Stage 2 (scratch-repo tasks) is not built. |
+| Resolver | `policy/resolver.ts` | An endpoint model needs known, non-`none` tool calling for agentic work. It never gets the assumed hosted window, even when external. Zero free slots is capacity (`blocked`). |
+| Agentic | `CodexHarness` + `codexThreadParams` | A local target is a Codex thread with `modelProvider: aw-<id>` and `config.model_providers.aw-<id> = {base_url: <url>/v1, wire_api: "responses"}`. `model_context_window` comes from the catalog, and `model_catalog_json` from a declared file if there is one. The key is read per request (`experimental_bearer_token`) and never recorded. The provider is in the launch policy, so every resume re-sends it. |
+| Completions | `completion/localCompletion.ts` | `LocalStructuredCompletion`: streamed `chat/completions`, `response_format` only where probed, otherwise the schema goes in the instructions, then validation and one retry. A dropped stream or refused connection is `infra`. `RoutedCompletion` puts the weakest-tier local model ahead of the hosted completion and falls back to it on any failure but an abort. Workspace requests (the reviewer) always go hosted. |
+| Failure | `TaskRunner` | `onDown`, or an `infra` turn failure while the endpoint does not answer, ends the attempt `infra` / `local-server-lost`. Failover re-resolves the same requirement pinned to the tier that ran, with the failed source excluded. It is allowed when the router decided the route or the mission has `autoRecover`, and within `maxAttempts` (default 3). The new decision is `decidedBy: 'router'` with rule `failover.infra`. |
+| Metrics | `AttemptRecord.local`, `LocalCallRecord`, `shared/orchestration/localMetrics.ts` | Runtime, device, context window and queue delay. Tokens/s is output over active time (`tokPerSecFrom: 'attempt'`); TTFT is absent through a harness, and server- or client-measured for direct calls. The API-equivalent cost avoided is labelled an estimate: the same requirement resolved with every endpoint excluded, priced at that model's `telemetry.prices` entry. Harness cost is stripped from local attempts (§19.6 point 3). `summariseLocal` gives executions, success, verified-first-time, escalation-from-local and averages. |
+
+Open, and not settled by tests (they use fakes):
+
+- The app-server's acceptance of `modelProvider` and a free-form `model_providers` table on
+  `thread/start` and `thread/resume`. It is in the pinned schema per §19.6, but #51 did not run it
+  live.
+- `experimental_bearer_token` on a per-thread provider.
+- Whether `model_catalog_json` adds to Codex's catalog or replaces it.
+
+The first live run against `llama-server` with a GGUF model should settle all three. It is also
+the measurement §19.6 slice B asks for.
 
 ---
 

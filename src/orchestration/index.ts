@@ -14,9 +14,13 @@ import type { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionRegistry } from '../core/session/sessionRegistry';
 import type { ModelChoice } from '../shared/conversation';
 import type { TelemetryRecord, TurnRecord } from '../shared/orchestration/telemetry';
-import { EFFORT_LEVELS, type EffortLevel, type HarnessId, type ModelSourceId, type RouteCaps } from '../shared/orchestration/types';
+import { parseRoutingSettings, ROUTING_KEY } from '../shared/orchestration/executionPolicy';
+import type { HarnessId, ModelSourceId } from '../shared/orchestration/types';
 import type { ResolverSnapshot } from './policy/resolver';
-import { ClaudeStructuredCompletion, type CompletionQueryFn, type StructuredCompletion } from './completion/structuredCompletion';
+import { ClaudeStructuredCompletion, type CompletionQueryFn, type CompletionResult, type StructuredCompletion } from './completion/structuredCompletion';
+import { RoutedCompletion } from './completion/localCompletion';
+import type { LocalEndpointService } from './local/localEndpointService';
+import type { CapabilityCatalogView } from '../shared/orchestration/catalog';
 import { TaskRunner } from './engine/taskRunner';
 import { ClaudeCodeHarness } from './harness/claudeCodeHarness';
 import { CodexHarness } from './harness/codexHarness';
@@ -72,29 +76,30 @@ export interface OrchestrationDeps {
   completion?: { query: CompletionQueryFn; binary: () => string | undefined };
   /** The catalog and source health, read fresh for each recommendation (#38). Absent: no routing. */
   routingSnapshot?: () => ResolverSnapshot;
+  /**
+   * The registered local endpoints (#51) and the catalog they are in. Codex
+   * reaches their models through a model provider; completions go to one
+   * assigned the weakest tier before the hosted model; a server lost
+   * mid-attempt is `infra` and fails over within the tier.
+   */
+  local?: {
+    service: Pick<
+      LocalEndpointService,
+      'codexProvider' | 'checkNow' | 'onDown' | 'pickCompletion' | 'completionFor' | 'recordCall' | 'runFacts'
+    >;
+    catalog: () => CapabilityCatalogView;
+  };
 }
 
 /**
- * How new tasks are routed (#38): `{ "mode": "manual" | "assisted", "maxTier"?, "maxEffort"? }`.
- * `manual` (the default) runs on the launcher's route and records the router's
- * choice in shadow; `assisted` proposes a route and waits for a click. The caps
- * are frozen into each mission's policy when it is recorded.
+ * How new tasks are routed, and the global scope of §10.2 (#38, #40):
+ * `{ "mode": "manual" | "assisted", "pins"?, "caps"?, "preferences"?, "exclusions"? }`,
+ * edited in Preferences → Orchestration → Routing defaults. `manual` (the
+ * default) runs on the launcher's route and records the router's choice in
+ * shadow; `assisted` proposes a route and waits for a click. The global layer
+ * is frozen into each mission when it is recorded.
  */
-export const ROUTING_KEY = 'orchestration.routing';
-
-export interface RoutingSettings {
-  mode: 'manual' | 'assisted';
-  caps: RouteCaps;
-}
-
-/** Trust nothing in `settings.json`. */
-export function parseRoutingSettings(raw: unknown): RoutingSettings {
-  const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  const caps: RouteCaps = {};
-  if (typeof r.maxTier === 'string' && r.maxTier.trim() !== '') caps.maxTier = r.maxTier.trim();
-  if (typeof r.maxEffort === 'string' && (EFFORT_LEVELS as readonly string[]).includes(r.maxEffort)) caps.maxEffort = r.maxEffort as EffortLevel;
-  return { mode: r.mode === 'assisted' ? 'assisted' : 'manual', caps };
-}
+export { ROUTING_KEY, parseRoutingSettings, type RoutingSettings } from '../shared/orchestration/executionPolicy';
 
 export interface Orchestration extends Disposable {
   readonly enabled: boolean;
@@ -114,6 +119,25 @@ export interface Orchestration extends Disposable {
   readonly ready: Promise<void>;
 }
 
+/** A `local-call` record for a completion a local endpoint served (or failed to). Counts and timings only. */
+function recordLocalCall(service: Pick<LocalEndpointService, 'recordCall'>, r: CompletionResult<unknown>, fellBack: boolean): void {
+  if (!r.local) return;
+  service.recordCall({
+    source: r.local.source,
+    model: r.model,
+    purpose: 'completion',
+    ok: r.ok,
+    ...(r.ok ? {} : { failure: r.reason }),
+    ...(r.infra ? { infra: true } : {}),
+    ...(r.usage.inputTokens !== undefined ? { inputTokens: r.usage.inputTokens } : {}),
+    ...(r.usage.outputTokens !== undefined ? { outputTokens: r.usage.outputTokens } : {}),
+    durationMs: r.durationMs,
+    attempts: r.attempts,
+    local: r.local,
+    ...(fellBack ? { fellBackToHosted: true } : {}),
+  });
+}
+
 export function missionsDir(dataDir: string): string {
   return path.join(dataDir, 'orchestration', 'missions');
 }
@@ -126,19 +150,34 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
   const log = (m: string) => deps.log(`orchestration: ${m}`);
   const store = new MissionStore(missionsDir(deps.dataDir), { log });
   const models = deps.models ?? (() => []);
+  const local = deps.local;
   // The adapters are the only orchestration code that touches the executors (§6.2).
   const harnesses = new Map<HarnessId, AgentHarness>([
     ['claude-code', new ClaudeCodeHarness({ sessions: deps.sessions, models })],
-    ['codex', new CodexHarness({ sessions: deps.sessions, models })],
+    [
+      'codex',
+      new CodexHarness({ sessions: deps.sessions, models, ...(local ? { localProvider: (s, m) => local.service.codexProvider(s, m) } : {}) }),
+    ],
   ]);
-  const completion = deps.completion
+  const hosted = deps.completion
     ? new ClaudeStructuredCompletion({ ...deps.completion, log: (m) => deps.log(`orchestration: ${m}`) })
     : undefined;
+  const completion: StructuredCompletion | undefined = local
+    ? new RoutedCompletion(
+        hosted,
+        () => {
+          const entry = local.service.pickCompletion(local.catalog());
+          return entry ? local.service.completionFor(entry) : undefined;
+        },
+        { log, onLocal: (r, fellBack) => recordLocalCall(local.service, r, fellBack) },
+      )
+    : hosted;
   const repoPolicies = new RepoPolicyStore(repoPoliciesDir(deps.dataDir), { log });
   // Without a completion the assessor still runs, from rules alone, at low confidence (§8.3).
   const assessor = new Assessor({ completion, log: deps.log });
   // Without a completion there is no reviewer, and `review` stages say so (#36).
-  const reviewer = completion ? new Reviewer({ completion }) : undefined;
+  // The reviewer reads the worktree, which only the hosted completion can (a local one has no tools).
+  const reviewer = hosted && completion ? new Reviewer({ completion }) : undefined;
   const tasks = new TaskRunner({
     store,
     harnesses,
@@ -161,7 +200,18 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     assessor,
     reviewer,
     tierOf: deps.tierOf,
+    // The global scope (§10.2), read when a mission is recorded and frozen into it.
+    globalPolicy: () => parseRoutingSettings(deps.settings.get<unknown>(ROUTING_KEY, undefined)).policy,
     ...(deps.routingSnapshot ? { routing: { snapshot: deps.routingSnapshot } } : {}),
+    ...(local
+      ? {
+          local: {
+            check: (source) => local.service.checkNow(source),
+            onDown: (listener) => local.service.onDown(listener),
+            facts: (source, model) => local.service.runFacts(source, model),
+          },
+        }
+      : {}),
     telemetry: deps.telemetry,
     onTurnRecord: deps.onTurnRecord,
     notify: deps.notify,

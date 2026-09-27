@@ -21,8 +21,9 @@ import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostSettings } from '../host/hostServices';
 import { settingUpdate, type HostToPreferences, type PreferencesToHost } from '../shared/preferences';
-import { isSettingActionId, modelPolicyChange, type OrchestrationPrefsView, type SettingActionId } from '../shared/preferences';
+import { isSettingActionId, modelPolicyChange, routingPolicyUpdate, type OrchestrationPrefsView, type SettingActionId } from '../shared/preferences';
 import type { ModelPolicyChange } from '../shared/orchestration/catalog';
+import { localEndpointChange, type LocalEndpointChange } from '../shared/orchestration/localEndpoints';
 import { SETTINGS } from '../shared/settings';
 import { documentUrl } from './bundleProtocol';
 import { TO_HOST, TO_WEBVIEW } from './channels';
@@ -46,6 +47,10 @@ export interface PreferencesWindowOptions {
     view(): OrchestrationPrefsView;
     onDidChange(listener: () => void): Disposable;
     setPolicy(change: ModelPolicyChange): Promise<boolean>;
+    /** Orchestration → Local endpoints (#51). */
+    localEndpoint?(change: LocalEndpointChange): Promise<{ ok: boolean; lines: string[] }>;
+    /** Write the global routing defaults (#40), already checked by `routingPolicyUpdate`. */
+    setRouting?(value: Record<string, unknown>): Promise<void>;
   };
 }
 
@@ -156,6 +161,41 @@ export class PreferencesWindow implements Disposable {
         if (!ok) this.opts.log(`preferences: refused model policy for ${change.key}`);
         this.pushOrchestration();
       });
+      return;
+    }
+    if (message.type === 'localEndpoint') {
+      // Checked like every other message: a shape no window sends does not get to act.
+      const change = localEndpointChange((message as { change?: unknown }).change);
+      const run = this.opts.orchestration?.localEndpoint;
+      if (!change || !run) {
+        this.opts.log('preferences: refused a local endpoint change');
+        return;
+      }
+      void run(change)
+        .then((r) => this.post({ type: 'localEndpointResult', ok: r.ok, lines: r.lines }))
+        .catch((err) => this.post({ type: 'localEndpointResult', ok: false, lines: [`✗  ${String(err)}`] }))
+        .finally(() => this.pushOrchestration());
+      return;
+    }
+    if (message.type === 'routingPolicy') {
+      // Checked again here with the same rules the window used: a shape, a
+      // tier or a pin-above-cap it let through does not get to write.
+      const orch = this.opts.orchestration;
+      if (!orch?.setRouting) {
+        this.opts.log('preferences: refused routing defaults (orchestration unavailable)');
+        return;
+      }
+      const update = routingPolicyUpdate(message, orch.view().catalog);
+      if (!update.ok) {
+        this.opts.log(`preferences: refused routing defaults: ${update.errors.join('; ')}`);
+        this.post({ type: 'routingResult', ok: false, errors: update.errors });
+        return;
+      }
+      void orch
+        .setRouting(update.value)
+        .then(() => this.post({ type: 'routingResult', ok: true, errors: [] }))
+        .catch((e) => this.post({ type: 'routingResult', ok: false, errors: [String(e)] }))
+        .finally(() => this.pushOrchestration());
       return;
     }
     if (message.type === 'close') {

@@ -373,6 +373,20 @@ new worktree and branch of the chosen folder's repository:
     is recorded. Dismissing it leaves the proposal in the Tasks menu.
   - `"maxTier"` and `"maxEffort"` cap every new task. A cap is never exceeded: work that needs
     more than the cap waits for you, saying both why it needs more and what the cap is.
+- **Pins and caps, at four scopes.** You can *pin* a harness, model or effort, *cap* the tier,
+  effort, attempts, concurrent agents, estimated spend, usage-window share or location
+  (local-only / hosted-only), *prefer* a harness or local models, and *exclude* harnesses,
+  sources or local models — globally (Preferences → Orchestration → Routing defaults, stored in
+  `orchestration.routing`), per repository (the `routing` section of its policy file), per
+  mission and per task (the task strip's **Policy…** button, or the Tasks menu). The more
+  specific scope wins, but a cap can only be tightened: a task cannot loosen its mission's cap.
+  A pin that breaks a cap is refused the moment you set it, naming both ("This task pins
+  Opus (expert); the mission is capped at standard"). A pinned model or effort is never changed
+  by escalation. A mission freezes the global and repository settings when it starts; a change
+  to its own policy or its task's applies from the next attempt — a running one is not
+  restarted — and is shown in the strip ("Policy changed (task): pinned effort low → high ·
+  applies from attempt 2"). *Pins & caps* in the strip lists each value in force and where it
+  came from.
 
   **Why this route** in the task strip (and the route chip's tooltip) shows the rules that
   fired and on what, the requirement, the fallbacks, and every model that was not picked and
@@ -387,6 +401,44 @@ new worktree and branch of the chosen folder's repository:
   summed from its turns, git numbers and flags, and a `routing` line records what the router
   recommended, what ran, and which dimensions differed. Like the turn lines, they hold metadata
   only.
+
+## Local models (orchestration)
+
+Preferences → Orchestration → *Local endpoints* registers OpenAI-compatible servers (Ollama,
+llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
+`orchestration.localEndpoints` in `settings.json`. Nothing is installed or started for you.
+
+- **Loopback or not.** An endpoint on `localhost`, `127.x` or `::1` is on when added. Anything
+  else, a LAN box or a hosted API, is treated as external. It is **off** until you turn it on,
+  it is not contacted while off, and everywhere it appears it says *data leaves this machine*.
+- **Keys** go in the system keychain (`safeStorage`), never in settings. Storing refuses when
+  the OS cannot encrypt. A Codex thread on the endpoint gets the key per request, and the key
+  is never written to the session registry.
+- **Probe.** AW reads what the runtime says: the model list, context window, vision, slots
+  (llama.cpp), constrained decoding, and whether the server serves `/v1/responses` (Codex) and
+  `/v1/messages` natively. It probes those with an empty POST, which generates nothing. Each fact
+  says where it came from (`probed`, `declared`, `measured`), and anything nobody said stays
+  unknown. Health is read every 30 s. One miss is *degraded*, two in a row is *down*.
+- **Tier map.** Every probed model shows up **unassigned** and is never routed to until you give
+  it a tier. *Qualify* runs §19.6's stage-1 probe against it: 10 tool calls, 10 tool-result round
+  trips and 20 JSON replies, all synthetic. That sets tool calling and structured output to
+  `measured`. Any miss makes the model completion-only.
+- **What it does once tiered.** Agentic tasks run as a Codex thread whose model provider is the
+  endpoint (Responses wire), under the same sandbox as any attempt. That needs `/v1/responses`
+  on the server and measured tool calling. A model at the weakest tier (`basic`) answers
+  structured completions (assessment) directly over `chat/completions`, ahead of Haiku, and falls
+  back to Haiku if it fails. The reviewer, which reads files, always uses the hosted model.
+  Server slots count as concurrency.
+- **Losing the server.** An attempt whose endpoint goes down, or whose turn fails while the
+  endpoint does not answer, ends as `infra` / `local-server-lost`. If the router picked the
+  route, or the mission has `autoRecover`, it fails over to another model **in the same tier**.
+  A route you picked by hand waits for you.
+- **Numbers.** Each local attempt's `attempt` record carries a `local` block: runtime, device,
+  context window, queue delay, output tokens/s over active time, and *API-equivalent avoided*.
+  That last one is **an estimate**: what the hosted model the router would otherwise have picked
+  would have cost at its `telemetry.prices` entry. Direct calls write `local-call` records. The
+  endpoint card shows runs, `$0 API cost`, verified first time, succeeded, escalated, tok/s, TTFT
+  and runtime per model. A cost a harness invents for a local model is not recorded.
 
 ## Repository policies (orchestration)
 

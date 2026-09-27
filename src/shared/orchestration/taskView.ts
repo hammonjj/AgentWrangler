@@ -159,7 +159,32 @@ export type TaskViewAction =
   | 'recreate-worktree'
   /** Leave the task out of its planned mission and carry on (#43). */
   | 'skip'
+  | 'edit-policy'
   | 'cancel';
+
+/**
+ * The mission's pins and caps as the header shows them (§10.2, §18.2; #40):
+ * what the next attempt runs under, where each value came from, and every
+ * change since the mission started.
+ */
+export interface TaskPolicyView {
+  /** "≤ standard · effort high (pinned)" — the header chip. Empty when nothing is set. */
+  chip: string;
+  /** One line per value in force: "max tier · standard · mission". */
+  lines: { label: string; value: string; from: string }[];
+  /** Route dimensions escalation will not move, because they are pinned. */
+  frozen: string[];
+  /** Newest last. `pending`: no attempt has started under it yet. */
+  changes: { at: number; scope: 'mission' | 'task'; text: string; appliesFromAttempt: number; pending: boolean }[];
+  /** A conflict still standing (a pin left above a cap), which stops the next attempt until it is fixed. */
+  conflicts: string[];
+}
+
+/** "Policy changed (mission): max tier expert → standard · from attempt 2" — the header's change line. */
+export function policyChangeLine(c: TaskPolicyView['changes'][number]): string {
+  const when = c.pending ? `applies from attempt ${c.appliesFromAttempt}` : `from attempt ${c.appliesFromAttempt}`;
+  return `Policy changed (${c.scope}): ${c.text} · ${when}`;
+}
 
 /** How an attempt's verification came out, as the strip and the row show it (#35). */
 export interface TaskVerificationView {
@@ -219,6 +244,8 @@ export interface TaskView {
   verification?: TaskVerificationView;
   /** Newest last, so the list reads in the order the attempts happened. */
   attempts: TaskAttemptView[];
+  /** Pins, caps and policy changes (#40). */
+  policy?: TaskPolicyView;
   actions: TaskViewAction[];
 }
 
@@ -379,6 +406,7 @@ export const TASK_ACTION_LABEL: Record<TaskViewAction, string> = {
   retry: 'Retry',
   'recreate-worktree': 'Recreate worktree',
   skip: 'Skip',
+  'edit-policy': 'Policy…',
   cancel: 'Cancel',
 };
 
@@ -391,6 +419,7 @@ export const TASK_STRIP_ACTIONS: readonly TaskViewAction[] = [
   'skip',
   'cancel',
   'recreate-worktree',
+  'edit-policy',
 ];
 
 /** "involved · medium confidence · from the model" — a row's tooltip, evidence and all. */

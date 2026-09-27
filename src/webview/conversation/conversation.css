@@ -255,6 +255,27 @@ body,
 #taskStrip .tsmeta.base-red {
   color: var(--vscode-charts-yellow, #d7ba7d);
 }
+/* Pins and caps (#40). The chip is dashed like the assessment: it is policy,
+   not a fact about what ran. A conflict left standing is loud, because it
+   stops the next attempt. */
+#taskStrip .tschip.policy {
+  border-style: dashed;
+  overflow-wrap: anywhere;
+}
+#taskStrip .tschip.policy.loud,
+#taskStrip .tsmeta.policy-conflict {
+  border-color: var(--vscode-errorForeground, #f48771);
+  color: var(--vscode-errorForeground, #f48771);
+}
+#taskStrip .tsmeta.policy-changed,
+#taskStrip .tsmeta.policy-conflict {
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+#taskStrip .tsmeta.policy-changed.pending,
+#taskStrip .tspolicychange.pending {
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
 /* The reviewer's verdict per acceptance criterion (#36). */
 #taskStrip .tsreview {
   display: flex;

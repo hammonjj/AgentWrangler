@@ -27,6 +27,7 @@ import {
 } from '../../shared/orchestration/catalog';
 import type { SourceStatus } from '../../shared/orchestration/sourceHealth';
 import { harnessLabel } from '../../shared/harness';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import type {
   ExecutionTarget,
   HarnessId,
@@ -34,6 +35,7 @@ import type {
   ResolverCandidate,
   RouteCaps,
   RouteExclusions,
+  RoutePins,
   RoutePreferences,
   RouteRequirement,
 } from '../../shared/orchestration/types';
@@ -51,6 +53,18 @@ export interface ResolverPolicy {
   caps?: RouteCaps;
   preferences?: RoutePreferences;
   exclusions?: RouteExclusions;
+  /**
+   * Dimensions the user fixed (§10.2, #40). A candidate that differs on one
+   * is rejected, saying which pin; a pinned model is used whatever tier the
+   * work was assessed as needing, within the tier cap, and the note says so.
+   */
+  pins?: RoutePins;
+}
+
+/** Whether a catalog entry is the model a pin names, by any of its ids. */
+function isPinnedModel(e: CatalogEntry, model: string): boolean {
+  const m = model.trim().toLowerCase();
+  return e.aliases.some((a) => a.toLowerCase() === m) || e.descriptor.modelId.toLowerCase() === m || e.descriptor.resolvedId?.toLowerCase() === m;
 }
 
 export interface Resolution {
@@ -140,6 +154,12 @@ function hardFilter(
   if (d.location === 'local' && (ex?.disableLocal || policy.caps?.location === 'hosted-only')) return { reason: `${label}: local models are off` };
   if (d.location === 'hosted' && policy.caps?.location === 'local-only') return { reason: `${label}: the mission is local-only` };
 
+  // 2b. Pins (§10.2, #40): the dimensions the user fixed.
+  const pins = policy.pins;
+  if (pins?.harness && c.target.harness !== pins.harness) return { reason: `${label} on ${harnessLabel(c.target.harness)}: the harness is pinned to ${harnessLabel(pins.harness)}` };
+  if (pins?.source && d.source !== pins.source) return { reason: `${label}: the source is pinned to ${pins.source}` };
+  if (pins?.model && !isPinnedModel(e, pins.model)) return { reason: `${label}: the model is pinned to ${pins.model}` };
+
   // 3. Tier fit.
   const r = c.tierRank;
   const def = tiers[r];
@@ -147,7 +167,8 @@ function hardFilter(
   const lo = tierRank(tiers, req.minTier);
   const hi = tierRank(tiers, req.maxTier);
   if (hi >= 0 && r > hi) return { reason: `${label}: ${e.tier} is above the ${req.maxTier} cap` };
-  if (lo >= 0 && r < lo) return { reason: `${label}: ${e.tier} is below the required ${req.minTier}` };
+  // A pinned model is the user's choice of capability: it is not held to the assessed floor.
+  if (lo >= 0 && r < lo && !pins?.model) return { reason: `${label}: ${e.tier} is below the required ${req.minTier}` };
 
   // 4. Hard needs the model has to meet. Tool needs (edit, shell, network) are
   // the harness's, and both harnesses are agentic; `exclusive:` is a lease (#68).
@@ -156,13 +177,22 @@ function hardFilter(
     if (!d.vision.value) return { reason: `${label}: does not take images` };
   }
 
+  // 4b. A registered endpoint's model does agentic work only once something
+  // has said its tool calls parse (§19.2, §19.6 point 4): the qualification
+  // probe, or the user. Unknown is "cannot satisfy a hard need".
+  const endpoint = isEndpointSource(d.source);
+  if (endpoint) {
+    if (!isKnown(d.toolCalling)) return { reason: `${label}: tool calling not measured yet; run its qualification in Preferences → Orchestration` };
+    if (d.toolCalling.value === 'none') return { reason: `${label}: its tool calls do not parse (completion only)` };
+  }
+
   // 5. Context window, with headroom already in the need.
   let note: string | undefined;
   const need = contextNeedOf(req.needs);
   if (need !== undefined) {
     if (isKnown(d.contextWindow)) {
       if (d.contextWindow.value < need) return { reason: `${label}: context ${fmtTokens(d.contextWindow.value)} < needed ${fmtTokens(need)}` };
-    } else if (d.location === 'hosted' && need <= ASSUMED_HOSTED_WINDOW) {
+    } else if (d.location === 'hosted' && !endpoint && need <= ASSUMED_HOSTED_WINDOW) {
       note = `context window not reported yet; ${fmtTokens(need)} needed is within the ${fmtTokens(ASSUMED_HOSTED_WINDOW)} every hosted model has`;
     } else {
       return { reason: `${label}: context window not reported, and ${fmtTokens(need)} is needed` };
@@ -176,6 +206,9 @@ function hardFilter(
     if (status.health.state === 'down' || (backoff !== undefined && backoff > snap.now)) {
       return { reason: `${label}: ${status.health.reason}`, capacity: status.health.state === 'down' && backoff !== undefined };
     }
+    // Server slots are concurrency (§19.2): none free means wait, not a worse model.
+    const free = status.capacity.freeSlots;
+    if (isKnown(free) && free.value <= 0) return { reason: `${label}: every server slot is busy`, capacity: true };
     const threshold = policy.caps?.maxUsageWindowPercent ?? DEFAULT_ADMISSION_PERCENT;
     const pct = status.capacity.windowPercent;
     if (isKnown(pct) && pct.value >= threshold) {
@@ -234,10 +267,14 @@ export function resolveRoute(req: RouteRequirement, snap: ResolverSnapshot, poli
     }
   }
 
-  const atMin = passing.filter((c) => c.tierRank === lo);
+  const pinnedModel = policy.pins?.model;
+  const atMin = pinnedModel ? passing : passing.filter((c) => c.tierRank === lo);
   let pool = atMin;
   let note: string | undefined;
-  if (pool.length === 0) {
+  if (pinnedModel && pool[0] && pool[0].tierRank !== lo) {
+    note = `Pinned to ${pool[0].entry.descriptor.label} (${pool[0].entry.tier}); the work was assessed as needing ${req.minTier}.`;
+  }
+  if (pool.length === 0 && !pinnedModel) {
     // Upgrade for availability only: the lowest tier above `minTier`, within `maxTier`, reachable by route.
     const higher = passing.filter((c) => c.tierRank > lo && (hi < 0 || c.tierRank <= hi)).sort((a, b) => a.tierRank - b.tierRank);
     if (higher.length > 0) {

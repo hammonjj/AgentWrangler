@@ -1,0 +1,11 @@
+{
+  "_note": "Synthetic, shaped like llama-server's /props, /health and /v1/models. Both harness routes present, as in llama-server 0.4.0.",
+  "GET /props": {
+    "status": 200,
+    "body": { "total_slots": 4, "default_generation_settings": { "n_ctx": 65536 }, "modalities": { "vision": false } }
+  },
+  "GET /health": { "status": 200, "body": { "status": "ok" } },
+  "GET /v1/models": { "status": 200, "body": { "object": "list", "data": [{ "id": "qwen-coder-q4.gguf", "object": "model", "owned_by": "llamacpp" }] } },
+  "POST /v1/responses": { "status": 400, "body": { "error": { "message": "model is required" } } },
+  "POST /v1/messages": { "status": 400, "body": { "error": { "message": "model is required" } } }
+}

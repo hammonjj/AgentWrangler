@@ -148,6 +148,57 @@ export interface AttemptRecord extends RecordBase {
   flags: AttemptFlags;
   /** The record was written for an interrupted attempt and may be incomplete. */
   partial?: boolean;
+  /** Present when the attempt ran on a registered endpoint's model (§19.4, #51). */
+  local?: LocalRunMetrics;
+}
+
+/**
+ * What a run on a local endpoint measured (§19.4). Only what was actually
+ * reported or measured: through a harness, TTFT is not visible, so it is
+ * absent rather than guessed. Cost is `$0 API cost` by rule, never a field.
+ */
+export interface LocalRunMetrics {
+  /** `local:<endpoint id>`. */
+  source: ModelSourceId;
+  runtime?: string;
+  /** Display only, as the user declared it. */
+  device?: string;
+  /** The context window the model was run with, as the catalog knew it. */
+  contextWindow?: number;
+  ttftMs?: number;
+  outTokPerSec?: number;
+  /** `server`: the runtime's own timings. `client`: measured from the stream. `attempt`: output tokens over active time. */
+  tokPerSecFrom?: 'server' | 'client' | 'attempt';
+  /** Time waiting for a server slot. */
+  queueMs?: number;
+  /** The endpoint is not on this machine. */
+  external?: boolean;
+  /**
+   * **An estimate, labelled as one:** what the hosted route the router would
+   * otherwise have picked would have cost for the same tokens, at its price
+   * table. Absent when that route has no price.
+   */
+  apiEquivalentUsd?: number;
+  apiEquivalentModel?: string;
+}
+
+/** One direct call to a local endpoint (§19.1 path 2): a structured completion or a qualification probe. */
+export interface LocalCallRecord extends RecordBase {
+  type: 'local-call';
+  source: ModelSourceId;
+  model: string;
+  purpose: 'completion' | 'qualification';
+  ok: boolean;
+  /** `invalid-output`, `error`, `timeout`, `aborted`; `infra` marks a server that went away. */
+  failure?: string;
+  infra?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  durationMs: number;
+  attempts: number;
+  local: LocalRunMetrics;
+  /** The call failed locally and was answered by the hosted completion instead. */
+  fellBackToHosted?: boolean;
 }
 
 /**
@@ -200,4 +251,42 @@ export interface TaskFinalRecord extends RecordBase {
   activeMs?: number;
 }
 
-export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord | TaskFinalRecord;
+/** A policy value as telemetry carries it: an enum, a number, a flag, or harness/source/model ids. Never text a person wrote. */
+export type PolicyFieldValue = string | number | boolean | string[];
+
+/**
+ * A person changed a control at mission or task scope (§16.2 `override`, #40):
+ * who changed what, from what, at which scope. `via: 'proposal'` is a change
+ * to an `assisted` proposal's route, which pins the task.
+ */
+export interface OverrideRecord extends RecordBase {
+  type: 'override';
+  missionId: string;
+  taskId?: string;
+  scope: 'mission' | 'task';
+  by: 'user';
+  via: 'editor' | 'proposal';
+  changes: { field: string; from?: PolicyFieldValue; to?: PolicyFieldValue }[];
+  /** The mission's state when it was made: `draft` is before anything started. */
+  missionState: string;
+}
+
+/**
+ * A started mission's policy changed (§16.2 `policy-change`, §10.2, #40). It
+ * applies from `appliesFromAttempt`; attempts running at the time keep the
+ * policy they started with.
+ */
+export interface PolicyChangeRecord extends RecordBase {
+  type: 'policy-change';
+  missionId: string;
+  taskId?: string;
+  scope: 'mission' | 'task';
+  fields: string[];
+  /** Index of this change in the mission's `policyChanges`, from 1: the revision it starts. */
+  revision: number;
+  appliesFromAttempt: number;
+  /** Attempts that were running when it changed, and are not restarted. */
+  runningAttempts: number;
+}
+
+export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord | LocalCallRecord | OverrideRecord | PolicyChangeRecord | TaskFinalRecord;

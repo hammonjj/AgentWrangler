@@ -27,7 +27,8 @@ import { Reviewer } from '../../src/orchestration/verify/reviewer';
 import { WorktreeManager, canonicalPath } from '../../src/orchestration/worktrees/worktreeManager';
 import type { SimAttempt } from '../../src/shared/orchestration/simulation';
 import type { AttemptRecord, TelemetryRecord } from '../../src/shared/orchestration/telemetry';
-import type { Mission } from '../../src/shared/orchestration/types';
+import type { ExecutionPolicy, Mission } from '../../src/shared/orchestration/types';
+import { policyContextFor } from '../../src/shared/orchestration/executionPolicy';
 import { taskViewOf } from '../../src/orchestration/view/taskViews';
 import { catalog, snapshot } from './routingFixtures';
 
@@ -551,7 +552,7 @@ describe('TaskRunner', () => {
       expect(mission.tasks[0]).toMatchObject({ state: 'routed', recommendation: { verdict: 'route' } });
       expect(mission.attempts).toEqual([]);
       expect(mission.worktrees).toEqual([]);
-      expect(r.runner.actions(mission.id)).toEqual(['cancel']);
+      expect(r.runner.actions(mission.id)).toEqual(['edit-policy', 'cancel']);
 
       await r.runner.startProposed(mission.id);
       const m = r.runner.get(mission.id)!;
@@ -587,7 +588,9 @@ describe('TaskRunner', () => {
     it('assisted: a change may not break the mission’s tier cap', async () => {
       const r = routed();
       const { mission } = await r.runner.propose({ ...DRAFT, folder: repo, policy: { caps: { maxTier: 'standard' } } });
-      await expect(r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'opus' } })).rejects.toThrow(/is expert; this task is capped at standard/);
+      await expect(r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'opus' } })).rejects.toThrow(
+        'This task pins Opus 5.5 (expert); the mission is capped at standard.',
+      );
       expect(r.runner.get(mission.id)!.attempts).toEqual([]);
     });
 
@@ -603,6 +606,108 @@ describe('TaskRunner', () => {
       // The user can still pick a route within the cap.
       await r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'sonnet', effort: 'medium' } });
       expect(r.runner.get(mission.id)!.decisions[0]).toMatchObject({ decidedBy: 'user', agreement: 'no-recommendation' });
+    });
+
+    // ---- pins and caps (#40) ----
+
+    const SONNET: NewTask['route'] = { harness: 'claude-code', model: 'sonnet', effort: 'low' };
+
+    it('a task pin above a mission cap is refused when it is set, naming both, and records nothing', async () => {
+      const r = routed();
+      await expect(r.runner.start({ ...TASK, folder: repo, route: { harness: 'claude-code', model: 'opus', effort: 'low' }, policy: { caps: { maxTier: 'standard' } } })).rejects.toThrow(
+        'This task pins Opus 5.5 (expert); the mission is capped at standard.',
+      );
+      expect(r.runner.list()).toEqual([]);
+    });
+
+    it('freezes the global and repository layers into the mission when it is recorded', async () => {
+      let global: ExecutionPolicy = { caps: { maxEffort: 'high', maxAttempts: 4 } };
+      new RepoPolicyStore(path.join(dataDir, 'repos')).save(identityFor(repo), {
+        worktrees: { setup: [{ link: 'node_modules' }] },
+        verification: { check: { run: ['/bin/sh', 'check.sh'] } },
+        routing: { caps: { maxAttempts: 2 } },
+      });
+      const r = routed(shared(), { globalPolicy: () => global });
+      const id = (await r.runner.start({ ...TASK, folder: repo, route: SONNET })).id;
+      const m = r.runner.get(id)!;
+      expect(m.policyLayers).toMatchObject({ global: { caps: { maxEffort: 'high', maxAttempts: 4 } }, repo: { caps: { maxAttempts: 2 } }, mission: { mode: 'manual' } });
+      expect(m.policy.caps).toEqual({ maxEffort: 'high', maxAttempts: 2 });
+      expect(r.runner.effectivePolicy(id)!.from['caps.maxAttempts']).toBe('repo');
+      // A later global change does not reach a mission that has started.
+      global = { caps: { maxEffort: 'low' } };
+      expect(r.runner.effectivePolicy(id)!.policy.caps?.maxEffort).toBe('high');
+    });
+
+    it('a mid-mission change applies only to attempts not yet started, is logged, and is shown in the header', async () => {
+      const r = routed();
+      const id = (await r.runner.start({ ...TASK, folder: repo, route: SONNET })).id;
+      // Changed while attempt 1 is under way: it keeps what it started with.
+      await r.runner.setPolicy(id, 'task', { pins: { harness: 'claude-code', model: 'sonnet', effort: 'high' } });
+      let m = r.runner.get(id)!;
+      expect(m.policyChanges).toHaveLength(1);
+      expect(m.policyChanges[0]).toMatchObject({ scope: 'task', fields: ['pins.effort'], appliesFromAttempt: 2, before: { pins: { effort: 'low' } }, changed: { pins: { effort: 'high' } } });
+      expect(m.decisions[0]).toMatchObject({ policyRevision: 0, resolution: { target: { effortNative: 'low' } } });
+      let view = taskViewOf(m, [], undefined, policyContextFor(catalog({ openai: false })))!;
+      expect(view.policy?.changes).toEqual([expect.objectContaining({ scope: 'task', text: 'pinned effort low → high', appliesFromAttempt: 2, pending: true })]);
+      expect(view.policy?.frozen).toEqual(['harness', 'model', 'tier', 'effort']);
+
+      // Telemetry: who changed what, from what, at which scope; and the policy change.
+      const override = r.telemetry.find((t) => t.type === 'override');
+      expect(override).toMatchObject({ missionId: id, scope: 'task', via: 'editor', changes: [{ field: 'pins.effort', from: 'low', to: 'high' }] });
+      expect(r.telemetry.find((t) => t.type === 'policy-change')).toMatchObject({ missionId: id, scope: 'task', fields: ['pins.effort'], revision: 1, appliesFromAttempt: 2 });
+      expect(JSON.stringify(r.telemetry.filter((t) => t.type === 'override' || t.type === 'policy-change'))).not.toContain('Synthetic objective');
+
+      await until(() => attemptOf(r.runner.get(id))?.state === 'succeeded', 8000, 'the attempt to finish');
+      expect(r.registry.get(attemptOf(r.runner.get(id))!.assignment.sessionIds[0])?.launch).toMatchObject({ effort: 'low' });
+      await r.runner.retry(id);
+      m = r.runner.get(id)!;
+      expect(m.decisions[1]).toMatchObject({ policyRevision: 1, resolution: { target: { model: 'sonnet', effortNative: 'high' } } });
+      expect(r.registry.get(attemptOf(m, 2)!.assignment.sessionIds[0])?.launch).toMatchObject({ model: 'sonnet', effort: 'high' });
+      view = taskViewOf(m, [])!;
+      expect(view.policy?.changes[0].pending).toBe(false);
+    });
+
+    it('a mission cap that would strand the task’s pin is refused, naming both, and changes nothing', async () => {
+      const r = routed();
+      const id = (await r.runner.start({ ...TASK, folder: repo, route: SONNET })).id;
+      await expect(r.runner.setPolicy(id, 'mission', { mode: 'manual', caps: { maxTier: 'basic' } })).rejects.toThrow(
+        'This task pins Sonnet 5 (standard); the mission is capped at basic.',
+      );
+      expect(r.runner.get(id)!.policyChanges).toEqual([]);
+      expect(r.telemetry.some((t) => t.type === 'override')).toBe(false);
+    });
+
+    it('an attempts cap set mid-mission stops the next attempt, and says which scope set it', async () => {
+      const r = routed();
+      const id = (await r.runner.start({ ...TASK, folder: repo, route: SONNET })).id;
+      await r.runner.setPolicy(id, 'mission', { mode: 'manual', caps: { maxAttempts: 1 } });
+      await until(() => attemptOf(r.runner.get(id))?.state === 'succeeded', 8000, 'the attempt to finish');
+      await expect(r.runner.retry(id)).rejects.toThrow('This would be attempt 2; the mission caps attempts at 1.');
+      const m = r.runner.get(id)!;
+      expect(m.attempts).toHaveLength(1);
+      expect(m.tasks[0]).toMatchObject({ state: 'needs-human', stateReason: 'This would be attempt 2; the mission caps attempts at 1.' });
+    });
+
+    it('assisted: a pinned effort is honoured by the proposal, and a cap edit before start re-proposes', async () => {
+      const r = routed();
+      const { mission } = await r.runner.propose({ ...DRAFT, folder: repo, policy: { preferences: { harness: 'claude-code' }, pins: { effort: 'high' } } });
+      const rec = r.runner.get(mission.id)!.tasks[0].recommendation!;
+      expect(rec.requirement.effort).toBe('high');
+      expect(rec.reasons.map((x) => x.ruleId)).toContain('pin.effort');
+      expect(rec.resolution.target).toMatchObject({ model: 'sonnet', effortNative: 'high' });
+      // Not started: no policy change is logged, but the override is, and the proposal follows the new cap.
+      await r.runner.setPolicy(mission.id, 'mission', { mode: 'assisted', preferences: { harness: 'claude-code' }, pins: { effort: 'high' }, caps: { maxTier: 'basic' } });
+      const m = r.runner.get(mission.id)!;
+      expect(m.policyChanges).toEqual([]);
+      expect(m.tasks[0]).toMatchObject({ state: 'needs-human', recommendation: { verdict: 'needs-human' } });
+      expect(r.telemetry.find((t) => t.type === 'override')).toMatchObject({ scope: 'mission', missionState: 'draft' });
+    });
+
+    it('assisted: changing the proposal’s route records an override from the recommendation', async () => {
+      const r = routed();
+      const { mission } = await r.runner.propose({ ...DRAFT, folder: repo });
+      await r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'sonnet', effort: 'high' } });
+      expect(r.telemetry.find((t) => t.type === 'override')).toMatchObject({ scope: 'task', via: 'proposal', changes: [{ field: 'pins.effort', from: 'medium', to: 'high' }] });
     });
 
     it('propose refuses without a catalog, and records nothing it cannot finish', async () => {

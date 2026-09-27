@@ -15,7 +15,7 @@ import './preferences.css';
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
 import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId } from '../../shared/preferences';
 import { settingGroups, type SettingSpec } from '../../shared/settings';
-import { ORCHESTRATION_GROUP, renderOrchestration } from './orchestration';
+import { ORCHESTRATION_GROUP, onRoutingResult, renderOrchestration, setLocalEndpointResult } from './orchestration';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
 
@@ -494,12 +494,24 @@ window.addEventListener('message', (event: MessageEvent) => {
     showActionResult(message.ok, message.lines);
     return;
   }
+  if (message.type === 'localEndpointResult') {
+    setLocalEndpointResult(message);
+    if (orchestrationBody) renderOrchestration(orchestrationBody, orchestration, post);
+    return;
+  }
+  if (message.type === 'routingResult') {
+    onRoutingResult(message.ok, message.errors);
+    if (orchestrationBody) renderOrchestration(orchestrationBody, orchestration, post);
+    return;
+  }
   if (message.type === 'orchestration') {
     orchestration = message.view;
     // A usage read re-sends the view every minute or so. Redrawing under an
-    // open tier dropdown would close it, so wait until focus leaves it.
+    // open tier dropdown, or a URL being typed, would lose it, so wait until focus leaves.
     const active = document.activeElement;
-    if (orchestrationBody?.contains(active) && active instanceof HTMLSelectElement) {
+    const editing =
+      active instanceof HTMLSelectElement || (active instanceof HTMLInputElement && active.type !== 'checkbox' && active.type !== 'radio');
+    if (orchestrationBody?.contains(active) && editing) {
       orchestrationStale = true;
       return;
     }

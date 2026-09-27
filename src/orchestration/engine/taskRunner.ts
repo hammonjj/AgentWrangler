@@ -64,6 +64,9 @@ import {
   type ModelSourceId,
   type OrchestrationOrigin,
   type OutcomeCategory,
+  type PolicyChange,
+  type PolicyLayers,
+  type RoutePins,
   type RouteRecommendation,
   type RoutingDecision,
   type RoutingReason,
@@ -88,8 +91,28 @@ import type { WorktreeManager } from '../worktrees/worktreeManager';
 import type { Reviewer } from '../verify/reviewer';
 import { Verifier } from '../verify/verifier';
 import { buildVerificationPlan, summariseVerification } from '../../shared/orchestration/verification';
-import { nativeEffortFor, tierRank } from '../../shared/orchestration/catalog';
-import type { ResolverSnapshot } from '../policy/resolver';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
+import type { HealthState } from '../../shared/orchestration/sourceHealth';
+import type { LocalRunMetrics } from '../../shared/orchestration/telemetry';
+import { DEFAULT_TIERS, isKnown, nativeEffortFor, tierRank } from '../../shared/orchestration/catalog';
+import {
+  admissionRefusal,
+  asTaskOverrides,
+  checkPolicyEdit,
+  compactPolicy,
+  conflictText,
+  missionLayer,
+  missionLayers,
+  policyContextFor,
+  policyDiff,
+  resolveEffectivePolicy,
+  taskLayer,
+  validateExecutionPolicy,
+  type AdmissionFacts,
+  type EffectivePolicy,
+  type PolicyContext,
+} from '../../shared/orchestration/executionPolicy';
+import { resolveRoute, type ResolverSnapshot } from '../policy/resolver';
 import { compareRoutes, recommendRoute } from '../policy/recommend';
 import { attemptRecord, addTurnUsage, routingRecord } from './attemptRecord';
 import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from './attemptPolicy';
@@ -98,6 +121,11 @@ import { sessionVerdict, turnFailure, turnMessageIds, type HandleView, type Sess
 /** What the user picked: harness, model, effort and (Claude) permission mode (#33 "manual route"). */
 export interface TaskRoute {
   harness: HarnessId;
+  /**
+   * Where the model runs, when it is not the harness's own login: a
+   * registered endpoint's `local:<id>` (#51). Absent: the harness's source.
+   */
+  source?: ModelSourceId;
   /** Empty or absent: the harness's own default model. */
   model?: string;
   /** The model's native effort level. Empty or absent: none is sent. */
@@ -166,7 +194,7 @@ export class TaskError extends Error {
 }
 
 /** What can be done with a task now. The launcher's task menu offers these (#34 draws them properly). */
-export type TaskAction = 'show-session' | 'open-diff' | 'accept' | 'resume' | 'retry' | 'recreate-worktree' | 'skip' | 'cancel';
+export type TaskAction = 'show-session' | 'open-diff' | 'accept' | 'resume' | 'retry' | 'recreate-worktree' | 'skip' | 'edit-policy' | 'cancel';
 
 export interface TaskRunnerDeps {
   store: Pick<MissionStore, 'save' | 'loadActive'>;
@@ -189,11 +217,29 @@ export interface TaskRunnerDeps {
   /** The catalog's tier for a model, recorded on the routing decision as history. */
   tierOf?: (source: ModelSourceId, model: string) => string | undefined;
   /**
+   * The global scope's pins, caps, preferences and exclusions (§10.2, #40),
+   * read when a mission is recorded and frozen into it. Absent: none.
+   */
+  globalPolicy?: () => ExecutionPolicy | undefined;
+  /**
    * The catalog and source health the resolver decides against (#38), read
    * fresh for every recommendation. Absent: no recommendations — `manual`
    * attempts record no shadow and `propose` refuses.
    */
   routing?: { snapshot(): ResolverSnapshot };
+  /**
+   * The registered local endpoints (#51). A running attempt on one whose
+   * server stops answering is ended as `infra` and, where the route allows,
+   * failed over to another model of the same tier. Absent: no local models.
+   */
+  local?: {
+    /** Read the endpoint's health now. */
+    check(source: ModelSourceId): Promise<HealthState>;
+    /** Fires when an endpoint is read as `down`. */
+    onDown(listener: (source: ModelSourceId) => void): Disposable;
+    /** What an attempt record says about the endpoint and model (runtime, device, context window). */
+    facts?(source: ModelSourceId, model: string): Omit<LocalRunMetrics, 'source'> | undefined;
+  };
   /** `attempt` records go here (the telemetry log); turn records carry the attempt id already (#27). */
   telemetry?: { append(record: TelemetryRecord): boolean };
   /** Every turn record as it is written, to sum each attempt's usage. */
@@ -225,6 +271,11 @@ const TASK_KEY = 't1';
 const CONTINUE_PROMPT =
   'Agent Wrangler lost track of this session and has resumed it. Carry on with the task where you left off; say so and stop when it is done.';
 const DEFAULT_SETTLE_MS = 2000;
+/** The outcome signature of an attempt whose local model server went away (#51). */
+export const LOCAL_SERVER_LOST = 'local-server-lost';
+const LOCAL_SERVER_LOST_TEXT = 'its local model server stopped answering';
+/** Attempts a task may have, in all, before failover stops trying (when the mission sets no `maxAttempts`). */
+const DEFAULT_MAX_ATTEMPTS = 3;
 const END_SESSION_WAIT_MS = 15_000;
 /** Attempt states in which a session is (or is about to be) the attempt's. */
 const LIVE: readonly AttemptState[] = ['launching', 'running', 'waiting-human', 'finishing', 'verifying'];
@@ -273,6 +324,7 @@ export class TaskRunner implements Disposable {
     this.log = deps.log ?? (() => undefined);
     this.subs.push(deps.sessions.onDidChange(() => this.pokeAll()));
     if (deps.onTurnRecord) this.subs.push(deps.onTurnRecord((r) => this.onTurnRecord(r)));
+    if (deps.local) this.subs.push(deps.local.onDown((source) => this.onLocalDown(source)));
   }
 
   // ---- Reading ----
@@ -333,7 +385,8 @@ export class TaskRunner implements Disposable {
     }
     // Skipping is for a task in a plan: the mission carries on without it.
     if (isPlanned(m) && live && ['needs-human', 'blocked'].includes(task.state)) out.push('skip');
-    if (!['completed', 'cancelled', 'failed', 'review'].includes(m.state)) out.push('cancel');
+    // Pins and caps can change until the mission ends; a change reaches the next attempt (#40).
+    if (!['completed', 'cancelled', 'failed', 'review'].includes(m.state)) out.push('edit-policy', 'cancel');
     return out;
   }
 
@@ -421,16 +474,16 @@ export class TaskRunner implements Disposable {
       if (!route) {
         const t = rec.resolution.target;
         if (!t || rec.verdict === 'blocked') throw new TaskError(rec.note ?? 'There is no recommended route to accept; pick one.');
-        route = { harness: t.harness, model: t.model, ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
+        route = { harness: t.harness, model: t.model, ...(isEndpointSource(t.source) ? { source: t.source } : {}), ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
       }
       this.checkRoute(route);
-      const target = accepted ? rec.resolution.target! : this.targetFor(route);
-      const tiers = this.deps.routing?.snapshot().catalog.tiers;
-      const cap = m.policy.caps?.maxTier;
-      if (!accepted && cap && tiers && tierRank(tiers, target.tier) > tierRank(tiers, cap) && tierRank(tiers, cap) >= 0) {
-        throw new TaskError(`${target.model || 'That model'} is ${target.tier}; this task is capped at ${cap}.`);
-      }
-      this.put(this.patchTask(m, task.id, (t) => ({ ...t, overrides: { ...t.overrides, pins: routePins(route!) } })));
+      // The route becomes the task's pins, which may break no cap at any
+      // scope (§10.2): refused here, naming both, before anything is changed.
+      const overrides = { ...task.overrides, pins: routePins(route) };
+      const conflicts = checkPolicyEdit(missionLayers(m, task), 'task', taskLayer(overrides), this.policyContext());
+      if (conflicts.length > 0) throw new TaskError(conflictText(conflicts));
+      this.put(this.patchTask(m, task.id, (t) => ({ ...t, overrides })));
+      if (!accepted) this.writeProposalOverride(m, rec, route);
       await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation: rec, offered: true, accepted } });
       return this.need(missionId);
     });
@@ -442,6 +495,22 @@ export class TaskRunner implements Disposable {
     if (!objective) throw new TaskError('A task needs an objective.');
     const loaded = this.deps.repoPolicies.forFolder(req.folder);
     if (!loaded) throw new TaskError(`${req.folder} is not in a git repository. A task runs in a worktree of one.`);
+    // The policy layers, frozen here (§10.2): the global defaults and the
+    // repository's policy as they are now, and what this mission and task set.
+    // Anything that conflicts is refused before a mission exists.
+    const ctx = this.policyContext();
+    const shape = validateExecutionPolicy(policy, { tiers: ctx.tiers });
+    if (!shape.ok) throw new TaskError(`The mission's policy is not valid: ${shape.errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`);
+    const policyLayers: PolicyLayers = {};
+    const global = compactPolicy(this.deps.globalPolicy?.());
+    const repo = compactPolicy(loaded.policy.routing);
+    const own = compactPolicy(shape.policy);
+    if (global) policyLayers.global = global;
+    if (repo) policyLayers.repo = repo;
+    if (own) policyLayers.mission = own;
+    const withTask = resolveEffectivePolicy(missionLayers({ policy: {}, policyLayers }, { overrides }), ctx);
+    if (withTask.conflicts.length > 0) throw new TaskError(conflictText(withTask.conflicts));
+    const effective = resolveEffectivePolicy(missionLayers({ policy: {}, policyLayers }), ctx).policy;
     const manager = await this.manager(loaded);
     const baseRef = req.baseRef?.trim() || 'HEAD';
     const baseCommit = await manager.resolveCommit(baseRef).catch((e: Error) => {
@@ -484,7 +553,8 @@ export class TaskRunner implements Disposable {
       repoRoot: manager.repoRoot,
       base: { ref: baseRef, commit: baseCommit },
       integration: 'none',
-      policy,
+      policy: effective,
+      policyLayers,
       policyChanges: [],
       state: 'draft',
       source: { kind: 'user', trusted: true },
@@ -498,8 +568,246 @@ export class TaskRunner implements Disposable {
       updatedAt: now,
     };
     this.put(mission);
-    this.log(`task ${id}: recorded in ${mission.repoRoot} (${policy.mode ?? 'manual'} routing)`);
+    this.log(`task ${id}: recorded in ${mission.repoRoot} (${effective.mode ?? 'manual'} routing)`);
     return id;
+  }
+
+  // ---- Policy (§10.2, #40) ----
+
+  /** The policy the task's next attempt would run under, with where each value came from and any conflict. */
+  effectivePolicy(missionId: string): EffectivePolicy | undefined {
+    const m = this.missions.get(missionId);
+    return m ? this.effective(m) : undefined;
+  }
+
+  /**
+   * Replace the mission's own layer, or the task's overrides.
+   *
+   * Refused — with a `TaskError` naming both scopes — when the new layer is
+   * malformed, when a pin in it breaks a cap at any scope, or when it would
+   * leave a pin elsewhere breaking a cap it sets (§10.2: a validation error
+   * at the time it is set, never resolved silently). Nothing changes then.
+   *
+   * On a started mission the change applies to attempts not yet started: a
+   * running attempt keeps the policy it launched with and is not restarted.
+   * It is recorded as a `PolicyChange` (shown in the mission header) and as
+   * `override` and `policy-change` telemetry. On a proposal nobody has
+   * started, the proposal is routed again under the new policy.
+   */
+  setPolicy(missionId: string, scope: 'mission' | 'task', next: ExecutionPolicy | undefined, opts: { reason?: string; taskId?: string } = {}): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (['completed', 'cancelled', 'failed', 'review'].includes(m.state)) throw new TaskError('The task has finished; its policy no longer changes anything.');
+      const ctx = this.policyContext();
+      const shape = validateExecutionPolicy(next ?? {}, {
+        tiers: ctx.tiers,
+        ...(scope === 'task' ? { allowed: ['pins', 'caps', 'preferences', 'exclusions'] } : {}),
+      });
+      if (!shape.ok) throw new TaskError(shape.errors.map((e) => `${e.path}: ${e.message}`).join('; '));
+      const layer = compactPolicy(shape.policy);
+      // A planned mission's task scope is the task that runs next, unless one is named.
+      const task = (opts.taskId ? m.tasks.find((t) => t.id === opts.taskId) : undefined) ?? this.currentTask(m);
+      const conflicts = checkPolicyEdit(missionLayers(m, task), scope, layer, ctx);
+      if (conflicts.length > 0) throw new TaskError(conflictText(conflicts));
+      const before = scope === 'mission' ? missionLayer(m) : taskLayer(task.overrides);
+      const diff = policyDiff(before, layer);
+      if (diff.length === 0) return m;
+
+      const now = this.now();
+      if (scope === 'mission') {
+        const layers: PolicyLayers = { ...(m.policyLayers ?? {}), mission: layer };
+        if (!layer) delete layers.mission;
+        m = { ...m, policyLayers: layers, policy: resolveEffectivePolicy(missionLayers({ policy: {}, policyLayers: layers }), ctx).policy };
+      } else {
+        m = this.patchTask(m, task.id, (t) => {
+          const { overrides: _old, ...rest } = t;
+          const overrides = asTaskOverrides(layer);
+          return overrides ? { ...rest, overrides } : rest;
+        });
+      }
+      const started = m.state !== 'draft' || task.attemptIds.length > 0;
+      let change: PolicyChange | undefined;
+      if (started) {
+        change = {
+          id: this.id(),
+          at: now,
+          by: 'user',
+          scope,
+          ...(scope === 'task' ? { taskId: task.id } : {}),
+          fields: diff.map((d) => d.field),
+          before: before ?? {},
+          changed: layer ?? {},
+          appliesFromAttempt: task.attemptIds.length + 1,
+          ...(opts.reason ? { reason: opts.reason } : {}),
+        };
+        m = { ...m, policyChanges: [...m.policyChanges, change] };
+      } else if (task.recommendation && task.attemptIds.length === 0) {
+        m = this.reproposed(m);
+      }
+      this.put(m);
+      this.log(`task ${missionId}: ${scope} policy changed (${diff.map((d) => d.field).join(', ')})${change ? `, from attempt ${change.appliesFromAttempt}` : ''}`);
+      this.writeTelemetry(m, {
+        v: 1,
+        type: 'override',
+        id: `override:${change?.id ?? this.id()}`,
+        at: now,
+        missionId: m.id,
+        ...(scope === 'task' ? { taskId: task.id } : {}),
+        scope,
+        by: 'user',
+        via: 'editor',
+        changes: diff,
+        missionState: m.state,
+      });
+      if (change) {
+        this.writeTelemetry(m, {
+          v: 1,
+          type: 'policy-change',
+          id: `policy-change:${change.id}`,
+          at: now,
+          missionId: m.id,
+          ...(change.taskId ? { taskId: change.taskId } : {}),
+          scope,
+          fields: change.fields,
+          revision: m.policyChanges.length,
+          appliesFromAttempt: change.appliesFromAttempt,
+          runningAttempts: m.attempts.filter((a) => LIVE.includes(a.state)).length,
+        });
+      }
+      return m;
+    });
+  }
+
+  /** A proposal nobody has started, routed again under the policy as it now is. */
+  private reproposed(m: Mission): Mission {
+    const rec = this.recommendationFor(m);
+    if (!rec) return m;
+    const now = this.now();
+    // A proposal is a single-task mission.
+    const tid = m.tasks[0].id;
+    m = this.patchTask(m, tid, (t) => ({ ...t, recommendation: rec }));
+    if (rec.verdict !== 'route' && m.tasks[0].state === 'routed') {
+      m = this.patchTask(m, tid, (t) => transitionTask(m, t, 'needs-human', { now, reason: rec.note ?? 'a person has to decide the route' }));
+    } else if (rec.verdict === 'route' && m.tasks[0].state === 'needs-human') {
+      m = this.patchTask(m, tid, (t) => ({ ...t, stateReason: 'route proposed under the changed policy; waiting for you to accept or change it' }));
+    }
+    return m;
+  }
+
+  /** The tiers and models pins and caps are checked against: the router's catalog, or the default tiers. */
+  private policyContext(): PolicyContext {
+    try {
+      const catalog = this.deps.routing?.snapshot().catalog;
+      if (catalog) return policyContextFor(catalog);
+    } catch (e) {
+      this.log(`policy: could not read the catalog: ${errorText(e)}`);
+    }
+    return {
+      tiers: DEFAULT_TIERS,
+      model: (pins) => {
+        const model = pins.model?.trim();
+        if (!model) return undefined;
+        const source = pins.source ?? SOURCE[pins.harness ?? ''];
+        const tier = source ? this.deps.tierOf?.(source, model) : undefined;
+        return { label: model, ...(tier ? { tier } : {}), ...(source ? { source } : {}) };
+      },
+    };
+  }
+
+  /** Every layer resolved for the task: what its next attempt runs under. */
+  private effective(m: Mission, task: Task = this.currentTask(m), ctx: PolicyContext = this.policyContext()): EffectivePolicy {
+    return resolveEffectivePolicy(missionLayers(m, task), ctx);
+  }
+
+  /**
+   * A route with the policy's pins applied (§10.2): a pinned dimension
+   * replaces the route's, so a pin set after the last attempt reaches the
+   * next one. A pinned effort is sent as the model's own level for it.
+   */
+  private withPins(route: TaskRoute, pins: RoutePins | undefined): TaskRoute {
+    if (!pins) return route;
+    const out: TaskRoute = { ...route };
+    if (pins.harness && pins.harness !== route.harness) {
+      out.harness = pins.harness;
+      if (!pins.model) delete out.model;
+      delete out.permissionMode;
+    }
+    if (pins.model) out.model = pins.model;
+    if (pins.effort && (!route.effort || awEffort(route.effort) !== pins.effort || out.model !== route.model)) {
+      const native = this.nativeEffort(out, pins.effort);
+      if (native) out.effort = native;
+      else delete out.effort;
+    }
+    return out;
+  }
+
+  /** The model's own level for an AW effort level, from the catalog; the level itself when the model is unknown. */
+  private nativeEffort(route: TaskRoute, level: EffortLevel): string | undefined {
+    const source = SOURCE[route.harness] ?? route.harness;
+    const alias = route.model?.trim() || (route.harness === 'claude-code' ? 'default' : '');
+    let entry;
+    try {
+      entry = alias ? this.deps.routing?.snapshot().catalog.entries.find((e) => e.descriptor.source === source && e.aliases.includes(alias)) : undefined;
+    } catch {
+      entry = undefined;
+    }
+    if (!entry) return level;
+    const native = nativeEffortFor(entry, level);
+    return native === 'none' ? undefined : native;
+  }
+
+  /** What the count caps are checked against for the task's next attempt. */
+  private admissionFacts(m: Mission, route: TaskRoute, mode: 'fresh' | 'continue', task: Task = this.currentTask(m)): AdmissionFacts {
+    const liveAgents = [...this.missions.values()].reduce((n, x) => n + x.attempts.filter((a) => LIVE.includes(a.state)).length, 0);
+    const costs = m.attempts.filter((a) => a.taskId === task.id && a.usage?.costUsd !== undefined).map((a) => a.usage!.costUsd!);
+    let windowPercent: number | undefined;
+    try {
+      const pct = this.deps.routing?.snapshot().sources[SOURCE[route.harness] ?? route.harness]?.capacity.windowPercent;
+      if (pct && isKnown(pct)) windowPercent = pct.value;
+    } catch {
+      windowPercent = undefined;
+    }
+    return {
+      // A resume carries on an attempt; it is not another try at the task.
+      attemptsSoFar: mode === 'continue' ? 0 : m.attempts.filter((a) => a.taskId === task.id && !a.resumeOf).length,
+      liveAgents,
+      ...(costs.length > 0 ? { spentUsd: costs.reduce((s, c) => s + c, 0) } : {}),
+      ...(windowPercent !== undefined ? { windowPercent } : {}),
+    };
+  }
+
+  /** An `assisted` proposal the user changed: an `override` at task scope, from the recommendation to their route. */
+  private writeProposalOverride(m: Mission, rec: RouteRecommendation, route: TaskRoute): void {
+    const t = rec.resolution.target;
+    const changes: { field: string; from?: string; to?: string }[] = [];
+    const add = (field: string, from: string | undefined, to: string | undefined) => {
+      if ((from ?? '') !== (to ?? '')) changes.push({ field, ...(from ? { from } : {}), ...(to ? { to } : {}) });
+    };
+    add('pins.harness', t?.harness, route.harness);
+    add('pins.model', t?.model, route.model?.trim() || undefined);
+    add('pins.effort', t ? rec.requirement.effort : undefined, route.effort?.trim() ? awEffort(route.effort) : undefined);
+    if (changes.length === 0) return;
+    this.writeTelemetry(m, {
+      v: 1,
+      type: 'override',
+      id: `override:${this.id()}`,
+      at: this.now(),
+      missionId: m.id,
+      taskId: m.tasks[0].id,
+      scope: 'task',
+      by: 'user',
+      via: 'proposal',
+      changes,
+      missionState: m.state,
+    });
+  }
+
+  private writeTelemetry(m: Mission, record: TelemetryRecord): void {
+    try {
+      this.deps.telemetry?.append(record);
+    } catch (e) {
+      this.log(`task ${m.id}: could not write its ${record.type} record: ${String(e)}`);
+    }
   }
 
   /** Resume an interrupted attempt: the same session id, through #4's Resume (orphan sweep first). */
@@ -626,8 +934,21 @@ export class TaskRunner implements Disposable {
     });
     const now = this.now();
     const title = (req.title?.trim() || firstLine(objective)).slice(0, 120);
+    // The policy layers, frozen here as `record` freezes them (§10.2, #40).
+    const ctx = this.policyContext();
+    const shape = validateExecutionPolicy(req.policy ?? {}, { tiers: ctx.tiers });
+    if (!shape.ok) throw new TaskError(`The mission's policy is not valid: ${shape.errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`);
+    const policyLayers: PolicyLayers = {};
+    const global = compactPolicy(this.deps.globalPolicy?.());
+    const repo = compactPolicy(loaded.policy.routing);
+    const own = compactPolicy(shape.policy);
+    if (global) policyLayers.global = global;
+    if (repo) policyLayers.repo = repo;
+    if (own) policyLayers.mission = own;
+    const layered = resolveEffectivePolicy(missionLayers({ policy: {}, policyLayers }), ctx);
+    if (layered.conflicts.length > 0) throw new TaskError(conflictText(layered.conflicts));
     // P8 routes by hand (the launcher's route, or a task's pin); the router's view is a preview.
-    const policy: ExecutionPolicy = { ...req.policy, mode: 'manual' };
+    const policy: ExecutionPolicy = { ...layered.policy, mode: 'manual' };
     const drafts = req.tasks && req.tasks.length > 0 ? req.tasks : [{ title, objective, acceptanceCriteria: [] }];
     const built = tasksFromDraft(drafts, policy, this.planContext(loaded.policy));
     if (!built.ok) throw new TaskError(`The plan was refused: ${built.problems.join('; ')}.`);
@@ -640,6 +961,7 @@ export class TaskRunner implements Disposable {
       base: { ref: baseRef, commit: baseCommit },
       integration: 'none',
       policy,
+      policyLayers,
       policyChanges: [],
       state: 'draft',
       planned: true,
@@ -857,12 +1179,12 @@ export class TaskRunner implements Disposable {
     const sameHarness = harness === base.harness;
     const model = pins.model ?? (sameHarness ? base.model : undefined);
     const sameModel = sameHarness && model === base.model;
-    const effort = pins.effort ? this.nativeEffort(harness, model, pins.effort) : sameModel ? base.effort : undefined;
+    const effort = pins.effort ? this.plannedEffort(harness, model, pins.effort) : sameModel ? base.effort : undefined;
     return { harness, ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
   }
 
   /** AW's effort level as the model's own, through the catalog when it knows the model. */
-  private nativeEffort(harness: HarnessId, model: string | undefined, level: EffortLevel): string | undefined {
+  private plannedEffort(harness: HarnessId, model: string | undefined, level: EffortLevel): string | undefined {
     const source = SOURCE[harness] ?? harness;
     const alias = model || (harness === 'claude-code' ? 'default' : '');
     const entry = alias ? this.deps.routing?.snapshot().catalog.entries.find((e) => e.descriptor.source === source && e.aliases.includes(alias)) : undefined;
@@ -870,10 +1192,10 @@ export class TaskRunner implements Disposable {
     return native === 'none' ? undefined : native;
   }
 
-  /** Why a task's route breaks its caps, if it does (§10.2). Thin on purpose: #40 owns how scopes combine. */
+  /** Why a task's route breaks its caps, if it does (§10.2): the caps of every scope, as #40 combines them. */
   private capRefusal(m: Mission, taskId: string, route: TaskRoute): string | undefined {
     const task = m.tasks.find((t) => t.id === taskId);
-    const caps = { ...m.policy.caps, ...task?.overrides?.caps };
+    const caps = (task ? this.effective(m, task).policy.caps : m.policy.caps) ?? {};
     const tiers = this.deps.routing?.snapshot().catalog.tiers;
     if (caps.maxTier && tiers) {
       const target = this.targetFor(route);
@@ -1222,10 +1544,17 @@ export class TaskRunner implements Disposable {
     const planned = isPlanned(m);
     const n = task.attemptIds.length + 1;
     const prevDecision = opts.mode === 'continue' ? m.decisions.find((d) => d.id === opts.resumeOf.routingDecisionId) : undefined;
-    const route: TaskRoute = opts.mode === 'fresh' ? opts.route : routeFromDecision(prevDecision, opts.resumeOf);
+    // The policy as it is now, not as it was at the last attempt: a change
+    // since then applies from this one (§10.2). Pins replace the route's own
+    // dimensions; a conflict or a spent count cap stops it here.
+    const eff = this.effective(m, task);
+    const route: TaskRoute = this.withPins(opts.mode === 'fresh' ? opts.route : routeFromDecision(prevDecision, opts.resumeOf), eff.policy.pins);
     let harness: AgentHarness;
     let loaded: LoadedRepoPolicy;
     try {
+      if (eff.conflicts.length > 0) throw new TaskError(conflictText(eff.conflicts));
+      const refusal = admissionRefusal(eff, this.admissionFacts(m, route, opts.mode, task));
+      if (refusal) throw new TaskError(refusal);
       harness = this.checkRoute(route);
       const policy = this.deps.repoPolicies.forFolder(m.repoRoot);
       if (!policy) throw new TaskError(`${m.repoRoot} is no longer a git repository.`);
@@ -1233,6 +1562,7 @@ export class TaskRunner implements Disposable {
     } catch (e) {
       // Nothing was started; a first attempt that never got going leaves the task waiting on the user.
       if (task.attemptIds.length === 0) this.put(this.failBeforeLaunch(m, task.id, errorText(e)));
+      else if (e instanceof TaskError) this.put(this.patchTask(m, task.id, (t) => ({ ...t, stateReason: e.message })));
       throw e;
     }
     const now = this.now();
@@ -1314,7 +1644,7 @@ export class TaskRunner implements Disposable {
         cwd: wt.path,
         prompt,
         promptId,
-        target: { harness: route.harness, model: route.model ?? '', effortNative: route.effort?.trim() || 'none' },
+        target: { harness: route.harness, source: decision.resolution.target.source, model: route.model ?? '', effortNative: route.effort?.trim() || 'none' },
         origin: originOf(m, attempt),
         permissionMode: provider === 'claude' ? decisionMode(decision) : undefined,
         ...(opts.mode === 'continue' ? { resume: sessionIds.at(-1) } : sessionIds[0] ? { sessionId: sessionIds[0] } : {}),
@@ -1390,7 +1720,7 @@ export class TaskRunner implements Disposable {
    * bare route when the catalog has never seen it.
    */
   private targetFor(route: TaskRoute): ExecutionTarget {
-    const source = SOURCE[route.harness] ?? route.harness;
+    const source = route.source ?? SOURCE[route.harness] ?? route.harness;
     const model = route.model?.trim() ?? '';
     const alias = model || (route.harness === 'claude-code' ? 'default' : '');
     const entry = alias
@@ -1418,7 +1748,8 @@ export class TaskRunner implements Disposable {
     const cmp = rec ? compareRoutes(rec.resolution.target, target, routing.offered) : undefined;
     const mode = m.policy.mode ?? 'manual';
     let reasons: RoutingReason[];
-    if (accepted) reasons = [...rec!.reasons, { ruleId: 'assisted.accepted', text: 'Recommendation accepted.', ...inputs }];
+    if (accepted && routing.failover) reasons = rec!.reasons.map((r, i) => (i === 0 && permissionMode ? { ...r, inputs: { ...r.inputs, permissionMode } } : r));
+    else if (accepted) reasons = [...rec!.reasons, { ruleId: 'assisted.accepted', text: 'Recommendation accepted.', ...inputs }];
     else if (routing.offered && cmp) reasons = [{ ruleId: 'assisted.changed', text: `Changed from the recommendation: ${cmp.changed.join(', ') || 'nothing'}.`, ...inputs }];
     else reasons = [{ ruleId: 'manual', text: 'Route picked by the user.', ...inputs }];
     return {
@@ -1437,6 +1768,7 @@ export class TaskRunner implements Disposable {
         ? { target, candidates: rec!.resolution.candidates, catalogVersion: rec!.resolution.catalogVersion, ...(rec!.resolution.note ? { note: rec!.resolution.note } : {}) }
         : { target, candidates: [{ target, verdict: 'chosen', reason: 'picked by the user' }], catalogVersion: 'manual' },
       ...(rec ? { shadow: rec, agreement: cmp!.agreement } : {}),
+      policyRevision: m.policyChanges.length,
       decidedBy: accepted ? 'router' : 'user',
       decidedAt: this.now(),
     };
@@ -1455,10 +1787,15 @@ export class TaskRunner implements Disposable {
     assessment: TaskAssessment | undefined = latestAssessment(m, taskId),
   ): RouteRecommendation | undefined {
     if (!assessment || !this.deps.routing) return undefined;
-    // A task's own caps (plan review) over the mission's. Thin on purpose: #40 owns how scopes combine.
-    const caps = m.tasks.find((t) => t.id === taskId)?.overrides?.caps;
-    const policy = caps ? { ...m.policy, caps: { ...m.policy.caps, ...caps } } : m.policy;
     try {
+      // Every scope's controls apply (§10.2), the task's own caps from plan
+      // review included. In `manual`, the task's pins are the route the user
+      // picked, so the shadow leaves them out: it is what the router would
+      // have picked instead, under the same policy.
+      const task = m.tasks.find((t) => t.id === taskId);
+      const mode = m.policy.mode ?? 'manual';
+      const forTask = task && mode === 'manual' && task.overrides?.pins ? { overrides: { ...task.overrides, pins: undefined } } : task;
+      const policy = { ...resolveEffectivePolicy(missionLayers(m, forTask), this.policyContext()).policy, mode };
       return recommendRoute(assessment, policy, this.deps.routing.snapshot(), this.now());
     } catch (e) {
       this.log(`task ${m.id}: could not route: ${errorText(e)}`);
@@ -1741,13 +2078,201 @@ export class TaskRunner implements Disposable {
         await this.releaseTree(missionId, a.id);
         this.notify(this.need(missionId), 'stopped', `Its session was ${v.reason}.`);
         return;
-      case 'failed':
+      case 'failed': {
         this.unwatch(a.id);
-        m = this.endAttempt(m, a.id, 'failed', { status: 'failed', category: v.category, signature: v.reason }, v.reason);
+        const lost = await this.localServerLost(m, a, v.category);
+        m = this.need(missionId);
+        m = this.endAttempt(
+          m,
+          a.id,
+          'failed',
+          { status: 'failed', category: v.category, signature: lost ? LOCAL_SERVER_LOST : v.reason },
+          lost ? LOCAL_SERVER_LOST_TEXT : v.reason,
+        );
         this.put(m);
         await this.releaseTree(missionId, a.id);
-        this.notify(this.need(missionId), 'failed', `${capitalise(v.reason)}. Retry it fresh, or cancel it.`);
+        if (lost && (await this.failover(missionId, a.id))) return;
+        this.notify(this.need(missionId), 'failed', `${capitalise(lost ? LOCAL_SERVER_LOST_TEXT : v.reason)}. Retry it fresh, or cancel it.`);
         return;
+      }
+    }
+  }
+
+  // ---- Local endpoints (#51) ----
+
+  /**
+   * Whether an `infra` failure on a local model was its server going away:
+   * the endpoint does not answer a health read now. Anything else (a turn
+   * that failed with the server up) stays the failure it was.
+   */
+  private async localServerLost(m: Mission, a: ExecutionAttempt, category: OutcomeCategory | undefined): Promise<boolean> {
+    if (category !== 'infra' || !this.deps.local) return false;
+    const source = m.decisions.find((d) => d.id === a.routingDecisionId)?.resolution.target.source;
+    if (!isEndpointSource(source)) return false;
+    const state = await this.deps.local.check(source!).catch((): HealthState => 'unknown');
+    return state === 'down' || state === 'degraded';
+  }
+
+  /**
+   * An endpoint was just read as `down`: every attempt running on it has lost
+   * its model mid-attempt. Ended as `infra` rather than left to a harness that
+   * may retry for minutes, then failed over where the route allows.
+   */
+  private onLocalDown(source: ModelSourceId): void {
+    for (const m of this.missions.values()) {
+      const a = this.currentAttempt(m);
+      if (!a || !['launching', 'running', 'waiting-human'].includes(a.state)) continue;
+      const d = m.decisions.find((x) => x.id === a.routingDecisionId);
+      if (d?.resolution.target.source !== source) continue;
+      void this.queue(m.id, () => this.serverLost(m.id, a.id)).catch((e) => this.log(`task ${m.id}: ${errorText(e)}`));
+    }
+  }
+
+  private async serverLost(missionId: string, attemptId: string): Promise<void> {
+    let m = this.need(missionId);
+    const a = m.attempts.find((x) => x.id === attemptId);
+    if (!a || !['launching', 'running', 'waiting-human'].includes(a.state)) return;
+    this.log(`task ${missionId}: attempt ${a.n} lost its local model server`);
+    await this.endSession(m, a);
+    m = this.need(missionId);
+    m = this.endAttempt(m, a.id, 'failed', { status: 'failed', category: 'infra', signature: LOCAL_SERVER_LOST }, LOCAL_SERVER_LOST_TEXT);
+    this.put(m);
+    await this.releaseTree(missionId, a.id);
+    if (await this.failover(missionId, a.id)) return;
+    this.notify(this.need(missionId), 'failed', `${capitalise(LOCAL_SERVER_LOST_TEXT)}. Retry it once the server is back, or cancel it.`);
+  }
+
+  /** Why the task may not fail over on its own, or undefined when it may. */
+  private failoverBlocked(m: Mission, d: RoutingDecision, task: Task): string | undefined {
+    if (m.state !== 'running' || task.state !== 'needs-human') return 'the task is not waiting';
+    // A route the user picked by hand is theirs to change, unless they opted into automatic recovery.
+    if (d.decidedBy !== 'router' && m.policy.autoRecover !== true) return 'the route was picked by hand';
+    const max = m.policy.caps?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    if (task.attemptIds.length >= max) return `it has had ${task.attemptIds.length} of ${max} attempts`;
+    if (!this.deps.routing) return 'there is no catalog to fail over with';
+    return undefined;
+  }
+
+  /**
+   * Failover within the tier (§9.4 step 5): the same requirement pinned to
+   * the tier that ran, re-resolved against a fresh snapshot with the failed
+   * source excluded. Never a different tier: a failover must not quietly
+   * change capability. True when a new attempt was launched.
+   */
+  private async failover(missionId: string, failedAttemptId: string): Promise<boolean> {
+    let m = this.need(missionId);
+    const failed = m.attempts.find((x) => x.id === failedAttemptId);
+    const d = failed && m.decisions.find((x) => x.id === failed.routingDecisionId);
+    const task = failed && m.tasks.find((x) => x.id === failed.taskId);
+    if (!failed || !d || !task) return false;
+    const blocked = this.failoverBlocked(m, d, task);
+    if (blocked) {
+      this.log(`task ${missionId}: no failover: ${blocked}`);
+      return false;
+    }
+    const from = d.resolution.target;
+    const requirement = { ...d.requirement, minTier: from.tier, maxTier: from.tier };
+    const snapshot = this.deps.routing!.snapshot();
+    const res = resolveRoute(requirement, snapshot, {
+      caps: m.policy.caps,
+      preferences: m.policy.preferences,
+      exclusions: { ...m.policy.exclusions, sources: [...(m.policy.exclusions?.sources ?? []), from.source] },
+    });
+    if (res.outcome !== 'resolved' || !res.target) {
+      this.log(`task ${missionId}: no failover: ${res.note ?? `nothing else at ${from.tier}`}`);
+      return false;
+    }
+    const t = res.target;
+    const recommendation: RouteRecommendation = {
+      assessmentId: d.assessmentId ?? d.shadow?.assessmentId ?? '',
+      policyVersion: 'failover',
+      requirement,
+      reasons: [
+        {
+          ruleId: 'failover.infra',
+          text: `${from.model} lost its server mid-attempt; failing over to another ${from.tier} model.`,
+          inputs: { from: from.source, tier: from.tier },
+        },
+      ],
+      verdict: 'route',
+      resolution: { target: t, candidates: res.candidates, catalogVersion: res.catalogVersion, ...(res.note ? { note: res.note } : {}) },
+      at: this.now(),
+    };
+    const route: TaskRoute = {
+      harness: t.harness,
+      ...(isEndpointSource(t.source) ? { source: t.source } : {}),
+      model: t.model,
+      ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}),
+      permissionMode: decisionMode(d),
+    };
+    // The task's pins (#40) name the route that lost its server; launch applies
+    // pins over the route, so they move with the failover. A pin or cap at a
+    // wider scope that forbids the new route stops the failover instead.
+    const overrides = { ...task.overrides, pins: routePins(route) };
+    const conflicts = checkPolicyEdit(missionLayers(m, task), 'task', taskLayer(overrides), this.policyContext());
+    if (conflicts.length > 0) {
+      this.log(`task ${missionId}: no failover: ${conflictText(conflicts)}`);
+      return false;
+    }
+    m = await this.retainTree(m, failed);
+    m = this.patchTask(m, task.id, (x) => ({ ...x, overrides }));
+    this.put(m);
+    this.log(`task ${missionId}: failing over from ${from.model} to ${t.model} (${t.tier})`);
+    try {
+      await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation, offered: false, accepted: true, failover: true } });
+    } catch (e) {
+      this.log(`task ${missionId}: failover could not start: ${errorText(e)}`);
+      return false;
+    }
+    this.notify(this.need(missionId), 'failed over', `${capitalise(LOCAL_SERVER_LOST_TEXT)}; carrying on with ${t.model}.`, 'show-session');
+    return true;
+  }
+
+  /** What an attempt record says about a run on a local endpoint (§19.4). */
+  private localMetrics(m: Mission, a: ExecutionAttempt, activeMs: number | undefined, queueMs: number | undefined): LocalRunMetrics | undefined {
+    const d = m.decisions.find((x) => x.id === a.routingDecisionId);
+    const t = d?.resolution.target;
+    if (!d || !t || !isEndpointSource(t.source)) return undefined;
+    const out: LocalRunMetrics = { source: t.source, ...this.deps.local?.facts?.(t.source, t.model) };
+    if (queueMs !== undefined) out.queueMs = queueMs;
+    const tokens = a.usage?.outputTokens;
+    if (tokens && activeMs && activeMs > 0) {
+      // Through a harness nothing reports decode speed; this is output over active time, and says so.
+      out.outTokPerSec = Math.round((tokens / (activeMs / 1000)) * 10) / 10;
+      out.tokPerSecFrom = 'attempt';
+    }
+    const avoided = this.hostedEquivalent(d, a);
+    if (avoided) {
+      out.apiEquivalentUsd = avoided.usd;
+      out.apiEquivalentModel = avoided.model;
+    }
+    return out;
+  }
+
+  /**
+   * **An estimate:** what the hosted route the router would otherwise have
+   * picked — the same requirement with every endpoint excluded — would have
+   * cost for this attempt's tokens, at that model's price table. Undefined
+   * when there is no such route or it has no price.
+   */
+  private hostedEquivalent(d: RoutingDecision, a: ExecutionAttempt): { usd: number; model: string } | undefined {
+    const u = a.usage;
+    if (!this.deps.routing || !u || (u.inputTokens === undefined && u.outputTokens === undefined)) return undefined;
+    try {
+      const snap = this.deps.routing.snapshot();
+      const endpoints = [...new Set(snap.catalog.entries.map((e) => e.descriptor.source).filter((s) => isEndpointSource(s)))];
+      const res = resolveRoute(d.requirement, snap, { exclusions: { sources: endpoints, disableLocal: true } });
+      const t = res.target;
+      if (!t) return undefined;
+      const entry = snap.catalog.entries.find((e) => e.descriptor.source === t.source && e.aliases.includes(t.model));
+      const p = entry?.descriptor.price;
+      if (!p) return undefined;
+      const cached = u.cacheReadTokens ?? 0;
+      const fresh = Math.max(0, (u.inputTokens ?? 0) - (p.cacheReadPerMTok !== undefined ? cached : 0));
+      const usd = (fresh * p.inPerMTok + (u.outputTokens ?? 0) * p.outPerMTok + (p.cacheReadPerMTok !== undefined ? cached * p.cacheReadPerMTok : 0)) / 1e6;
+      return { usd: Math.round(usd * 1e6) / 1e6, model: entry.descriptor.resolvedId ?? entry.descriptor.modelId };
+    } catch {
+      return undefined;
     }
   }
 
@@ -1796,8 +2321,13 @@ export class TaskRunner implements Disposable {
     // release the tree first: there is nothing to run in it.
     if (failure) {
       m = await this.releaseTree(missionId, a.id);
-      this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', ...failure }, `its last turn ended in an error (${failure.signature})`));
-      this.notify(this.need(missionId), 'failed', `Its last turn ended in an error (${failure.signature}). Retry it fresh, or cancel it.`);
+      const lost = await this.localServerLost(m, a, failure.category);
+      m = this.need(missionId);
+      const signature = lost ? LOCAL_SERVER_LOST : failure.signature;
+      const why = lost ? LOCAL_SERVER_LOST_TEXT : `its last turn ended in an error (${failure.signature})`;
+      this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', category: failure.category, signature }, why));
+      if (lost && (await this.failover(missionId, a.id))) return;
+      this.notify(this.need(missionId), 'failed', `${capitalise(why)}. Retry it fresh, or cancel it.`);
       return;
     }
     if (stats.filesChanged === 0) {
@@ -1956,6 +2486,8 @@ export class TaskRunner implements Disposable {
     }
     const a = m.attempts.find((x) => x.id === attemptId)!;
     const record = attemptRecord(m, a, now);
+    const local = record && this.localMetrics(m, a, record.activeMs, record.queueMs);
+    if (record && local) record.local = local;
     if (record) {
       try {
         this.deps.telemetry?.append(record);
@@ -2059,7 +2591,11 @@ export class TaskRunner implements Disposable {
         const cur = this.need(m.id);
         // Checked again here: the attempt may have ended (and its record been written) while this waited.
         if (!LIVE.includes(cur.attempts.find((x) => x.id === a.id)?.state ?? 'failed')) return;
-        this.put(this.patchAttempt(cur, a.id, (x) => ({ ...x, usage: addTurnUsage(x.usage, r) })));
+        const source = cur.decisions.find((d) => d.id === a.routingDecisionId)?.resolution.target.source;
+        // A local model has `$0 API cost` by rule (§19.4): whatever cost a harness
+        // invents for a model it does not know (§19.6 point 3) is not recorded.
+        const turn = isEndpointSource(source) ? withoutCost(r) : r;
+        this.put(this.patchAttempt(cur, a.id, (x) => ({ ...x, usage: addTurnUsage(x.usage, turn) })));
       });
       return;
     }
@@ -2125,6 +2661,14 @@ function handleView(h: SessionHandle): HandleView {
   return { lifecycle: h.lifecycle, pendingAsk: !!h.pendingQuestion || !!h.pendingPlan || permission, backgroundTasks: h.backgroundTasks };
 }
 
+/** A turn's tokens without any cost: for a model on a local endpoint. */
+function withoutCost(r: TurnRecord): TurnRecord {
+  const modelsUsed: TurnRecord['modelsUsed'] = {};
+  for (const [model, { costUsd: _c, ...rest }] of Object.entries(r.modelsUsed ?? {})) modelsUsed[model] = rest;
+  const { costUsd: _cost, ...rest } = r;
+  return { ...rest, modelsUsed, costBasis: 'none' };
+}
+
 function closeWait(a: ExecutionAttempt, now: number): ExecutionAttempt {
   const since = a.timing?.waitingSince;
   if (since === undefined) return a;
@@ -2146,8 +2690,13 @@ function missionSlug(m: Mission): string {
   return `${head}-${suffix}`;
 }
 
-function routePins(route: TaskRoute): { harness: HarnessId; model?: string; effort?: EffortLevel } {
-  return { harness: route.harness, ...(route.model?.trim() ? { model: route.model.trim() } : {}), ...(route.effort?.trim() ? { effort: awEffort(route.effort) } : {}) };
+function routePins(route: TaskRoute): { harness: HarnessId; source?: ModelSourceId; model?: string; effort?: EffortLevel } {
+  return {
+    harness: route.harness,
+    ...(route.source ? { source: route.source } : {}),
+    ...(route.model?.trim() ? { model: route.model.trim() } : {}),
+    ...(route.effort?.trim() ? { effort: awEffort(route.effort) } : {}),
+  };
 }
 
 /** The route the last attempt ran on, or the task's pins. */
@@ -2155,13 +2704,19 @@ function routeOf(m: Mission, a: ExecutionAttempt | undefined): TaskRoute {
   const d = a ? m.decisions.find((x) => x.id === a.routingDecisionId) : undefined;
   if (d && a) return routeFromDecision(d, a);
   const pins = (a && m.tasks.find((t) => t.id === a.taskId))?.overrides?.pins ?? m.tasks[0].overrides?.pins;
-  return { harness: pins?.harness ?? 'claude-code', model: pins?.model };
+  return { harness: pins?.harness ?? 'claude-code', model: pins?.model, ...(pins?.source ? { source: pins.source } : {}) };
 }
 
 function routeFromDecision(d: RoutingDecision | undefined, a: ExecutionAttempt): TaskRoute {
   if (!d) return { harness: a.assignment.harness };
   const t = d.resolution.target;
-  return { harness: t.harness, model: t.model, effort: t.effortNative === 'none' ? undefined : t.effortNative, permissionMode: decisionMode(d) };
+  return {
+    harness: t.harness,
+    ...(isEndpointSource(t.source) ? { source: t.source } : {}),
+    model: t.model,
+    effort: t.effortNative === 'none' ? undefined : t.effortNative,
+    permissionMode: decisionMode(d),
+  };
 }
 
 /** The permission mode a decision launched with: on its `manual` or `assisted.*` reason. */
@@ -2175,6 +2730,8 @@ interface DecisionRouting {
   recommendation?: RouteRecommendation;
   offered: boolean;
   accepted: boolean;
+  /** The router picked it itself, failing over after an `infra` loss (#51): no person was asked. */
+  failover?: boolean;
 }
 
 /** The newest assessment of the mission's task. */

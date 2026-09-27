@@ -26,6 +26,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Options, Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { RouteRequirement } from '../../shared/orchestration/types';
+import type { LocalRunMetrics } from '../../shared/orchestration/telemetry';
 import { validateJson, type JsonSchema } from './jsonSchema';
 
 export interface CompletionRequest {
@@ -65,9 +66,19 @@ export interface CompletionUsage {
   costUsd?: number;
 }
 
+/** Fields a completion served by a local endpoint adds (#51). */
+export interface LocalCompletionFacts {
+  /** What the call measured on the local endpoint. */
+  local?: LocalRunMetrics;
+  /** The failure was the server going away, not the model's answer: `infra` (§15.1). */
+  infra?: boolean;
+  /** The local call failed and the hosted completion answered instead. */
+  fellBackFrom?: string;
+}
+
 export type CompletionResult<T> =
-  | { ok: true; value: T; model: string; attempts: number; usage: CompletionUsage; durationMs: number }
-  | {
+  | ({ ok: true; value: T; model: string; attempts: number; usage: CompletionUsage; durationMs: number } & LocalCompletionFacts)
+  | ({
       ok: false;
       /** `invalid-output`: never schema-valid, after the retry. `error`: the call failed. `timeout`/`aborted`: it was cut off. */
       reason: 'invalid-output' | 'error' | 'timeout' | 'aborted';
@@ -82,7 +93,7 @@ export type CompletionResult<T> =
       raw?: unknown;
       /** What was wrong with it. */
       problems?: string[];
-    };
+    } & LocalCompletionFacts);
 
 export interface StructuredCompletion {
   complete<T>(req: CompletionRequest): Promise<CompletionResult<T>>;
