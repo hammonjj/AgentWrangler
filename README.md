@@ -373,6 +373,20 @@ new worktree and branch of the chosen folder's repository:
     is recorded. Dismissing it leaves the proposal in the Tasks menu.
   - `"maxTier"` and `"maxEffort"` cap every new task. A cap is never exceeded: work that needs
     more than the cap waits for you, saying both why it needs more and what the cap is.
+- **Pins and caps, at four scopes.** You can *pin* a harness, model or effort, *cap* the tier,
+  effort, attempts, concurrent agents, estimated spend, usage-window share or location
+  (local-only / hosted-only), *prefer* a harness or local models, and *exclude* harnesses,
+  sources or local models — globally (Preferences → Orchestration → Routing defaults, stored in
+  `orchestration.routing`), per repository (the `routing` section of its policy file), per
+  mission and per task (the task strip's **Policy…** button, or the Tasks menu). The more
+  specific scope wins, but a cap can only be tightened: a task cannot loosen its mission's cap.
+  A pin that breaks a cap is refused the moment you set it, naming both ("This task pins
+  Opus (expert); the mission is capped at standard"). A pinned model or effort is never changed
+  by escalation. A mission freezes the global and repository settings when it starts; a change
+  to its own policy or its task's applies from the next attempt — a running one is not
+  restarted — and is shown in the strip ("Policy changed (task): pinned effort low → high ·
+  applies from attempt 2"). *Pins & caps* in the strip lists each value in force and where it
+  came from.
 
   **Why this route** in the task strip (and the route chip's tooltip) shows the rules that
   fired and on what, the requirement, the fallbacks, and every model that was not picked and
