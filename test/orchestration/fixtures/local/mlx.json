@@ -1,0 +1,10 @@
+{
+  "_note": "Synthetic, shaped like mlx_lm.server 0.31: the id is the weights path, no metadata, /health ok, neither harness route (404), as measured in #50.",
+  "GET /v1/models": {
+    "status": 200,
+    "body": { "object": "list", "data": [{ "id": "/Users/test/models/Example-4B-4bit", "object": "model", "created": 1 }] }
+  },
+  "GET /health": { "status": 200, "body": { "status": "ok" } },
+  "POST /v1/responses": { "status": 404, "body": "" },
+  "POST /v1/messages": { "status": 404, "body": "" }
+}

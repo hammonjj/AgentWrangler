@@ -2079,6 +2079,36 @@ not the model):
   per call here. Revisit when a runtime serves `/v1/messages` natively with prefix caching that
   holds across Claude's turns.
 
+### 19.7 As built (#51, 2026-09-27)
+
+Both slices, as §19.6 recommends. The Claude Code path is not built. Task, assessment and rule
+types are unchanged. What changed is adapters, settings and the catalog's inputs.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Registry | `shared/orchestration/localEndpoints.ts`, setting `orchestration.localEndpoints` | URL, name, optional runtime, slots, device, declared per-model facts. A loopback endpoint is on by default. Anything else is `location: 'hosted'`, off until turned on, never contacted while off, and labelled "data leaves this machine". Keys are in `safeStorage` under `localEndpoint:<id>`; the setting only records `hasKey`. |
+| Probe | `orchestration/local/probe.ts` | Detects the runtime (Ollama, LM Studio, llama.cpp, vLLM, MLX, generic), or takes a declared one. Reads models, context, vision and slots, plus constrained decoding (`schema` for the four that have it, `none` for MLX). Probes `/v1/responses` and `/v1/messages` with an empty POST: 404/405/501 means absent. |
+| Descriptors | `shared/orchestration/localModels.ts` | `measured` > `probed` > `declared` > unknown, per field. `nativeEffort: []`, `costBasis: 'none'`. Harness `codex` only where `/v1/responses` was probed. |
+| Catalog | `buildCatalog({ local })`, `CapabilityCatalog.setLocal` | Local models are never given a default tier, so they start unassigned. `routable` needs a tier, an enabled model, an endpoint that is on, and a harness. `completions` is the same without the harness. |
+| Service | `orchestration/local/localEndpointService.ts` | Probe at start and every 10 min. Health every 30 s from the runtime's cheapest route: one miss `degraded`, two `down`, then `onDown`. A failed re-probe keeps the last good probe. Slots are a gate for direct calls (`acquire`, whose wait is the queue delay). Attempts count against slots in the resolver snapshot. |
+| Qualification | `qualifyModel` | Stage 1 of §19.6 (10 tool calls, 10 round trips, 20 JSON replies, synthetic), shown beside the tier picker. Results are `measured` and persisted. Stage 2 (scratch-repo tasks) is not built. |
+| Resolver | `policy/resolver.ts` | An endpoint model needs known, non-`none` tool calling for agentic work. It never gets the assumed hosted window, even when external. Zero free slots is capacity (`blocked`). |
+| Agentic | `CodexHarness` + `codexThreadParams` | A local target is a Codex thread with `modelProvider: aw-<id>` and `config.model_providers.aw-<id> = {base_url: <url>/v1, wire_api: "responses"}`. `model_context_window` comes from the catalog, and `model_catalog_json` from a declared file if there is one. The key is read per request (`experimental_bearer_token`) and never recorded. The provider is in the launch policy, so every resume re-sends it. |
+| Completions | `completion/localCompletion.ts` | `LocalStructuredCompletion`: streamed `chat/completions`, `response_format` only where probed, otherwise the schema goes in the instructions, then validation and one retry. A dropped stream or refused connection is `infra`. `RoutedCompletion` puts the weakest-tier local model ahead of the hosted completion and falls back to it on any failure but an abort. Workspace requests (the reviewer) always go hosted. |
+| Failure | `TaskRunner` | `onDown`, or an `infra` turn failure while the endpoint does not answer, ends the attempt `infra` / `local-server-lost`. Failover re-resolves the same requirement pinned to the tier that ran, with the failed source excluded. It is allowed when the router decided the route or the mission has `autoRecover`, and within `maxAttempts` (default 3). The new decision is `decidedBy: 'router'` with rule `failover.infra`. |
+| Metrics | `AttemptRecord.local`, `LocalCallRecord`, `shared/orchestration/localMetrics.ts` | Runtime, device, context window and queue delay. Tokens/s is output over active time (`tokPerSecFrom: 'attempt'`); TTFT is absent through a harness, and server- or client-measured for direct calls. The API-equivalent cost avoided is labelled an estimate: the same requirement resolved with every endpoint excluded, priced at that model's `telemetry.prices` entry. Harness cost is stripped from local attempts (§19.6 point 3). `summariseLocal` gives executions, success, verified-first-time, escalation-from-local and averages. |
+
+Open, and not settled by tests (they use fakes):
+
+- The app-server's acceptance of `modelProvider` and a free-form `model_providers` table on
+  `thread/start` and `thread/resume`. It is in the pinned schema per §19.6, but #51 did not run it
+  live.
+- `experimental_bearer_token` on a per-thread provider.
+- Whether `model_catalog_json` adds to Codex's catalog or replaces it.
+
+The first live run against `llama-server` with a GGUF model should settle all three. It is also
+the measurement §19.6 slice B asks for.
+
 ---
 
 ## 20. Historical and adaptive routing (design only; not built)

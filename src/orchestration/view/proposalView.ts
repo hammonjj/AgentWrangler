@@ -8,6 +8,7 @@
  * route the palette would refuse.
  */
 import { harnessLabel } from '../../shared/harness';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import { nativeEffortFor, tierRank, type CapabilityCatalogView, type CatalogEntry } from '../../shared/orchestration/catalog';
 import type { ProposalDecision, ProposalModelOption, TaskProposalView } from '../../shared/orchestration/taskView';
 import { EFFORT_LEVELS, type Mission, type RouteRecommendation } from '../../shared/orchestration/types';
@@ -74,5 +75,15 @@ export function proposalChoice(rec: RouteRecommendation, catalog: CapabilityCata
     const sameEffort = (route.effort ?? 'none') === (t.effortNative || 'none');
     if (sameModel && sameEffort) return {};
   }
-  return { route: { harness: route.harness, model: route.model, ...(route.effort && route.effort !== 'none' ? { effort: route.effort } : {}) } };
+  // The card names harness and model; a local endpoint's model also needs its source (#51).
+  const picked = catalog.entries.find((e) => e.harnesses.includes(route.harness) && (e.descriptor.modelId === route.model || e.aliases.includes(route.model)));
+  const source = picked && isEndpointSource(picked.descriptor.source) ? picked.descriptor.source : undefined;
+  return {
+    route: {
+      harness: route.harness,
+      ...(source ? { source } : {}),
+      model: route.model,
+      ...(route.effort && route.effort !== 'none' ? { effort: route.effort } : {}),
+    },
+  };
 }

@@ -18,6 +18,8 @@ import {
   validateExecutionPolicy,
 } from './orchestration/executionPolicy';
 import type { SourceStatus } from './orchestration/sourceHealth';
+import type { LocalEndpointChange, LocalEndpointView } from './orchestration/localEndpoints';
+import type { LocalModelSummary } from './orchestration/localMetrics';
 import type { ExecutionPolicy } from './orchestration/types';
 
 export type PreferencesToHost =
@@ -36,6 +38,8 @@ export type PreferencesToHost =
   | { type: 'action'; id: SettingActionId }
   /** A change to one model's tier or enabled flag, from Orchestration → tier map. */
   | { type: 'modelPolicy'; change: ModelPolicyChange }
+  /** Add, remove, turn on or off, key, probe or qualify a local endpoint (#51). */
+  | { type: 'localEndpoint'; change: LocalEndpointChange }
   /** The global routing defaults, whole, from Orchestration → Routing defaults (#40). */
   | { type: 'routingPolicy'; mode: 'manual' | 'assisted'; policy: ExecutionPolicy }
   | { type: 'close' };
@@ -44,6 +48,13 @@ export type PreferencesToHost =
 export interface OrchestrationPrefsView {
   catalog: CapabilityCatalogView;
   sources: SourceStatus[];
+  /** Local endpoints and what their models have done (#51). */
+  local?: {
+    endpoints: LocalEndpointView[];
+    summaries: LocalModelSummary[];
+    /** The OS can encrypt keys; without it no key can be stored. */
+    secretsAvailable: boolean;
+  };
   /** The global scope of §10.2 as stored (#40). Absent: the host has none to offer. */
   routing?: { mode: 'manual' | 'assisted'; policy: ExecutionPolicy; ignored: string[] };
 }
@@ -117,6 +128,8 @@ export type HostToPreferences =
   | { type: 'actionBusy'; id: SettingActionId }
   /** The model catalog changed, or the window just opened. */
   | { type: 'orchestration'; view: OrchestrationPrefsView }
+  /** What a local endpoint change did, shown beside the endpoints. */
+  | { type: 'localEndpointResult'; ok: boolean; lines: string[] }
   /** The routing defaults the window sent were saved, or refused and why (#40). */
   | { type: 'routingResult'; ok: boolean; errors: string[] };
 
