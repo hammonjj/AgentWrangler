@@ -57,6 +57,8 @@ import { explainRecommendation, targetLabel } from '../orchestration/view/routeE
 import { sourceStatus } from '../shared/orchestration/sourceHealth';
 import { EFFORT_LEVELS, type RouteRecommendation } from '../shared/orchestration/types';
 import { nativeEffortFor, tierRank } from '../shared/orchestration/catalog';
+import { policyContextFor } from '../shared/orchestration/executionPolicy';
+import { editPolicy, type PolicyEditorDeps } from './policyEditor';
 import { Emitter } from '../core/events';
 import type { TurnRecord } from '../shared/orchestration/telemetry';
 import type { Mission } from '../shared/orchestration/types';
@@ -1116,7 +1118,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         viewFor: (sessionKey: string): TaskView | undefined => {
           const badge = taskBadges(tasks.list()).get(sessionKey);
           const mission = badge && tasks.get(badge.missionId);
-          return mission ? taskViewOf(mission, tasks.actions(mission.id)) : undefined;
+          return mission ? taskViewOf(mission, tasks.actions(mission.id), policyContextFor(models.catalog)) : undefined;
         },
         run: async (missionId: string, action: TaskViewAction): Promise<void> => {
           await runTaskAction(tasks, missionId, action);
@@ -1172,9 +1174,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
         return runner.retry(missionId);
       case 'recreate-worktree':
         return runner.recreateWorktree(missionId);
+      case 'edit-policy':
+        return editPolicy(policyEditorDeps(runner), missionId);
       case 'cancel':
         return runner.cancel(missionId);
     }
+  }
+
+  function policyEditorDeps(runner: TaskRunner): PolicyEditorDeps {
+    return { dialogs, runner, catalog: () => models.catalog, log };
   }
 
   const launcher: ConversationLauncher = {
@@ -1230,7 +1238,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const routing = parseRoutingSettings(host.settings.get<unknown>(ROUTING_KEY, undefined));
     const harness = provider === 'codex' ? 'codex' : 'claude-code';
     // The launcher's harness is a preference, not a pin: the router ranks it first within the tier it picks.
-    const policy = { caps: routing.caps, preferences: { harness } };
+    // It is the mission's own layer; the global defaults are frozen in by the runner (#40).
+    const policy = { preferences: { harness } };
     if (routing.mode === 'assisted') {
       try {
         dialogs.flash('Assessing the task to propose a route…');
@@ -1270,7 +1279,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     rec: RouteRecommendation,
     opts: { showSession?: boolean } = {},
   ): Promise<void> {
-    type Row = { label: string; description?: string; detail?: string; action: 'accept' | 'effort' | 'model' | 'why' | 'cancel' };
+    type Row = { label: string; description?: string; detail?: string; action: 'accept' | 'effort' | 'model' | 'why' | 'policy' | 'cancel' };
     const target = rec.resolution.target;
     const why = explainRecommendation(rec);
     for (;;) {
@@ -1288,6 +1297,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       }
       rows.push({ label: 'Change model…', description: `needs ${rec.requirement.minTier}${rec.requirement.maxTier !== rec.requirement.minTier ? `, capped at ${rec.requirement.maxTier}` : ''}`, action: 'model' });
       rows.push({ label: 'Why this route?', action: 'why' });
+      rows.push({ label: 'Edit pins and caps…', description: 'the proposal is routed again under them', action: 'policy' });
       rows.push({ label: 'Cancel the task', action: 'cancel' });
       const picked = await dialogs.pick(rows, { placeHolder: `Proposed route — ${runner.get(missionId)?.title ?? 'task'}`, matchOnDetail: true });
       if (!picked) {
@@ -1302,6 +1312,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
         if (why.note) lines.push('', why.note);
         await dialogs.info(lines.join('\n'));
         continue;
+      }
+      if (picked.action === 'policy') {
+        await editPolicy(policyEditorDeps(runner), missionId);
+        const again = runner.get(missionId)?.tasks[0].recommendation;
+        return again ? reviewProposal(runner, missionId, again, opts) : undefined;
       }
       if (picked.action === 'cancel') {
         await runner.cancel(missionId);
@@ -1358,6 +1373,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     resume: 'Resume the attempt',
     retry: 'Retry fresh, in a new worktree',
     'recreate-worktree': 'Recreate its worktree from its branch',
+    'edit-policy': 'Edit its pins and caps…',
     cancel: 'Cancel the task',
   };
 
@@ -1389,6 +1405,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
           return;
         case 'recreate-worktree':
           await runner.recreateWorktree(missionId);
+          return;
+        case 'edit-policy':
+          await editPolicy(policyEditorDeps(runner), missionId);
           return;
         case 'cancel': {
           const ok = await dialogs.warn(`Cancel “${m.title}”?`, { modal: true, detail: 'Its session is ended. Its worktree and branch are kept.' }, 'Cancel Task');
@@ -1437,13 +1456,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
   async function proposeTask(req: ProposeTaskRequest): Promise<ProposedTask> {
     if (!tasks) throw new TaskError('Tasks are off. Turn on orchestration ("orchestration.enabled": true in settings.json) first.');
     const runner = tasks;
-    const routing = parseRoutingSettings(host.settings.get<unknown>(ROUTING_KEY, undefined));
     const harness = req.harness === 'codex' ? 'codex' : 'claude-code';
     const { mission, recommendation } = await runner.propose({
       folder: req.folder,
       objective: req.objective,
       acceptanceCriteria: req.acceptanceCriteria ?? [],
-      policy: { caps: routing.caps, preferences: { harness } },
+      policy: { preferences: { harness } },
       ...(req.origin ? { origin: req.origin } : {}),
     });
     const target = recommendation.resolution.target;

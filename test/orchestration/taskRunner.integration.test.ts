@@ -551,7 +551,7 @@ describe('TaskRunner', () => {
       expect(mission.tasks[0]).toMatchObject({ state: 'routed', recommendation: { verdict: 'route' } });
       expect(mission.attempts).toEqual([]);
       expect(mission.worktrees).toEqual([]);
-      expect(r.runner.actions(mission.id)).toEqual(['cancel']);
+      expect(r.runner.actions(mission.id)).toEqual(['edit-policy', 'cancel']);
 
       await r.runner.startProposed(mission.id);
       const m = r.runner.get(mission.id)!;
@@ -587,7 +587,9 @@ describe('TaskRunner', () => {
     it('assisted: a change may not break the mission’s tier cap', async () => {
       const r = routed();
       const { mission } = await r.runner.propose({ ...DRAFT, folder: repo, policy: { caps: { maxTier: 'standard' } } });
-      await expect(r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'opus' } })).rejects.toThrow(/is expert; this task is capped at standard/);
+      await expect(r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'opus' } })).rejects.toThrow(
+        'This task pins Opus 5.5 (expert); the mission is capped at standard.',
+      );
       expect(r.runner.get(mission.id)!.attempts).toEqual([]);
     });
 

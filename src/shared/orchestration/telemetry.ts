@@ -177,4 +177,42 @@ export interface RoutingRecord extends RecordBase {
   candidates: { chosen: number; fallback: number; rejected: number };
 }
 
-export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord;
+/** A policy value as telemetry carries it: an enum, a number, a flag, or harness/source/model ids. Never text a person wrote. */
+export type PolicyFieldValue = string | number | boolean | string[];
+
+/**
+ * A person changed a control at mission or task scope (§16.2 `override`, #40):
+ * who changed what, from what, at which scope. `via: 'proposal'` is a change
+ * to an `assisted` proposal's route, which pins the task.
+ */
+export interface OverrideRecord extends RecordBase {
+  type: 'override';
+  missionId: string;
+  taskId?: string;
+  scope: 'mission' | 'task';
+  by: 'user';
+  via: 'editor' | 'proposal';
+  changes: { field: string; from?: PolicyFieldValue; to?: PolicyFieldValue }[];
+  /** The mission's state when it was made: `draft` is before anything started. */
+  missionState: string;
+}
+
+/**
+ * A started mission's policy changed (§16.2 `policy-change`, §10.2, #40). It
+ * applies from `appliesFromAttempt`; attempts running at the time keep the
+ * policy they started with.
+ */
+export interface PolicyChangeRecord extends RecordBase {
+  type: 'policy-change';
+  missionId: string;
+  taskId?: string;
+  scope: 'mission' | 'task';
+  fields: string[];
+  /** Index of this change in the mission's `policyChanges`, from 1: the revision it starts. */
+  revision: number;
+  appliesFromAttempt: number;
+  /** Attempts that were running when it changed, and are not restarted. */
+  runningAttempts: number;
+}
+
+export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord | OverrideRecord | PolicyChangeRecord;
