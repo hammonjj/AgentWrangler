@@ -13,8 +13,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { Emitter } from '../../src/core/events';
 import { LaunchDefaults } from '../../src/core/launchDefaults';
 import { SessionRegistry } from '../../src/core/session/sessionRegistry';
+import { TelemetryLog } from '../../src/core/telemetry/telemetryLog';
+import { TurnTelemetry } from '../../src/core/telemetry/turnTelemetry';
+import type { TurnRecord } from '../../src/shared/orchestration/telemetry';
 import { TaskRunner, type NewTask, type TaskRunnerDeps } from '../../src/orchestration/engine/taskRunner';
 import { createSimulatedExecutors, SimulatedHarness } from '../../src/orchestration/harness/simulatedHarness';
 import type { AgentHarness } from '../../src/orchestration/harness/types';
@@ -985,6 +989,37 @@ describe('escalation (#41): simulated failures through the real launch path', ()
     expect(b.runner.get(started.id)!.tasks[0].state).toBe('queued');
     await until(() => attemptOf(b.runner.get(started.id), 2)?.state === 'succeeded', 8000, 'the retry after the restart');
     expect(attemptOf(b.runner.get(started.id), 2)).toMatchObject({ escalation: { action: 'retry-same' }, assignment: { mode: 'continue' } });
+  });
+
+  it('a session carried on twice credits its turns to the attempt now running it, so spend is counted', async () => {
+    const s = shared();
+    const turns = new Emitter<TurnRecord>();
+    const turnTelemetry = new TurnTelemetry({ sessions: s.executors.sessions, log: new TelemetryLog(path.join(dataDir, 'telemetry')), enabled: () => true, registry: s.registry, onRecord: (t) => turns.fire(t) });
+    const r = rig(
+      {
+        behaviour: 'fail-verification',
+        files: { 'src/a.ts': 'x\n', 'check.flag': '1\n' },
+        costUsd: 0.01,
+        followUps: [
+          // Carried on once (new failure) … then an API error, carried on again.
+          { behaviour: 'fail', costUsd: 0.02 },
+          { behaviour: 'edit', files: { 'check.flag': null, 'src/a.ts': 'export const a = 1;\n' }, costUsd: 0.5 },
+        ],
+      },
+      s,
+      { onTurnRecord: (l) => turns.event(l) },
+    );
+    try {
+      const started = await r.runner.start({ ...TASK, folder: repo });
+      await until(() => attemptOf(r.runner.get(started.id), 3)?.state === 'succeeded', 15_000, 'the third attempt');
+      const m = r.runner.get(started.id)!;
+      expect(m.attempts.map((a) => a.escalation?.action)).toEqual([undefined, 'continue-with-feedback', 'retry-same']);
+      expect(attemptOf(m, 3)!.continues).toBe(attemptOf(m, 2)!.id);
+      // Every attempt's own turn, credited to it: the third names the first attempt's origin.
+      expect(m.attempts.map((a) => a.usage?.costUsd)).toEqual([0.01, 0.02, 0.5]);
+    } finally {
+      turnTelemetry.dispose();
+    }
   });
 
   it('cancelling drops a pending step', async () => {

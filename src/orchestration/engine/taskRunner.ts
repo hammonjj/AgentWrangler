@@ -98,7 +98,7 @@ import { buildVerificationPlan, summariseVerification } from '../../shared/orche
 import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import type { HealthState } from '../../shared/orchestration/sourceHealth';
 import type { LocalRunMetrics } from '../../shared/orchestration/telemetry';
-import { DEFAULT_TIERS, isKnown, nativeEffortFor, tierRank } from '../../shared/orchestration/catalog';
+import { DEFAULT_TIERS, isKnown, nativeEffortFor, tierRank, type TierDef } from '../../shared/orchestration/catalog';
 import {
   admissionRefusal,
   asTaskOverrides,
@@ -1049,8 +1049,9 @@ export class TaskRunner implements Disposable {
       if (!isPlanned(m)) throw new TaskError('Only a task in a plan can be skipped.');
       const task = (taskId && m.tasks.find((t) => t.id === taskId)) || this.currentTask(m);
       if (!['needs-human', 'blocked', 'pending'].includes(task.state)) throw new TaskError(`${task.key} is ${task.state}; it cannot be skipped now.`);
-      // A capacity wait is `blocked`: skipping the task drops its pending step.
-      this.clearEscalations(missionId);
+      // A capacity wait is `blocked`: skipping the task drops its pending step (and only its own).
+      const pending = pendingEscalation(task);
+      if (pending) this.clearEscalations(missionId, pending.id);
       const a = this.currentAttempt(m, task.id);
       if (a && LIVE.includes(a.state)) {
         m = this.endAttempt(m, a.id, 'cancelled', { status: 'cancelled' }, 'skipped by the user');
@@ -1513,7 +1514,15 @@ export class TaskRunner implements Disposable {
     const wt = m.worktrees.find((w) => w.id === a.worktreeId);
     if ((a.turnsSeen ?? 0) > 0 || !promptId || !wt) return;
     const task = m.tasks.find((t) => t.id === a.taskId) ?? m.tasks[0];
-    const prompt = a.assignment.mode === 'continue' ? CONTINUE_PROMPT : attemptPrompt(task, { harness: a.assignment.harness, branch: wt.branch, mission: missionContext(m, task) });
+    // An escalation's message is rebuilt from what was stored: the attempt it carried on and the step.
+    const carried = a.continues ? m.attempts.find((x) => x.id === a.continues) : undefined;
+    const step = a.escalation ? task.escalations.find((d) => d.id === a.escalation!.decisionId) : undefined;
+    const prompt =
+      carried && step
+        ? escalationMessage(task, carried, step, 'continue')
+        : a.assignment.mode === 'continue'
+          ? CONTINUE_PROMPT
+          : attemptPrompt(task, { harness: a.assignment.harness, branch: wt.branch, mission: missionContext(m, task) });
     this.log(`task ${m.id}: attempt ${a.n} had no turn seen before the restart; sending its prompt again (deduplicated by id)`);
     try {
       await handle.send(prompt, undefined, { clientMessageId: promptId });
@@ -1578,6 +1587,8 @@ export class TaskRunner implements Disposable {
     let loaded: LoadedRepoPolicy;
     try {
       if (eff.conflicts.length > 0) throw new TaskError(conflictText(eff.conflicts));
+      // A session is carried on only by its own harness.
+      if (continues && route.harness !== continues.assignment.harness) throw new TaskError(`The session runs on ${continues.assignment.harness}; the route is now pinned to ${route.harness}.`);
       const refusal = admissionRefusal(eff, this.admissionFacts(m, route, !!resumeOf, task));
       if (refusal) throw new TaskError(refusal);
       harness = this.checkRoute(route);
@@ -2334,6 +2345,8 @@ export class TaskRunner implements Disposable {
   private sessionContinuable(a: ExecutionAttempt): boolean {
     if (this.continuableHandle(a)) return true;
     const sid = a.assignment.sessionIds.at(-1);
+    // Live here but busy or asking (someone is using it): not resumed over them.
+    if (sid && this.deps.sessions.get(sid)) return false;
     const record = sid ? (this.deps.registry.get(sid) as SessionRecord | undefined) : undefined;
     const harness = this.deps.harnesses.get(a.assignment.harness);
     return !!record && record.state !== 'failed' && !!harness?.capabilities().resume;
@@ -2382,9 +2395,11 @@ export class TaskRunner implements Disposable {
     this.escalationTimers.set(d.id, { missionId, timer });
   }
 
-  private clearEscalations(missionId?: string): void {
+  /** Drop pending steps' timers: all of them, a mission's, or one step's. */
+  private clearEscalations(missionId?: string, decisionId?: string): void {
     for (const [id, t] of this.escalationTimers) {
       if (missionId !== undefined && t.missionId !== missionId) continue;
+      if (decisionId !== undefined && id !== decisionId) continue;
       clearTimeout(t.timer);
       this.escalationTimers.delete(id);
     }
@@ -2410,19 +2425,22 @@ export class TaskRunner implements Disposable {
       this.put(m);
     }
     const route = this.escalatedRoute(m, prev, d);
-    const message = escalationMessage(task, prev, d);
+    // The policy as it is now (§10.2): a pin or cap set while the step waited still holds.
+    // Everything is checked before anything is touched, the session's effort included.
+    const eff = this.effective(m, task);
+    const pinned = this.withPins(route, eff.policy.pins);
+    const refusal = eff.conflicts.length > 0 ? conflictText(eff.conflicts) : this.stepRefusal(m, eff, d) ?? admissionRefusal(eff, this.admissionFacts(m, pinned, false, task));
+    if (refusal) return this.stopEscalation(missionId, task.id, d, refusal, eff.conflicts.length > 0 ? 'pin' : 'cap');
     let mode = d.mode ?? 'fresh';
     const live = this.continuableHandle(prev);
-    if (mode === 'continue' && !live && !this.sessionContinuable(prev)) mode = 'fresh';
+    // Only an idle session is carried on, and only on its own harness: a busy one is the user's now.
+    if (mode === 'continue' && (pinned.harness !== prev.assignment.harness || (!live && !this.sessionContinuable(prev)))) mode = 'fresh';
     if (mode === 'continue' && d.action === 'raise-effort') {
       // Raised in the running session where the harness can (§6.4); otherwise a fresh session at the new level.
-      const applied = live && route.effort ? await live.setEffort(route.effort).catch(() => 'unsupported' as const) : 'unsupported';
+      const applied = live && pinned.effort ? await live.setEffort(pinned.effort).catch(() => 'unsupported' as const) : 'unsupported';
       if (applied !== 'applied') mode = 'fresh';
     }
-    // The count caps as they are now (§10.2): a cap set or tightened while the step waited still holds.
-    const eff = this.effective(m, task);
-    const refusal = eff.conflicts.length > 0 ? conflictText(eff.conflicts) : admissionRefusal(eff, this.admissionFacts(m, this.withPins(route, eff.policy.pins), false, task));
-    if (refusal) return this.stopEscalation(missionId, task.id, d, refusal, eff.conflicts.length > 0 ? 'pin' : 'cap');
+    const message = escalationMessage(task, prev, d, mode);
     this.log(`task ${missionId}: ${task.key} ${d.action} (${mode}) after attempt ${prev.n}`);
     try {
       if (mode === 'continue') {
@@ -2449,6 +2467,37 @@ export class TaskRunner implements Disposable {
       // Refused before any attempt existed (the harness is gone, the worktree is gone): the user decides.
       this.stopEscalation(missionId, t.id, d, `The ${d.action} could not start: ${errorText(e)}`);
     }
+  }
+
+  /**
+   * Why a step decided earlier may no longer run under the policy as it is
+   * now: a tier or effort cap lowered, `frontier` no longer allowed, or a pin
+   * set on the dimension it moves. Undefined when it may.
+   */
+  private stepRefusal(m: Mission, eff: EffectivePolicy, d: EscalationDecision): string | undefined {
+    const p = eff.policy;
+    const by = (field: string) => scopeName(eff.from[field] ?? 'mission');
+    const t = d.target;
+    if (t) {
+      let tiers: readonly TierDef[] = DEFAULT_TIERS;
+      try {
+        tiers = this.deps.routing?.snapshot().catalog.tiers ?? DEFAULT_TIERS;
+      } catch {
+        tiers = DEFAULT_TIERS;
+      }
+      const rank = tierRank(tiers, t.tier);
+      const cap = p.caps?.maxTier ? tierRank(tiers, p.caps.maxTier) : -1;
+      if (cap >= 0 && rank > cap) return `Would run ${t.model} (${t.tier}); ${by('caps.maxTier')} is now capped at ${p.caps!.maxTier}.`;
+      if (tiers[rank]?.reachableBy === 'escalation' && m.policy.frontierAllowed !== true) return `Would run ${t.model} (${t.tier}); not allowed for this mission any more.`;
+      if (p.pins?.harness && p.pins.harness !== t.harness) return `Would switch to ${t.harness}; ${by('pins.harness')} now pins ${p.pins.harness}.`;
+      if (p.pins?.model && p.pins.model !== t.model) return `Would switch to ${t.model}; ${by('pins.model')} now pins ${p.pins.model}.`;
+    }
+    const effort = d.delta?.effort;
+    if (effort) {
+      if (p.pins?.effort && p.pins.effort !== effort) return `Would raise effort to ${effort}; ${by('pins.effort')} now pins ${p.pins.effort}.`;
+      if (p.caps?.maxEffort && EFFORT_LEVELS.indexOf(effort) > EFFORT_LEVELS.indexOf(p.caps.maxEffort)) return `Would raise effort to ${effort}; ${by('caps.maxEffort')} now caps effort at ${p.caps.maxEffort}.`;
+    }
+    return undefined;
   }
 
   /** A pending step that cannot run: recorded as a stop, and the task goes to the user saying why. */
@@ -3005,7 +3054,8 @@ export class TaskRunner implements Disposable {
       // its turns name that attempt; they are the live attempt's that continues it (#41).
       if (!LIVE.includes(a.state)) {
         const ended = a;
-        a = m.attempts.find((x) => LIVE.includes(x.state) && x.continues === ended.id && x.assignment.sessionIds.some((s) => sameId(s, r.sessionId)));
+        // Followed along the whole chain: a session carried on twice still names its first attempt.
+        a = m.attempts.find((x) => LIVE.includes(x.state) && x.assignment.sessionIds.some((s) => sameId(s, r.sessionId)) && continuesFrom(m, x, ended.id));
         if (!a) return;
       }
       const attempt = a;
@@ -3106,6 +3156,19 @@ function sameId(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
+/** Whether `a` carries on (directly, or through other carried-on attempts) the session of attempt `fromId`. */
+function continuesFrom(m: Mission, a: ExecutionAttempt, fromId: string): boolean {
+  const seen = new Set<string>();
+  let cur: ExecutionAttempt | undefined = a;
+  while (cur?.continues && !seen.has(cur.id)) {
+    if (cur.continues === fromId) return true;
+    seen.add(cur.id);
+    const next: string = cur.continues;
+    cur = m.attempts.find((x) => x.id === next);
+  }
+  return false;
+}
+
 /** The task's newest failed attempt before `beforeId`. */
 function previousFailure(m: Mission, task: Task, beforeId: string): ExecutionAttempt | undefined {
   const ids = task.attemptIds.slice(0, Math.max(0, task.attemptIds.indexOf(beforeId)));
@@ -3145,9 +3208,9 @@ function pendingText(d: EscalationDecision, now: number): string {
  * "earlier attempt" section of a fresh one's prompt. Stays in the prompt; it
  * never reaches telemetry.
  */
-function escalationMessage(task: Task, prev: ExecutionAttempt, d: EscalationDecision): string {
+function escalationMessage(task: Task, prev: ExecutionAttempt, d: EscalationDecision, mode: 'continue' | 'fresh'): string {
   const lines: string[] = [];
-  const carry = d.mode === 'continue';
+  const carry = mode === 'continue';
   switch (d.evidence.category) {
     case 'quality-new':
     case 'quality-repeat': {
