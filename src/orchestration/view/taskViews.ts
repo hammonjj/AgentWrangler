@@ -261,10 +261,14 @@ export function policyViewOf(m: Mission, ctx: PolicyContext = { tiers: DEFAULT_T
   if (!task) return undefined;
   const eff = resolveEffectivePolicy(missionLayers(m, task), ctx);
   const p = eff.policy;
+  // The chip is for limits the route chip does not already say: a task's own
+  // pins are the route it runs on, so only pins from a wider scope show here.
+  // The panel lists everything, task pins included.
+  const wider = (field: string) => eff.from[field] !== undefined && eff.from[field] !== 'task';
   const chip: string[] = [];
   if (p.caps?.maxTier) chip.push(`≤ ${p.caps.maxTier}`);
-  if (p.pins?.model) chip.push(`${modelLabel(p.pins.model) ?? p.pins.model} (pinned)`);
-  if (p.pins?.effort) chip.push(`${p.pins.effort} effort (pinned)`);
+  if (p.pins?.model && wider('pins.model')) chip.push(`${modelLabel(p.pins.model) ?? p.pins.model} (pinned)`);
+  if (p.pins?.effort && wider('pins.effort')) chip.push(`${p.pins.effort} effort (pinned)`);
   else if (p.caps?.maxEffort) chip.push(`effort ≤ ${p.caps.maxEffort}`);
   if (p.caps?.maxAttempts !== undefined) chip.push(`${p.caps.maxAttempts} attempt${p.caps.maxAttempts === 1 ? '' : 's'} max`);
   if (p.caps?.location) chip.push(p.caps.location);
