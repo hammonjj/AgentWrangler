@@ -134,8 +134,8 @@ export function installApplicationMenu(
             )(),
         },
         { type: 'separator' },
-        // The token-emergency pair. Deliberately not behind a confirmation:
-        // see the header of `setPausedAll` in createApp.
+        // The token-emergency pair. Pausing asks first, like the toolbar
+        // button; resuming does not. See `requestPauseAll` in createApp.
         { label: 'Pause All Agents', click: () => wrangler.pauseAll(true) },
         { label: 'Resume All Paused Agents', click: () => wrangler.pauseAll(false) },
         { type: 'separator' },
