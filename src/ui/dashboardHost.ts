@@ -8,6 +8,7 @@ import type { CapabilityCatalog } from '../core/capabilityCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { TaskBadge } from '../shared/orchestration/taskView';
+import type { MissionOp, MissionsSnapshot } from '../shared/orchestration/missionView';
 import { displayTitle, GLOBAL_PROJECT_DIR, type HookHealth, type ProjectDTO } from '../shared/model';
 import { checkoutRootFor } from '../core/checkout';
 import { occupantsOf, occupiesCheckout, sharedCheckouts, type CheckoutEntry } from '../core/sharedCheckout';
@@ -90,6 +91,22 @@ export interface TaskBadgeSource {
   onDidChange(listener: () => void): Disposable;
 }
 
+/**
+ * The Missions view (#43), behind an interface for the same reason as the
+ * others: the dashboard draws what it is given and forwards clicks. Absent
+ * while orchestration is off, and then there is no Missions tab.
+ */
+export interface MissionSource {
+  snapshot(): MissionsSnapshot;
+  /** Run a Missions view action. Rejects with a message the user should read. */
+  run(missionId: string, op: MissionOp, provider: 'claude' | 'codex'): Promise<void>;
+  /** Write a new mission for `cwd`'s repository; resolves with its id once it is in review, or undefined if the user backed out. */
+  create(cwd: string): Promise<string | undefined>;
+  onDidChange(listener: () => void): Disposable;
+  /** Something outside the view (a notice, the Tasks menu) wants a mission shown. */
+  onDidRequestShow?(listener: (missionId?: string) => void): Disposable;
+}
+
 /** Starting a conversation is the extension's job, not the dashboard's; it only asks. */
 export interface ConversationLauncher {
   newConversation(cwd: string, provider?: 'claude' | 'codex'): Promise<unknown>;
@@ -119,6 +136,7 @@ export class DashboardHost {
     private dialogs: HostDialogs,
     private models: Pick<CapabilityCatalog, 'value' | 'onDidChange'>,
     private tasks?: TaskBadgeSource,
+    private missions?: MissionSource,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
@@ -157,6 +175,12 @@ export class DashboardHost {
     // A task starting, finishing or being retried changes what its session's
     // row says without the store moving at all.
     if (this.tasks) this.subs.push(this.tasks.onDidChange(() => this.pushSnapshot()));
+    if (this.missions) {
+      // Overlapping snapshots are cheap: only the newest one is posted (`snapshotSeq`).
+      this.subs.push(this.missions.onDidChange(() => this.pushSnapshot()));
+      const show = this.missions.onDidRequestShow?.((missionId) => void this.webview.postMessage({ type: 'showMissions', missionId } satisfies HostToDashboard));
+      if (show) this.subs.push(show);
+    }
   }
 
   dispose(): void {
@@ -268,8 +292,32 @@ export class DashboardHost {
         },
       },
       projects: projects.length > 0 ? projects : undefined,
+      missions: this.missions?.snapshot(),
     };
     void this.webview.postMessage(msg);
+  }
+
+  /** A Missions view click. A refusal comes back beside the mission it was about. */
+  private async runMission(missionId: string, op: MissionOp, provider: 'claude' | 'codex'): Promise<void> {
+    if (!this.missions) return;
+    try {
+      await this.missions.run(missionId, op, provider);
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      void this.webview.postMessage({ type: 'missionError', missionId, text } satisfies HostToDashboard);
+    }
+    this.pushSnapshot();
+  }
+
+  private async newMission(cwd: string): Promise<void> {
+    if (!this.missions) return;
+    try {
+      const id = await this.missions.create(cwd);
+      if (id) void this.webview.postMessage({ type: 'showMissions', missionId: id } satisfies HostToDashboard);
+    } catch (error) {
+      this.dialogs.error(`Agent Wrangler: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.pushSnapshot();
   }
 
   private onMessage(m: DashboardToHost): void {
@@ -358,6 +406,14 @@ export class DashboardHost {
         break;
       case 'taskMenu':
         void this.launcher.taskMenu?.(m.cwd, m.provider === 'codex' ? 'codex' : 'claude');
+        break;
+      case 'newMission':
+        if (typeof m.cwd === 'string') void this.newMission(m.cwd);
+        break;
+      case 'mission':
+        if (typeof m.missionId === 'string' && m.op && typeof m.op === 'object') {
+          void this.runMission(m.missionId, m.op, m.provider === 'codex' ? 'codex' : 'claude');
+        }
         break;
       case 'browseProject':
         void this.browseProject();

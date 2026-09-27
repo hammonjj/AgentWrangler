@@ -148,10 +148,22 @@ const CODEX_INSTRUCTIONS = [
  * The attempt's first message. The user's objective and criteria, then how
  * this worktree works. It is sent to the agent only; telemetry never sees it.
  */
-export function attemptPrompt(task: Pick<Task, 'title' | 'objective' | 'acceptanceCriteria'>, ctx: { harness: HarnessId; branch: string }): string {
+export function attemptPrompt(
+  task: Pick<Task, 'title' | 'objective' | 'acceptanceCriteria'>,
+  ctx: {
+    harness: HarnessId;
+    branch: string;
+    /** Where the task sits in a planned mission (#43): the tasks before it are already on this branch. */
+    mission?: { title: string; position: number; of: number; before: string[] };
+  },
+): string {
   const lines = [`# Task: ${task.title}`, '', task.objective.trim()];
   const criteria = task.acceptanceCriteria.map((c) => c.trim()).filter(Boolean);
   if (criteria.length > 0) lines.push('', '## Acceptance criteria', ...criteria.map((c) => `- ${c}`));
+  if (ctx.mission) {
+    lines.push('', '## This task is part of a mission', `Task ${ctx.mission.position} of ${ctx.mission.of} in “${ctx.mission.title}”. Do only this task; the others are separate.`);
+    if (ctx.mission.before.length > 0) lines.push('The work of these tasks is already on this branch:', ...ctx.mission.before.map((b) => `- ${b}`));
+  }
   lines.push(
     '',
     '## How this task runs',

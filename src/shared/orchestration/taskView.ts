@@ -157,6 +157,8 @@ export type TaskViewAction =
   | 'resume'
   | 'retry'
   | 'recreate-worktree'
+  /** Leave the task out of its planned mission and carry on (#43). */
+  | 'skip'
   | 'cancel';
 
 /** How an attempt's verification came out, as the strip and the row show it (#35). */
@@ -191,8 +193,11 @@ export interface TaskReviewView {
 /** The task strip above the conversation (§18.3). Built by the host, drawn by the pane. */
 export interface TaskView {
   missionId: string;
+  taskId: string;
   /** `t1`, `t2`, … within the mission. */
   taskKey: string;
+  /** The mission this task is one of, when it has more than one (#43). */
+  mission?: { title: string; tasks: number };
   title: string;
   objective: string;
   acceptanceCriteria: string[];
@@ -220,6 +225,7 @@ export interface TaskView {
 /** The chips on an orchestrated session's row (§18.1). A cut-down `TaskView`. */
 export interface TaskBadge {
   missionId: string;
+  taskId: string;
   taskKey: string;
   title: string;
   state: TaskState;
@@ -372,6 +378,7 @@ export const TASK_ACTION_LABEL: Record<TaskViewAction, string> = {
   resume: 'Resume',
   retry: 'Retry',
   'recreate-worktree': 'Recreate worktree',
+  skip: 'Skip',
   cancel: 'Cancel',
 };
 
@@ -381,6 +388,7 @@ export const TASK_STRIP_ACTIONS: readonly TaskViewAction[] = [
   'accept',
   'resume',
   'retry',
+  'skip',
   'cancel',
   'recreate-worktree',
 ];

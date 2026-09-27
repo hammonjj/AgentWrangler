@@ -649,6 +649,136 @@ export class WorktreeManager {
     return `${a.branch}: ${range}\n\n${stat.stdout}\n${patch.stdout}`;
   }
 
+  // ---- A planned mission's one tree (§29 P8, #43) ----
+
+  /** The head of the assignment's branch. */
+  async headOf(a: WorktreeAssignment): Promise<string> {
+    return this.branchHead(a.branch);
+  }
+
+  /**
+   * Start a fresh retry inside the same tree: switch it to a new branch cut at
+   * `from` (the commit the task started from). The tree must be clean — commit
+   * what the last attempt left first — so nothing is lost in the switch.
+   *
+   * When the tree is on `resetBranch` (the mission branch) and it has moved
+   * past `from`, the rejected work is kept on `keepAs` before the mission
+   * branch is put back to `from`, so the mission branch only ever holds
+   * accepted work and the rejected attempt stays for comparison (§13.2).
+   * Returns the assignment on its new branch, recorded.
+   */
+  async restartOn(
+    a: WorktreeAssignment,
+    opts: { branch: string; from: string; resetBranch?: string; keepAs?: string },
+  ): Promise<WorktreeAssignment> {
+    this.assertOurs(a);
+    for (const b of [opts.branch, opts.keepAs, opts.resetBranch]) {
+      if (b !== undefined && !b.startsWith(`${BRANCH_PREFIX}/`)) throw this.fail('invalid-name', `${b} is not an AW branch`);
+    }
+    if (!FULL_SHA.test(opts.from)) throw this.fail('invalid-name', `from must be a full commit id, not "${opts.from}"`);
+    const dirty = await this.dirtyPaths(a);
+    if (dirty.length > 0) throw this.fail('refused-dirty', `${a.branch} has uncommitted changes: ${listed(dirty)}`);
+    if ((await this.branchHeadOrUndefined(opts.branch)) !== undefined) throw this.fail('branch-exists', `${opts.branch} already exists`);
+    const head = await this.branchHead(a.branch);
+    const onReset = opts.resetBranch !== undefined && a.branch === opts.resetBranch;
+    if (onReset && head !== opts.from) {
+      const anc = await this.git(['merge-base', '--is-ancestor', opts.from, head]);
+      if (anc.code !== 0) throw this.fail('unexpected-commits', `${a.branch} no longer contains ${opts.from.slice(0, 8)}; not resetting it`);
+      if (opts.keepAs) {
+        if ((await this.branchHeadOrUndefined(opts.keepAs)) !== undefined) throw this.fail('branch-exists', `${opts.keepAs} already exists`);
+        await this.gitOk(['branch', '--no-track', opts.keepAs, head], 'git-failed');
+      }
+    }
+    const sw = await this.git(['switch', '--quiet', '--no-track', '-c', opts.branch, opts.from], a.path, ADD_TIMEOUT_MS);
+    if (sw.code !== 0) throw this.fail('git-failed', `could not switch ${a.path} to ${opts.branch}: ${sw.stderr.trim()}`);
+    if (onReset && head !== opts.from) {
+      // No longer checked out anywhere, so the ref can move; only if nobody else moved it meanwhile.
+      await this.gitOk(['update-ref', `refs/heads/${opts.resetBranch}`, opts.from, head], 'git-failed');
+    }
+    const next: WorktreeAssignment = { ...a, branch: opts.branch, lastKnownHead: opts.from };
+    await this.deps.record(next);
+    this.log(`worktree ${a.path}: ${a.branch} → ${opts.branch} from ${opts.from.slice(0, 8)}`);
+    return next;
+  }
+
+  /**
+   * Put the tree back on `branch` (the mission branch) at the current head,
+   * after a retry branch's work was accepted. Only a fast-forward: `branch`
+   * must be an ancestor of the head, so nothing on it is dropped.
+   */
+  async returnTo(a: WorktreeAssignment, branch: string): Promise<WorktreeAssignment> {
+    this.assertOurs(a);
+    if (!branch.startsWith(`${BRANCH_PREFIX}/`)) throw this.fail('invalid-name', `${branch} is not an AW branch`);
+    if (a.branch === branch) return a;
+    const head = await this.branchHead(a.branch);
+    const target = await this.branchHead(branch);
+    if (target !== head) {
+      const anc = await this.git(['merge-base', '--is-ancestor', target, head]);
+      if (anc.code !== 0) throw this.fail('unexpected-commits', `${branch} has commits that ${a.branch} does not; not moving it`);
+      await this.gitOk(['update-ref', `refs/heads/${branch}`, head, target], 'git-failed');
+    }
+    const sw = await this.git(['switch', '--quiet', branch], a.path);
+    if (sw.code !== 0) throw this.fail('git-failed', `could not switch ${a.path} to ${branch}: ${sw.stderr.trim()}`);
+    const next: WorktreeAssignment = { ...a, branch, lastKnownHead: head };
+    await this.deps.record(next);
+    this.log(`worktree ${a.path}: back on ${branch} at ${head.slice(0, 8)}`);
+    return next;
+  }
+
+  /**
+   * Take a task's work off `branch` (the mission branch) without losing it:
+   * it is kept on `keepAs`, and the tree goes back to `branch` at `resetTo`,
+   * the commit the task started from. Used when a task is skipped. On a
+   * retry branch, the work is already on a branch of its own, and the tree
+   * just switches back (the mission branch must still be at `resetTo`).
+   */
+  async setAside(a: WorktreeAssignment, opts: { branch: string; resetTo: string; keepAs: string }): Promise<WorktreeAssignment> {
+    this.assertOurs(a);
+    for (const b of [opts.branch, opts.keepAs]) {
+      if (!b.startsWith(`${BRANCH_PREFIX}/`)) throw this.fail('invalid-name', `${b} is not an AW branch`);
+    }
+    if (!FULL_SHA.test(opts.resetTo)) throw this.fail('invalid-name', `resetTo must be a full commit id, not "${opts.resetTo}"`);
+    const dirty = await this.dirtyPaths(a);
+    if (dirty.length > 0) throw this.fail('refused-dirty', `${a.branch} has uncommitted changes: ${listed(dirty)}`);
+    if (a.branch === opts.branch) {
+      const head = await this.branchHead(a.branch);
+      if (head !== opts.resetTo) {
+        const anc = await this.git(['merge-base', '--is-ancestor', opts.resetTo, head]);
+        if (anc.code !== 0) throw this.fail('unexpected-commits', `${a.branch} no longer contains ${opts.resetTo.slice(0, 8)}; not resetting it`);
+        if ((await this.branchHeadOrUndefined(opts.keepAs)) !== undefined) throw this.fail('branch-exists', `${opts.keepAs} already exists`);
+        await this.gitOk(['branch', '--no-track', opts.keepAs, head], 'git-failed');
+        // Clean tree, and the work it held is on `keepAs`: this loses nothing.
+        const reset = await this.git(['reset', '--quiet', '--hard', opts.resetTo], a.path, ADD_TIMEOUT_MS);
+        if (reset.code !== 0) throw this.fail('git-failed', `could not put ${a.branch} back to ${opts.resetTo.slice(0, 8)}: ${reset.stderr.trim()}`);
+      }
+    } else {
+      const target = await this.branchHead(opts.branch);
+      if (target !== opts.resetTo) throw this.fail('unexpected-commits', `${opts.branch} moved to ${target.slice(0, 8)}; not switching back to it`);
+      const sw = await this.git(['switch', '--quiet', opts.branch], a.path, ADD_TIMEOUT_MS);
+      if (sw.code !== 0) throw this.fail('git-failed', `could not switch ${a.path} to ${opts.branch}: ${sw.stderr.trim()}`);
+    }
+    const next: WorktreeAssignment = { ...a, branch: opts.branch, lastKnownHead: opts.resetTo };
+    await this.deps.record(next);
+    return next;
+  }
+
+  /** The branch the primary checkout has checked out, or undefined on a detached HEAD. */
+  async primaryBranch(): Promise<string | undefined> {
+    const r = await this.git(['symbolic-ref', '--quiet', '--short', 'HEAD']);
+    const name = r.stdout.trim();
+    return r.code === 0 && name ? name : undefined;
+  }
+
+  /** Uncommitted paths in the tree, leaving out setup artifacts that are still exactly what setup made. */
+  private async dirtyPaths(a: WorktreeAssignment): Promise<string[]> {
+    const ignorable = new Set(this.setupArtifacts(a.path).filter((x) => x.intact).map((x) => x.rel));
+    const st = await this.git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], a.path);
+    if (st.code !== 0) throw this.fail('git-failed', `could not read the status of ${a.path}: ${st.stderr.trim()}`);
+    return parseStatus(st.stdout)
+      .map((e) => e.path.replace(/\/$/, ''))
+      .filter((p) => !ignorable.has(p));
+  }
+
   // ---- Inspection ----
 
   /** Every worktree git knows for this repository, flagged when it is under AW's root. */

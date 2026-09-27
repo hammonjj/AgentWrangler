@@ -250,6 +250,7 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       host.dialogs,
       app.models,
       app.taskPanes,
+      app.missions,
     );
     this.conversation = new ConversationHost(
       paneChannel(transport, 'conversation'),

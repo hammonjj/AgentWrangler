@@ -133,7 +133,8 @@ export interface TransitionOptions {
 export function transitionMission(mission: Mission, to: MissionState, opts: TransitionOptions): Mission {
   missionMachine.check(mission.state, to);
   if (to === 'running' && mission.state === 'draft') {
-    if (mission.tasks.length !== 1 || mission.plannerAttemptId !== undefined) {
+    // A planned mission always goes through review, whatever its size and whatever the mode (#43).
+    if (mission.tasks.length !== 1 || mission.plannerAttemptId !== undefined || mission.planned) {
       throw new IllegalTransition('mission', mission.state, to, 'only a single task may start without a reviewed plan');
     }
   }

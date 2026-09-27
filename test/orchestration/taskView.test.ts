@@ -111,13 +111,14 @@ describe('task chips', () => {
   });
 
   it('is a task chip alone when nothing has been routed yet', () => {
-    const chips = taskChips({ missionId: 'm', taskKey: 't1', title: 'Do it', state: 'running' });
+    const chips = taskChips({ missionId: 'm', taskId: 't1', taskKey: 't1', title: 'Do it', state: 'running' });
     expect(chips.map((c) => c.kind)).toEqual(['task']);
   });
 
   it('appends the mode marker to the route chip and flags the loud ones', () => {
     const chips = taskChips({
       missionId: 'm',
+      taskId: 't1',
       taskKey: 't1',
       title: 'Do it',
       state: 'running',
