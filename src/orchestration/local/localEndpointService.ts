@@ -118,6 +118,7 @@ export class LocalEndpointService implements Disposable {
     this.now = deps.now ?? Date.now;
     this.log = deps.log ?? (() => undefined);
     this.stored = parseStored(deps.storage?.get<unknown>(STORAGE_KEY, undefined));
+    this.lastReprobe = this.now();
     this.sub = deps.settings.onDidChange((affects) => {
       if (affects(LOCAL_ENDPOINTS_KEY)) void this.configChanged();
     });
@@ -159,9 +160,15 @@ export class LocalEndpointService implements Disposable {
       if (!cfg) return;
       const key = await this.key(id);
       const probe = await probeEndpoint(cfg, { fetch: this.deps.fetch, key, now: this.now });
-      this.stored = { ...this.stored, probes: { ...this.stored.probes, [id]: probe } };
-      this.save();
+      // A failed re-probe keeps the last good one: its models stay in the tier
+      // map (and their tiers in force) while the server is down; health says why.
+      const prev = this.stored.probes[id];
+      if (probe.reachable || !prev?.reachable) {
+        this.stored = { ...this.stored, probes: { ...this.stored.probes, [id]: probe } };
+        this.save();
+      }
       const st = this.state(id);
+      const was = st.health.state;
       if (probe.reachable) {
         st.failures = 0;
         st.health = { state: 'reachable', reason: reachableReason(probe), at: probe.at };
@@ -171,6 +178,7 @@ export class LocalEndpointService implements Disposable {
       }
       this.log(`local: probed ${id}: ${probe.reachable ? `${probe.models.length} model(s)` : `unreachable (${probe.error})`}`);
       this.changed();
+      if (st.health.state === 'down' && was !== 'down') this.downEmitter.fire(endpointSource(id));
     })().finally(() => this.probing.delete(id));
     this.probing.set(id, p);
     return p;

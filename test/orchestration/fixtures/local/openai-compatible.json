@@ -1,0 +1,4 @@
+{
+  "_note": "Synthetic: a generic OpenAI-compatible server that lists models and nothing else.",
+  "GET /v1/models": { "status": 200, "body": { "object": "list", "data": [{ "id": "some-model", "object": "model", "owned_by": "someone" }] } }
+}

@@ -1,0 +1,10 @@
+{
+  "_note": "Synthetic, shaped like vLLM's /v1/models (owned_by vllm, max_model_len).",
+  "GET /v1/models": {
+    "status": 200,
+    "body": { "object": "list", "data": [{ "id": "example/coder-14b", "object": "model", "owned_by": "vllm", "max_model_len": 131072 }] }
+  },
+  "GET /health": { "status": 200, "body": "" },
+  "POST /v1/responses": { "status": 422, "body": { "detail": "input is required" } },
+  "POST /v1/messages": { "status": 404, "body": { "detail": "Not Found" } }
+}

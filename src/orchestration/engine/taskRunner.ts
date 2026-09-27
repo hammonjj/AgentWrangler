@@ -1384,7 +1384,7 @@ export class TaskRunner implements Disposable {
       const cached = u.cacheReadTokens ?? 0;
       const fresh = Math.max(0, (u.inputTokens ?? 0) - (p.cacheReadPerMTok !== undefined ? cached : 0));
       const usd = (fresh * p.inPerMTok + (u.outputTokens ?? 0) * p.outPerMTok + (p.cacheReadPerMTok !== undefined ? cached * p.cacheReadPerMTok : 0)) / 1e6;
-      return { usd: Math.round(usd * 1e6) / 1e6, model: entry.descriptor.label };
+      return { usd: Math.round(usd * 1e6) / 1e6, model: entry.descriptor.resolvedId ?? entry.descriptor.modelId };
     } catch {
       return undefined;
     }
@@ -1677,7 +1677,11 @@ export class TaskRunner implements Disposable {
         const cur = this.need(m.id);
         // Checked again here: the attempt may have ended (and its record been written) while this waited.
         if (!LIVE.includes(cur.attempts.find((x) => x.id === a.id)?.state ?? 'failed')) return;
-        this.put(this.patchAttempt(cur, a.id, (x) => ({ ...x, usage: addTurnUsage(x.usage, r) })));
+        const source = cur.decisions.find((d) => d.id === a.routingDecisionId)?.resolution.target.source;
+        // A local model has `$0 API cost` by rule (§19.4): whatever cost a harness
+        // invents for a model it does not know (§19.6 point 3) is not recorded.
+        const turn = isEndpointSource(source) ? withoutCost(r) : r;
+        this.put(this.patchAttempt(cur, a.id, (x) => ({ ...x, usage: addTurnUsage(x.usage, turn) })));
       });
       return;
     }
@@ -1739,6 +1743,14 @@ export class TaskRunner implements Disposable {
 function handleView(h: SessionHandle): HandleView {
   const permission = h.blocks.some((b) => b.kind === 'permission' && (b as { state?: string }).state === 'pending');
   return { lifecycle: h.lifecycle, pendingAsk: !!h.pendingQuestion || !!h.pendingPlan || permission, backgroundTasks: h.backgroundTasks };
+}
+
+/** A turn's tokens without any cost: for a model on a local endpoint. */
+function withoutCost(r: TurnRecord): TurnRecord {
+  const modelsUsed: TurnRecord['modelsUsed'] = {};
+  for (const [model, { costUsd: _c, ...rest }] of Object.entries(r.modelsUsed ?? {})) modelsUsed[model] = rest;
+  const { costUsd: _cost, ...rest } = r;
+  return { ...rest, modelsUsed, costBasis: 'none' };
 }
 
 function closeWait(a: ExecutionAttempt, now: number): ExecutionAttempt {
