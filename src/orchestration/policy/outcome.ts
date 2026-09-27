@@ -133,7 +133,7 @@ function classifyClaudeResult(r: Record<string, unknown>): Classification | unde
   if (subtype.startsWith('error_max_budget') || reason === 'budget_exhausted') {
     return { category: 'budget', signature: 'max-budget', detail: 'it reached its spending limit' };
   }
-  if (reason === 'prompt_too_long' || /prompt.?too.?long|context.?(window|length|overflow)/i.test(`${reason} ${subtype} ${text}`)) {
+  if (reason === 'prompt_too_long' || /prompt.?(is.?)?too.?long|context.?(window|length|overflow)/i.test(`${reason} ${subtype} ${text}`)) {
     return { category: 'context', signature: 'context-overflow', detail: 'its context overflowed' };
   }
   if (status === 401 || status === 403) {

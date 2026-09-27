@@ -26,6 +26,7 @@ import type { TaskFinalRecord, TelemetryRecord } from '../../src/shared/orchestr
 import type { Mission, Task } from '../../src/shared/orchestration/types';
 import type { PlanTaskDraft } from '../../src/shared/orchestration/plan';
 import type { Exec } from '../../src/orchestration/worktrees/exec';
+import { snapshot } from './routingFixtures';
 
 const savedEnv: Record<string, string | undefined> = {};
 let gitConfig: string;
@@ -159,6 +160,48 @@ function byKey(m: Mission, key: string): Task {
 function script(r: Rig, m: Mission, attempts: Record<string, SimAttempt[]>): void {
   for (const [key, list] of Object.entries(attempts)) r.scenario.tasks![byKey(m, key).id] = list;
 }
+
+describe('planned missions: escalation (#41)', () => {
+  const SONNET = { harness: 'claude-code', model: 'sonnet', effort: 'low' } as const;
+  const FAILS = { behaviour: 'fail-verification', files: { 'a.txt': 'bad\n', 'check.flag': '1\n' } } as const;
+  const one = (title: string): PlanTaskDraft[] => [{ title, objective: 'Synthetic.', acceptanceCriteria: ['a'] }];
+
+  it('a mission capped at standard never runs expert, and the task says which cap stopped it', async () => {
+    const r = rig({ routing: { snapshot: () => snapshot() } });
+    const m = await r.runner.createMission({ folder: repo, title: 'Capped mission', objective: 'Synthetic.', tasks: one('Capped'), policy: { caps: { maxTier: 'standard', maxEffort: 'low' } } });
+    script(r, m, { t1: [FAILS] });
+    await r.runner.approvePlan(m.id, SONNET);
+    await until(() => byKey(r.runner.get(m.id)!, 't1').escalations.at(-1)?.action === 'needs-human', 20_000, 'the ladder to end');
+    const cur = r.runner.get(m.id)!;
+    const t1 = byKey(cur, 't1');
+    expect(t1.escalations.map((d) => [d.action, d.blockedBy ?? null])).toEqual([
+      ['continue-with-feedback', null],
+      ['raise-effort', 'cap'],
+      ['raise-tier', 'cap'],
+      ['switch-harness', 'limit'],
+      ['needs-human', null],
+    ]);
+    expect(t1.escalations[2].reason).toBe('Would raise tier to expert; the mission is capped at standard.');
+    expect(t1.stateReason).toContain('the mission is capped at standard');
+    // Nothing ran above the cap.
+    for (const a of cur.attempts) expect(cur.decisions.find((d) => d.id === a.routingDecisionId)!.resolution.target.tier).toBe('standard');
+  });
+
+  it('a repeated failure raises effort once (a planned route is not pinned), and a fresh attempt passes', async () => {
+    const r = rig({ routing: { snapshot: () => snapshot() } });
+    const m = await r.runner.createMission({ folder: repo, title: 'Effort mission', objective: 'Synthetic.', tasks: one('Effort') });
+    script(r, m, { t1: [FAILS, edit({ 'a.txt': 'good\n' })] });
+    await r.runner.approvePlan(m.id, SONNET);
+    await until(() => r.runner.get(m.id)?.state === 'review', 20_000, 'the mission to finish');
+    const cur = r.runner.get(m.id)!;
+    const t1 = byKey(cur, 't1');
+    expect(t1.escalations.map((d) => d.action)).toEqual(['continue-with-feedback', 'raise-effort']);
+    const last = cur.attempts.find((a) => a.id === t1.attemptIds.at(-1))!;
+    expect(last).toMatchObject({ n: 3, escalation: { action: 'raise-effort', step: 2 } });
+    expect(cur.decisions.find((d) => d.id === last.routingDecisionId)!.resolution.target).toMatchObject({ model: 'sonnet', tier: 'standard', effortNative: 'medium' });
+    expect(t1.result?.acceptedBy).toBe('verification');
+  });
+});
 
 describe('planned missions', () => {
   it('a hand-written three-task mission is validated, reviewed, approved and run in dependency order in one mission worktree', async () => {

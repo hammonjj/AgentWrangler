@@ -939,3 +939,103 @@ describe('TaskRunner', () => {
     });
   });
 });
+
+describe('escalation (#41): simulated failures through the real launch path', () => {
+  const done = (r: Rig, id: string) => ['needs-human', 'stop', 'split-task'].includes(r.runner.get(id)!.tasks[0].escalations.at(-1)?.action ?? '');
+
+  it('a 429 waits for capacity, then carries on the same session on the same route', async () => {
+    const r = rig({ behaviour: 'rate-limit', followUps: [{ behaviour: 'edit', files: { 'src/a.ts': 'export const a = 1;\n' } }] });
+    const started = await r.runner.start({ ...TASK, folder: repo });
+    await until(() => r.runner.get(started.id)!.tasks[0].state === 'blocked', 8000, 'the wait');
+    expect(r.runner.get(started.id)!.tasks[0].stateReason).toMatch(/^Waiting for capacity/);
+    await until(() => attemptOf(r.runner.get(started.id), 2)?.state === 'succeeded', 8000, 'the attempt after the wait');
+    const m = r.runner.get(started.id)!;
+    expect(m.tasks[0].escalations.map((d) => d.action)).toEqual(['wait']);
+    const [d1, d2] = m.attempts.map((a) => m.decisions.find((d) => d.id === a.routingDecisionId)!.resolution.target);
+    // Never a bigger model: the same route, the same session.
+    expect(d2).toEqual(d1);
+    expect(attemptOf(m, 2)).toMatchObject({ continues: attemptOf(m, 1)!.id, escalation: { action: 'wait', step: 1 } });
+    expect(r.harness.launches).toHaveLength(1);
+  });
+
+  it('an attempt past its wall clock is stopped as stuck, tried once more fresh, then handed over', async () => {
+    const r = rig({ behaviour: 'timeout' }, shared(), { escalationLimits: { wallClockMs: 300 } });
+    const started = await r.runner.start({ ...TASK, folder: repo });
+    await until(() => done(r, started.id), 10_000, 'the ladder to end');
+    const m = r.runner.get(started.id)!;
+    expect(m.attempts.map((a) => [a.outcome?.category, a.outcome?.signature])).toEqual([
+      ['stuck', 'wall-clock'],
+      ['stuck', 'wall-clock'],
+    ]);
+    expect(m.tasks[0].escalations.map((d) => d.action)).toEqual(['retry-same', 'needs-human']);
+    // Fresh: its own session and worktree; the first is kept.
+    expect(attemptOf(m, 2)!.assignment.sessionIds[0]).not.toBe(attemptOf(m, 1)!.assignment.sessionIds[0]);
+    expect(m.worktrees.map((w) => w.state)).toEqual(['retained', 'ready']);
+  });
+
+  it('a pending step survives a restart and runs when it is due', async () => {
+    const s = shared();
+    const a = rig({ behaviour: 'fail', followUps: [{ behaviour: 'edit', files: { 'src/a.ts': 'export const a = 1;\n' } }] }, s, { escalationLimits: { infraBackoffMs: [400] } });
+    const started = await a.runner.start({ ...TASK, folder: repo });
+    await until(() => a.runner.get(started.id)!.tasks[0].state === 'queued', 8000, 'the pending retry');
+    a.runner.dispose();
+
+    const b = rig(EDIT, s, { escalationLimits: { infraBackoffMs: [400] } });
+    await b.runner.recover();
+    expect(b.runner.get(started.id)!.tasks[0].state).toBe('queued');
+    await until(() => attemptOf(b.runner.get(started.id), 2)?.state === 'succeeded', 8000, 'the retry after the restart');
+    expect(attemptOf(b.runner.get(started.id), 2)).toMatchObject({ escalation: { action: 'retry-same' }, assignment: { mode: 'continue' } });
+  });
+
+  it('cancelling drops a pending step', async () => {
+    const r = rig({ behaviour: 'fail' }, shared(), { escalationLimits: { infraBackoffMs: [300] } });
+    const started = await r.runner.start({ ...TASK, folder: repo });
+    await until(() => r.runner.get(started.id)!.tasks[0].state === 'queued', 8000, 'the pending retry');
+    await r.runner.cancel(started.id);
+    await new Promise((res) => setTimeout(res, 500));
+    expect(r.runner.get(started.id)!.attempts).toHaveLength(1);
+    expect(r.runner.get(started.id)!.tasks[0].state).toBe('cancelled');
+  });
+
+  it('a cap tightened while a step waits stops it at launch, saying which', async () => {
+    const r = rig({ behaviour: 'fail' }, shared(), { escalationLimits: { infraBackoffMs: [300] } });
+    const started = await r.runner.start({ ...TASK, folder: repo });
+    await until(() => r.runner.get(started.id)!.tasks[0].state === 'queued', 8000, 'the pending retry');
+    await r.runner.setPolicy(started.id, 'mission', { caps: { maxAttempts: 1 } });
+    await until(() => r.runner.get(started.id)!.tasks[0].state === 'needs-human', 8000, 'the stop');
+    const m = r.runner.get(started.id)!;
+    expect(m.attempts).toHaveLength(1);
+    expect(m.tasks[0].escalations.at(-1)).toMatchObject({ action: 'stop', blockedBy: 'cap' });
+    expect(m.tasks[0].stateReason).toMatch(/caps attempts at 1/);
+  });
+
+  // Every failure type the simulated harness can inject, repeated on every attempt:
+  // the ladder always ends with a person, within its limits, every step an event.
+  const behaviours: [SimAttempt['behaviour'], number, string][] = [
+    ['fail', 3, 'needs-human'],
+    ['crash', 3, 'needs-human'],
+    ['rate-limit', 4, 'needs-human'],
+    ['context-overflow', 1, 'split-task'],
+    ['fail-verification', 2, 'needs-human'],
+    ['no-diff', 2, 'needs-human'],
+  ];
+  for (const [behaviour, attempts, last] of behaviours) {
+    it(`${behaviour}, every time: ${attempts} attempt(s), then ${last}`, async () => {
+      const files = behaviour === 'fail-verification' ? { 'src/a.ts': 'x\n', 'check.flag': '1\n' } : undefined;
+      const r = rig({ behaviour, ...(files ? { files } : {}), followUps: Array(4).fill({ behaviour, ...(files ? { files } : {}) }) });
+      const started = await r.runner.start({ ...TASK, folder: repo });
+      await until(() => done(r, started.id), 15_000, 'the ladder to end');
+      await new Promise((res) => setTimeout(res, 150));
+      const m = r.runner.get(started.id)!;
+      expect(m.attempts).toHaveLength(attempts);
+      expect(m.tasks[0].escalations.at(-1)?.action).toBe(last);
+      expect(m.tasks[0].state).toBe('needs-human');
+      // The route the user picked is the route every attempt ran on.
+      const targets = new Set(m.attempts.map((a) => JSON.stringify(m.decisions.find((d) => d.id === a.routingDecisionId)!.resolution.target)));
+      expect(targets.size).toBe(1);
+      // Every attempt after the first was started by a recorded step, and every step is an event.
+      for (const a of m.attempts.slice(1)) expect(m.tasks[0].escalations.some((d) => d.id === a.escalation?.decisionId)).toBe(true);
+      expect(r.telemetry.filter((t) => t.type === 'escalation')).toHaveLength(m.tasks[0].escalations.length);
+    });
+  }
+});
