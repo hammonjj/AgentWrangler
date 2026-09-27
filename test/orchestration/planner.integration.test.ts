@@ -273,7 +273,8 @@ describe('replanning a partly done mission (§11.4)', () => {
     const plan = output([planned('t1'), planned('t2', { dependsOn: [{ key: 't1', kind: 'code' }] }), planned('t3', { dependsOn: [{ key: 't2', kind: 'order' }] })]);
     // The replan: one new task after the done one. `t1` is kept, so the planner names its own keys.
     const replanned = output([planned('n1', { dependsOn: [{ key: 't1', kind: 'code' }], whySeparate: '' })]);
-    const r = rig([{ output: plan }, { output: replanned }]);
+    // No automatic retry (#41): t2's failure goes straight to the user, who replans.
+    const r = rig([{ output: plan }, { output: replanned }], { escalationLimits: { qualityAttempts: 1 } });
     const m = await r.runner.planMission({ folder: repo, title: 'Replan mission', objective: 'Synthetic mission objective.' });
     await until(() => r.runner.get(m.id)?.state === 'plan-review', 5000, 'the plan');
     let cur = r.runner.get(m.id)!;

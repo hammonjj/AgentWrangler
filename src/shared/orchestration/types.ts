@@ -669,6 +669,10 @@ export interface ExecutionAttempt {
   turnsSeen?: number;
   /** The interrupted attempt this one resumes (same session, `assignment.mode: 'continue'`). */
   resumeOf?: string;
+  /** The failed attempt whose session this one carries on, with the failure as its message (#41). */
+  continues?: string;
+  /** The escalation step that started it (#41). Absent: a person started it. */
+  escalation?: { decisionId: string; action: EscalationAction; step: number };
   /** Started by `autoRecover`, not by a person: at most one per interrupted attempt (§23.3). */
   autoResumed?: boolean;
   /** Interrupted with a conversation that can be resumed (the same session id). */
@@ -773,12 +777,32 @@ export type EscalationAction =
   | 'raise-effort'
   | 'raise-tier'
   | 'switch-harness'
+  /** Another model of the same tier: a larger context window, or a failover (#41, #51). */
+  | 'switch-model'
   | 'wait'
   | 'split-task'
   | 'needs-human'
   | 'stop';
 
-/** What happened after a failed attempt, blocked steps included. Immutable. */
+/** Actions that start another attempt when they are not blocked. */
+export const LAUNCHING_ACTIONS: readonly EscalationAction[] = [
+  'retry-same',
+  'continue-with-feedback',
+  'raise-effort',
+  'raise-tier',
+  'switch-harness',
+  'switch-model',
+  'wait',
+];
+
+/** Why a step of the ladder was skipped (§15.2): a pin, a cap, a limit (§15.3), or nothing to move to. */
+export type EscalationBlock = 'cap' | 'pin' | 'limit' | 'unavailable';
+
+/**
+ * What happened after a failed attempt, blocked steps included (§7.2, §15).
+ * Immutable. One failure can leave several: each step the ladder skipped
+ * (with `blockedBy`), then the one it took.
+ */
 export interface EscalationDecision {
   id: string;
   taskId: string;
@@ -786,9 +810,17 @@ export interface EscalationDecision {
   evidence: { category: OutcomeCategory; signature?: string; repeats: number };
   action: EscalationAction;
   delta?: { tier?: TierName; effort?: EffortLevel; harness?: HarnessId };
-  blockedBy?: 'cap' | 'pin' | 'limit';
+  blockedBy?: EscalationBlock;
   reason: string;
   decidedAt: Millis;
+  /** A launching step: carry on in the failed attempt's session, or start a fresh one in a fresh worktree. */
+  mode?: 'continue' | 'fresh';
+  /** A launching step waits until then: a backoff, or capacity coming back. */
+  notBefore?: Millis;
+  /** A step that changes the model: what it resolved to when it was decided. */
+  target?: ExecutionTarget;
+  /** A launching step: the escalation step its attempt carries (1 for the first attempt escalation started). */
+  step?: number;
 }
 
 // ---------------------------------------------------------------------------

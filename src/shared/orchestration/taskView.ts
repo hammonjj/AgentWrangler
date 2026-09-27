@@ -180,6 +180,45 @@ export interface TaskPolicyView {
   conflicts: string[];
 }
 
+/** One step of the escalation ladder as the strip shows it (§15.3, #41). */
+export interface TaskEscalationStepView {
+  /** The attempt whose failure it answered. */
+  afterAttempt: number;
+  category: OutcomeCategory;
+  /** "Raise effort → high", "Wait for capacity", "Hand to you". */
+  label: string;
+  /** The rule's sentence: why this step, or why it was skipped. */
+  reason: string;
+  /** Skipped, and what stopped it. */
+  blockedBy?: 'pin' | 'cap' | 'limit' | 'unavailable';
+  /** Taken, and waiting to run: when it is due (absent: as soon as it can). */
+  pending?: { at?: number };
+  at: number;
+}
+
+/** The ladder as it was walked: every step, the skipped ones included. */
+export interface TaskEscalationView {
+  /** "2 steps · effort raised" — the header chip. */
+  chip: string;
+  /** A step changed the route (a bigger model, more effort, another harness): drawn loudly. */
+  loud: boolean;
+  steps: TaskEscalationStepView[];
+}
+
+const BLOCK_LABEL: Record<NonNullable<TaskEscalationStepView['blockedBy']>, string> = {
+  pin: 'pinned',
+  cap: 'capped',
+  limit: 'limit reached',
+  unavailable: 'nothing to move to',
+};
+
+/** "After attempt 2 · quality-repeat · ⊘ Raise tier → expert (capped): Would raise tier…" — one line of the ladder. */
+export function escalationStepLine(s: TaskEscalationStepView): string {
+  const glyph = s.blockedBy ? '⊘' : s.pending ? '…' : '→';
+  const tag = s.blockedBy ? ` (${BLOCK_LABEL[s.blockedBy]})` : s.pending ? ' (pending)' : '';
+  return `After attempt ${s.afterAttempt} · ${s.category} · ${glyph} ${s.label}${tag}: ${s.reason}`;
+}
+
 /** "Policy changed (mission): max tier expert → standard · from attempt 2" — the header's change line. */
 export function policyChangeLine(c: TaskPolicyView['changes'][number]): string {
   const when = c.pending ? `applies from attempt ${c.appliesFromAttempt}` : `from attempt ${c.appliesFromAttempt}`;
@@ -246,6 +285,8 @@ export interface TaskView {
   attempts: TaskAttemptView[];
   /** Pins, caps and policy changes (#40). */
   policy?: TaskPolicyView;
+  /** The escalation ladder as walked so far (#41). Absent: no attempt has failed. */
+  escalation?: TaskEscalationView;
   actions: TaskViewAction[];
 }
 

@@ -71,7 +71,7 @@ describe('turnFailure', () => {
 
   it('classifies Claude error results', () => {
     expect(turnFailure({ type: 'result', subtype: 'success', is_error: true, api_error_status: 429 })).toEqual({ category: 'capacity', signature: 'api-429' });
-    expect(turnFailure({ type: 'result', subtype: 'error_max_turns', is_error: true })).toEqual({ category: 'budget', signature: 'error_max_turns' });
+    expect(turnFailure({ type: 'result', subtype: 'error_max_turns', is_error: true })).toEqual({ category: 'budget', signature: 'max-turns' });
     expect(turnFailure({ type: 'result', subtype: 'success', is_error: true, terminal_reason: 'prompt_too_long' })).toEqual({ category: 'context', signature: 'context-overflow' });
     expect(turnFailure({ type: 'result', subtype: 'error_during_execution', is_error: true })).toEqual({ category: 'infra', signature: 'error_during_execution' });
   });

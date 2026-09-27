@@ -53,9 +53,13 @@ import { TELEMETRY_SCHEMA_VERSION } from '../../shared/orchestration/telemetry';
 import type { PlanEdit, PlanTaskDraft } from '../../shared/orchestration/plan';
 import {
   EFFORT_LEVELS,
+  LAUNCHING_ACTIONS,
   isOrchestrationOrigin,
   type AttemptState,
   type EffortLevel,
+  type EscalationDecision,
+  type RouteDimension,
+  type RouteRequirement,
   type ExecutionAttempt,
   type ExecutionPolicy,
   type ExecutionTarget,
@@ -97,7 +101,7 @@ import { buildVerificationPlan, summariseVerification } from '../../shared/orche
 import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import type { HealthState } from '../../shared/orchestration/sourceHealth';
 import type { LocalRunMetrics } from '../../shared/orchestration/telemetry';
-import { DEFAULT_TIERS, isKnown, nativeEffortFor, tierRank } from '../../shared/orchestration/catalog';
+import { DEFAULT_TIERS, isKnown, nativeEffortFor, tierRank, type TierDef } from '../../shared/orchestration/catalog';
 import {
   admissionRefusal,
   asTaskOverrides,
@@ -106,9 +110,11 @@ import {
   conflictText,
   missionLayer,
   missionLayers,
+  pinnedDimensions,
   policyContextFor,
   policyDiff,
   resolveEffectivePolicy,
+  scopeName,
   taskLayer,
   validateExecutionPolicy,
   type AdmissionFacts,
@@ -117,7 +123,9 @@ import {
 } from '../../shared/orchestration/executionPolicy';
 import { resolveRoute, type ResolverSnapshot } from '../policy/resolver';
 import { compareRoutes, recommendRoute } from '../policy/recommend';
-import { attemptRecord, addTurnUsage, routingRecord } from './attemptRecord';
+import { changesRoute, decideEscalation, limitsFor, pendingEscalation, type EscalationInput, type EscalationLimits, type ProbeAnswer, type ProbeRequest } from '../policy/escalation';
+import { classifyOutcome, type Classification } from '../policy/outcome';
+import { attemptRecord, addTurnUsage, escalationRecord, routingRecord, waitedMs } from './attemptRecord';
 import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from './attemptPolicy';
 import { sessionVerdict, turnFailure, turnMessageIds, type HandleView, type SessionVerdict } from './sessionVerdict';
 
@@ -266,6 +274,8 @@ export interface TaskRunnerDeps {
   settleMs?: number;
   /** How long plan review waits after an edit before assessing the changed tasks (default 800 ms). */
   previewDelayMs?: number;
+  /** §15.3's limits over the defaults for the mission's mode (#41): tests shorten the waits and the wall clock. */
+  escalationLimits?: Partial<EscalationLimits>;
   log?: (msg: string) => void;
 }
 
@@ -297,6 +307,8 @@ interface Watcher {
   /** When the session first looked finished in the current stretch. */
   finishedSince?: number;
   timer?: ReturnType<typeof setTimeout>;
+  /** Fires when the attempt's active time would reach its wall clock (§15.3). */
+  clock?: ReturnType<typeof setTimeout>;
   queued: boolean;
   /** Reattached at start-up, and not yet checked for a prompt that never arrived. */
   checkPrompt: boolean;
@@ -315,6 +327,8 @@ export class TaskRunner implements Disposable {
   private readonly worktreeOwners = new Map<string, string>();
   /** Plan review's pending preview assessments, per mission. */
   private readonly previewTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Escalation steps waiting to run (a backoff, capacity coming back), by decision id (#41). */
+  private readonly escalationTimers = new Map<string, { missionId: string; timer: ReturnType<typeof setTimeout> }>();
   /** The planner call out for each mission, to cut off on Cancel. */
   private readonly planAborts = new Map<string, AbortController>();
   private readonly now: () => number;
@@ -765,7 +779,7 @@ export class TaskRunner implements Disposable {
   }
 
   /** What the count caps are checked against for the task's next attempt. */
-  private admissionFacts(m: Mission, route: TaskRoute, mode: 'fresh' | 'continue', task: Task = this.currentTask(m)): AdmissionFacts {
+  private admissionFacts(m: Mission, route: TaskRoute, resume: boolean, task: Task = this.currentTask(m)): AdmissionFacts {
     const liveAgents = [...this.missions.values()].reduce((n, x) => n + x.attempts.filter((a) => LIVE.includes(a.state)).length, 0);
     const costs = m.attempts.filter((a) => a.taskId === task.id && a.usage?.costUsd !== undefined).map((a) => a.usage!.costUsd!);
     let windowPercent: number | undefined;
@@ -776,8 +790,9 @@ export class TaskRunner implements Disposable {
       windowPercent = undefined;
     }
     return {
-      // A resume carries on an attempt; it is not another try at the task.
-      attemptsSoFar: mode === 'continue' ? 0 : m.attempts.filter((a) => a.taskId === task.id && !a.resumeOf).length,
+      // A resume carries on an interrupted attempt; it is not another try at the
+      // task. Escalation's "continue with feedback" is (#41).
+      attemptsSoFar: resume ? 0 : m.attempts.filter((a) => a.taskId === task.id && !a.resumeOf).length,
       liveAgents,
       ...(costs.length > 0 ? { spentUsd: costs.reduce((s, c) => s + c, 0) } : {}),
       ...(windowPercent !== undefined ? { windowPercent } : {}),
@@ -899,6 +914,7 @@ export class TaskRunner implements Disposable {
 
   /** Stop the mission: its session is ended, its worktrees and branches are kept. */
   cancel(missionId: string): Promise<void> {
+    this.clearEscalations(missionId);
     // The planner is cut off first: its call may be what the queue is waiting behind.
     this.planAborts.get(missionId)?.abort();
     return this.queue(missionId, async () => {
@@ -1309,6 +1325,9 @@ export class TaskRunner implements Disposable {
       if (!isPlanned(m)) throw new TaskError('Only a task in a plan can be skipped.');
       const task = (taskId && m.tasks.find((t) => t.id === taskId)) || this.currentTask(m);
       if (!['needs-human', 'blocked', 'pending'].includes(task.state)) throw new TaskError(`${task.key} is ${task.state}; it cannot be skipped now.`);
+      // A capacity wait is `blocked`: skipping the task drops its pending step (and only its own).
+      const pending = pendingEscalation(task);
+      if (pending) this.clearEscalations(missionId, pending.id);
       const a = this.currentAttempt(m, task.id);
       if (a && LIVE.includes(a.state)) {
         m = this.endAttempt(m, a.id, 'cancelled', { status: 'cancelled' }, 'skipped by the user');
@@ -1402,7 +1421,8 @@ export class TaskRunner implements Disposable {
     // Nothing runs before approval, however this was reached.
     if (m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
     const busy: TaskState[] = ['ready', 'assessing', 'routed', 'queued', 'running', 'verifying', 'integrating', 'needs-human'];
-    if (m.tasks.some((t) => busy.includes(t.state))) return;
+    // A task waiting out a rate limit is `blocked`, and it is still this mission's task in hand.
+    if (m.tasks.some((t) => busy.includes(t.state) || pendingEscalation(t))) return;
     const now = this.now();
     const open = executionOrder(m.tasks).filter((t) => t.state === 'pending' || t.state === 'blocked');
     if (open.length === 0) {
@@ -1741,6 +1761,13 @@ export class TaskRunner implements Disposable {
       return;
     }
     const task = this.currentTask(m);
+    // An escalation step that was waiting when the core stopped: it runs when it was due, or now.
+    const pending = pendingEscalation(task);
+    if (pending && m.state === 'running') {
+      this.log(`task ${id}: ${task.key} resumes its pending ${pending.action}`);
+      this.scheduleEscalation(id, pending);
+      return;
+    }
     const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
     if (wt?.state === 'missing' && task.state === 'needs-human') {
       const why = branchGone.has(wt.id) ? 'its worktree and branch have gone; retry it fresh' : 'its worktree has gone; recreate it from its branch, or retry';
@@ -1776,7 +1803,15 @@ export class TaskRunner implements Disposable {
     const wt = m.worktrees.find((w) => w.id === a.worktreeId);
     if ((a.turnsSeen ?? 0) > 0 || !promptId || !wt) return;
     const task = m.tasks.find((t) => t.id === a.taskId) ?? m.tasks[0];
-    const prompt = a.assignment.mode === 'continue' ? CONTINUE_PROMPT : attemptPrompt(task, { harness: a.assignment.harness, branch: wt.branch, mission: missionContext(m, task) });
+    // An escalation's message is rebuilt from what was stored: the attempt it carried on and the step.
+    const carried = a.continues ? m.attempts.find((x) => x.id === a.continues) : undefined;
+    const step = a.escalation ? task.escalations.find((d) => d.id === a.escalation!.decisionId) : undefined;
+    const prompt =
+      carried && step
+        ? escalationMessage(task, carried, step, 'continue')
+        : a.assignment.mode === 'continue'
+          ? CONTINUE_PROMPT
+          : attemptPrompt(task, { harness: a.assignment.harness, branch: wt.branch, mission: missionContext(m, task) });
     this.log(`task ${m.id}: attempt ${a.n} had no turn seen before the restart; sending its prompt again (deduplicated by id)`);
     try {
       await handle.send(prompt, undefined, { clientMessageId: promptId });
@@ -1818,31 +1853,32 @@ export class TaskRunner implements Disposable {
    * planned mission in the mission's one tree, from wherever it now stands.
    * `continue`: the interrupted attempt's session, resumed in its own tree.
    */
-  private async launch(
-    missionId: string,
-    opts:
-      | { mode: 'fresh'; route: TaskRoute; taskId?: string; routing?: DecisionRouting }
-      | { mode: 'continue'; resumeOf: ExecutionAttempt; auto?: boolean },
-  ): Promise<void> {
+  private async launch(missionId: string, opts: LaunchOptions): Promise<void> {
     let m = this.need(missionId);
-    const taskId = opts.mode === 'continue' ? opts.resumeOf.taskId : opts.taskId ?? this.currentTask(m).id;
+    const resumeOf = opts.mode === 'continue' && 'resumeOf' in opts ? opts.resumeOf : undefined;
+    const continues = opts.mode === 'continue' && 'continues' in opts ? opts.continues : undefined;
+    const prevAttempt = resumeOf ?? continues;
+    const escalation = 'escalation' in opts ? opts.escalation : undefined;
+    const taskId = prevAttempt ? prevAttempt.taskId : (opts as { taskId?: string }).taskId ?? this.currentTask(m).id;
     const task = m.tasks.find((t) => t.id === taskId);
     if (!task) throw new TaskError('That task is no longer in the mission.');
     // The one gate that holds whatever called this: a planned mission's work waits for Approve and start.
     if (m.planned && m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
     const planned = isPlanned(m);
     const n = task.attemptIds.length + 1;
-    const prevDecision = opts.mode === 'continue' ? m.decisions.find((d) => d.id === opts.resumeOf.routingDecisionId) : undefined;
+    const prevDecision = resumeOf ? m.decisions.find((d) => d.id === resumeOf.routingDecisionId) : undefined;
     // The policy as it is now, not as it was at the last attempt: a change
     // since then applies from this one (§10.2). Pins replace the route's own
     // dimensions; a conflict or a spent count cap stops it here.
     const eff = this.effective(m, task);
-    const route: TaskRoute = this.withPins(opts.mode === 'fresh' ? opts.route : routeFromDecision(prevDecision, opts.resumeOf), eff.policy.pins);
+    const route: TaskRoute = this.withPins(resumeOf ? routeFromDecision(prevDecision, resumeOf) : (opts as { route: TaskRoute }).route, eff.policy.pins);
     let harness: AgentHarness;
     let loaded: LoadedRepoPolicy;
     try {
       if (eff.conflicts.length > 0) throw new TaskError(conflictText(eff.conflicts));
-      const refusal = admissionRefusal(eff, this.admissionFacts(m, route, opts.mode, task));
+      // A session is carried on only by its own harness.
+      if (continues && route.harness !== continues.assignment.harness) throw new TaskError(`The session runs on ${continues.assignment.harness}; the route is now pinned to ${route.harness}.`);
+      const refusal = admissionRefusal(eff, this.admissionFacts(m, route, !!resumeOf, task));
       if (refusal) throw new TaskError(refusal);
       harness = this.checkRoute(route);
       const policy = this.deps.repoPolicies.forFolder(m.repoRoot);
@@ -1863,11 +1899,12 @@ export class TaskRunner implements Disposable {
     const manager = await this.manager(loaded);
     let wt: WorktreeAssignment;
     let startCommit: string;
-    if (opts.mode === 'continue') {
-      const prev = m.worktrees.find((w) => w.id === opts.resumeOf.worktreeId);
+    if (prevAttempt) {
+      const prev = m.worktrees.find((w) => w.id === prevAttempt.worktreeId);
       if (!prev || prev.state === 'missing' || prev.state === 'removed') throw new TaskError('The attempt’s worktree has gone; recreate it or retry fresh.');
       wt = prev;
-      startCommit = opts.resumeOf.startCommit ?? prev.baseCommit;
+      // Carrying on the same work on the same branch: measured from where the task's work began.
+      startCommit = prevAttempt.startCommit ?? prev.baseCommit;
     } else {
       try {
         if (planned) {
@@ -1891,12 +1928,14 @@ export class TaskRunner implements Disposable {
 
     // The routing decision, immutable (§7.2). Beside a route the user picked,
     // what the router would have picked, whenever there is an assessment to route from.
-    const routing: DecisionRouting =
-      (opts.mode === 'fresh' ? opts.routing : undefined) ?? { recommendation: this.recommendationFor(m, task.id), offered: false, accepted: false };
+    const routing: DecisionRouting = {
+      ...((opts.mode === 'fresh' ? opts.routing : undefined) ?? { recommendation: this.recommendationFor(m, task.id), offered: false, accepted: false }),
+      ...(escalation ? { escalation, prevDecidedBy: this.decisionOf(m, escalation.afterAttemptId)?.decidedBy } : {}),
+    };
     const decision = this.decision(m, task, n, route, harness, routing);
     const provider = PROVIDER[route.harness] ?? 'claude';
     const preassigned = harness.capabilities().preassignedSessionId;
-    const sessionIds = opts.mode === 'continue' ? [...opts.resumeOf.assignment.sessionIds] : preassigned ? [randomUUID()] : [];
+    const sessionIds = prevAttempt ? [...prevAttempt.assignment.sessionIds] : preassigned ? [randomUUID()] : [];
     const promptId = randomUUID();
     const attempt: ExecutionAttempt = {
       id: this.id(),
@@ -1914,7 +1953,9 @@ export class TaskRunner implements Disposable {
       turnsSeen: 0,
       timing: { queuedAt: now },
       createdAt: now,
-      ...(opts.mode === 'continue' ? { resumeOf: opts.resumeOf.id, ...(opts.auto ? { autoResumed: true } : {}) } : {}),
+      ...(resumeOf ? { resumeOf: resumeOf.id, ...('auto' in opts && opts.auto ? { autoResumed: true } : {}) } : {}),
+      ...(continues ? { continues: continues.id } : {}),
+      ...(escalation?.step !== undefined ? { escalation: { decisionId: escalation.id, action: escalation.action, step: escalation.step } } : {}),
     };
     m = { ...m, decisions: [...m.decisions, decision], attempts: [...m.attempts, attempt] };
     m = this.patchTask(m, task.id, (t) => ({ ...t, attemptIds: [...t.attemptIds, attempt.id] }));
@@ -1926,7 +1967,37 @@ export class TaskRunner implements Disposable {
     this.writeRouting(m, decision);
 
     const policy: LaunchPolicy = attemptLaunchPolicy({ harness: route.harness, primaryRoot: m.repoRoot, repoPolicy: loaded.policy });
-    const prompt = opts.mode === 'continue' ? CONTINUE_PROMPT : attemptPrompt(task, { harness: route.harness, branch: wt.branch, mission: missionContext(m, task) });
+    const feedback = opts.mode === 'fresh' ? opts.feedback : undefined;
+    const prompt = resumeOf
+      ? CONTINUE_PROMPT
+      : continues
+        ? (opts as { message: string }).message
+        : attemptPrompt(task, { harness: route.harness, branch: wt.branch, mission: missionContext(m, task) }) + (feedback ? `\n\n## An earlier attempt\n${feedback}` : '');
+    // Escalation's "continue" (§15.2): the failed attempt's session is still
+    // here and idle, so the failure goes to it as its next message. Watched
+    // from now, so the turns it already finished are not read as this attempt's.
+    const live = continues ? this.continuableHandle(continues) : undefined;
+    if (live) {
+      this.watch(missionId, attempt.id, live, { recovered: false, fromNow: true });
+      let outcome: string;
+      try {
+        outcome = await live.send(prompt, undefined, { clientMessageId: promptId });
+      } catch (e) {
+        outcome = errorText(e);
+      }
+      if (outcome !== 'applied') {
+        this.unwatch(attempt.id);
+        m = this.need(missionId);
+        this.put(this.endAttempt(m, attempt.id, 'failed', { status: 'failed', category: 'infra', signature: 'launch-failed' }, `could not carry on its session: ${outcome}`));
+        await this.releaseTree(missionId, attempt.id);
+        throw new TaskError(`Could not carry on the session: ${outcome}`);
+      }
+      m = this.need(missionId);
+      const cur = m.attempts.find((x) => x.id === attempt.id);
+      if (cur?.state === 'launching') this.put(this.patchAttempt(m, attempt.id, (x) => transitionAttempt(m, x, 'running', { now: this.now() })));
+      this.log(`task ${missionId}: attempt ${n} carries on session ${sessionIds.at(-1)} in ${wt.path}`);
+      return;
+    }
     let handle: SessionHandle;
     try {
       handle = await harness.launch({
@@ -1936,7 +2007,7 @@ export class TaskRunner implements Disposable {
         target: { harness: route.harness, source: decision.resolution.target.source, model: route.model ?? '', effortNative: route.effort?.trim() || 'none' },
         origin: originOf(m, attempt),
         permissionMode: provider === 'claude' ? decisionMode(decision) : undefined,
-        ...(opts.mode === 'continue' ? { resume: sessionIds.at(-1) } : sessionIds[0] ? { sessionId: sessionIds[0] } : {}),
+        ...(prevAttempt ? { resume: sessionIds.at(-1) } : sessionIds[0] ? { sessionId: sessionIds[0] } : {}),
         policy,
       });
     } catch (e) {
@@ -2037,17 +2108,22 @@ export class TaskRunner implements Disposable {
     const cmp = rec ? compareRoutes(rec.resolution.target, target, routing.offered) : undefined;
     const mode = m.policy.mode ?? 'manual';
     let reasons: RoutingReason[];
+    const esc = routing.escalation;
     if (accepted && routing.failover) reasons = rec!.reasons.map((r, i) => (i === 0 && permissionMode ? { ...r, inputs: { ...r.inputs, permissionMode } } : r));
     else if (accepted) reasons = [...rec!.reasons, { ruleId: 'assisted.accepted', text: 'Recommendation accepted.', ...inputs }];
+    else if (esc) reasons = [{ ruleId: `escalation.${esc.action}`, text: esc.reason, ...inputs }];
     else if (routing.offered && cmp) reasons = [{ ruleId: 'assisted.changed', text: `Changed from the recommendation: ${cmp.changed.join(', ') || 'nothing'}.`, ...inputs }];
     else reasons = [{ ruleId: 'manual', text: 'Route picked by the user.', ...inputs }];
+    // A step that changed the route was escalation's choice; one that kept it is still whoever picked it.
+    const byEscalation = !accepted && !!esc && changesRoute(esc.action);
+    const decidedBy: RoutingDecision['decidedBy'] = accepted || byEscalation ? 'router' : esc ? (routing.prevDecidedBy ?? 'user') : 'user';
     return {
       id: this.id(),
       taskId: task.id,
       attemptN: n,
       mode,
       ...(rec ? { assessmentId: rec.assessmentId } : {}),
-      policyVersion: accepted ? rec!.policyVersion : 'manual',
+      policyVersion: accepted ? rec!.policyVersion : byEscalation ? 'escalation' : 'manual',
       requirement: accepted
         ? rec!.requirement
         : { minTier: target.tier, maxTier: target.tier, effort: awEffort(route.effort), needs: [], gates: [] },
@@ -2055,10 +2131,10 @@ export class TaskRunner implements Disposable {
       overrides: cmp?.changed ?? [],
       resolution: accepted
         ? { target, candidates: rec!.resolution.candidates, catalogVersion: rec!.resolution.catalogVersion, ...(rec!.resolution.note ? { note: rec!.resolution.note } : {}) }
-        : { target, candidates: [{ target, verdict: 'chosen', reason: 'picked by the user' }], catalogVersion: 'manual' },
+        : { target, candidates: [{ target, verdict: 'chosen', reason: byEscalation ? `escalation: ${esc!.action}` : 'picked by the user' }], catalogVersion: byEscalation && esc!.target ? 'escalation' : 'manual' },
       ...(rec ? { shadow: rec, agreement: cmp!.agreement } : {}),
       policyRevision: m.policyChanges.length,
-      decidedBy: accepted ? 'router' : 'user',
+      decidedBy,
       decidedAt: this.now(),
     };
   }
@@ -2187,7 +2263,7 @@ export class TaskRunner implements Disposable {
 
   // ---- Watching ----
 
-  private watch(missionId: string, attemptId: string, handle: SessionHandle, opts: { recovered: boolean; turnSeen?: boolean }): void {
+  private watch(missionId: string, attemptId: string, handle: SessionHandle, opts: { recovered: boolean; turnSeen?: boolean; fromNow?: boolean }): void {
     this.unwatch(attemptId);
     const w: Watcher = {
       missionId,
@@ -2203,9 +2279,10 @@ export class TaskRunner implements Disposable {
       this.poke(w);
     };
     // From the start of the handle's log for a fresh launch, so its first turn
-    // is never missed; from now for a reattached one (its old turns ended long ago).
+    // is never missed; from now for a reattached one (its old turns ended long
+    // ago) and for a session an escalation carries on (they were another attempt's).
     try {
-      w.sub = handle.subscribe(opts.recovered ? handle.snapshot().seq : 0, listener);
+      w.sub = handle.subscribe(opts.recovered || opts.fromNow ? handle.snapshot().seq : 0, listener);
     } catch {
       w.sub = handle.subscribe(handle.snapshot().seq, listener);
     }
@@ -2218,6 +2295,7 @@ export class TaskRunner implements Disposable {
     if (!w) return;
     w.sub.dispose();
     clearTimeout(w.timer);
+    clearTimeout(w.clock);
     this.watchers.delete(attemptId);
   }
 
@@ -2295,7 +2373,32 @@ export class TaskRunner implements Disposable {
     } else {
       w.finishedSince = undefined;
     }
+    // The wall clock (§15.3): active time only, so a wait on a person does not count.
+    if (verdict.kind === 'running' && a.launchedAt !== undefined && a.state !== 'waiting-human') {
+      const now = this.now();
+      const limit = this.limits(m).wallClockMs;
+      const active = now - a.launchedAt - waitedMs(a, now);
+      if (active >= limit) return this.overran(w, a, active, limit);
+      clearTimeout(w.clock);
+      w.clock = setTimeout(() => this.poke(w), Math.max(50, limit - active));
+    }
     await this.apply(w.missionId, w.attemptId, verdict);
+  }
+
+  /**
+   * An attempt past its wall clock (§15.2 `stuck`): interrupt it, end it as
+   * `stuck`, and let escalation decide (one fresh try, then a person).
+   */
+  private async overran(w: Watcher, a: ExecutionAttempt, activeMs: number, limitMs: number): Promise<void> {
+    this.unwatch(a.id);
+    this.log(`task ${w.missionId}: attempt ${a.n} ran ${Math.round(activeMs / 1000)}s, past its wall clock; interrupting it`);
+    await bounded(w.handle.interrupt().catch(() => undefined), END_SESSION_WAIT_MS);
+    const cls = classifyOutcome({ overran: { activeMs, limitMs } })!;
+    let m = this.need(w.missionId);
+    m = this.endAttempt(m, a.id, 'failed', { status: 'failed', category: cls.category, signature: cls.signature }, cls.detail);
+    this.put(m);
+    await this.releaseTree(w.missionId, a.id);
+    await this.escalate(w.missionId, a.id, cls, { what: 'was stopped' });
   }
 
   /** Act on a verdict. Runs in the mission's queue. */
@@ -2348,15 +2451,10 @@ export class TaskRunner implements Disposable {
         m = this.endAttempt(m, a.id, 'interrupted', { status: 'interrupted', category: 'lost', signature: v.reason }, v.reason, { resumable: v.resumable });
         this.put(m);
         if (v.unexpected) this.log(`task ${missionId}: attempt ${a.n} lost its session record, which should not happen once #72 keeps live records`);
-        m = await this.releaseTree(missionId, a.id);
-        const auto = v.autoResumable && v.resumable && m.policy.autoRecover === true && !a.autoResumed;
-        if (auto) {
-          this.log(`task ${missionId}: attempt ${a.n} interrupted (${v.reason}); resuming once, as autoRecover allows`);
-          // After this step, in the same queue: never inside it.
-          void this.resume(missionId, { auto: true }).catch((e) => this.log(`task ${missionId}: automatic resume failed: ${String(e)}`));
-        } else {
-          this.notify(m, 'was interrupted', `${capitalise(v.reason)}. Resume the attempt or retry it fresh.`);
-        }
+        await this.releaseTree(missionId, a.id);
+        // One automatic Resume under `autoRecover`, never after a host crash; otherwise the user's (§23.3).
+        const cls = classifyOutcome({ session: { state: 'interrupted', endedReason: v.reason } })!;
+        await this.escalate(missionId, a.id, cls, { what: 'was interrupted' }, { resumable: v.resumable, autoResumable: v.autoResumable });
         return;
       }
       case 'cancelled':
@@ -2370,21 +2468,371 @@ export class TaskRunner implements Disposable {
       case 'failed': {
         this.unwatch(a.id);
         const lost = await this.localServerLost(m, a, v.category);
+        const cls: Classification = lost
+          ? classifyOutcome({ localServerLost: true })!
+          : { category: v.category, signature: v.reason, detail: `its agent failed (${v.reason})` };
         m = this.need(missionId);
-        m = this.endAttempt(
-          m,
-          a.id,
-          'failed',
-          { status: 'failed', category: v.category, signature: lost ? LOCAL_SERVER_LOST : v.reason },
-          lost ? LOCAL_SERVER_LOST_TEXT : v.reason,
-        );
+        m = this.endAttempt(m, a.id, 'failed', { status: 'failed', category: cls.category, signature: cls.signature }, lost ? LOCAL_SERVER_LOST_TEXT : v.reason);
         this.put(m);
         await this.releaseTree(missionId, a.id);
         if (lost && (await this.failover(missionId, a.id))) return;
-        this.notify(this.need(missionId), 'failed', `${capitalise(lost ? LOCAL_SERVER_LOST_TEXT : v.reason)}. Retry it fresh, or cancel it.`);
+        await this.escalate(missionId, a.id, cls, { what: 'failed' });
         return;
       }
     }
+  }
+
+  // ---- Escalation (#41, §15) ----
+
+  /** §15.3's limits for the mission's mode. */
+  private limits(m: Mission): EscalationLimits {
+    return limitsFor(m.policy.mode ?? 'manual', this.deps.escalationLimits);
+  }
+
+  private decisionOf(m: Mission, attemptId: string | undefined): RoutingDecision | undefined {
+    const a = attemptId ? m.attempts.find((x) => x.id === attemptId) : undefined;
+    return a ? m.decisions.find((d) => d.id === a.routingDecisionId) : undefined;
+  }
+
+  /**
+   * An attempt has failed and been ended: decide the next step by rule
+   * (`decideEscalation`), record every step (skipped ones too) on the task
+   * and as telemetry, then act. A step that starts an attempt leaves the task
+   * `queued` (or `blocked`, waiting out a rate limit) and runs when it is
+   * due, in a later step of the mission's queue; anything else leaves it with
+   * the user, saying why. Runs in the mission's queue.
+   */
+  private async escalate(
+    missionId: string,
+    attemptId: string,
+    cls: Classification,
+    notice: { what: string; click?: 'open-diff' | 'show-session' },
+    lost?: { resumable: boolean; autoResumable: boolean },
+  ): Promise<void> {
+    let m = this.need(missionId);
+    const a = m.attempts.find((x) => x.id === attemptId);
+    const task = a && m.tasks.find((t) => t.id === a.taskId);
+    // Cancelled, skipped or otherwise moved on while the attempt was ending: nothing to decide.
+    if (!a || !task || task.state !== 'needs-human' || m.state !== 'running' || this.disposed) return;
+    let outcome: ReturnType<typeof decideEscalation>;
+    try {
+      outcome = decideEscalation(this.escalationInput(m, task, a, cls, lost));
+    } catch (e) {
+      // A bug here must not leave the task looking busy: it stays with the user.
+      this.log(`task ${missionId}: escalation failed: ${errorText(e)}`);
+      this.notify(m, notice.what, `${capitalise(cls.detail)}. Retry it, or cancel it.`, notice.click);
+      return;
+    }
+    const { final } = outcome;
+    const now = this.now();
+    const autoResume = cls.category === 'lost' && final.action === 'retry-same';
+    const launching = !final.blockedBy && LAUNCHING_ACTIONS.includes(final.action) && !autoResume;
+    m = this.patchTask(m, task.id, (t) => ({ ...t, escalations: [...t.escalations, ...outcome.decisions] }));
+    if (launching) {
+      m = this.patchTask(m, task.id, (t) => transitionTask(m, t, 'queued', { now, reason: pendingText(final, now) }));
+      if (final.action === 'wait') m = this.patchTask(m, task.id, (t) => transitionTask(m, t, 'blocked', { now, reason: pendingText(final, now) }));
+    } else if (!autoResume) {
+      m = this.patchTask(m, task.id, (t) => ({ ...t, stateReason: final.reason }));
+    }
+    this.put(m);
+    for (const d of outcome.decisions) this.writeTelemetry(m, escalationRecord(m, d, now));
+    this.log(
+      `task ${missionId}: attempt ${a.n} ${cls.category} (${cls.signature}) → ${outcome.decisions.map((d) => (d.blockedBy ? `${d.action}✗${d.blockedBy}` : d.action)).join(' → ')}`,
+    );
+    if (autoResume) {
+      // After this step, in the same queue: never inside it.
+      void this.resume(missionId, { auto: true }).catch((e) => this.log(`task ${missionId}: automatic resume failed: ${String(e)}`));
+      return;
+    }
+    if (launching) {
+      this.scheduleEscalation(missionId, final);
+      // A step that spends more (a bigger route) or waits a while is worth a word; a plain retry is not.
+      if (changesRoute(final.action) || final.action === 'wait') this.notify(m, 'is escalating', final.reason, 'show-session');
+      return;
+    }
+    this.notify(m, notice.what, final.reason, notice.click);
+  }
+
+  /** Everything `decideEscalation` needs, from the mission as it is now. */
+  private escalationInput(
+    m: Mission,
+    task: Task,
+    a: ExecutionAttempt,
+    cls: Classification,
+    lost: { resumable: boolean; autoResumable: boolean } | undefined,
+  ): EscalationInput {
+    const eff = this.effective(m, task);
+    const policy = eff.policy;
+    const mode = m.policy.mode ?? 'manual';
+    const d = this.decisionOf(m, a.id);
+    const target = d?.resolution.target;
+    let snapshot: ResolverSnapshot | undefined;
+    try {
+      snapshot = this.deps.routing?.snapshot();
+    } catch {
+      snapshot = undefined;
+    }
+    const entry = target ? snapshot?.catalog.entries.find((e) => e.descriptor.source === target.source && (e.aliases.includes(target.model || 'default') || e.descriptor.modelId === target.model)) : undefined;
+    const window = entry?.descriptor.contextWindow;
+    const route = {
+      harness: target?.harness ?? a.assignment.harness,
+      model: target?.model ?? '',
+      tier: target?.tier ?? 'unassigned',
+      // What AW asked for: the level sent, or for a routed decision its requirement; unknown when nothing was sent.
+      effort: target && target.effortNative !== 'none' ? awEffort(target.effortNative) : d?.decidedBy === 'router' ? d.requirement.effort : undefined,
+      ...(window && isKnown(window) ? { contextWindow: window.value } : {}),
+    };
+    const history = task.attemptIds
+      .map((id) => m.attempts.find((x) => x.id === id))
+      .filter((x): x is ExecutionAttempt => !!x && !!x.outcome)
+      .map((x) => ({
+        id: x.id,
+        n: x.n,
+        status: x.outcome!.status,
+        category: x.outcome!.category,
+        signature: x.outcome!.signature,
+        resume: !!x.resumeOf,
+        autoResumed: x.autoResumed,
+      }));
+    const harness = this.deps.harnesses.get(route.harness);
+    const caps = policy.caps ?? {};
+    const costs = m.attempts.filter((x) => x.taskId === task.id && x.usage?.costUsd !== undefined).map((x) => x.usage!.costUsd!);
+    const pinnedBy: Partial<Record<RouteDimension, string>> = {};
+    for (const dim of ['harness', 'model', 'effort'] as const) if (eff.from[`pins.${dim}`]) pinnedBy[dim] = scopeName(eff.from[`pins.${dim}`]!);
+    if (pinnedBy.model) pinnedBy.tier = pinnedBy.model;
+    const cappedBy: EscalationInput['cappedBy'] = {};
+    for (const k of Object.keys(caps) as (keyof typeof caps)[]) if (eff.from[`caps.${k}`]) cappedBy[k] = scopeName(eff.from[`caps.${k}`]!);
+    return {
+      taskId: task.id,
+      afterAttemptId: a.id,
+      classification: cls,
+      history,
+      decisions: task.escalations,
+      route,
+      mode,
+      pinned: pinnedDimensions(policy),
+      pinnedBy,
+      caps,
+      cappedBy,
+      // Mission-wide switches: a task's overrides cannot set them, so the mission's resolved policy has them.
+      frontierAllowed: m.policy.frontierAllowed === true,
+      autoRecover: m.policy.autoRecover === true,
+      ...(lost ? { lost } : {}),
+      tiers: snapshot?.catalog.tiers ?? DEFAULT_TIERS,
+      ...(costs.length > 0 ? { spentUsd: costs.reduce((s, c) => s + c, 0) } : {}),
+      sessionContinuable: cls.category !== 'stuck' && this.sessionContinuable(a),
+      effortMidSession: (harness?.capabilities().midSessionEffortChange ?? 'none') !== 'none',
+      ...(target && snapshot?.sources[target.source]?.capacity.backoffUntil !== undefined ? { capacityBackAt: snapshot.sources[target.source].capacity.backoffUntil } : {}),
+      limits: this.limits(m),
+      probe: (req) => this.probeRoute(policy, route.effort, snapshot, req),
+      now: this.now(),
+      newId: () => this.id(),
+    };
+  }
+
+  /** The failed attempt's session can take another message: idle here, or on record and resumable by its harness. */
+  private sessionContinuable(a: ExecutionAttempt): boolean {
+    if (this.continuableHandle(a)) return true;
+    const sid = a.assignment.sessionIds.at(-1);
+    // Live here but busy or asking (someone is using it): not resumed over them.
+    if (sid && this.deps.sessions.get(sid)) return false;
+    const record = sid ? (this.deps.registry.get(sid) as SessionRecord | undefined) : undefined;
+    const harness = this.deps.harnesses.get(a.assignment.harness);
+    return !!record && record.state !== 'failed' && !!harness?.capabilities().resume;
+  }
+
+  /** The attempt's session, live here, idle and asking nothing: it can be sent the next message now. */
+  private continuableHandle(a: ExecutionAttempt): SessionHandle | undefined {
+    const sid = a.assignment.sessionIds.at(-1);
+    const h = sid ? this.deps.sessions.get(sid) : undefined;
+    if (!h || h.lifecycle !== 'idle' || !h.canSend) return undefined;
+    return handleView(h).pendingAsk ? undefined : h;
+  }
+
+  /** Is there a model the policy allows to move to? Answered from a resolver snapshot (§9.4). */
+  private probeRoute(policy: ExecutionPolicy, effort: EffortLevel | undefined, snapshot: ResolverSnapshot | undefined, req: ProbeRequest): ProbeAnswer {
+    if (!snapshot) return { ok: false, reason: 'there is no model catalog to choose from.' };
+    const { effort: _effort, ...pins } = policy.pins ?? {};
+    const requirement: RouteRequirement = {
+      minTier: req.tier,
+      maxTier: req.tier,
+      effort: effort ?? 'medium',
+      needs: req.largerContextThan !== undefined ? [`context:${req.largerContextThan + 1}`] : [],
+      gates: [],
+    };
+    const res = resolveRoute(requirement, snapshot, {
+      caps: policy.caps,
+      preferences: policy.preferences,
+      exclusions: { ...policy.exclusions, harnesses: [...(policy.exclusions?.harnesses ?? []), ...(req.notHarness ? [req.notHarness] : [])] },
+      pins: { ...pins, ...(req.harness ? { harness: req.harness } : {}) },
+      allowEscalationTiers: req.escalationTier === true,
+    });
+    if (res.outcome === 'resolved' && res.target) return { ok: true, target: res.target };
+    return { ok: false, reason: res.note ?? 'nothing the policy allows.' };
+  }
+
+  /** Run a pending step when it is due. */
+  private scheduleEscalation(missionId: string, d: EscalationDecision): void {
+    if (this.disposed) return;
+    const had = this.escalationTimers.get(d.id);
+    if (had) clearTimeout(had.timer);
+    const delay = Math.max(0, (d.notBefore ?? 0) - this.now());
+    const timer = setTimeout(() => {
+      this.escalationTimers.delete(d.id);
+      void this.queue(missionId, () => this.runEscalation(missionId, d.id)).catch((e) => this.log(`task ${missionId}: escalation step failed: ${errorText(e)}`));
+    }, delay);
+    this.escalationTimers.set(d.id, { missionId, timer });
+  }
+
+  /** Drop pending steps' timers: all of them, a mission's, or one step's. */
+  private clearEscalations(missionId?: string, decisionId?: string): void {
+    for (const [id, t] of this.escalationTimers) {
+      if (missionId !== undefined && t.missionId !== missionId) continue;
+      if (decisionId !== undefined && id !== decisionId) continue;
+      clearTimeout(t.timer);
+      this.escalationTimers.delete(id);
+    }
+  }
+
+  /**
+   * Carry out a pending step. Checked again first — the user may have
+   * cancelled, skipped, retried or changed the policy meanwhile — and then:
+   * `continue` sends the failure to the failed attempt's session (live, or
+   * resumed), `fresh` ends that session, keeps its worktree and branch, and
+   * starts a new attempt from the task's start in a fresh one (§15.2). Runs
+   * in the mission's queue.
+   */
+  private async runEscalation(missionId: string, decisionId: string): Promise<void> {
+    let m = this.missions.get(missionId);
+    const task = m?.tasks.find((t) => t.escalations.some((d) => d.id === decisionId));
+    const d = task && pendingEscalation(task);
+    if (!m || !task || !d || d.id !== decisionId || m.state !== 'running' || this.disposed) return;
+    const prev = m.attempts.find((a) => a.id === d.afterAttemptId);
+    if (!prev) return;
+    if (task.state === 'blocked') {
+      m = this.patchTask(m, task.id, (t) => transitionTask(m!, t, 'queued', { now: this.now(), reason: `${d.action}: starting` }));
+      this.put(m);
+    }
+    const route = this.escalatedRoute(m, prev, d);
+    // The policy as it is now (§10.2): a pin or cap set while the step waited still holds.
+    // Everything is checked before anything is touched, the session's effort included.
+    const eff = this.effective(m, task);
+    const pinned = this.withPins(route, eff.policy.pins);
+    const refusal = eff.conflicts.length > 0 ? conflictText(eff.conflicts) : this.stepRefusal(m, eff, d) ?? admissionRefusal(eff, this.admissionFacts(m, pinned, false, task));
+    if (refusal) return this.stopEscalation(missionId, task.id, d, refusal, eff.conflicts.length > 0 ? 'pin' : 'cap');
+    let mode = d.mode ?? 'fresh';
+    const live = this.continuableHandle(prev);
+    // Only an idle session is carried on, and only on its own harness: a busy one is the user's now.
+    if (mode === 'continue' && (pinned.harness !== prev.assignment.harness || (!live && !this.sessionContinuable(prev)))) mode = 'fresh';
+    if (mode === 'continue' && d.action === 'raise-effort') {
+      // Raised in the running session where the harness can (§6.4); otherwise a fresh session at the new level.
+      const applied = live && pinned.effort ? await live.setEffort(pinned.effort).catch(() => 'unsupported' as const) : 'unsupported';
+      if (applied !== 'applied') mode = 'fresh';
+    }
+    const message = escalationMessage(task, prev, d, mode);
+    this.log(`task ${missionId}: ${task.key} ${d.action} (${mode}) after attempt ${prev.n}`);
+    try {
+      if (mode === 'continue') {
+        await this.launch(missionId, { mode: 'continue', continues: prev, route, escalation: d, message });
+      } else {
+        await this.endSession(this.need(missionId), prev);
+        if (isPlanned(this.need(missionId))) {
+          await this.releaseTree(missionId, prev.id);
+          await this.restartTree(missionId, task.id, prev);
+        } else {
+          await this.retainTree(this.need(missionId), prev);
+        }
+        await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, escalation: d, feedback: message });
+      }
+    } catch (e) {
+      m = this.need(missionId);
+      const t = m.tasks.find((x) => x.id === task.id)!;
+      const newest = m.attempts.find((a) => a.id === t.attemptIds.at(-1));
+      if (newest && newest.id !== prev.id && newest.state === 'failed') {
+        // The step's own attempt could not start: an infra failure with its own counter.
+        await this.escalate(missionId, newest.id, { category: 'infra', signature: newest.outcome?.signature ?? 'launch-failed', detail: `it could not start (${errorText(e)})` }, { what: 'failed' });
+        return;
+      }
+      // Refused before any attempt existed (the harness is gone, the worktree is gone): the user decides.
+      this.stopEscalation(missionId, t.id, d, `The ${d.action} could not start: ${errorText(e)}`);
+    }
+  }
+
+  /**
+   * Why a step decided earlier may no longer run under the policy as it is
+   * now: a tier or effort cap lowered, `frontier` no longer allowed, or a pin
+   * set on the dimension it moves. Undefined when it may.
+   */
+  private stepRefusal(m: Mission, eff: EffectivePolicy, d: EscalationDecision): string | undefined {
+    const p = eff.policy;
+    const by = (field: string) => scopeName(eff.from[field] ?? 'mission');
+    const t = d.target;
+    if (t) {
+      let tiers: readonly TierDef[] = DEFAULT_TIERS;
+      try {
+        tiers = this.deps.routing?.snapshot().catalog.tiers ?? DEFAULT_TIERS;
+      } catch {
+        tiers = DEFAULT_TIERS;
+      }
+      const rank = tierRank(tiers, t.tier);
+      const cap = p.caps?.maxTier ? tierRank(tiers, p.caps.maxTier) : -1;
+      if (cap >= 0 && rank > cap) return `Would run ${t.model} (${t.tier}); ${by('caps.maxTier')} is now capped at ${p.caps!.maxTier}.`;
+      if (tiers[rank]?.reachableBy === 'escalation' && m.policy.frontierAllowed !== true) return `Would run ${t.model} (${t.tier}); not allowed for this mission any more.`;
+      if (p.pins?.harness && p.pins.harness !== t.harness) return `Would switch to ${t.harness}; ${by('pins.harness')} now pins ${p.pins.harness}.`;
+      if (p.pins?.model && p.pins.model !== t.model) return `Would switch to ${t.model}; ${by('pins.model')} now pins ${p.pins.model}.`;
+    }
+    const effort = d.delta?.effort;
+    if (effort) {
+      if (p.pins?.effort && p.pins.effort !== effort) return `Would raise effort to ${effort}; ${by('pins.effort')} now pins ${p.pins.effort}.`;
+      if (p.caps?.maxEffort && EFFORT_LEVELS.indexOf(effort) > EFFORT_LEVELS.indexOf(p.caps.maxEffort)) return `Would raise effort to ${effort}; ${by('caps.maxEffort')} now caps effort at ${p.caps.maxEffort}.`;
+    }
+    return undefined;
+  }
+
+  /** A pending step that cannot run: recorded as a stop, and the task goes to the user saying why. */
+  private stopEscalation(missionId: string, taskId: string, d: EscalationDecision, reason: string, blockedBy?: EscalationDecision['blockedBy']): void {
+    let m = this.need(missionId);
+    const now = this.now();
+    const stop: EscalationDecision = {
+      id: this.id(),
+      taskId,
+      afterAttemptId: d.afterAttemptId,
+      evidence: d.evidence,
+      action: 'stop',
+      ...(blockedBy ? { blockedBy } : {}),
+      reason,
+      decidedAt: now,
+    };
+    const state = m.tasks.find((x) => x.id === taskId)?.state;
+    if (state === 'blocked') m = this.patchTask(m, taskId, (x) => transitionTask(m, x, 'queued', { now }));
+    if (state !== 'queued' && state !== 'blocked') return;
+    m = this.patchTask(m, taskId, (x) => transitionTask(m, { ...x, escalations: [...x.escalations, stop] }, 'needs-human', { now, reason }));
+    this.put(m);
+    this.writeTelemetry(m, escalationRecord(m, stop, now));
+    this.log(`task ${missionId}: ${d.action} stopped: ${reason}`);
+    this.notify(m, 'needs you', reason);
+  }
+
+  /** The route a step runs on: the failed attempt's, with the step's change. */
+  private escalatedRoute(m: Mission, prev: ExecutionAttempt, d: EscalationDecision): TaskRoute {
+    const base = routeOf(m, prev);
+    const t = d.target;
+    if (t) {
+      // A new model keeps "no effort sent" when the last route sent none.
+      const effort = base.effort && t.effortNative !== 'none' ? t.effortNative : undefined;
+      return {
+        harness: t.harness,
+        ...(isEndpointSource(t.source) ? { source: t.source } : {}),
+        model: t.model,
+        ...(effort ? { effort } : {}),
+        ...(t.harness === base.harness && base.permissionMode ? { permissionMode: base.permissionMode } : {}),
+      };
+    }
+    if (d.delta?.effort) {
+      const native = this.nativeEffort(base, d.delta.effort);
+      return native ? { ...base, effort: native } : base;
+    }
+    return base;
   }
 
   // ---- Local endpoints (#51) ----
@@ -2428,7 +2876,7 @@ export class TaskRunner implements Disposable {
     this.put(m);
     await this.releaseTree(missionId, a.id);
     if (await this.failover(missionId, a.id)) return;
-    this.notify(this.need(missionId), 'failed', `${capitalise(LOCAL_SERVER_LOST_TEXT)}. Retry it once the server is back, or cancel it.`);
+    await this.escalate(missionId, a.id, classifyOutcome({ localServerLost: true })!, { what: 'failed' });
   }
 
   /** Why the task may not fail over on its own, or undefined when it may. */
@@ -2504,11 +2952,27 @@ export class TaskRunner implements Disposable {
       return false;
     }
     m = await this.retainTree(m, failed);
-    m = this.patchTask(m, task.id, (x) => ({ ...x, overrides }));
+    // Every step is an escalation event (§15.3), this one included.
+    const priorSteps = task.escalations.filter((x) => !x.blockedBy && x.step !== undefined).length;
+    const step: EscalationDecision = {
+      id: this.id(),
+      taskId: task.id,
+      afterAttemptId: failed.id,
+      evidence: { category: 'infra', signature: LOCAL_SERVER_LOST, repeats: 1 },
+      action: 'switch-model',
+      delta: { harness: t.harness },
+      reason: `${capitalise(LOCAL_SERVER_LOST_TEXT)}: failing over to ${t.model}, same tier (${t.tier}).`,
+      decidedAt: this.now(),
+      mode: 'fresh',
+      target: t,
+      step: priorSteps + 1,
+    };
+    m = this.patchTask(m, task.id, (x) => ({ ...x, overrides, escalations: [...x.escalations, step] }));
     this.put(m);
+    this.writeTelemetry(m, escalationRecord(m, step, this.now()));
     this.log(`task ${missionId}: failing over from ${from.model} to ${t.model} (${t.tier})`);
     try {
-      await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation, offered: false, accepted: true, failover: true } });
+      await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation, offered: false, accepted: true, failover: true }, escalation: step });
     } catch (e) {
       this.log(`task ${missionId}: failover could not start: ${errorText(e)}`);
       return false;
@@ -2608,21 +3072,23 @@ export class TaskRunner implements Disposable {
     this.put(m);
     // The two ways an attempt is over before anything is worth checking. Both
     // release the tree first: there is nothing to run in it.
+    const gates = this.decisionOf(m, a.id)?.requirement.gates ?? [];
     if (failure) {
       m = await this.releaseTree(missionId, a.id);
       const lost = await this.localServerLost(m, a, failure.category);
       m = this.need(missionId);
-      const signature = lost ? LOCAL_SERVER_LOST : failure.signature;
+      const cls = classifyOutcome({ lastTurn, localServerLost: lost })!;
       const why = lost ? LOCAL_SERVER_LOST_TEXT : `its last turn ended in an error (${failure.signature})`;
-      this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', category: failure.category, signature }, why));
+      this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', category: cls.category, signature: cls.signature }, why));
       if (lost && (await this.failover(missionId, a.id))) return;
-      this.notify(this.need(missionId), 'failed', `${capitalise(why)}. Retry it fresh, or cancel it.`);
+      await this.escalate(missionId, a.id, cls, { what: 'failed' });
       return;
     }
     if (stats.filesChanged === 0) {
       m = await this.releaseTree(missionId, a.id);
-      this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', category: 'empty', signature: 'no-diff' }, 'the attempt changed nothing'));
-      this.notify(this.need(missionId), 'changed nothing', 'The attempt finished without changing anything. Retry it, or cancel it.');
+      const cls = classifyOutcome({ lastTurn, filesChanged: 0, gates })!;
+      this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', category: cls.category, signature: cls.signature }, 'the attempt changed nothing'));
+      await this.escalate(missionId, a.id, cls, { what: 'changed nothing' });
       return;
     }
 
@@ -2644,18 +3110,16 @@ export class TaskRunner implements Disposable {
     const verdict = summariseVerification(plan, results);
     this.log(`task ${missionId}: attempt ${a.n} ${verdict.verdict}: ${verdict.summary}`);
     if (verdict.verdict === 'failed') {
-      this.put(
-        this.endAttempt(
-          m,
-          a.id,
-          'failed',
-          // `quality-new` until #41 can tell a repeat from a first sighting;
-          // the signature is what will let it.
-          { status: 'failed', category: 'quality-new', signature: verdict.signature },
-          `verification failed: ${verdict.summary}`,
-        ),
-      );
-      this.notify(this.need(missionId), 'failed verification', `${verdict.summary}. Retry it, or open the diff and decide.`, 'open-diff');
+      // New or a repeat: the same signature as the task's last failed attempt (§15.2).
+      const cls = classifyOutcome({
+        lastTurn,
+        gates,
+        filesChanged: stats.filesChanged,
+        verification: { verdict: 'failed', signature: verdict.signature, summary: verdict.summary },
+        previousSignature: previousFailure(m, task, a.id)?.outcome?.signature,
+      })!;
+      this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', category: cls.category, signature: cls.signature }, `verification failed: ${verdict.summary}`));
+      await this.escalate(missionId, a.id, cls, { what: 'failed verification', click: 'open-diff' });
       return;
     }
     // In a planned mission a pass is the result (§7.2: done by verification),
@@ -2872,19 +3336,27 @@ export class TaskRunner implements Disposable {
   private onTurnRecord(r: TurnRecord): void {
     if (!r.attemptId) return;
     for (const m of this.missions.values()) {
-      const a = m.attempts.find((x) => x.id === r.attemptId);
+      let a = m.attempts.find((x) => x.id === r.attemptId);
       if (!a) continue;
       // An ended attempt is never reopened: turns after it (the user carrying on) are not its.
-      if (!LIVE.includes(a.state)) return;
+      // A session escalation carried on keeps the failed attempt's origin, so
+      // its turns name that attempt; they are the live attempt's that continues it (#41).
+      if (!LIVE.includes(a.state)) {
+        const ended = a;
+        // Followed along the whole chain: a session carried on twice still names its first attempt.
+        a = m.attempts.find((x) => LIVE.includes(x.state) && x.assignment.sessionIds.some((s) => sameId(s, r.sessionId)) && continuesFrom(m, x, ended.id));
+        if (!a) return;
+      }
+      const attempt = a;
       void this.queue(m.id, async () => {
         const cur = this.need(m.id);
         // Checked again here: the attempt may have ended (and its record been written) while this waited.
-        if (!LIVE.includes(cur.attempts.find((x) => x.id === a.id)?.state ?? 'failed')) return;
-        const source = cur.decisions.find((d) => d.id === a.routingDecisionId)?.resolution.target.source;
+        if (!LIVE.includes(cur.attempts.find((x) => x.id === attempt.id)?.state ?? 'failed')) return;
+        const source = cur.decisions.find((d) => d.id === attempt.routingDecisionId)?.resolution.target.source;
         // A local model has `$0 API cost` by rule (§19.4): whatever cost a harness
         // invents for a model it does not know (§19.6 point 3) is not recorded.
         const turn = isEndpointSource(source) ? withoutCost(r) : r;
-        this.put(this.patchAttempt(cur, a.id, (x) => ({ ...x, usage: addTurnUsage(x.usage, turn) })));
+        this.put(this.patchAttempt(cur, attempt.id, (x) => ({ ...x, usage: addTurnUsage(x.usage, turn) })));
       });
       return;
     }
@@ -2935,6 +3407,7 @@ export class TaskRunner implements Disposable {
 
   dispose(): void {
     this.disposed = true;
+    this.clearEscalations();
     for (const t of this.previewTimers.values()) clearTimeout(t);
     this.previewTimers.clear();
     for (const a of this.planAborts.values()) a.abort();
@@ -2972,6 +3445,103 @@ function originOf(m: Mission, a: ExecutionAttempt): OrchestrationOrigin {
 
 function sameId(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
+}
+
+/** Whether `a` carries on (directly, or through other carried-on attempts) the session of attempt `fromId`. */
+function continuesFrom(m: Mission, a: ExecutionAttempt, fromId: string): boolean {
+  const seen = new Set<string>();
+  let cur: ExecutionAttempt | undefined = a;
+  while (cur?.continues && !seen.has(cur.id)) {
+    if (cur.continues === fromId) return true;
+    seen.add(cur.id);
+    const next: string = cur.continues;
+    cur = m.attempts.find((x) => x.id === next);
+  }
+  return false;
+}
+
+/** The task's newest failed attempt before `beforeId`. */
+function previousFailure(m: Mission, task: Task, beforeId: string): ExecutionAttempt | undefined {
+  const ids = task.attemptIds.slice(0, Math.max(0, task.attemptIds.indexOf(beforeId)));
+  for (const id of [...ids].reverse()) {
+    const a = m.attempts.find((x) => x.id === id);
+    if (a?.outcome?.status === 'failed') return a;
+  }
+  return undefined;
+}
+
+/** Resolves when `p` does, or after `ms`, whichever is first. Never rejects. */
+async function bounded(p: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([p.catch(() => undefined), new Promise((r) => (timer = setTimeout(r, ms)))]);
+  clearTimeout(timer);
+}
+
+/** What a task waiting on an escalation step says it is waiting for. */
+function pendingText(d: EscalationDecision, now: number): string {
+  const due = d.notBefore !== undefined && d.notBefore > now ? ` at ${new Date(d.notBefore).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : '';
+  const what: Record<string, string> = {
+    'retry-same': 'retrying the same route',
+    'continue-with-feedback': 'sending the failure back to the agent',
+    'raise-effort': `raising effort to ${d.delta?.effort ?? 'the next level'}`,
+    'raise-tier': `raising tier to ${d.delta?.tier ?? 'the next one'}`,
+    'switch-harness': `switching to ${d.delta?.harness ?? 'another harness'}`,
+    'switch-model': `switching to ${d.target?.model ?? 'another model'}`,
+    wait: 'waiting for capacity, then retrying',
+  };
+  return `${capitalise(what[d.action] ?? d.action)}${due} (escalation step ${d.step ?? '?'}): ${d.reason}`;
+}
+
+/**
+ * What an escalation step tells the agent: the failure, as evidence it can
+ * act on — the checks' summary, the failing tests, where the full output is —
+ * and what to do about it. The next message of a carried-on session, or the
+ * "earlier attempt" section of a fresh one's prompt. Stays in the prompt; it
+ * never reaches telemetry.
+ */
+function escalationMessage(task: Task, prev: ExecutionAttempt, d: EscalationDecision, mode: 'continue' | 'fresh'): string {
+  const lines: string[] = [];
+  const carry = mode === 'continue';
+  switch (d.evidence.category) {
+    case 'quality-new':
+    case 'quality-repeat': {
+      const summary = summariseVerification(task.verification, prev.verification);
+      const failed = prev.verification.find((v) => v.outcome === 'failed' && task.verification.stages.some((s) => s.strategy === v.strategy && s.required));
+      lines.push(`Agent Wrangler ran this task's checks on ${carry ? 'your' : 'an earlier attempt’s'} work, and they failed: ${summary.summary}.`);
+      const failing = failed?.evidence?.failing ?? [];
+      if (failing.length > 0) lines.push('Failing:', ...failing.slice(0, 20).map((f) => `- ${f}`));
+      if (failed?.evidence?.logPath) lines.push(`The full output is in ${failed.evidence.logPath}.`);
+      const review = prev.verification.find((v) => v.review)?.review;
+      const unmet = review?.criteria.filter((c) => c.verdict !== 'met') ?? [];
+      if (unmet.length > 0) lines.push('The reviewer said these acceptance criteria are not met:', ...unmet.map((c) => `- ${task.acceptanceCriteria[Number(c.id.slice(1)) - 1] ?? c.id}: ${c.why}`));
+      if (d.evidence.category === 'quality-repeat') lines.push('This is the same failure as before: take a different approach rather than repeating the last one.');
+      lines.push(carry ? 'Find and fix the cause, then say so and stop.' : 'This attempt starts again from the task’s starting point; the earlier work is kept on its own branch.');
+      break;
+    }
+    case 'empty':
+      lines.push(
+        carry
+          ? 'You finished without changing any files, but this task expects changes in the worktree. Make the change it asks for, then say so and stop. If no change is needed, say exactly why and stop.'
+          : 'An earlier attempt finished without changing anything. This task expects changes in the worktree.',
+      );
+      break;
+    case 'infra':
+      lines.push(carry ? `Your last turn ended with an error (${d.evidence.signature ?? 'error'}). Carry on with the task where you left off; say so and stop when it is done.` : 'An earlier attempt stopped on an error that was not its own doing.');
+      break;
+    case 'capacity':
+      lines.push(carry ? 'The rate limit has passed. Carry on with the task where you left off; say so and stop when it is done.' : 'An earlier attempt was stopped by a rate limit.');
+      break;
+    case 'stuck':
+      lines.push('An earlier attempt ran for too long without finishing and was stopped. Work in small steps, and say so and stop as soon as the task is done.');
+      break;
+    case 'context':
+      lines.push('An earlier attempt ran out of context. Read only what the task needs.');
+      break;
+    default:
+      lines.push(carry ? 'Carry on with the task where you left off; say so and stop when it is done.' : 'An earlier attempt did not finish the task.');
+  }
+  if (d.action === 'raise-effort' && carry && d.delta?.effort) lines.unshift(`Your effort has been raised to ${d.delta.effort}.`);
+  return lines.join('\n');
 }
 
 /** `<title-slug>-<6 of the id>`: readable, and two tasks with one title never share a branch. */
@@ -3023,7 +3593,20 @@ interface DecisionRouting {
   accepted: boolean;
   /** The router picked it itself, failing over after an `infra` loss (#51): no person was asked. */
   failover?: boolean;
+  /** The escalation step that started the attempt (#41). */
+  escalation?: EscalationDecision;
+  /** Who decided the route of the attempt the step came after: a step that keeps the route keeps its owner. */
+  prevDecidedBy?: RoutingDecision['decidedBy'];
 }
+
+/** How `launch` starts an attempt. */
+type LaunchOptions =
+  /** A new session: the first attempt, a fresh retry, or an escalation step that starts over. */
+  | { mode: 'fresh'; route: TaskRoute; taskId?: string; routing?: DecisionRouting; escalation?: EscalationDecision; feedback?: string }
+  /** #4's Resume of an interrupted attempt's session. */
+  | { mode: 'continue'; resumeOf: ExecutionAttempt; auto?: boolean }
+  /** Escalation's "continue" (#41): the failed attempt's session gets `message` next, live or resumed. */
+  | { mode: 'continue'; continues: ExecutionAttempt; route: TaskRoute; escalation: EscalationDecision; message: string };
 
 /** The newest assessment of the mission's task. */
 function latestAssessment(m: Mission, taskId: string): TaskAssessment | undefined {

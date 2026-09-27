@@ -59,6 +59,11 @@ export interface ResolverPolicy {
    * work was assessed as needing, within the tier cap, and the note says so.
    */
   pins?: RoutePins;
+  /**
+   * The escalation ladder's "raise tier" into an escalation-only tier the
+   * mission allows (§6.3, §15.2, #41). Routing never sets it.
+   */
+  allowEscalationTiers?: boolean;
 }
 
 /** Whether a catalog entry is the model a pin names, by any of its ids. */
@@ -163,7 +168,7 @@ function hardFilter(
   // 3. Tier fit.
   const r = c.tierRank;
   const def = tiers[r];
-  if (def && def.reachableBy !== 'route') return { reason: `${label}: ${def.name} is reached only by escalation` };
+  if (def && def.reachableBy !== 'route' && !policy.allowEscalationTiers) return { reason: `${label}: ${def.name} is reached only by escalation` };
   const lo = tierRank(tiers, req.minTier);
   const hi = tierRank(tiers, req.maxTier);
   if (hi >= 0 && r > hi) return { reason: `${label}: ${e.tier} is above the ${req.maxTier} cap` };

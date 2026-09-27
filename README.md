@@ -297,9 +297,34 @@ new worktree and branch of the chosen folder's repository:
 - **How it ends.** When the agent's turn is over, it is idle, nothing is pending and nothing
   runs in the background. Agent Wrangler then commits anything left uncommitted on the task's
   branch, **verifies the result** (below) and shows a notification. Click it (or *Tasks → the
-  task → Open the diff*) to read the diff. The task then waits for you either way: *Accept the
-  result*, *Retry fresh* or *Cancel*. Accepting keeps the branch for you to merge. An attempt
-  that changed nothing, or whose last turn ended in an error, fails and waits the same way.
+  task → Open the diff*) to read the diff. A result waits for you: *Accept the result*,
+  *Retry fresh* or *Cancel*. Accepting keeps the branch for you to merge. An attempt that
+  fails is handled by rule first (below), and waits for you once the rules have nothing left.
+- **When an attempt fails.** It is classified from what the harness, the session and the
+  checks reported — no model is asked — and a fixed ladder decides the next step:
+  - checks failed in a new way → the failure (summary, failing tests, log path) goes back to
+    the same session as its next message;
+  - the same failure again → raise effort, then the tier, then another harness at the same
+    tier, skipping any step a pin, a cap or a limit forbids; three identical failures in a row
+    go to you;
+  - an API error or a crashed agent → the same route again after a short wait (twice at most,
+    not counted as a try at the work);
+  - a rate limit → wait for capacity, then the same route. **Never a bigger model;**
+  - changed nothing → one more try, told explicitly; ran past 45 minutes of active time →
+    stopped, one fresh try; context overflowed → a same-tier model with a larger window, else
+    "split the task";
+  - asked a question, refused tools repeatedly, or hit a cap → you.
+
+  Hard limits make a runaway loop impossible: 3 tries at the work, 2 infra retries, 3 rate-limit
+  waits, 1 effort and 1 tier step, 8 attempts of any kind, and every cap you set (attempts,
+  spend, tier, effort). `frontier` is reached only if the mission allows it. A route you picked
+  by hand is the task's pins, so escalation keeps to it — it retries and carries on in the same
+  session, then hands over — and never changes tier or harness on its own; a planned mission's
+  default route is not pinned, so its effort can be raised once. Escalation never changes the
+  permission mode or tools. Every step, including a skipped one ("Would raise tier to expert;
+  the mission is capped at standard"), is recorded: the strip's **Escalation** button lists the
+  ladder as it was walked, and a chip counts the steps (yellow once one changed the route). To
+  turn automatic retries off, cap attempts at 1.
 - **Verification.** A task is finished because checks passed on its result, not because the
   agent stopped talking. Agent Wrangler runs, in the task's own worktree:
   - `diff-sanity` — the attempt changed something, and the diff has no conflict markers and
@@ -411,7 +436,9 @@ new worktree and branch of the chosen folder's repository:
   reinstalling (Claude tasks need *Keep conversations running when Agent Wrangler quits*, and
   are refused without it). On relaunch the task is picked up where it is. If its session was
   lost (its host was killed, say), the task offers *Resume the attempt*, which continues the
-  same session id, and *Retry fresh*. It never resumes by itself.
+  same session id, and *Retry fresh*. It never resumes by itself, unless the mission sets
+  `autoRecover` (one resume, never after a host crash). A retry that was waiting (a backoff, a
+  rate limit) when the app quit runs when it is due after the relaunch.
 - **Records.** Missions are `orchestration/missions/<id>.json` under the app's support folder.
   Each attempt adds one `attempt` line to the usage records, with its route, timings, usage
   summed from its turns, git numbers and flags, and a `routing` line records what the router
