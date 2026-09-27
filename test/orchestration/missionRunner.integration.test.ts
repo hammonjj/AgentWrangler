@@ -329,7 +329,8 @@ describe('planned missions', () => {
   });
 
   it('a fresh retry restarts from the pre-task commit on a new -a<n> branch, in the same tree', async () => {
-    const r = rig();
+    // The user's own Retry: no automatic step first (one quality attempt, then the user).
+    const r = rig({ escalationLimits: { qualityAttempts: 1 } });
     const m = await r.runner.createMission({
       folder: repo,
       title: 'Retry mission',
@@ -381,7 +382,7 @@ describe('planned missions', () => {
   });
 
   it('skipping a task takes its work off the mission branch; what needed it waits, what did not runs', async () => {
-    const r = rig();
+    const r = rig({ escalationLimits: { qualityAttempts: 1 } });
     const m = await r.runner.createMission({
       folder: repo,
       title: 'Skip mission',

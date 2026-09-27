@@ -6,8 +6,8 @@
  * never the objective, the prompt or anything the agent wrote. A field
  * nobody reported is absent, never zero.
  */
-import { TELEMETRY_SCHEMA_VERSION, type AttemptRecord, type RoutingRecord, type TurnRecord } from '../../shared/orchestration/telemetry';
-import type { ExecutionAttempt, Millis, Mission, ReviewVerdict, RoutingDecision, UsageSummary } from '../../shared/orchestration/types';
+import { TELEMETRY_SCHEMA_VERSION, type AttemptRecord, type EscalationRecord, type RoutingRecord, type TurnRecord } from '../../shared/orchestration/telemetry';
+import type { EscalationDecision, ExecutionAttempt, Millis, Mission, ReviewVerdict, RoutingDecision, UsageSummary } from '../../shared/orchestration/types';
 import { reviewCounts } from '../../shared/orchestration/verification';
 
 /** Fold one turn record into an attempt's usage. A record already counted is ignored. */
@@ -115,6 +115,8 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     outcome,
     category: a.outcome?.category,
     signature: a.outcome?.signature,
+    escalationStep: a.escalation?.step,
+    escalationAction: a.escalation?.action,
     verification: a.verification
       .filter((v) => v.outcome !== undefined)
       .map((v) =>
@@ -178,6 +180,35 @@ export function routingRecord(mission: Mission, d: RoutingDecision, now: Millis)
     agreement: d.agreement ?? 'no-recommendation',
     changed: [...d.overrides],
     candidates: { chosen: count('chosen'), fallback: count('fallback'), rejected: count('rejected') },
+  });
+}
+
+/**
+ * The `escalation` record for one step of the ladder (#41). The id is the
+ * decision's, so writing it twice records once.
+ */
+export function escalationRecord(mission: Mission, d: EscalationDecision, now: Millis): EscalationRecord {
+  const after = mission.attempts.find((a) => a.id === d.afterAttemptId);
+  return prune<EscalationRecord>({
+    v: TELEMETRY_SCHEMA_VERSION,
+    type: 'escalation',
+    at: now,
+    id: `escalation:${d.id}`,
+    missionId: mission.id,
+    taskId: d.taskId,
+    decisionId: d.id,
+    afterAttemptId: d.afterAttemptId,
+    afterAttemptN: after?.n ?? 0,
+    mode: mission.policy.mode ?? 'manual',
+    category: d.evidence.category,
+    signature: d.evidence.signature,
+    repeats: d.evidence.repeats,
+    action: d.action,
+    blockedBy: d.blockedBy,
+    delta: d.delta,
+    continueSession: d.mode === undefined ? undefined : d.mode === 'continue',
+    delayMs: d.notBefore !== undefined ? Math.max(0, d.notBefore - d.decidedAt) : undefined,
+    step: d.step,
   });
 }
 

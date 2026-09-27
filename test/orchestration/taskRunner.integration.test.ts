@@ -155,6 +155,8 @@ function rig(attempt: SimAttempt, s: Shared = shared(), overrides: Partial<TaskR
     diffsDir: path.join(dataDir, 'orchestration', 'diffs'),
     logsDir: path.join(dataDir, 'orchestration', 'logs'),
     settleMs: 30,
+    // Escalation's waits, shortened so a retry ladder plays out within a test.
+    escalationLimits: { infraBackoffMs: [0], capacityWaitMs: 50 },
     ...overrides,
   });
   const r = { ...s, runner, harness };
@@ -413,21 +415,35 @@ describe('TaskRunner', () => {
     expect(attemptOf(limited.runner.get(l.id))!.outcome).toMatchObject({ category: 'capacity' });
   });
 
-  it('an agent that crashes fails the attempt; its work stays in the tree', async () => {
+  it('an agent that crashes fails the attempt as infra; its work stays in the tree; two retries, then the user', async () => {
     const r = rig({ behaviour: 'crash', files: { 'src/half.ts': 'export const half = 1;\n' } });
     const started = await r.runner.start({ ...TASK, folder: repo });
     await until(() => attemptOf(r.runner.get(started.id))?.state === 'failed', 8000, 'the crash');
+    expect(attemptOf(r.runner.get(started.id))!.outcome).toMatchObject({ status: 'failed', category: 'infra' });
+    expect(fs.existsSync(path.join(r.runner.get(started.id)!.worktrees[0].path, 'src', 'half.ts'))).toBe(true);
+    // An infra failure retries the same route, not counted as a try at the work (§15.2), at most twice.
+    await until(() => r.runner.get(started.id)!.tasks[0].escalations.at(-1)?.action === 'needs-human', 15000, 'the retries');
     const m = r.runner.get(started.id)!;
-    expect(attemptOf(m)!.outcome).toMatchObject({ status: 'failed', category: 'infra' });
-    expect(fs.existsSync(path.join(m.worktrees[0].path, 'src', 'half.ts'))).toBe(true);
+    expect(m.attempts).toHaveLength(3);
+    expect(m.attempts.map((a) => a.escalation?.action)).toEqual([undefined, 'retry-same', 'retry-same']);
+    expect(m.tasks[0].escalations.map((d) => [d.action, d.blockedBy])).toEqual([
+      ['retry-same', undefined],
+      ['retry-same', undefined],
+      ['retry-same', 'limit'],
+      // A route picked by hand never changes harness on its own.
+      ['switch-harness', 'pin'],
+      ['needs-human', undefined],
+    ]);
     expect(r.runner.actions(m.id)).toContain('retry');
+    expect(r.notices.at(-1)?.body).toMatch(/3 times in a row/);
   });
 
   it('a worktree deleted while the app was away is reported missing, and can be recreated from its branch', async () => {
     const s = shared();
     const a = rig({ behaviour: 'no-diff' }, s);
     const started = await a.runner.start({ ...TASK, folder: repo });
-    await until(() => attemptOf(a.runner.get(started.id))?.state === 'failed', 8000, 'the attempt to end');
+    // Empty, one explicit retry in the same session (empty again), then the user.
+    await until(() => attemptOf(a.runner.get(started.id), 2)?.state === 'failed' && a.runner.get(started.id)!.tasks[0].state === 'needs-human', 8000, 'the attempts to end');
     const wt = a.runner.get(started.id)!.worktrees[0];
     a.runner.dispose();
     fs.rmSync(wt.path, { recursive: true, force: true });
@@ -768,8 +784,39 @@ describe('TaskRunner', () => {
       expect(check.evidence?.failing).toEqual(['test/a.test.ts']);
       // The log is on disk for the user to open.
       expect(fs.readFileSync(check.evidence!.logPath!, 'utf8')).toContain('FAIL');
-      expect(m.tasks[0].state).toBe('needs-human');
+
+      // Escalation (§15.2): a new failure goes back to the same session as its
+      // next message; the same failure again moves along the ladder, and a route
+      // picked by hand is all pins, so the ladder ends with the user.
+      await until(() => r.runner.get(m.id)!.tasks[0].escalations.at(-1)?.action === 'needs-human', 15_000, 'the ladder to end');
+      const after = r.runner.get(m.id)!;
+      const second = attemptOf(after, 2)!;
+      expect(second).toMatchObject({
+        continues: a.id,
+        assignment: { mode: 'continue', sessionIds: a.assignment.sessionIds },
+        worktreeId: a.worktreeId,
+        escalation: { action: 'continue-with-feedback', step: 1 },
+        outcome: { status: 'failed', category: 'quality-repeat', signature: a.outcome!.signature },
+      });
+      // No second launch: the message went to the live session.
+      expect(r.harness.launches).toHaveLength(1);
+      const sent = r.runner.handleOf(m.id)!.blocks.filter((b) => b.kind === 'user').map((b) => JSON.stringify(b));
+      expect(sent.some((t) => t.includes('test/a.test.ts') && t.includes('checks'))).toBe(true);
+      expect(after.tasks[0].escalations.map((d) => [d.action, d.blockedBy ?? null])).toEqual([
+        ['continue-with-feedback', null],
+        ['raise-effort', 'pin'],
+        ['raise-tier', 'pin'],
+        ['switch-harness', 'pin'],
+        ['needs-human', null],
+      ]);
+      expect(after.tasks[0].stateReason).toMatch(/Failed the same way 2 times.*Effort is pinned by this task/);
       expect(r.notices.some((n) => n.title.includes('failed verification'))).toBe(true);
+      // Every step is an event, blocked ones included.
+      const events = r.telemetry.filter((t) => t.type === 'escalation');
+      expect(events).toHaveLength(5);
+      expect(JSON.stringify(events)).not.toContain('Synthetic objective');
+      const rec2 = r.telemetry.find((t): t is AttemptRecord => t.type === 'attempt' && t.attemptId === second.id)!;
+      expect(rec2).toMatchObject({ escalationStep: 1, escalationAction: 'continue-with-feedback', category: 'quality-repeat' });
     });
 
     it('carries the stage results into the attempt’s telemetry record', async () => {

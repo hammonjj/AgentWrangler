@@ -19,6 +19,7 @@
 import type { SessionLifecycle } from '../../core/session/sessionHandle';
 import type { SessionRecordState } from '../../core/session/sessionRegistry';
 import type { AttemptState, OutcomeCategory } from '../../shared/orchestration/types';
+import { classifyTurn } from '../policy/outcome';
 
 /** The part of a registry record the table reads. */
 export interface RecordView {
@@ -146,22 +147,8 @@ function isCleanCut(reason: string): boolean {
  * `result`. Codex: a `turn/completed` whose turn failed.
  */
 export function turnFailure(raw: unknown): { category: OutcomeCategory; signature: string } | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const r = raw as Record<string, unknown>;
-  if (r.type === 'result') {
-    const subtype = typeof r.subtype === 'string' ? r.subtype : '';
-    if (r.is_error !== true && subtype === 'success') return undefined;
-    const status = typeof r.api_error_status === 'number' ? r.api_error_status : undefined;
-    const reason = typeof r.terminal_reason === 'string' ? r.terminal_reason : '';
-    const text = typeof r.result === 'string' ? r.result.slice(0, 500) : '';
-    if (status === 429 || /rate.?limit/i.test(reason)) return { category: 'capacity', signature: `api-${status ?? 'rate-limit'}` };
-    if (subtype.startsWith('error_max_turns') || subtype.startsWith('error_max_budget')) return { category: 'budget', signature: subtype };
-    if (/prompt.?too.?long|context/i.test(`${reason} ${subtype} ${text}`)) return { category: 'context', signature: 'context-overflow' };
-    return { category: 'infra', signature: subtype || (status !== undefined ? `api-${status}` : 'error') };
-  }
-  const turn = (r as { turn?: { status?: unknown; error?: unknown } }).turn;
-  if (turn && (turn.status === 'failed' || turn.error)) return { category: 'infra', signature: 'codex-turn-failed' };
-  return undefined;
+  const c = classifyTurn(raw);
+  return c ? { category: c.category, signature: c.signature } : undefined;
 }
 
 /**

@@ -60,7 +60,8 @@ export const taskMachine = new Machine<TaskState>({
     ready: ['assessing'],
     assessing: ['routed'],
     routed: ['queued', 'needs-human'],
-    queued: ['running', 'blocked'],
+    // `needs-human`: an automatic retry a cap refused at launch, or that could not start (#41).
+    queued: ['running', 'blocked', 'needs-human'],
     running: ['verifying', 'queued', 'needs-human'],
     verifying: ['integrating', 'done', 'queued', 'needs-human'],
     integrating: ['done', 'queued', 'needs-human'],

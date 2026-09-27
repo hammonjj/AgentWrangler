@@ -54,7 +54,7 @@ describe('transition tables', () => {
         'blocked→pending', 'blocked→ready', 'blocked→queued',
         'ready→assessing', 'assessing→routed',
         'routed→queued', 'routed→needs-human',
-        'queued→running', 'queued→blocked',
+        'queued→running', 'queued→blocked', 'queued→needs-human',
         'running→verifying', 'running→queued', 'running→needs-human',
         'verifying→integrating', 'verifying→done', 'verifying→queued', 'verifying→needs-human',
         'integrating→done', 'integrating→queued', 'integrating→needs-human',

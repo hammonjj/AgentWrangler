@@ -11,6 +11,8 @@ import type {
   AttemptFlags,
   CostBasis,
   EffortLevel,
+  EscalationAction,
+  EscalationBlock,
   ExecutionTarget,
   HarnessId,
   ModelSourceId,
@@ -117,7 +119,10 @@ export interface AttemptRecord extends RecordBase {
   outcome: 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
   category?: OutcomeCategory;
   signature?: string;
+  /** The escalation step that started this attempt (#41): 1 for the first. Absent: a person started it. */
   escalationStep?: number;
+  /** What that step was. */
+  escalationAction?: EscalationAction;
   git?: { filesChanged: number; insertions: number; deletions: number; commits: number };
   /** Fraction of changed files inside the predicted scope. */
   scopeAccuracy?: number;
@@ -289,4 +294,39 @@ export interface PolicyChangeRecord extends RecordBase {
   runningAttempts: number;
 }
 
-export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord | LocalCallRecord | OverrideRecord | PolicyChangeRecord | TaskFinalRecord;
+/**
+ * One step of the escalation ladder after a failed attempt (§15, §16.2
+ * `escalation`, #41), blocked steps included. No reason text: it can quote a
+ * verification summary, and that quotes the code. The category, signature
+ * and what blocked it say which rule applied.
+ */
+export interface EscalationRecord extends RecordBase {
+  type: 'escalation';
+  missionId: string;
+  taskId: string;
+  decisionId: string;
+  afterAttemptId: string;
+  afterAttemptN: number;
+  mode: RoutingMode;
+  category: OutcomeCategory;
+  signature?: string;
+  repeats: number;
+  action: EscalationAction;
+  blockedBy?: EscalationBlock;
+  delta?: { tier?: TierName; effort?: EffortLevel; harness?: HarnessId };
+  /** A launching step: continue the session or start fresh. */
+  continueSession?: boolean;
+  /** How long the step waits before it runs. */
+  delayMs?: number;
+  step?: number;
+}
+
+export type TelemetryRecord =
+  | TurnRecord
+  | AttemptRecord
+  | RoutingRecord
+  | LocalCallRecord
+  | OverrideRecord
+  | PolicyChangeRecord
+  | TaskFinalRecord
+  | EscalationRecord;
