@@ -36,7 +36,11 @@ import {
   type ControlSessionResult,
   type ControlStatusResult,
   type ControlSubscribeResult,
+  type ControlTaskProposeParams,
+  type ControlTaskProposeResult,
+  type ControlTaskView,
   type StopOutcome,
+  MAX_TASK_OBJECTIVE_CHARS,
 } from './protocol';
 
 /** A method failed in a way the client should be told about by code. */
@@ -69,6 +73,9 @@ export interface ControlBackend {
   send(ref: string, text: string): Promise<ControlSendResult>;
   stop(ref: string, force: boolean): Promise<StopOutcome>;
   projects(): ControlProject[];
+  /** A task proposal the user accepts in the app (#80). Throws `ControlError` when orchestration is off. */
+  proposeTask(params: ControlTaskProposeParams): Promise<ControlTaskProposeResult>;
+  tasks(): ControlTaskView[];
 }
 
 export interface ControlServerOptions {
@@ -203,7 +210,9 @@ export class ControlServer implements Disposable {
     const backend = this.opts.backend;
     const mutating = MUTATING_CONTROL_METHODS.includes(method);
     if (mutating || method === 'subscribe') {
-      this.opts.log(`control socket: ${method} ${String(p.ref).slice(0, 80)} by ${conn.client ?? '?'}`);
+      // The session, or the repository a task is for; never the text.
+      const target = method === 'task.propose' ? path.basename(String(p.folder ?? '')) : String(p.ref);
+      this.opts.log(`control socket: ${method} ${target.slice(0, 80)} by ${conn.client ?? '?'}`);
     }
     if (mutating && this.mutationsStopped) throw new ControlError(RPC_UNSUPPORTED, 'Agent Wrangler is quitting');
     switch (method) {
@@ -225,6 +234,10 @@ export class ControlServer implements Disposable {
         return { outcome: await backend.stop(ref(p), p.force === true) };
       case 'projects':
         return { projects: backend.projects() };
+      case 'task.propose':
+        return (await backend.proposeTask(taskParams(p))) satisfies ControlTaskProposeResult;
+      case 'tasks':
+        return { tasks: backend.tasks() };
       default:
         throw new ControlError(RPC_METHOD_NOT_FOUND, `no method ${req.method}`);
     }
@@ -304,6 +317,28 @@ export function ensurePrivateDir(dir: string): void {
     throw new Error(`${dir} belongs to another user; not serving the control socket there`);
   }
   if ((st.mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
+}
+
+/** `task.propose`'s params, checked. The folder must be absolute: the app has no cwd of the caller's. */
+export function taskParams(p: Record<string, unknown>): ControlTaskProposeParams {
+  if (typeof p.folder !== 'string' || !path.isAbsolute(p.folder)) throw new ControlError(RPC_INVALID_PARAMS, 'folder must be an absolute path');
+  if (typeof p.objective !== 'string' || p.objective.trim().length === 0) throw new ControlError(RPC_INVALID_PARAMS, 'objective is required');
+  if (p.objective.length > MAX_TASK_OBJECTIVE_CHARS) {
+    throw new ControlError(RPC_INVALID_PARAMS, `objective is longer than ${MAX_TASK_OBJECTIVE_CHARS} characters`);
+  }
+  const criteria = p.acceptanceCriteria;
+  if (criteria !== undefined && (!Array.isArray(criteria) || criteria.some((c) => typeof c !== 'string'))) {
+    throw new ControlError(RPC_INVALID_PARAMS, 'acceptanceCriteria must be a list of strings');
+  }
+  if (p.harness !== undefined && p.harness !== 'claude' && p.harness !== 'codex') {
+    throw new ControlError(RPC_INVALID_PARAMS, 'harness must be claude or codex');
+  }
+  return {
+    folder: p.folder,
+    objective: p.objective,
+    acceptanceCriteria: ((criteria as string[] | undefined) ?? []).map((c) => c.trim()).filter(Boolean),
+    ...(p.harness ? { harness: p.harness } : {}),
+  };
 }
 
 function ref(p: Record<string, unknown>): string {

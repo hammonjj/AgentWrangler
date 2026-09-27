@@ -105,7 +105,13 @@ import type { PermissionModeName } from '../shared/conversation';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
 import type { SessionActions } from '../ui/actions';
-import type { RunBy, StopOutcome } from '../core/control/protocol';
+import type {
+  ControlTaskProposeParams as ProposeTaskRequest,
+  ControlTaskProposeResult as ProposedTask,
+  ControlTaskView as TaskSummary,
+  RunBy,
+  StopOutcome,
+} from '../core/control/protocol';
 import type {
   ConversationLauncher,
   ProjectSource,
@@ -202,6 +208,15 @@ export interface AgentWranglerApp {
    * (`working`) unless `force`, since stopping it throws the turn away.
    */
   stopSession(key: string, opts?: { force?: boolean }): Promise<StopOutcome | 'gone'>;
+  /**
+   * `aw task` (#80): assess and route a task, and leave the proposal waiting
+   * for the user — announced by a notification whose click opens it, and in
+   * the Tasks menu. Launches nothing. Throws `TaskError` for anything the
+   * caller should read (orchestration off, not a repository, no catalog).
+   */
+  proposeTask(req: ProposeTaskRequest): Promise<ProposedTask>;
+  /** Tasks that are not finished, newest first. Empty while orchestration is off. */
+  taskList(): TaskSummary[];
   /**
    * The app is quitting: end the sessions that cannot survive it (and hosted
    * ones too with `includeHosted`), awaited and bounded by `withinMs`. Ended
@@ -1226,7 +1241,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * the effort or the model runs that instead and is recorded as a labelled
    * disagreement. Dismissing leaves it waiting in the Tasks menu.
    */
-  async function reviewProposal(runner: TaskRunner, missionId: string, rec: RouteRecommendation): Promise<void> {
+  async function reviewProposal(
+    runner: TaskRunner,
+    missionId: string,
+    rec: RouteRecommendation,
+    opts: { showSession?: boolean } = {},
+  ): Promise<void> {
     type Row = { label: string; description?: string; detail?: string; action: 'accept' | 'effort' | 'model' | 'why' | 'cancel' };
     const target = rec.resolution.target;
     const why = explainRecommendation(rec);
@@ -1296,7 +1316,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
       try {
         const mission = await runner.startProposed(missionId, route ? { route } : {});
         const handle = runner.handleOf(mission.id);
-        if (handle) surface?.showSession(handle);
+        // A handoff from a conversation (`aw task`) leaves that conversation on screen.
+        if (handle && opts.showSession !== false) surface?.showSession(handle);
         dialogs.flash(`Task started on ${mission.worktrees.at(-1)?.branch ?? 'its own branch'}`);
         return;
       } catch (error) {
@@ -1370,6 +1391,59 @@ export function createApp(host: HostServices): AgentWranglerApp {
   function runnerAttempt(m: Mission) {
     const id = m.tasks[0]?.attemptIds.at(-1);
     return id ? m.attempts.find((a) => a.id === id) : undefined;
+  }
+
+  function taskSummary(m: Mission): TaskSummary {
+    return {
+      missionId: m.id,
+      title: m.title,
+      state: taskStateLabel(m),
+      repoRoot: m.repoRoot,
+      branch: m.worktrees.at(-1)?.branch,
+      createdAt: m.createdAt,
+    };
+  }
+
+  /**
+   * `aw task` (#80). Always the `assisted` path, whatever the routing mode
+   * says: the handoff exists to put a route in front of the user, and a
+   * proposal is the only thing a caller outside the window may create. The
+   * proposal is never popped up in the palette: a palette that opens while
+   * the user is typing in the composer would take their Enter as "accept".
+   */
+  async function proposeTask(req: ProposeTaskRequest): Promise<ProposedTask> {
+    if (!tasks) throw new TaskError('Tasks are off. Turn on orchestration ("orchestration.enabled": true in settings.json) first.');
+    const runner = tasks;
+    const routing = parseRoutingSettings(host.settings.get<unknown>(ROUTING_KEY, undefined));
+    const harness = req.harness === 'codex' ? 'codex' : 'claude-code';
+    const { mission, recommendation } = await runner.propose({
+      folder: req.folder,
+      objective: req.objective,
+      acceptanceCriteria: req.acceptanceCriteria ?? [],
+      policy: { caps: routing.caps, preferences: { harness } },
+    });
+    const target = recommendation.resolution.target;
+    const route = target && recommendation.verdict !== 'blocked' ? targetLabel(target) : undefined;
+    const open = () => {
+      const current = runner.get(mission.id);
+      const task = current?.tasks[0];
+      if (!task?.recommendation || task.attemptIds.length > 0 || !['routed', 'needs-human'].includes(task.state)) {
+        dialogs.flash('That proposal has already been started or cancelled.');
+        return;
+      }
+      void reviewProposal(runner, mission.id, task.recommendation, { showSession: false });
+    };
+    const body = route ? `Proposed: ${route}. Click to review and start it.` : 'No route recommended: click to pick one.';
+    if (host.notify) host.notify({ title: `Task proposal: ${mission.title}`, body, onClick: open });
+    dialogs.flash(`Task proposal waiting: ${mission.title} (Tasks menu)`, 6000);
+    log(`task ${mission.id}: proposed through aw`);
+    return {
+      task: taskSummary(runner.get(mission.id) ?? mission),
+      verdict: recommendation.verdict,
+      route,
+      summary: explainRecommendation(recommendation).summary,
+      note: recommendation.note,
+    };
   }
 
   /**
@@ -2337,6 +2411,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (!opts.force && (s.status === 'busy' || s.status === 'stuck' || s.status === 'blocked')) return 'working';
       return closeSessionNow(s);
     },
+    proposeTask,
+    taskList: () => (tasks ? tasks.list().filter((m) => !['completed', 'cancelled'].includes(m.state)).map(taskSummary) : []),
     async stopAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}) {
       const { hosted, local } = runners.counts();
       const ending = local + (opts.includeHosted ? hosted : 0);

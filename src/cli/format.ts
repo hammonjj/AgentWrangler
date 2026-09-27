@@ -7,6 +7,8 @@ import type {
   ControlSession,
   ControlSessionResult,
   ControlStatusResult,
+  ControlTaskProposeResult,
+  ControlTaskView,
   RunBy,
 } from '../core/control/protocol';
 import { STATUS_LABEL } from '../shared/model';
@@ -136,6 +138,31 @@ export function formatProjects(projects: readonly ControlProject[], now: number,
     p.dir,
   ]);
   return table(['PROJECT', 'USED', 'SESSIONS', 'FOLDER'], rows, width);
+}
+
+/**
+ * `aw task`'s answer. Written for the agent that ran it as much as for a
+ * person: the last line says what to tell the user, since nothing runs until
+ * they act on it in the app.
+ */
+export function formatProposal(r: ControlTaskProposeResult): string {
+  const lines = [`Task proposed: ${safe(r.task.title)}`];
+  if (r.route) lines.push(`Route: ${safe(r.route)}${r.verdict === 'route' ? '' : ' (needs a decision)'}`);
+  else lines.push('Route: none recommended');
+  if (r.summary) lines.push(`Why: ${safe(r.summary)}`);
+  if (r.note) lines.push(`Note: ${safe(r.note)}`);
+  lines.push(`Id: ${r.task.missionId}`);
+  lines.push(
+    '',
+    'Nothing is running yet. Approve it in Agent Wrangler: click the "Task proposal" notification, or Tasks → this task.',
+  );
+  return lines.join('\n');
+}
+
+export function formatTasks(tasks: readonly ControlTaskView[], now: number, width = 100): string {
+  if (tasks.length === 0) return 'No tasks.';
+  const rows = tasks.map((t) => [t.title, t.state, ago(t.createdAt, now), t.branch ?? '', t.missionId]);
+  return table(['TASK', 'STATE', 'CREATED', 'BRANCH', 'ID'], rows, width);
 }
 
 // ---- the read-only view, when the app is not running ----

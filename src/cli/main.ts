@@ -20,11 +20,15 @@ import {
   type ControlSubscribeParams,
   type ControlSubscribeResult,
   type ControlSessionRef,
+  type ControlTaskProposeParams,
+  type ControlTaskProposeResult,
+  type ControlTasksResult,
 } from '../core/control/protocol';
-import { agentEnvironment, parseArgs, USAGE, type Command } from './args';
+import * as path from 'node:path';
+import { agentEnvironment, harnessOf, parseArgs, USAGE, type Command } from './args';
 import { ATTACH_BACKLOG, AttachRenderer } from './attach';
 import { ControlClient } from './client';
-import { formatOffline, formatProjects, formatSession, formatSessions, formatStatus } from './format';
+import { formatOffline, formatProjects, formatProposal, formatSession, formatSessions, formatStatus, formatTasks } from './format';
 import { readOfflineView } from './offline';
 
 declare const AW_BUILD_ID: string | undefined;
@@ -148,6 +152,28 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
     }
     case 'attach':
       return attach(cmd.ref, client);
+    case 'task': {
+      const objective = cmd.objective ?? (await readStdin());
+      if (objective.trim().length === 0) {
+        process.stderr.write('aw task: the objective is empty.\n');
+        return 2;
+      }
+      const params: ControlTaskProposeParams = {
+        folder: path.resolve(cmd.folder ?? process.cwd()),
+        objective,
+        acceptanceCriteria: cmd.criteria,
+        ...((cmd.harness ?? harnessOf(process.env)) ? { harness: cmd.harness ?? harnessOf(process.env) } : {}),
+      };
+      // Assessing is one model call, which can take longer than a read.
+      const r = await client.request<ControlTaskProposeResult>('task.propose', params, { timeoutMs: 180_000 });
+      print(r, () => formatProposal(r), cmd.json);
+      return 0;
+    }
+    case 'tasks': {
+      const r = await client.request<ControlTasksResult>('tasks');
+      print(r, () => formatTasks(r.tasks, now), cmd.json);
+      return 0;
+    }
     default:
       return 2;
   }

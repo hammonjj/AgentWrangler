@@ -24,6 +24,7 @@ import {
 } from '../core/control/protocol';
 import { ControlError, type ControlBackend, type ControlSubscription } from '../core/control/server';
 import { displayTitle, type AgentSession } from '../shared/model';
+import { TaskError } from '../orchestration/engine/taskRunner';
 import type { AgentWranglerApp } from './createApp';
 
 export interface ControlBackendDeps {
@@ -154,6 +155,18 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
 
     projects: () =>
       app.projects.value.map((p) => ({ dir: p.dir, name: p.name, lastUsedAt: p.lastUsedAt, favourite: p.favourite, occupiedBy: p.occupiedBy })),
+
+    async proposeTask(params) {
+      try {
+        return await app.proposeTask(params);
+      } catch (err) {
+        // Refusals the caller can act on (orchestration off, not a repository) keep their wording.
+        if (err instanceof TaskError) throw new ControlError(RPC_UNSUPPORTED, err.message);
+        throw err;
+      }
+    },
+
+    tasks: () => app.taskList(),
   };
 }
 
