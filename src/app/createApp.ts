@@ -58,7 +58,10 @@ import { sourceStatus } from '../shared/orchestration/sourceHealth';
 import { EFFORT_LEVELS, type RouteRecommendation } from '../shared/orchestration/types';
 import { nativeEffortFor, tierRank } from '../shared/orchestration/catalog';
 import { Emitter } from '../core/events';
-import type { TurnRecord } from '../shared/orchestration/telemetry';
+import type { TelemetryRecord, TurnRecord } from '../shared/orchestration/telemetry';
+import { isEndpointSource } from '../shared/orchestration/localEndpoints';
+import { LocalEndpointService } from '../orchestration/local/localEndpointService';
+import { LocalMetricsIndex } from '../core/telemetry/localMetricsIndex';
 import type { Mission } from '../shared/orchestration/types';
 import type { ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../shared/orchestration/taskView';
 import { taskBadges, taskViewOf } from '../orchestration/view/taskViews';
@@ -168,6 +171,10 @@ export interface AgentWranglerApp {
   columns: ColumnPrefsService;
   /** Every model the CLIs report, by capability, with AW's tier for each (#29). */
   models: CapabilityCatalog;
+  /** Registered local model endpoints (#51): Preferences → Orchestration → Local endpoints. */
+  localEndpoints: LocalEndpointService;
+  /** What local models have done (§19.4), from the telemetry log. */
+  localMetrics: LocalMetricsIndex;
   pause: PauseService;
   usage: UsageSource;
   codexUsage: UsageSource;
@@ -292,6 +299,26 @@ export function createApp(host: HostServices): AgentWranglerApp {
   );
   const models = new CapabilityCatalog(host.globalState, host.settings);
   host.subscribe(models);
+  // Registered local endpoints (#51): probed, health-checked, keys in
+  // safeStorage. Their models join the catalog unassigned. `localTelemetry`
+  // is bound once the telemetry log exists, below.
+  let localTelemetry: (record: TelemetryRecord) => boolean = () => false;
+  const localEndpoints = new LocalEndpointService({
+    settings: host.settings,
+    secrets: host.secrets,
+    storage: host.globalState,
+    log,
+    telemetry: { append: (record) => localTelemetry(record) },
+    promptKey: (endpoint) =>
+      dialogs.input({
+        title: `Key for ${endpoint.name}`,
+        prompt: 'The API key the endpoint expects, if it expects one. Stored in the system keychain, never in settings.',
+        password: true,
+      }),
+  });
+  host.subscribe(localEndpoints);
+  models.setLocal(localEndpoints.reports());
+  host.subscribe(localEndpoints.onDidChange(() => models.setLocal(localEndpoints.reports())));
   // Session hosts first (playbook §7.3 step 1): which sessions a previous run
   // left running in hosts that are still alive. Nothing may classify, resume
   // or adopt a session before this is known, or AW could end or double-resume
@@ -384,6 +411,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     registry: sessionRegistry,
     locate,
     log,
+    // A thread on a local endpoint gets the endpoint's key per request; it is never recorded.
+    endpointKey: (ref) => localEndpoints.keyByRef(ref),
   });
   host.subscribe(codexRunners);
   store.useLiveSessions((session) => session.provider === 'codex' ? codexRunners.get(session.sessionId)?.session : undefined);
@@ -510,8 +539,29 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // on by default and switched off by `telemetry.enabled`. Attempt records (#33) go in the same log.
   const telemetryDir = path.join(host.dataDir, 'orchestration', 'telemetry');
   const telemetryLog = new TelemetryLog(telemetryDir);
+  // Local observability (§19.4, #51): attempt and local-call records, folded per local model.
+  const localMetrics = new LocalMetricsIndex();
+  host.subscribe(localMetrics);
+  void localMetrics.load(telemetryDir).catch((err) => log(`telemetry: could not read local metrics: ${String(err)}`));
+  const appendTelemetry = (record: TelemetryRecord): boolean => {
+    if (host.settings.get<boolean>(TELEMETRY_ENABLED_KEY, true) === false) return false;
+    const written = telemetryLog.append(record);
+    if (written) localMetrics.add(record);
+    return written;
+  };
   const turnRecords = new Emitter<TurnRecord>();
   host.subscribe(turnRecords);
+  /** Attempts running now on each local endpoint. */
+  const localBusy = (): Record<string, number> => {
+    const busy: Record<string, number> = {};
+    for (const m of orchestration.tasks?.list() ?? []) {
+      const a = orchestration.tasks!.currentAttempt(m);
+      if (!a || !['launching', 'running', 'waiting-human'].includes(a.state)) continue;
+      const source = m.decisions.find((d) => d.id === a.routingDecisionId)?.resolution.target.source;
+      if (source && isEndpointSource(source)) busy[source] = (busy[source] ?? 0) + 1;
+    }
+    return busy;
+  };
   // Behind `orchestration.enabled` (off by default): tasks (#33) and nothing else yet.
   const orchestration = createOrchestration({
     settings: host.settings,
@@ -522,7 +572,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     hostsEnabled: () => !!hostSupervisor && host.settings.get<boolean>('experimental.sessionHosts', false) === true,
     onTurnRecord: (listener) => turnRecords.event(listener),
     telemetry: {
-      append: (record) => (host.settings.get<boolean>(TELEMETRY_ENABLED_KEY, true) !== false ? telemetryLog.append(record) : false),
+      append: (record) => appendTelemetry(record),
     },
     notify: host.notify,
     openFile: (file) => host.shell.openFile(file),
@@ -536,12 +586,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const now = Date.now();
       return {
         catalog: models.catalog,
-        sources: { anthropic: sourceStatus('anthropic', usage.usage, now), openai: sourceStatus('openai', codexUsage.usage, now) },
+        sources: {
+          anthropic: sourceStatus('anthropic', usage.usage, now),
+          openai: sourceStatus('openai', codexUsage.usage, now),
+          // Slots are concurrency (§19.2): attempts running on an endpoint hold one each.
+          ...localEndpoints.statuses(localBusy()),
+        },
         now,
       };
     },
+    local: { service: localEndpoints, catalog: () => models.catalog },
   });
   host.subscribe(orchestration);
+  localTelemetry = appendTelemetry;
+  localEndpoints.start();
 
   // What each session has used, summed from its records, on every surface's
   // copy of the session (#28): the Usage column and the conversation header.
@@ -2463,6 +2521,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     nicknames,
     columns,
     models,
+    localEndpoints,
+    localMetrics,
     pause,
     usage,
     codexUsage,

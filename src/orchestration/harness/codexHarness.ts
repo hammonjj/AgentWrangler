@@ -7,12 +7,20 @@
 import type { SessionExecutors } from '../../core/session/sessionExecutors';
 import type { SessionHandle } from '../../core/session/sessionHandle';
 import type { ModelChoice } from '../../shared/conversation';
+import type { CodexModelProvider } from '../../shared/launchPolicy';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
+import type { ModelSourceId } from '../../shared/orchestration/types';
 import { assertTarget, nativeEffort, type AgentHarness, type AttemptLaunch, type HarnessCapabilities } from './types';
 
 export interface CodexHarnessDeps {
   sessions: Pick<SessionExecutors, 'launch'>;
   /** What the app-server last reported (`ModelCatalogService`). */
   models: () => ModelChoice[];
+  /**
+   * The model provider for a `local:<id>` source (#51, §19.6 slice B), or
+   * undefined when that endpoint is not registered or is off.
+   */
+  localProvider?: (source: ModelSourceId, model: string) => CodexModelProvider | undefined;
 }
 
 const CAPABILITIES: HarnessCapabilities = {
@@ -49,6 +57,16 @@ export class CodexHarness implements AgentHarness {
   async launch(req: AttemptLaunch): Promise<SessionHandle> {
     assertTarget(this.id, req);
     const effort = nativeEffort(req.target);
+    let policy = req.policy;
+    const source = req.target.source;
+    if (source && isEndpointSource(source)) {
+      // A local model is a Codex thread with a different model provider: the
+      // sandbox and approval policy are the same as any attempt's (§19.6).
+      if (!req.target.model) throw new Error('A local model has to be named: there is no default model on an endpoint.');
+      const provider = this.deps.localProvider?.(source, req.target.model);
+      if (!provider) throw new Error(`The endpoint for ${source} is not registered, or is off.`);
+      policy = { ...policy, codex: { ...policy?.codex, modelProvider: provider } };
+    }
     // The prompt is sent here rather than as `initialPrompt`, so a resumed
     // thread has its effort set before the first turn it runs for us.
     const handle = await this.deps.sessions.launch({
@@ -58,7 +76,7 @@ export class CodexHarness implements AgentHarness {
       effort,
       ...(req.resume ? { resume: req.resume } : {}),
       origin: req.origin,
-      ...(req.policy ? { policy: req.policy } : {}),
+      ...(policy ? { policy } : {}),
     });
     if (req.resume && effort) await handle.setEffort(effort);
     await handle.send(req.prompt, undefined, req.promptId ? { clientMessageId: req.promptId } : undefined);

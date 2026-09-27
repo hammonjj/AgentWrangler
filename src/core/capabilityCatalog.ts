@@ -40,6 +40,7 @@ import {
   type PriceTable,
   type ReportedModels,
 } from '../shared/orchestration/catalog';
+import type { LocalModelReport } from '../shared/orchestration/localModels';
 
 const LEGACY_KEY = 'agentWrangler.modelCatalog';
 const STORAGE_KEY = 'agentWrangler.capabilityCatalog';
@@ -65,6 +66,7 @@ export class CapabilityCatalog implements Disposable {
   private emitter = new Emitter<void>();
   private cached?: CapabilityCatalogView;
   private sub?: Disposable;
+  private local: LocalModelReport[] = [];
 
   constructor(
     private storage: KeyValueStorage,
@@ -99,6 +101,7 @@ export class CapabilityCatalog implements Disposable {
         policy: parseModelPolicy(this.settings?.get<unknown>(MODEL_POLICY_KEY, undefined)),
         tiers: parseTiers(this.settings?.get<unknown>(TIERS_KEY, undefined)),
         prices: parsePrices(this.settings?.get<unknown>(PRICES_KEY, undefined)),
+        local: this.local,
       });
     }
     return this.cached;
@@ -123,6 +126,16 @@ export class CapabilityCatalog implements Disposable {
     // Only the timestamp moved: nothing anyone shows has changed.
     if (same) this.cached = undefined;
     else this.changed();
+  }
+
+  /**
+   * What the local endpoints reported (#51): their models join the catalog
+   * unassigned. Held in memory; the endpoint service keeps its own last probe.
+   */
+  setLocal(reports: LocalModelReport[]): void {
+    if (JSON.stringify(reports) === JSON.stringify(this.local)) return;
+    this.local = reports;
+    this.changed();
   }
 
   /** Record the limits a harness reported for a model it just used. */

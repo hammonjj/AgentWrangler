@@ -148,6 +148,57 @@ export interface AttemptRecord extends RecordBase {
   flags: AttemptFlags;
   /** The record was written for an interrupted attempt and may be incomplete. */
   partial?: boolean;
+  /** Present when the attempt ran on a registered endpoint's model (§19.4, #51). */
+  local?: LocalRunMetrics;
+}
+
+/**
+ * What a run on a local endpoint measured (§19.4). Only what was actually
+ * reported or measured: through a harness, TTFT is not visible, so it is
+ * absent rather than guessed. Cost is `$0 API cost` by rule, never a field.
+ */
+export interface LocalRunMetrics {
+  /** `local:<endpoint id>`. */
+  source: ModelSourceId;
+  runtime?: string;
+  /** Display only, as the user declared it. */
+  device?: string;
+  /** The context window the model was run with, as the catalog knew it. */
+  contextWindow?: number;
+  ttftMs?: number;
+  outTokPerSec?: number;
+  /** `server`: the runtime's own timings. `client`: measured from the stream. `attempt`: output tokens over active time. */
+  tokPerSecFrom?: 'server' | 'client' | 'attempt';
+  /** Time waiting for a server slot. */
+  queueMs?: number;
+  /** The endpoint is not on this machine. */
+  external?: boolean;
+  /**
+   * **An estimate, labelled as one:** what the hosted route the router would
+   * otherwise have picked would have cost for the same tokens, at its price
+   * table. Absent when that route has no price.
+   */
+  apiEquivalentUsd?: number;
+  apiEquivalentModel?: string;
+}
+
+/** One direct call to a local endpoint (§19.1 path 2): a structured completion or a qualification probe. */
+export interface LocalCallRecord extends RecordBase {
+  type: 'local-call';
+  source: ModelSourceId;
+  model: string;
+  purpose: 'completion' | 'qualification';
+  ok: boolean;
+  /** `invalid-output`, `error`, `timeout`, `aborted`; `infra` marks a server that went away. */
+  failure?: string;
+  infra?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  durationMs: number;
+  attempts: number;
+  local: LocalRunMetrics;
+  /** The call failed locally and was answered by the hosted completion instead. */
+  fellBackToHosted?: boolean;
 }
 
 /**
@@ -177,4 +228,4 @@ export interface RoutingRecord extends RecordBase {
   candidates: { chosen: number; fallback: number; rejected: number };
 }
 
-export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord;
+export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord | LocalCallRecord;

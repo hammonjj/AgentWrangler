@@ -54,11 +54,32 @@ export type CodexSandbox = 'read-only' | 'workspace-write';
 /** Codex approval policies AW will ask for (the app-server's `AskForApproval`, minus `granular`). */
 export type CodexApprovalPolicy = 'untrusted' | 'on-request' | 'never';
 
+/**
+ * A model provider for a thread that runs on a local endpoint
+ * (`docs/plans/intelligent-orchestration.md` §19.6 slice B, #51): Codex's
+ * `model_providers.<id>` with `wire_api = "responses"`. Re-sent on every
+ * resume, like the rest of the policy. The key is never here: `keyRef` names
+ * where it is in `safeStorage`, and the runner reads it per request.
+ */
+export interface CodexModelProvider {
+  /** `[a-z0-9_-]`, the `model_providers` table key. */
+  id: string;
+  name: string;
+  /** Includes `/v1`. */
+  baseUrl: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  keyRef?: string;
+  /** An absolute path, passed as `model_catalog_json`. */
+  modelCatalog?: string;
+}
+
 /** Codex: `thread/start` and `thread/resume` params, sent on every one. */
 export interface CodexLaunchPolicy {
   sandbox?: CodexSandbox;
   approvalPolicy?: CodexApprovalPolicy;
   developerInstructions?: string;
+  modelProvider?: CodexModelProvider;
 }
 
 export interface LaunchPolicy {
@@ -110,7 +131,26 @@ function parseCodex(raw: unknown): CodexLaunchPolicy | undefined {
   if (typeof raw.developerInstructions === 'string' && raw.developerInstructions.trim()) {
     out.developerInstructions = raw.developerInstructions;
   }
+  const provider = parseModelProvider(raw.modelProvider);
+  if (provider) out.modelProvider = provider;
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function parseModelProvider(raw: unknown): CodexModelProvider | undefined {
+  if (!isObject(raw)) return undefined;
+  if (typeof raw.id !== 'string' || !/^[a-z0-9_-]{1,48}$/.test(raw.id)) return undefined;
+  if (typeof raw.baseUrl !== 'string' || !/^https?:\/\/[^\s@]+$/.test(raw.baseUrl)) return undefined;
+  const out: CodexModelProvider = {
+    id: raw.id,
+    name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : raw.id,
+    baseUrl: raw.baseUrl,
+  };
+  const n = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined);
+  if (n(raw.contextWindow)) out.contextWindow = n(raw.contextWindow);
+  if (n(raw.maxOutputTokens)) out.maxOutputTokens = n(raw.maxOutputTokens);
+  if (typeof raw.keyRef === 'string' && raw.keyRef.startsWith('localEndpoint:')) out.keyRef = raw.keyRef;
+  if (typeof raw.modelCatalog === 'string' && raw.modelCatalog.startsWith('/')) out.modelCatalog = raw.modelCatalog;
+  return out;
 }
 
 function stringList(raw: unknown): string[] | undefined {

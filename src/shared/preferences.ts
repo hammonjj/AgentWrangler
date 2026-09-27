@@ -10,6 +10,8 @@
 
 import type { CapabilityCatalogView, ModelPolicyChange } from './orchestration/catalog';
 import type { SourceStatus } from './orchestration/sourceHealth';
+import type { LocalEndpointChange, LocalEndpointView } from './orchestration/localEndpoints';
+import type { LocalModelSummary } from './orchestration/localMetrics';
 
 export type PreferencesToHost =
   /** The window has rendered and wants the current values. */
@@ -27,12 +29,21 @@ export type PreferencesToHost =
   | { type: 'action'; id: SettingActionId }
   /** A change to one model's tier or enabled flag, from Orchestration → tier map. */
   | { type: 'modelPolicy'; change: ModelPolicyChange }
+  /** Add, remove, turn on or off, key, probe or qualify a local endpoint (#51). */
+  | { type: 'localEndpoint'; change: LocalEndpointChange }
   | { type: 'close' };
 
 /** What Preferences → Orchestration shows: the catalog and each source's health. */
 export interface OrchestrationPrefsView {
   catalog: CapabilityCatalogView;
   sources: SourceStatus[];
+  /** Local endpoints and what their models have done (#51). */
+  local?: {
+    endpoints: LocalEndpointView[];
+    summaries: LocalModelSummary[];
+    /** The OS can encrypt keys; without it no key can be stored. */
+    secretsAvailable: boolean;
+  };
 }
 
 /**
@@ -81,7 +92,9 @@ export type HostToPreferences =
   /** The action has started; the button says so and cannot be pressed twice. */
   | { type: 'actionBusy'; id: SettingActionId }
   /** The model catalog changed, or the window just opened. */
-  | { type: 'orchestration'; view: OrchestrationPrefsView };
+  | { type: 'orchestration'; view: OrchestrationPrefsView }
+  /** What a local endpoint change did, shown beside the endpoints. */
+  | { type: 'localEndpointResult'; ok: boolean; lines: string[] };
 
 /**
  * What a `set` or `reset` should actually write, or nothing.

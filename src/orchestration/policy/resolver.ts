@@ -27,6 +27,7 @@ import {
 } from '../../shared/orchestration/catalog';
 import type { SourceStatus } from '../../shared/orchestration/sourceHealth';
 import { harnessLabel } from '../../shared/harness';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import type {
   ExecutionTarget,
   HarnessId,
@@ -156,13 +157,22 @@ function hardFilter(
     if (!d.vision.value) return { reason: `${label}: does not take images` };
   }
 
+  // 4b. A registered endpoint's model does agentic work only once something
+  // has said its tool calls parse (§19.2, §19.6 point 4): the qualification
+  // probe, or the user. Unknown is "cannot satisfy a hard need".
+  const endpoint = isEndpointSource(d.source);
+  if (endpoint) {
+    if (!isKnown(d.toolCalling)) return { reason: `${label}: tool calling not measured yet; run its qualification in Preferences → Orchestration` };
+    if (d.toolCalling.value === 'none') return { reason: `${label}: its tool calls do not parse (completion only)` };
+  }
+
   // 5. Context window, with headroom already in the need.
   let note: string | undefined;
   const need = contextNeedOf(req.needs);
   if (need !== undefined) {
     if (isKnown(d.contextWindow)) {
       if (d.contextWindow.value < need) return { reason: `${label}: context ${fmtTokens(d.contextWindow.value)} < needed ${fmtTokens(need)}` };
-    } else if (d.location === 'hosted' && need <= ASSUMED_HOSTED_WINDOW) {
+    } else if (d.location === 'hosted' && !endpoint && need <= ASSUMED_HOSTED_WINDOW) {
       note = `context window not reported yet; ${fmtTokens(need)} needed is within the ${fmtTokens(ASSUMED_HOSTED_WINDOW)} every hosted model has`;
     } else {
       return { reason: `${label}: context window not reported, and ${fmtTokens(need)} is needed` };
@@ -176,6 +186,9 @@ function hardFilter(
     if (status.health.state === 'down' || (backoff !== undefined && backoff > snap.now)) {
       return { reason: `${label}: ${status.health.reason}`, capacity: status.health.state === 'down' && backoff !== undefined };
     }
+    // Server slots are concurrency (§19.2): none free means wait, not a worse model.
+    const free = status.capacity.freeSlots;
+    if (isKnown(free) && free.value <= 0) return { reason: `${label}: every server slot is busy`, capacity: true };
     const threshold = policy.caps?.maxUsageWindowPercent ?? DEFAULT_ADMISSION_PERCENT;
     const pct = status.capacity.windowPercent;
     if (isKnown(pct) && pct.value >= threshold) {

@@ -23,6 +23,8 @@ import { EFFORT_LEVELS } from './types';
 import type { ModelChoice } from '../conversation';
 import { harnessesFor, type HostedSource } from '../harness';
 import { modelLabel, normalizeModelId } from '../modelName';
+import type { LocalModelReport } from './localModels';
+import { DATA_LEAVES_MACHINE } from './localEndpoints';
 
 // ---------------------------------------------------------------------------
 // Provenance
@@ -353,6 +355,14 @@ export interface CatalogEntry {
   notRoutableBecause?: string;
   /** When its harness last reported it. Absent for a list carried over from before the catalog. */
   reportedAt?: Millis;
+  /**
+   * A local endpoint's model (#51) that may serve structured completions
+   * directly: its endpoint is on, it is enabled, and it has a tier. Independent
+   * of `routable`, which is about agentic work through a harness.
+   */
+  completions?: boolean;
+  /** A registered endpoint that is not on this machine: "data leaves this machine". */
+  external?: boolean;
 }
 
 export interface CapabilityCatalogView {
@@ -387,6 +397,8 @@ export interface CatalogInputs {
   policy?: ModelPolicy;
   tiers?: readonly TierDef[];
   prices?: PriceTable;
+  /** Models the registered local endpoints reported (#51). Never given a default tier. */
+  local?: LocalModelReport[];
 }
 
 export function modelKey(source: ModelSourceId, id: string): string {
@@ -498,6 +510,49 @@ export function buildCatalog(input: CatalogInputs): CapabilityCatalogView {
         reportedAt: at,
       });
     }
+  }
+
+  // Local endpoints' models (#51, §19.3): no shipped default ever names one,
+  // so each is unassigned until the user gives it a tier.
+  const seen = new Set(entries.map((e) => e.key));
+  for (const report of input.local ?? []) {
+    const d = report.descriptor;
+    const key = modelKey(d.source, d.modelId);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const declared = policy[key] ?? {};
+    const tierDeclared = 'tier' in declared;
+    let tier = tierDeclared ? (declared.tier ?? undefined) : undefined;
+    let undefinedTier: string | undefined;
+    if (tier !== undefined && tierRank(tiers, tier) < 0) {
+      undefinedTier = tier;
+      tier = undefined;
+    }
+    const enabledDeclared = declared.enabled !== undefined;
+    const enabled = declared.enabled ?? true;
+    let notRoutableBecause: string | undefined;
+    if (!report.endpointEnabled) notRoutableBecause = report.external ? `Its endpoint is off (${DATA_LEAVES_MACHINE})` : 'Its endpoint is off';
+    else if (!enabled) notRoutableBecause = 'Disabled';
+    else if (undefinedTier !== undefined) notRoutableBecause = `Tier "${undefinedTier}" is not defined`;
+    else if (tier === undefined) notRoutableBecause = 'Unassigned';
+    const completions = notRoutableBecause === undefined;
+    if (!notRoutableBecause && report.harnesses.length === 0) notRoutableBecause = report.completionOnlyBecause ?? 'No harness can drive it';
+    entries.push({
+      key,
+      descriptor: d,
+      aliases: [d.modelId],
+      harnesses: [...report.harnesses],
+      tier,
+      tierDeclared,
+      enabled,
+      enabledDeclared,
+      costReporting: 'none',
+      routable: notRoutableBecause === undefined,
+      notRoutableBecause,
+      reportedAt: report.reportedAt,
+      completions,
+      ...(report.external ? { external: true } : {}),
+    });
   }
 
   entries.sort((a, b) => {

@@ -523,3 +523,57 @@
   font-size: 0.82em;
   opacity: 0.75;
 }
+
+/*
+ * Orchestration → Local endpoints (#51). One card per endpoint, its models
+ * listed inside. The pane can be narrow, so the add form wraps.
+ */
+#prefsApp .pf-endpoint-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+#prefsApp .pf-endpoint-add .pf-endpoint-url {
+  flex: 2 1 220px;
+}
+
+#prefsApp .pf-endpoint-add .pf-endpoint-name {
+  flex: 1 1 140px;
+}
+
+#prefsApp .pf-endpoints {
+  display: flex;
+  flex-direction: column;
+}
+
+#prefsApp .pf-endpoint {
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+#prefsApp .pf-endpoint.reachable .pf-source-dot {
+  background: var(--vscode-charts-green, #3ba55d);
+}
+#prefsApp .pf-endpoint.degraded .pf-source-dot {
+  background: var(--vscode-charts-yellow, #d29922);
+}
+#prefsApp .pf-endpoint.down .pf-source-dot {
+  background: var(--vscode-errorForeground, #ed4245);
+}
+
+#prefsApp .pf-endpoint-warning {
+  margin: 2px 0 0;
+  font-size: 0.86em;
+  font-weight: 600;
+  color: var(--vscode-charts-yellow, #d29922);
+}
+
+#prefsApp .pf-endpoint-model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 8px;
+}

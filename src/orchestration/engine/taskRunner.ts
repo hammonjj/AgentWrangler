@@ -72,7 +72,10 @@ import type { Reviewer } from '../verify/reviewer';
 import { Verifier } from '../verify/verifier';
 import { buildVerificationPlan, summariseVerification } from '../../shared/orchestration/verification';
 import { tierRank } from '../../shared/orchestration/catalog';
-import type { ResolverSnapshot } from '../policy/resolver';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
+import type { HealthState } from '../../shared/orchestration/sourceHealth';
+import type { LocalRunMetrics } from '../../shared/orchestration/telemetry';
+import { resolveRoute, type ResolverSnapshot } from '../policy/resolver';
 import { compareRoutes, recommendRoute } from '../policy/recommend';
 import { attemptRecord, addTurnUsage, routingRecord } from './attemptRecord';
 import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from './attemptPolicy';
@@ -81,6 +84,11 @@ import { sessionVerdict, turnFailure, turnMessageIds, type HandleView, type Sess
 /** What the user picked: harness, model, effort and (Claude) permission mode (#33 "manual route"). */
 export interface TaskRoute {
   harness: HarnessId;
+  /**
+   * Where the model runs, when it is not the harness's own login: a
+   * registered endpoint's `local:<id>` (#51). Absent: the harness's source.
+   */
+  source?: ModelSourceId;
   /** Empty or absent: the harness's own default model. */
   model?: string;
   /** The model's native effort level. Empty or absent: none is sent. */
@@ -162,6 +170,19 @@ export interface TaskRunnerDeps {
    * attempts record no shadow and `propose` refuses.
    */
   routing?: { snapshot(): ResolverSnapshot };
+  /**
+   * The registered local endpoints (#51). A running attempt on one whose
+   * server stops answering is ended as `infra` and, where the route allows,
+   * failed over to another model of the same tier. Absent: no local models.
+   */
+  local?: {
+    /** Read the endpoint's health now. */
+    check(source: ModelSourceId): Promise<HealthState>;
+    /** Fires when an endpoint is read as `down`. */
+    onDown(listener: (source: ModelSourceId) => void): Disposable;
+    /** What an attempt record says about the endpoint and model (runtime, device, context window). */
+    facts?(source: ModelSourceId, model: string): Omit<LocalRunMetrics, 'source'> | undefined;
+  };
   /** `attempt` records go here (the telemetry log); turn records carry the attempt id already (#27). */
   telemetry?: { append(record: TelemetryRecord): boolean };
   /** Every turn record as it is written, to sum each attempt's usage. */
@@ -191,6 +212,11 @@ const TASK_KEY = 't1';
 const CONTINUE_PROMPT =
   'Agent Wrangler lost track of this session and has resumed it. Carry on with the task where you left off; say so and stop when it is done.';
 const DEFAULT_SETTLE_MS = 2000;
+/** The outcome signature of an attempt whose local model server went away (#51). */
+export const LOCAL_SERVER_LOST = 'local-server-lost';
+const LOCAL_SERVER_LOST_TEXT = 'its local model server stopped answering';
+/** Attempts a task may have, in all, before failover stops trying (when the mission sets no `maxAttempts`). */
+const DEFAULT_MAX_ATTEMPTS = 3;
 const END_SESSION_WAIT_MS = 15_000;
 /** Attempt states in which a session is (or is about to be) the attempt's. */
 const LIVE: readonly AttemptState[] = ['launching', 'running', 'waiting-human', 'finishing', 'verifying'];
@@ -235,6 +261,7 @@ export class TaskRunner implements Disposable {
     this.log = deps.log ?? (() => undefined);
     this.subs.push(deps.sessions.onDidChange(() => this.pokeAll()));
     if (deps.onTurnRecord) this.subs.push(deps.onTurnRecord((r) => this.onTurnRecord(r)));
+    if (deps.local) this.subs.push(deps.local.onDown((source) => this.onLocalDown(source)));
   }
 
   // ---- Reading ----
@@ -361,7 +388,7 @@ export class TaskRunner implements Disposable {
       if (!route) {
         const t = rec.resolution.target;
         if (!t || rec.verdict === 'blocked') throw new TaskError(rec.note ?? 'There is no recommended route to accept; pick one.');
-        route = { harness: t.harness, model: t.model, ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
+        route = { harness: t.harness, model: t.model, ...(isEndpointSource(t.source) ? { source: t.source } : {}), ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
       }
       this.checkRoute(route);
       const target = accepted ? rec.resolution.target! : this.targetFor(route);
@@ -766,7 +793,7 @@ export class TaskRunner implements Disposable {
         cwd: wt.path,
         prompt,
         promptId,
-        target: { harness: route.harness, model: route.model ?? '', effortNative: route.effort?.trim() || 'none' },
+        target: { harness: route.harness, source: decision.resolution.target.source, model: route.model ?? '', effortNative: route.effort?.trim() || 'none' },
         origin: originOf(m, attempt),
         permissionMode: provider === 'claude' ? decisionMode(decision) : undefined,
         ...(opts.mode === 'continue' ? { resume: sessionIds.at(-1) } : sessionIds[0] ? { sessionId: sessionIds[0] } : {}),
@@ -836,7 +863,7 @@ export class TaskRunner implements Disposable {
    * bare route when the catalog has never seen it.
    */
   private targetFor(route: TaskRoute): ExecutionTarget {
-    const source = SOURCE[route.harness] ?? route.harness;
+    const source = route.source ?? SOURCE[route.harness] ?? route.harness;
     const model = route.model?.trim() ?? '';
     const alias = model || (route.harness === 'claude-code' ? 'default' : '');
     const entry = alias
@@ -864,7 +891,8 @@ export class TaskRunner implements Disposable {
     const cmp = rec ? compareRoutes(rec.resolution.target, target, routing.offered) : undefined;
     const mode = m.policy.mode ?? 'manual';
     let reasons: RoutingReason[];
-    if (accepted) reasons = [...rec!.reasons, { ruleId: 'assisted.accepted', text: 'Recommendation accepted.', ...inputs }];
+    if (accepted && routing.failover) reasons = rec!.reasons.map((r, i) => (i === 0 && permissionMode ? { ...r, inputs: { ...r.inputs, permissionMode } } : r));
+    else if (accepted) reasons = [...rec!.reasons, { ruleId: 'assisted.accepted', text: 'Recommendation accepted.', ...inputs }];
     else if (routing.offered && cmp) reasons = [{ ruleId: 'assisted.changed', text: `Changed from the recommendation: ${cmp.changed.join(', ') || 'nothing'}.`, ...inputs }];
     else reasons = [{ ruleId: 'manual', text: 'Route picked by the user.', ...inputs }];
     return {
@@ -1175,13 +1203,190 @@ export class TaskRunner implements Disposable {
         await this.releaseTree(missionId, a.id);
         this.notify(this.need(missionId), 'stopped', `Its session was ${v.reason}.`);
         return;
-      case 'failed':
+      case 'failed': {
         this.unwatch(a.id);
-        m = this.endAttempt(m, a.id, 'failed', { status: 'failed', category: v.category, signature: v.reason }, v.reason);
+        const lost = await this.localServerLost(m, a, v.category);
+        m = this.need(missionId);
+        m = this.endAttempt(
+          m,
+          a.id,
+          'failed',
+          { status: 'failed', category: v.category, signature: lost ? LOCAL_SERVER_LOST : v.reason },
+          lost ? LOCAL_SERVER_LOST_TEXT : v.reason,
+        );
         this.put(m);
         await this.releaseTree(missionId, a.id);
-        this.notify(this.need(missionId), 'failed', `${capitalise(v.reason)}. Retry it fresh, or cancel it.`);
+        if (lost && (await this.failover(missionId, a.id))) return;
+        this.notify(this.need(missionId), 'failed', `${capitalise(lost ? LOCAL_SERVER_LOST_TEXT : v.reason)}. Retry it fresh, or cancel it.`);
         return;
+      }
+    }
+  }
+
+  // ---- Local endpoints (#51) ----
+
+  /**
+   * Whether an `infra` failure on a local model was its server going away:
+   * the endpoint does not answer a health read now. Anything else (a turn
+   * that failed with the server up) stays the failure it was.
+   */
+  private async localServerLost(m: Mission, a: ExecutionAttempt, category: OutcomeCategory | undefined): Promise<boolean> {
+    if (category !== 'infra' || !this.deps.local) return false;
+    const source = m.decisions.find((d) => d.id === a.routingDecisionId)?.resolution.target.source;
+    if (!isEndpointSource(source)) return false;
+    const state = await this.deps.local.check(source!).catch((): HealthState => 'unknown');
+    return state === 'down' || state === 'degraded';
+  }
+
+  /**
+   * An endpoint was just read as `down`: every attempt running on it has lost
+   * its model mid-attempt. Ended as `infra` rather than left to a harness that
+   * may retry for minutes, then failed over where the route allows.
+   */
+  private onLocalDown(source: ModelSourceId): void {
+    for (const m of this.missions.values()) {
+      const a = this.currentAttempt(m);
+      if (!a || !['launching', 'running', 'waiting-human'].includes(a.state)) continue;
+      const d = m.decisions.find((x) => x.id === a.routingDecisionId);
+      if (d?.resolution.target.source !== source) continue;
+      void this.queue(m.id, () => this.serverLost(m.id, a.id)).catch((e) => this.log(`task ${m.id}: ${errorText(e)}`));
+    }
+  }
+
+  private async serverLost(missionId: string, attemptId: string): Promise<void> {
+    let m = this.need(missionId);
+    const a = m.attempts.find((x) => x.id === attemptId);
+    if (!a || !['launching', 'running', 'waiting-human'].includes(a.state)) return;
+    this.log(`task ${missionId}: attempt ${a.n} lost its local model server`);
+    await this.endSession(m, a);
+    m = this.need(missionId);
+    m = this.endAttempt(m, a.id, 'failed', { status: 'failed', category: 'infra', signature: LOCAL_SERVER_LOST }, LOCAL_SERVER_LOST_TEXT);
+    this.put(m);
+    await this.releaseTree(missionId, a.id);
+    if (await this.failover(missionId, a.id)) return;
+    this.notify(this.need(missionId), 'failed', `${capitalise(LOCAL_SERVER_LOST_TEXT)}. Retry it once the server is back, or cancel it.`);
+  }
+
+  /** Why the task may not fail over on its own, or undefined when it may. */
+  private failoverBlocked(m: Mission, d: RoutingDecision): string | undefined {
+    const task = m.tasks[0];
+    if (m.state !== 'running' || task.state !== 'needs-human') return 'the task is not waiting';
+    // A route the user picked by hand is theirs to change, unless they opted into automatic recovery.
+    if (d.decidedBy !== 'router' && m.policy.autoRecover !== true) return 'the route was picked by hand';
+    const max = m.policy.caps?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    if (task.attemptIds.length >= max) return `it has had ${task.attemptIds.length} of ${max} attempts`;
+    if (!this.deps.routing) return 'there is no catalog to fail over with';
+    return undefined;
+  }
+
+  /**
+   * Failover within the tier (§9.4 step 5): the same requirement pinned to
+   * the tier that ran, re-resolved against a fresh snapshot with the failed
+   * source excluded. Never a different tier: a failover must not quietly
+   * change capability. True when a new attempt was launched.
+   */
+  private async failover(missionId: string, failedAttemptId: string): Promise<boolean> {
+    let m = this.need(missionId);
+    const failed = m.attempts.find((x) => x.id === failedAttemptId);
+    const d = failed && m.decisions.find((x) => x.id === failed.routingDecisionId);
+    if (!failed || !d) return false;
+    const blocked = this.failoverBlocked(m, d);
+    if (blocked) {
+      this.log(`task ${missionId}: no failover: ${blocked}`);
+      return false;
+    }
+    const from = d.resolution.target;
+    const requirement = { ...d.requirement, minTier: from.tier, maxTier: from.tier };
+    const snapshot = this.deps.routing!.snapshot();
+    const res = resolveRoute(requirement, snapshot, {
+      caps: m.policy.caps,
+      preferences: m.policy.preferences,
+      exclusions: { ...m.policy.exclusions, sources: [...(m.policy.exclusions?.sources ?? []), from.source] },
+    });
+    if (res.outcome !== 'resolved' || !res.target) {
+      this.log(`task ${missionId}: no failover: ${res.note ?? `nothing else at ${from.tier}`}`);
+      return false;
+    }
+    const t = res.target;
+    const recommendation: RouteRecommendation = {
+      assessmentId: d.assessmentId ?? d.shadow?.assessmentId ?? '',
+      policyVersion: 'failover',
+      requirement,
+      reasons: [
+        {
+          ruleId: 'failover.infra',
+          text: `${from.model} lost its server mid-attempt; failing over to another ${from.tier} model.`,
+          inputs: { from: from.source, tier: from.tier },
+        },
+      ],
+      verdict: 'route',
+      resolution: { target: t, candidates: res.candidates, catalogVersion: res.catalogVersion, ...(res.note ? { note: res.note } : {}) },
+      at: this.now(),
+    };
+    const route: TaskRoute = {
+      harness: t.harness,
+      ...(isEndpointSource(t.source) ? { source: t.source } : {}),
+      model: t.model,
+      ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}),
+      permissionMode: decisionMode(d),
+    };
+    m = await this.retainTree(m, failed);
+    this.log(`task ${missionId}: failing over from ${from.model} to ${t.model} (${t.tier})`);
+    try {
+      await this.launch(missionId, { mode: 'fresh', route, routing: { recommendation, offered: false, accepted: true, failover: true } });
+    } catch (e) {
+      this.log(`task ${missionId}: failover could not start: ${errorText(e)}`);
+      return false;
+    }
+    this.notify(this.need(missionId), 'failed over', `${capitalise(LOCAL_SERVER_LOST_TEXT)}; carrying on with ${t.model}.`, 'show-session');
+    return true;
+  }
+
+  /** What an attempt record says about a run on a local endpoint (§19.4). */
+  private localMetrics(m: Mission, a: ExecutionAttempt, activeMs: number | undefined, queueMs: number | undefined): LocalRunMetrics | undefined {
+    const d = m.decisions.find((x) => x.id === a.routingDecisionId);
+    const t = d?.resolution.target;
+    if (!d || !t || !isEndpointSource(t.source)) return undefined;
+    const out: LocalRunMetrics = { source: t.source, ...this.deps.local?.facts?.(t.source, t.model) };
+    if (queueMs !== undefined) out.queueMs = queueMs;
+    const tokens = a.usage?.outputTokens;
+    if (tokens && activeMs && activeMs > 0) {
+      // Through a harness nothing reports decode speed; this is output over active time, and says so.
+      out.outTokPerSec = Math.round((tokens / (activeMs / 1000)) * 10) / 10;
+      out.tokPerSecFrom = 'attempt';
+    }
+    const avoided = this.hostedEquivalent(d, a);
+    if (avoided) {
+      out.apiEquivalentUsd = avoided.usd;
+      out.apiEquivalentModel = avoided.model;
+    }
+    return out;
+  }
+
+  /**
+   * **An estimate:** what the hosted route the router would otherwise have
+   * picked — the same requirement with every endpoint excluded — would have
+   * cost for this attempt's tokens, at that model's price table. Undefined
+   * when there is no such route or it has no price.
+   */
+  private hostedEquivalent(d: RoutingDecision, a: ExecutionAttempt): { usd: number; model: string } | undefined {
+    const u = a.usage;
+    if (!this.deps.routing || !u || (u.inputTokens === undefined && u.outputTokens === undefined)) return undefined;
+    try {
+      const snap = this.deps.routing.snapshot();
+      const endpoints = [...new Set(snap.catalog.entries.map((e) => e.descriptor.source).filter((s) => isEndpointSource(s)))];
+      const res = resolveRoute(d.requirement, snap, { exclusions: { sources: endpoints, disableLocal: true } });
+      const t = res.target;
+      if (!t) return undefined;
+      const entry = snap.catalog.entries.find((e) => e.descriptor.source === t.source && e.aliases.includes(t.model));
+      const p = entry?.descriptor.price;
+      if (!p) return undefined;
+      const cached = u.cacheReadTokens ?? 0;
+      const fresh = Math.max(0, (u.inputTokens ?? 0) - (p.cacheReadPerMTok !== undefined ? cached : 0));
+      const usd = (fresh * p.inPerMTok + (u.outputTokens ?? 0) * p.outPerMTok + (p.cacheReadPerMTok !== undefined ? cached * p.cacheReadPerMTok : 0)) / 1e6;
+      return { usd: Math.round(usd * 1e6) / 1e6, model: entry.descriptor.label };
+    } catch {
+      return undefined;
     }
   }
 
@@ -1227,8 +1432,13 @@ export class TaskRunner implements Disposable {
     // release the tree first: there is nothing to run in it.
     if (failure) {
       m = await this.releaseTree(missionId, a.id);
-      this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', ...failure }, `its last turn ended in an error (${failure.signature})`));
-      this.notify(this.need(missionId), 'failed', `Its last turn ended in an error (${failure.signature}). Retry it fresh, or cancel it.`);
+      const lost = await this.localServerLost(m, a, failure.category);
+      m = this.need(missionId);
+      const signature = lost ? LOCAL_SERVER_LOST : failure.signature;
+      const why = lost ? LOCAL_SERVER_LOST_TEXT : `its last turn ended in an error (${failure.signature})`;
+      this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', category: failure.category, signature }, why));
+      if (lost && (await this.failover(missionId, a.id))) return;
+      this.notify(this.need(missionId), 'failed', `${capitalise(why)}. Retry it fresh, or cancel it.`);
       return;
     }
     if (stats.filesChanged === 0) {
@@ -1364,6 +1574,8 @@ export class TaskRunner implements Disposable {
     }
     const a = m.attempts.find((x) => x.id === attemptId)!;
     const record = attemptRecord(m, a, now);
+    const local = record && this.localMetrics(m, a, record.activeMs, record.queueMs);
+    if (record && local) record.local = local;
     if (record) {
       try {
         this.deps.telemetry?.append(record);
@@ -1550,8 +1762,13 @@ function missionSlug(m: Mission): string {
   return `${head}-${suffix}`;
 }
 
-function routePins(route: TaskRoute): { harness: HarnessId; model?: string; effort?: EffortLevel } {
-  return { harness: route.harness, ...(route.model?.trim() ? { model: route.model.trim() } : {}), ...(route.effort?.trim() ? { effort: awEffort(route.effort) } : {}) };
+function routePins(route: TaskRoute): { harness: HarnessId; source?: ModelSourceId; model?: string; effort?: EffortLevel } {
+  return {
+    harness: route.harness,
+    ...(route.source ? { source: route.source } : {}),
+    ...(route.model?.trim() ? { model: route.model.trim() } : {}),
+    ...(route.effort?.trim() ? { effort: awEffort(route.effort) } : {}),
+  };
 }
 
 /** The route the last attempt ran on, or the task's pins. */
@@ -1559,13 +1776,19 @@ function routeOf(m: Mission, a: ExecutionAttempt | undefined): TaskRoute {
   const d = a ? m.decisions.find((x) => x.id === a.routingDecisionId) : undefined;
   if (d && a) return routeFromDecision(d, a);
   const pins = m.tasks[0].overrides?.pins;
-  return { harness: pins?.harness ?? 'claude-code', model: pins?.model };
+  return { harness: pins?.harness ?? 'claude-code', model: pins?.model, ...(pins?.source ? { source: pins.source } : {}) };
 }
 
 function routeFromDecision(d: RoutingDecision | undefined, a: ExecutionAttempt): TaskRoute {
   if (!d) return { harness: a.assignment.harness };
   const t = d.resolution.target;
-  return { harness: t.harness, model: t.model, effort: t.effortNative === 'none' ? undefined : t.effortNative, permissionMode: decisionMode(d) };
+  return {
+    harness: t.harness,
+    ...(isEndpointSource(t.source) ? { source: t.source } : {}),
+    model: t.model,
+    effort: t.effortNative === 'none' ? undefined : t.effortNative,
+    permissionMode: decisionMode(d),
+  };
 }
 
 /** The permission mode a decision launched with: on its `manual` or `assisted.*` reason. */
@@ -1579,6 +1802,8 @@ interface DecisionRouting {
   recommendation?: RouteRecommendation;
   offered: boolean;
   accepted: boolean;
+  /** The router picked it itself, failing over after an `infra` loss (#51): no person was asked. */
+  failover?: boolean;
 }
 
 /** The newest assessment of the mission's task. */

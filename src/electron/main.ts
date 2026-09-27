@@ -200,13 +200,27 @@ void app.whenReady().then(() => {
         sources: [
           sourceStatus('anthropic', wrangler.usage.usage, Date.now()),
           sourceStatus('openai', wrangler.codexUsage.usage, Date.now()),
+          ...Object.values(wrangler.localEndpoints.statuses()),
         ],
+        // Local endpoints (#51): the registry, and what each model has done (§19.4).
+        local: {
+          endpoints: wrangler.localEndpoints.view(wrangler.models.catalog),
+          summaries: wrangler.localMetrics.summaries(),
+          secretsAvailable: host.secrets.available,
+        },
       }),
       onDidChange: (listener) => {
-        const subs = [wrangler.models.onDidChange(listener), wrangler.usage.onDidChange(listener), wrangler.codexUsage.onDidChange(listener)];
+        const subs = [
+          wrangler.models.onDidChange(listener),
+          wrangler.usage.onDidChange(listener),
+          wrangler.codexUsage.onDidChange(listener),
+          wrangler.localEndpoints.onDidChange(listener),
+          wrangler.localMetrics.onDidChange(listener),
+        ];
         return { dispose: () => subs.forEach((s) => s.dispose()) };
       },
       setPolicy: (change) => wrangler.models.setPolicy(change),
+      localEndpoint: (change) => wrangler.localEndpoints.apply(change),
     },
   });
 

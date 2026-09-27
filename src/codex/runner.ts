@@ -50,6 +50,49 @@ export function codexPolicyParams(policy: LaunchPolicy | undefined): Record<stri
   };
 }
 
+/**
+ * The `thread/start` / `thread/resume` params for a thread on a local
+ * endpoint (#51, plan §19.6 slice B): `modelProvider` plus the provider's
+ * table in the free-form `config`, on the Responses wire (Codex 0.155 rejects
+ * `chat`). The context window goes in as `model_context_window`, so Codex
+ * does not fall back to a hosted default. `key` is read at launch and sent
+ * only to the app-server, never recorded.
+ */
+export function codexProviderParams(
+  policy: LaunchPolicy | undefined,
+  key?: string,
+): { modelProvider?: string; config: Record<string, unknown> } {
+  const p = parseLaunchPolicy(policy)?.codex?.modelProvider;
+  if (!p) return { config: {} };
+  return {
+    modelProvider: p.id,
+    config: {
+      model_providers: {
+        [p.id]: {
+          name: p.name,
+          base_url: p.baseUrl,
+          wire_api: 'responses',
+          ...(key ? { experimental_bearer_token: key } : {}),
+        },
+      },
+      ...(p.contextWindow ? { model_context_window: p.contextWindow } : {}),
+      ...(p.maxOutputTokens ? { model_max_output_tokens: p.maxOutputTokens } : {}),
+      ...(p.modelCatalog ? { model_catalog_json: p.modelCatalog } : {}),
+    },
+  };
+}
+
+/** Everything a policy and an effort put on `thread/start` / `thread/resume`, with one merged `config`. */
+export function codexThreadParams(policy: LaunchPolicy | undefined, effort: string | undefined, key?: string): Record<string, unknown> {
+  const provider = codexProviderParams(policy, key);
+  const config = { ...provider.config, ...(effort ? { model_reasoning_effort: effort } : {}) };
+  return {
+    ...(Object.keys(config).length > 0 ? { config } : {}),
+    ...(provider.modelProvider ? { modelProvider: provider.modelProvider } : {}),
+    ...codexPolicyParams(policy),
+  };
+}
+
 /** How a thread was launched, beyond its model: kept by its runner, recorded, and re-sent on every rejoin. */
 export interface CodexLaunch {
   effort?: string;
@@ -667,6 +710,8 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
       log?: (message: string) => void;
       /** Reads a rollout file into blocks; injectable for tests. */
       readHistory?: (path: string) => Promise<{ blocks: ConvBlock[] }>;
+      /** A local endpoint's key by its `safeStorage` ref (#51). Read per request; never recorded. */
+      endpointKey?: (ref: string) => Promise<string | undefined>;
     } = {},
   ) {
     this.log = record.log ?? (() => undefined);
@@ -679,6 +724,18 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     if (server.onReconnect) this.subs.push(server.onReconnect((event) => void this.reconnected(event)));
   }
   onDidChange = (listener: () => void): Disposable => this.change.event(listener);
+
+  /** The key for a policy's local model provider, if it names one. */
+  private async providerKey(policy: LaunchPolicy | undefined): Promise<string | undefined> {
+    const ref = parseLaunchPolicy(policy)?.codex?.modelProvider?.keyRef;
+    if (!ref || !this.record.endpointKey) return undefined;
+    try {
+      return await this.record.endpointKey(ref);
+    } catch (error) {
+      this.log(`codex: could not read an endpoint key: ${String(error)}`);
+      return undefined;
+    }
+  }
   owns(id: string | undefined): boolean { return !!id && this.runners.has(id.toLowerCase()); }
   get(id: string | undefined): CodexRunner | undefined { return id ? this.runners.get(id.toLowerCase()) : undefined; }
   list(): CodexRunner[] { return [...this.runners.values()]; }
@@ -704,8 +761,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     const result = await this.server.request<any>('thread/start', {
       cwd,
       ...(model ? { model } : {}),
-      ...(effort ? { config: { model_reasoning_effort: effort } } : {}),
-      ...codexPolicyParams(launch.policy),
+      ...codexThreadParams(launch.policy, effort, await this.providerKey(launch.policy)),
     });
     const threadId = result?.thread?.id;
     if (typeof threadId !== 'string') throw new Error('Codex App Server returned no thread id');
@@ -734,8 +790,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     options = { ...options, policy: resumePolicy(this.record.registry, threadId, options.policy) };
     const result = await this.server.request<any>('thread/resume', {
       threadId,
-      ...(options.effort ? { config: { model_reasoning_effort: options.effort } } : {}),
-      ...codexPolicyParams(options.policy),
+      ...codexThreadParams(options.policy, options.effort, await this.providerKey(options.policy)),
     });
     const resumedId = result?.thread?.id ?? threadId;
     const runner = new CodexRunner(
@@ -845,7 +900,10 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     let result: any;
     try {
       // A new connection (or a new server) must not get a looser thread than the one it lost.
-      result = await this.server.request<any>('thread/resume', { threadId: runner.threadId, ...codexPolicyParams(runner.policy) });
+      result = await this.server.request<any>('thread/resume', {
+        threadId: runner.threadId,
+        ...codexThreadParams(runner.policy, undefined, await this.providerKey(runner.policy)),
+      });
     } catch (error) {
       const kind = classifyResumeError(error);
       if (kind === 'open-elsewhere') {
@@ -888,7 +946,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
   }
   /** A new thread with this one's history. A policy the original had comes with it. */
   async fork(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string, policy?: LaunchPolicy): Promise<CodexRunner> {
-    const result = await this.server.request<any>('thread/fork', { threadId, ...codexPolicyParams(policy) });
+    const result = await this.server.request<any>('thread/fork', { threadId, ...codexThreadParams(policy, undefined, await this.providerKey(policy)) });
     const forkedId = result?.thread?.id;
     if (typeof forkedId !== 'string') throw new Error('Codex App Server returned no forked thread id');
     const runner = new CodexRunner(

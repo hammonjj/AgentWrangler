@@ -56,7 +56,7 @@ export interface AttemptLaunch {
    * What runs it, from the routing decision. `harness` must be this harness;
    * `effortNative` is sent as is, and `none` means "send no effort".
    */
-  target: Pick<ExecutionTarget, 'harness' | 'model' | 'effortNative'>;
+  target: Pick<ExecutionTarget, 'harness' | 'model' | 'effortNative'> & Partial<Pick<ExecutionTarget, 'source'>>;
   /** Recorded as the session's registry `origin`. */
   origin: OrchestrationOrigin;
   /** Claude only; ignored by a harness whose `permissionModes` is empty. */
