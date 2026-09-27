@@ -21,7 +21,7 @@ import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostSettings } from '../host/hostServices';
 import { settingUpdate, type HostToPreferences, type PreferencesToHost } from '../shared/preferences';
-import { isSettingActionId, modelPolicyChange, type OrchestrationPrefsView, type SettingActionId } from '../shared/preferences';
+import { isSettingActionId, modelPolicyChange, routingPolicyUpdate, type OrchestrationPrefsView, type SettingActionId } from '../shared/preferences';
 import type { ModelPolicyChange } from '../shared/orchestration/catalog';
 import { SETTINGS } from '../shared/settings';
 import { documentUrl } from './bundleProtocol';
@@ -46,6 +46,8 @@ export interface PreferencesWindowOptions {
     view(): OrchestrationPrefsView;
     onDidChange(listener: () => void): Disposable;
     setPolicy(change: ModelPolicyChange): Promise<boolean>;
+    /** Write the global routing defaults (#40), already checked by `routingPolicyUpdate`. */
+    setRouting?(value: Record<string, unknown>): Promise<void>;
   };
 }
 
@@ -156,6 +158,27 @@ export class PreferencesWindow implements Disposable {
         if (!ok) this.opts.log(`preferences: refused model policy for ${change.key}`);
         this.pushOrchestration();
       });
+      return;
+    }
+    if (message.type === 'routingPolicy') {
+      // Checked again here with the same rules the window used: a shape, a
+      // tier or a pin-above-cap it let through does not get to write.
+      const orch = this.opts.orchestration;
+      if (!orch?.setRouting) {
+        this.opts.log('preferences: refused routing defaults (orchestration unavailable)');
+        return;
+      }
+      const update = routingPolicyUpdate(message, orch.view().catalog);
+      if (!update.ok) {
+        this.opts.log(`preferences: refused routing defaults: ${update.errors.join('; ')}`);
+        this.post({ type: 'routingResult', ok: false, errors: update.errors });
+        return;
+      }
+      void orch
+        .setRouting(update.value)
+        .then(() => this.post({ type: 'routingResult', ok: true, errors: [] }))
+        .catch((e) => this.post({ type: 'routingResult', ok: false, errors: [String(e)] }))
+        .finally(() => this.pushOrchestration());
       return;
     }
     if (message.type === 'close') {

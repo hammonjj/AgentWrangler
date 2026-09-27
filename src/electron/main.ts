@@ -28,6 +28,7 @@ import { DictationSetupError, defaultModelPath } from '../core/dictation';
 import { shouldPreventAppSuspension } from '../core/menuBar';
 import { agentCount, quitIntentSource, quitPolicy, type QuitSource } from '../core/session/quitPolicy';
 import { sourceStatus } from '../shared/orchestration/sourceHealth';
+import { parseRoutingSettings, ROUTING_KEY } from '../shared/orchestration/executionPolicy';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { registerBundleScheme, serveBundles } from './bundleProtocol';
 import { installContextMenuEverywhere } from './contextMenu';
@@ -195,18 +196,25 @@ void app.whenReady().then(() => {
     // Orchestration → tier map (#29): the catalog, and each source's health
     // from the same usage reads the dashboard cards use.
     orchestration: {
-      view: () => ({
-        catalog: wrangler.models.catalog,
-        sources: [
-          sourceStatus('anthropic', wrangler.usage.usage, Date.now()),
-          sourceStatus('openai', wrangler.codexUsage.usage, Date.now()),
-        ],
-      }),
+      view: () => {
+        const routing = parseRoutingSettings(host.settingsStore.get<unknown>(ROUTING_KEY, undefined));
+        return {
+          catalog: wrangler.models.catalog,
+          sources: [
+            sourceStatus('anthropic', wrangler.usage.usage, Date.now()),
+            sourceStatus('openai', wrangler.codexUsage.usage, Date.now()),
+          ],
+          // The global scope of pins and caps (#40), with anything in settings.json that was ignored.
+          routing: { mode: routing.mode, policy: routing.policy, ignored: routing.errors.map((e) => `${e.path}: ${e.message}`) },
+        };
+      },
       onDidChange: (listener) => {
         const subs = [wrangler.models.onDidChange(listener), wrangler.usage.onDidChange(listener), wrangler.codexUsage.onDidChange(listener)];
         return { dispose: () => subs.forEach((s) => s.dispose()) };
       },
       setPolicy: (change) => wrangler.models.setPolicy(change),
+      // Frozen into each mission recorded after this; a started mission keeps what it had (§10.2).
+      setRouting: (value) => host.settingsStore.update(ROUTING_KEY, value),
     },
   });
 

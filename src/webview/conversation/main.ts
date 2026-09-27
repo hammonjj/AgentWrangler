@@ -22,6 +22,7 @@ import {
   attemptLine,
   CRITERION_GLYPH,
   diffStatText,
+  policyChangeLine,
   reviewHeadText,
   routeChipText,
   routeChipTitle,
@@ -1230,6 +1231,7 @@ let task: TaskView | undefined;
 let attemptsOpen = false;
 let assessmentOpen = false;
 let routingOpen = false;
+let policyOpen = false;
 
 // ---- task proposal cards (#81) ----
 
@@ -1513,6 +1515,47 @@ function assessmentPanel(a: NonNullable<TaskView['assessment']>): HTMLElement {
 }
 
 /**
+ * The policy panel (#40): each value in force with the scope that set it, the
+ * dimensions escalation will not move, and every change since the mission
+ * started. The same wrapping list as the assessment, for the same 300px.
+ */
+function policyPanel(p: NonNullable<TaskView['policy']>): HTMLElement {
+  const box = document.createElement('div');
+  box.className = 'tsassess tspolicy';
+  for (const l of p.lines) {
+    const row = document.createElement('div');
+    row.className = 'tsassessrow';
+    const label = document.createElement('span');
+    label.className = 'tsassesslabel';
+    label.textContent = l.label;
+    const value = document.createElement('span');
+    value.className = 'tsassessvalue';
+    value.textContent = l.value;
+    const from = document.createElement('span');
+    from.className = 'tsassessmeta';
+    from.textContent = l.from;
+    row.append(label, value, from);
+    box.append(row);
+  }
+  const foot: string[] = [];
+  if (p.frozen.length > 0) foot.push(`Pinned, so escalation will not change: ${p.frozen.join(', ')}`);
+  if (p.lines.length === 0) foot.push('Nothing is pinned or capped.');
+  for (const text of foot) {
+    const f = document.createElement('div');
+    f.className = 'tsassessfoot';
+    f.textContent = text;
+    box.append(f);
+  }
+  for (const c of p.changes) {
+    const row = document.createElement('div');
+    row.className = c.pending ? 'tsassessfoot tspolicychange pending' : 'tsassessfoot tspolicychange';
+    row.textContent = `${new Date(c.at).toLocaleString()} — ${policyChangeLine(c)}`;
+    box.append(row);
+  }
+  return box;
+}
+
+/**
  * Draw the strip.
  *
  * Built as DOM rather than as HTML for the reason the rest of this pane is:
@@ -1565,6 +1608,15 @@ function renderTask(): void {
     n.textContent = `attempt ${t.attempt.n}/${t.attempt.of}`;
     head.append(n);
   }
+  // Pins and caps (#40): the limits the next attempt runs under, visible
+  // without opening anything, so "capped at standard" is never a surprise.
+  if (t.policy?.chip) {
+    const p = document.createElement('span');
+    p.className = t.policy.conflicts.length > 0 ? 'tschip policy loud' : 'tschip policy';
+    p.textContent = t.policy.chip;
+    p.title = t.policy.lines.map((l) => `${l.label}: ${l.value} (${l.from})`).join('\n');
+    head.append(p);
+  }
   // The verdict, last on the line: what the checks made of the result (#35).
   if (t.verification) {
     const v = document.createElement('span');
@@ -1588,6 +1640,27 @@ function renderTask(): void {
     meta.textContent = bits.join(' · ');
     if (t.worktreePath) meta.title = t.worktreePath;
     taskStrip.append(meta);
+  }
+
+  // A policy change mid-mission is shown in the header (§10.2): the latest,
+  // with the attempt it applies from; the panel lists them all. A conflict
+  // left standing stops the next attempt, so it is said outright.
+  if (t.policy) {
+    for (const c of t.policy.conflicts) {
+      const line = document.createElement('div');
+      line.className = 'tsmeta policy-conflict';
+      line.textContent = c;
+      taskStrip.append(line);
+    }
+    const last = t.policy.changes.at(-1);
+    if (last) {
+      const line = document.createElement('div');
+      line.className = last.pending ? 'tsmeta policy-changed pending' : 'tsmeta policy-changed';
+      const more = t.policy.changes.length > 1 ? ` (${t.policy.changes.length} changes)` : '';
+      line.textContent = `${policyChangeLine(last)}${more}`;
+      line.title = new Date(last.at).toLocaleString();
+      taskStrip.append(line);
+    }
   }
 
   // Why the verdict is what it is: one line per stage, plus the reason a
@@ -1679,8 +1752,21 @@ function renderTask(): void {
     });
     actions.append(toggle);
   }
+  if (t.policy) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tsbtn link';
+    toggle.setAttribute('aria-expanded', String(policyOpen));
+    toggle.textContent = policyOpen ? 'Hide policy' : 'Pins & caps';
+    toggle.addEventListener('click', () => {
+      policyOpen = !policyOpen;
+      renderTask();
+    });
+    actions.append(toggle);
+  }
   if (actions.childElementCount > 0) taskStrip.append(actions);
 
+  if (policyOpen && t.policy) taskStrip.append(policyPanel(t.policy));
   if (routingOpen && t.routing) taskStrip.append(routingPanel(t.routing));
   if (assessmentOpen && t.assessment) taskStrip.append(assessmentPanel(t.assessment));
 
@@ -2427,7 +2513,7 @@ vscodeApi.onMessage((body) => {
       // A different conversation is a different task (usually none at all), so
       // the attempts list and the assessment start closed rather than
       // inheriting the last one's.
-      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = routingOpen = false;
+      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = routingOpen = policyOpen = false;
       task = m.task;
       renderTask();
       proposals = [];
@@ -2469,7 +2555,7 @@ vscodeApi.onMessage((body) => {
       setBanner(m.caps);
       break;
     case 'task':
-      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = routingOpen = false;
+      if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = routingOpen = policyOpen = false;
       task = m.task;
       renderTask();
       break;

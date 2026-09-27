@@ -136,12 +136,46 @@ export interface ExecutionPolicy {
   maxTasks?: number;
 }
 
-/** A recorded change to a running mission's policy (§10.2). */
+/**
+ * Where a control was set (§10.2), widest first. The more specific scope wins,
+ * except that caps and exclusions only ever tighten
+ * (`src/shared/orchestration/executionPolicy.ts`).
+ */
+export type PolicyScope = 'global' | 'repo' | 'mission' | 'task';
+
+/**
+ * The layers a mission's policy is made of (#40). `global` and `repo` are
+ * copied in when the mission is recorded and never change after: a mission's
+ * policy is frozen at its start. `mission` is what the user set for this
+ * mission, and is the one layer here a person edits later; each edit is a
+ * `PolicyChange`.
+ */
+export interface PolicyLayers {
+  global?: ExecutionPolicy;
+  repo?: ExecutionPolicy;
+  mission?: ExecutionPolicy;
+}
+
+/**
+ * A recorded change to a started mission's policy, or to one of its tasks'
+ * overrides (§10.2, #40). It applies to attempts not yet started: an attempt
+ * already running keeps the policy it started with, and is not restarted.
+ */
 export interface PolicyChange {
+  id: string;
   at: Millis;
   by: 'user';
-  /** The fields that changed, as they became. */
+  scope: 'mission' | 'task';
+  /** The task whose overrides changed, for a `task` change. */
+  taskId?: string;
+  /** The dotted fields that changed, e.g. `caps.maxTier`, `pins.effort`. */
+  fields: string[];
+  /** The scope's layer before the change. */
+  before: ExecutionPolicy;
+  /** The scope's layer after it. */
   changed: ExecutionPolicy;
+  /** The first attempt number the change applies to. */
+  appliesFromAttempt: number;
   reason?: string;
 }
 
@@ -163,8 +197,18 @@ export interface Mission {
   base: { ref: string; commit: string };
   /** The mission branch and its integration worktree, or none for a single-task mission. */
   integration: { branch: string; worktreeId: string } | 'none';
-  /** The effective policy, frozen when the mission starts. */
+  /**
+   * The effective mission policy: `policyLayers` resolved (global, then repo,
+   * then mission). Frozen when the mission starts; recomputed only when the
+   * user edits the mission layer, which is then a `PolicyChange`.
+   */
   policy: ExecutionPolicy;
+  /**
+   * What `policy` was resolved from (#40). Absent on missions recorded before
+   * it, whose `policy` is then read as their mission layer.
+   */
+  policyLayers?: PolicyLayers;
+  /** Every change after the mission was recorded, oldest first (#40). Shown in the mission header. */
   policyChanges: PolicyChange[];
   state: MissionState;
   stateReason?: string;
@@ -233,11 +277,12 @@ export const TASK_KINDS: readonly TaskKind[] = [
   'plan',
 ];
 
-/** The user's per-task overrides. The pin is the only model name a task may carry. */
+/** The user's per-task overrides (the `task` scope, §10.2). The pin is the only model name a task may carry. */
 export interface TaskOverrides {
   pins?: RoutePins;
   caps?: RouteCaps;
   preferences?: RoutePreferences;
+  exclusions?: RouteExclusions;
 }
 
 export interface TaskResult {
@@ -431,6 +476,12 @@ export interface RoutingDecision {
   /** What the router recommended, beside what ran (§27.3). In `assisted` it is the proposal the user saw. */
   shadow?: RouteRecommendation;
   agreement?: RouteAgreement;
+  /**
+   * How many of the mission's `policyChanges` were in force when this was
+   * decided (#40): the attempt runs under that revision of the policy, and a
+   * later change does not reach it.
+   */
+  policyRevision?: number;
   decidedBy: 'router' | 'user';
   decidedAt: Millis;
 }

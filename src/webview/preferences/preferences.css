@@ -424,6 +424,59 @@
   font-weight: 600;
 }
 
+/* Routing defaults (#40): label, control and help on one row that wraps, so a
+   520px window puts the help under the control rather than squeezing it. */
+#prefsApp .pf-policy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#prefsApp .pf-policy-group {
+  margin-top: 8px;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+#prefsApp .pf-policy-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+
+#prefsApp .pf-policy-label {
+  flex: 0 0 13em;
+}
+
+#prefsApp .pf-policy-row .pf-select {
+  min-width: 18ch;
+}
+
+#prefsApp .pf-policy-help {
+  flex: 1 1 16em;
+  margin: 0;
+  font-size: 0.9em;
+}
+
+#prefsApp .pf-policy-checks {
+  display: inline-flex;
+  gap: 12px;
+}
+
+#prefsApp .pf-policy-error {
+  margin: 6px 0 0;
+  color: var(--vscode-errorForeground, #ed4245);
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .pf-policy-status {
+  margin: 6px 0 0;
+}
+
 #prefsApp .pf-sources {
   display: flex;
   flex-direction: column;
