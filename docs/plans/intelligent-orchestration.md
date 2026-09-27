@@ -3002,6 +3002,59 @@ Issue numbers are in §30.
   cost with basis, tokens, elapsed and active time). Mission metrics are computed from
   attempts and never stored.
 
+**As built (#44, 2026-09-27): the read-only planner.**
+- **Deviation from §11.1: a completion, not a session.** Neither harness can return a
+  structured final output yet (`structuredFinalOutput: false` in both adapters), so the planner
+  is a **structured completion with a workspace** — the review verifier's mechanism (#36):
+  `plan` permission mode, `Read`/`Grep`/`Glob` only, every read confined to the checkout by
+  `canUseTool`, `persistSession: false`, no settings. It reads the repository as an agent does
+  and cannot change it, but it has no row or transcript to read afterwards, and the repair
+  round is a second call carrying the first answer and its problems rather than a follow-up
+  turn. Each run is a `PlanningRun` on the mission (`Mission.planning`: rounds with their
+  problems, model, usage and time; decomposition, risks, warnings, the replan diff, edits in
+  review). `plannerAttemptId` stays unused. When harnesses gain structured output, the run can
+  become a real attempt without changing the validator or the review.
+- **Routing**: fixed, not routed — `opus` at `high` (§9.3's `plan` → `expert`), up to 40 read
+  turns and 10 minutes, hosted only (a local completion has no tools). Routed like other
+  completions once those are.
+- **Output** (`policy/planner.ts`, `PLAN_SCHEMA`): §11.1's fields, with `assessmentHints` as
+  kind, complexity and risk. Strings and lists are size-bounded; `additionalProperties: false`
+  everywhere, so nothing can carry a command, model or permission.
+- **Validation** (`checkPlan`, pure): hard problems — the schema, the cap (the mission's task
+  cap; for a replan, minus the tasks that stay), unique keys, no self/dangling/duplicate edge,
+  no cycle (shown as its path), at least one criterion, named strategies that exist in repo
+  policy (`test` or `command:test`), paths inside the repository, `whySeparate` on every task
+  of a split, `decomposition` agreeing with the count. §11.3's rules are **advice**: overlapping
+  scopes with no order between them, a strict chain over the same files, a trivial task, a docs
+  follow-up. Advice earns the repair round; if the repaired plan still breaks it, the plan is
+  kept and review shows the warnings — the user decides. Invalid JSON is the completion's own
+  retry (the same one repair). A second failure is `planning-failed` with the reason.
+- **Verification is not weakened.** The planner's named strategies are checked to exist, but a
+  task's stages are built from repo policy by kind, as for a hand-written task (§14.2's
+  "planner's named suggestions" are validated, not applied), so a plan cannot drop a check.
+- **Lifecycle.** `planMission` records the mission with the objective as a stand-in task and
+  goes `draft → planning`; the call runs outside the mission queue, so Cancel aborts it at
+  once. A proposal replaces the tasks (`createdBy: 'planner'`, keys `t1`…, the planner's kind
+  and subsystems) and goes `planning → plan-review`; nothing runs before Approve, as for #43.
+  From `planning-failed`: *Plan again…* (with an optional note) or *Write it myself*
+  (`plan-review` from the stand-in). A planner call cut off by a restart is asked again.
+- **Replanning** (§11.4): *Replan…* on a running planned mission with no live attempt. The
+  planner reads the **mission worktree** and is told the done tasks (kept, dependable by key),
+  the started-and-unfinished ones with their evidence (outcome, failed checks), and the
+  not-started ones. The result is a diff applied only once the new plan passes: done tasks are
+  untouched; unfinished ones have their work set aside (committed, kept on
+  `aw/<mission>/<key>`, the mission branch reset to where they started) and go `skipped`;
+  not-started ones are replaced; new tasks get fresh keys (never a replaced task's). The
+  approval is cleared and the plan goes through review again. Escalation-proposed replans
+  (`split-task`, §15) wait for #41.
+- **Telemetry**: `plan` per run (kind, outcome, model, rounds, tasks, decomposition, problem
+  and warning counts, cost, tokens, duration) and `plan-review` at approval (proposed vs
+  approved tasks, edits in review, time in review). Counts only, never text.
+- **Evaluation**: `test/fixtures/planning-corpus/` holds synthetic objectives over small
+  made-up repositories, six "should not split" and one where a split may pay.
+  `planningCorpus.live.test.ts` (`AW_LIVE_PLANNER=1`) writes each repository to a temp dir and
+  runs the real planner.
+
 ### P9: Scheduling, integration and contention
 
 - **Objective**: independent tasks run at the same time, safely, and their results meet on a

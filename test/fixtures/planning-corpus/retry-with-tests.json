@@ -1,0 +1,15 @@
+{
+  "id": "retry-with-tests",
+  "case": "a feature and the tests for it",
+  "objective": "Give the HTTP client retries with exponential backoff (3 tries, starting at 200 ms, only for 5xx and network errors), with unit tests that use fake timers.",
+  "repo": {
+    "files": {
+      "package.json": "{\"name\":\"client\",\"scripts\":{\"test\":\"vitest run\",\"typecheck\":\"tsc --noEmit\"}}\n",
+      "src/http/client.ts": "export async function get(url: string): Promise<Response> {\n  return fetch(url);\n}\n",
+      "src/http/errors.ts": "export class HttpError extends Error { constructor(public status: number) { super(`HTTP ${status}`); } }\n",
+      "test/http/client.test.ts": "// tests for the HTTP client\n"
+    },
+    "verification": ["test", "typecheck"]
+  },
+  "expect": { "split": "never" }
+}

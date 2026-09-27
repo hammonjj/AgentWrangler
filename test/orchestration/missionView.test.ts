@@ -252,6 +252,66 @@ describe('the Missions view HTML', () => {
   });
 });
 
+describe('the planner in the Missions view (#44)', () => {
+  const run = (over: Partial<NonNullable<Mission['planning']>[number]> = {}): NonNullable<Mission['planning']>[number] => ({
+    id: 'run1',
+    kind: 'plan',
+    state: 'proposed',
+    startedAt: T0,
+    endedAt: T0 + 30_000,
+    model: 'opus',
+    effort: 'high',
+    rounds: [{ n: 1, ok: false, problems: ['x'], model: 'opus', durationMs: 1, costUsd: 0.2 }, { n: 2, ok: true, problems: [], model: 'opus', durationMs: 1, costUsd: 0.1 }],
+    proposed: 1,
+    decomposition: 'single',
+    risks: ['Synthetic risk.'],
+    warnings: ['t1 and t2 may touch the same files'],
+    editsInReview: 0,
+    ...over,
+  });
+  const snapOf = (m: Mission, canPlan = true): MissionsSnapshot => ({
+    missions: [missionViewOf(m, { actions: () => [], canPlan })],
+    tiers: [],
+    harnesses: [],
+  });
+
+  it('a proposal says who planned it, how, what it cost, and its risks and warnings; Plan again is offered', () => {
+    const m = mission({ state: 'plan-review', planned: true, tasks: [task('t1')], planning: [run()] });
+    const v = missionViewOf(m, { actions: () => [], canPlan: true });
+    expect(v.planner).toMatchObject({ kind: 'plan', state: 'proposed', text: 'Planned by opus · 1 task · 2 rounds · $0.30', risks: ['Synthetic risk.'] });
+    expect(v).toMatchObject({ canPlanAgain: true, canWritePlan: false, canReplan: false });
+    const html = missionsHtml(snapOf(m), newMissionsUiState(), T0);
+    expect(html).toContain('Planned by opus · 1 task · 2 rounds · $0.30');
+    expect(html).toContain('Synthetic risk.');
+    expect(html).toContain('may touch the same files');
+    expect(html).toContain('data-mission-op="plan-again"');
+    expect(html).not.toMatch(/style=/);
+    // Without a planner running here, there is nothing to ask again.
+    expect(missionViewOf(m, { actions: () => [] }).canPlanAgain).toBe(false);
+  });
+
+  it('while planning, the stand-in task is not drawn; a failure offers Plan again and Write it myself', () => {
+    const planning = mission({ state: 'planning', planned: true, tasks: [task('t1')], planning: [run({ state: 'running', rounds: [], endedAt: undefined })] });
+    let html = missionsHtml(snapOf(planning), newMissionsUiState(), T0);
+    expect(html).toContain('Planning with opus…');
+    expect(html).toContain('The planner is reading the repository');
+    expect(html).not.toContain('class="mtasks"');
+    const failed = { ...planning, state: 'planning-failed' as const, planning: [run({ state: 'failed', reason: 'the plan was still not valid after one repair' })] };
+    html = missionsHtml(snapOf(failed), newMissionsUiState(), T0);
+    expect(html).toContain('Planning failed');
+    expect(html).toContain('data-mission-op="plan-again"');
+    expect(html).toContain('data-mission-op="write-plan"');
+  });
+
+  it('Replan is offered for a started mission with nothing running, and a replan shows its diff', () => {
+    const m = mission({ state: 'running', planned: true, planApprovedAt: T0, tasks: [task('t1', { state: 'done' }), task('t2', { state: 'needs-human' })] });
+    expect(missionViewOf(m, { actions: () => [], canPlan: true }).canReplan).toBe(true);
+    expect(missionsHtml(snapOf(m), newMissionsUiState(), T0)).toContain('data-mission-op="replan"');
+    const replanned = { ...m, state: 'plan-review' as const, planning: [run({ kind: 'replan', diff: { kept: ['t1'], setAside: ['t2'], removed: [], added: ['t3'] } })] };
+    expect(missionViewOf(replanned, { actions: () => [], canPlan: true }).planner).toMatchObject({ text: expect.stringMatching(/^Replanned by opus · 1 new task/), diff: 'kept t1 · set aside t2 · added t3' });
+  });
+});
+
 describe('the approval gate (§7.2)', () => {
   it('a planned mission never goes from draft to running, however few tasks it has', () => {
     const m = mission({ planned: true, tasks: [task('t1')] });

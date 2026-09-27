@@ -20,6 +20,7 @@ import {
   taskRowFigures,
   taskRowState,
   type MissionOp,
+  type MissionPlannerView,
   type MissionTaskView,
   type MissionView,
   type MissionsSnapshot,
@@ -61,9 +62,10 @@ function isOpen(v: MissionView, ui: MissionsUiState): boolean {
 
 /** The whole view. Missions that need the user first, then running, then the rest by recency. */
 export function missionsHtml(snap: MissionsSnapshot, ui: MissionsUiState, nowMs: number): string {
-  const rank = (v: MissionView) => (v.state === 'plan-review' || v.state === 'review' || v.metrics.waiting > 0 ? 0 : TERMINAL.has(v.state) ? 2 : 1);
+  const rank = (v: MissionView) =>
+    v.state === 'plan-review' || v.state === 'review' || v.state === 'planning-failed' || v.metrics.waiting > 0 ? 0 : TERMINAL.has(v.state) ? 2 : 1;
   const missions = [...snap.missions].sort((a, b) => rank(a) - rank(b) || b.updatedAt - a.updatedAt);
-  const head = `<div class="mbar"><button class="mnew" data-mission-new title="Write a mission as a plan of tasks. Nothing runs until you approve it.">+ New mission</button><span class="mhint">A plan of tasks that run one after another on one branch, after you approve it.</span></div>`;
+  const head = `<div class="mbar"><button class="mnew" data-mission-new title="A mission is a plan of tasks, written by you or proposed by the read-only planner. Nothing runs until you approve it.">+ New mission</button><span class="mhint">A plan of tasks that run one after another on one branch, after you approve it.</span></div>`;
   if (missions.length === 0) {
     return `<div class="missions">${head}<div class="mempty">No missions yet. <span class="hint">“+ New mission” writes one for the launcher’s folder; the Tasks button runs a single task.</span></div></div>`;
   }
@@ -82,13 +84,31 @@ function missionHtml(v: MissionView, snap: MissionsSnapshot, ui: MissionsUiState
     body += `<div class="mmeta" title="${esc(v.objective)}">${esc(where)}</div>`;
     if (v.stateReason) body += `<div class="mreason">${esc(v.stateReason)}</div>`;
     if (error) body += `<div class="merror" role="alert">${esc(error)}<button class="mdismiss" data-mission-dismiss title="Dismiss">×</button></div>`;
+    if (v.planner) body += plannerHtml(v.planner);
     const reviewing = v.state === 'plan-review';
     if (reviewing) body += planIssuesHtml(v);
-    body += `<ol class="mtasks">${v.tasks.map((t, i) => (reviewing ? planTaskHtml(v, t, i, snap, ui) : taskRowHtml(t, nowMs))).join('')}</ol>`;
+    // Before a fresh plan arrives the mission holds only its objective as a stand-in task: not worth a row.
+    const awaitingPlan = (v.state === 'planning' || v.state === 'planning-failed') && v.planner?.kind === 'plan';
+    if (awaitingPlan) {
+      if (v.state === 'planning') body += `<div class="mplanning">The planner is reading the repository. Its plan comes here for review, and nothing runs until you approve it.</div>`;
+    } else {
+      body += `<ol class="mtasks">${v.tasks.map((t, i) => (reviewing ? planTaskHtml(v, t, i, snap, ui) : taskRowHtml(t, nowMs))).join('')}</ol>`;
+    }
     body += footerHtml(v);
   }
   return `<section class="mission m-${esc(v.state)}${open ? '' : ' shut'}" data-mission="${esc(v.id)}">
 <div class="mhdr" data-mission-toggle><span class="twist">${open ? '▾' : '▸'}</span><span class="mtitle" title="${esc(v.objective)}">${esc(v.title)}</span><span class="mchips">${chips}</span></div>${body}</section>`;
+}
+
+/** What the planner did (#44): a line, what a replan changed, and its risks and warnings. */
+function plannerHtml(p: MissionPlannerView): string {
+  const list = (cls: string, label: string, items: string[]) =>
+    items.length > 0 ? `<ul class="${cls}">${items.map((x) => `<li><span class="ilevel">${esc(label)}</span> ${esc(x)}</li>`).join('')}</ul>` : '';
+  return `<div class="mplanner ps-${esc(p.state)}"><div class="pl-line" title="${esc(p.title)}">${esc(p.text)}${p.diff ? `<span class="pl-diff">${esc(p.diff)}</span>` : ''}</div>${list(
+    'pl-warn',
+    'Worth a look',
+    p.warnings,
+  )}${list('pl-risk', 'Risk', p.risks)}</div>`;
 }
 
 function planIssuesHtml(v: MissionView): string {
@@ -221,6 +241,17 @@ function footerHtml(v: MissionView): string {
     const text = r.pullRequestUrl ? `Pull request: ${r.pullRequestUrl}` : r.mergeCommit ? `Merged at ${r.mergeCommit.slice(0, 8)}${r.note ? ` (${r.note})` : ''}` : r.note ?? '';
     if (text) parts.push(`<span class="mstat">${esc(text)}</span>`);
   }
+  if (v.canPlanAgain) {
+    parts.push(
+      `<button class="mbtn${v.state === 'planning-failed' ? ' primary' : ''}" data-mission-op="plan-again" title="Ask the read-only planner again${v.state === 'plan-review' ? '; the tasks here are replaced by its new plan' : ''}">Plan again…</button>`,
+    );
+  }
+  if (v.canWritePlan) parts.push(`<button class="mbtn" data-mission-op="write-plan" title="Start plan review from what the mission has now, and write the tasks yourself">Write it myself</button>`);
+  if (v.canReplan) {
+    parts.push(
+      `<button class="mbtn" data-mission-op="replan" title="Ask the planner for the rest of the plan. Done tasks stay; unfinished work is set aside on a branch of its own; the new plan is reviewed before anything runs.">Replan…</button>`,
+    );
+  }
   if (v.canCancel) parts.push(`<button class="mbtn danger" data-mission-op="cancel">Cancel mission</button>`);
   return parts.length > 0 ? `<div class="mfoot">${parts.join('')}</div>` : '';
 }
@@ -254,6 +285,7 @@ export function clickIntent(target: HTMLElement, snap: MissionsSnapshot | undefi
   const missionOp = target.closest<HTMLElement>('[data-mission-op]')?.dataset.missionOp;
   if (missionOp === 'approve') return { kind: 'op', missionId, op: { kind: 'approve' } };
   if (missionOp === 'cancel') return { kind: 'op', missionId, op: { kind: 'cancel' } };
+  if (missionOp === 'plan-again' || missionOp === 'write-plan' || missionOp === 'replan') return { kind: 'op', missionId, op: { kind: missionOp } };
   const finish = target.closest<HTMLElement>('[data-finish]')?.dataset.finish;
   if (finish) return { kind: 'op', missionId, op: { kind: 'finish', how: finish as 'merge-local' } };
   const action = target.closest<HTMLElement>('[data-task-action]')?.dataset.taskAction;
