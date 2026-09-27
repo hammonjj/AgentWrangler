@@ -64,6 +64,7 @@ export interface SessionActions {
   /**
    * The same across every running agent on the machine, for when the plan is
    * nearly spent. `pause: false` thaws everything currently frozen.
+   * Pausing asks for confirmation first; resuming does not.
    */
   pauseAll(pause: boolean): void;
   resume(key: string): void;

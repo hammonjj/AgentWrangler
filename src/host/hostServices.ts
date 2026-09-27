@@ -68,6 +68,11 @@ export interface MessageOptions {
   modal?: boolean;
   /** The second paragraph: what this will cost, in full sentences. */
   detail?: string;
+  /**
+   * Make Cancel the default button, so Return backs out instead of acting.
+   * For actions a stray click or keypress should not be able to confirm.
+   */
+  defaultToCancel?: boolean;
 }
 
 export interface InputOptions {
