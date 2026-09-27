@@ -1633,7 +1633,7 @@ function renderTask(): void {
     b.type = 'button';
     b.className = a === 'cancel' ? 'tsbtn danger' : 'tsbtn';
     b.textContent = TASK_ACTION_LABEL[a];
-    b.addEventListener('click', () => post({ type: 'taskAction', missionId: t.missionId, action: a }));
+    b.addEventListener('click', () => post({ type: 'taskAction', missionId: t.missionId, taskId: t.taskId, action: a }));
     actions.append(b);
   }
   // More than one attempt is history worth reaching; one is the conversation

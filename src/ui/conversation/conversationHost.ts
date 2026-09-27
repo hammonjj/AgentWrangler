@@ -67,7 +67,8 @@ export interface ConversationHostUi {
 export interface TaskPaneSource {
   viewFor(sessionKey: string): TaskView | undefined;
   /** Run one of the strip's buttons. Rejects with a message the user should read. */
-  run(missionId: string, action: TaskViewAction): Promise<void>;
+  /** `taskId`: the task the strip is about, in a mission of several (#43). */
+  run(missionId: string, action: TaskViewAction, taskId?: string): Promise<void>;
   /** Proposals this conversation handed off with `aw task` and nobody has started or dropped (#81). */
   proposalsFor?(sessionKey: string): TaskProposalView[];
   /** The proposal card's Run or Cancel. Rejects with a message the user should read. */
@@ -521,7 +522,7 @@ export class ConversationHost {
         this.actions.openFile(m.path);
         return;
       case 'taskAction':
-        await this.runTaskAction(m.missionId, m.action);
+        await this.runTaskAction(m.missionId, m.action, typeof m.taskId === 'string' ? m.taskId : undefined);
         return;
       case 'proposalDecision':
         await this.decideProposal(m.missionId, m.decision);
@@ -543,10 +544,10 @@ export class ConversationHost {
    * is re-pushed either way, because a refused action still proves what the
    * task's state actually is.
    */
-  private async runTaskAction(missionId: string, action: TaskViewAction): Promise<void> {
+  private async runTaskAction(missionId: string, action: TaskViewAction, taskId?: string): Promise<void> {
     if (!this.tasks) return;
     try {
-      await this.tasks.run(missionId, action);
+      await this.tasks.run(missionId, action, taskId);
     } catch (error) {
       this.ui.dialogs.error(`Agent Wrangler: ${(error as Error).message ?? String(error)}`);
     }

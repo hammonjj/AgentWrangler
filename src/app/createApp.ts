@@ -1122,8 +1122,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
           const mission = badge && tasks.get(badge.missionId);
           return mission ? taskViewOf(mission, tasks.actions(mission.id, badge.taskId), badge.taskId) : undefined;
         },
-        run: async (missionId: string, action: TaskViewAction): Promise<void> => {
-          await runTaskAction(tasks, missionId, action);
+        run: async (missionId: string, action: TaskViewAction, taskId?: string): Promise<void> => {
+          await runTaskAction(tasks, missionId, action, taskId);
         },
         proposalsFor: (sessionKey: string): TaskProposalView[] =>
           tasks

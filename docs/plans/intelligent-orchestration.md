@@ -2872,6 +2872,48 @@ Issue numbers are in §30.
 - **Non-goals**: hierarchical planning.
 - **Prerequisite for next**: missions with graphs to schedule.
 
+**As built (#43, 2026-09-27): hand-written missions and plan review.** The planner is #44.
+- **Plan model** (`orchestration/domain/plan.ts`, pure). `applyPlanEdit` handles add, update,
+  delete, merge, split, move, depend and overrides (pins and caps), and validates the whole plan
+  after each one. An edit that adds an *error* (a cycle, shown as its path `t1 → t2 → t3 → t1`;
+  a self, dangling or duplicate edge; more tasks than `taskCap`, default 8, never above 12) is
+  refused and nothing changes. *Blockers* (no objective, no acceptance criterion, a scope path
+  outside the repository) are allowed while writing but stop Approve. *Warnings* (§11.2
+  overlap) never stop anything. The list order is the run order: every edit except `move`
+  stable-sorts it into dependency order, and a `move` above an upstream is refused.
+  Edits bump `revision` and drop the stale preview; pins and caps don't.
+- **Nothing runs before approval.** `createMission` records `planned: true` and goes
+  `draft → plan-review`. `transitionMission` refuses `draft → running` for a planned
+  mission of any size. `launch` refuses a planned mission without `planApprovedAt`, whatever
+  called it. `approvePlan` is the only way in, and it refuses while blockers remain. P8
+  routing is always `manual`: tasks run on their own pins over `Mission.defaultRoute` (the
+  launcher's route at approval), with a thin cap check. The router shows only as each task's
+  **preview** (assessed in the background, outside the mission queue, one immutable assessment
+  per revision) and as the shadow on each decision.
+- **Execution.** `launchNext` runs one task at a time in run order, in the mission worktree
+  (`<repo>.aw/<slug>/_integration`, branch `aw/<slug>/mission`, created write-ahead on the first
+  launch). Each attempt records `startCommit`, the head the task before it left, and its diff
+  and checks are measured from there. A pass is `done` by verification and the next task
+  starts. Anything else waits for the user (accept, retry, skip, cancel). A **fresh retry**
+  commits what was left, keeps the rejected work on `aw/<slug>/<key>` (or `-a<n>`), resets the
+  mission branch to the pre-task commit, and runs on `aw/<slug>/<key>-a<n>` in the same tree.
+  When that task is done the mission branch fast-forwards to it (`returnTo`). **Skip** sets a
+  task's work aside the same way. Tasks that need a skipped or failed task go `blocked`, and
+  independent ones still run.
+- **Mission review** (`engine/missionFinish.ts`) works for any single-branch result, a planned
+  mission's or a single task's. *Merge locally* is `git merge --no-ff` in the primary checkout,
+  only when that checkout is already on the base branch with no uncommitted changes, with hooks
+  and signing off; a conflict is aborted. It does not yet run the gated full check (§13.3), which
+  comes with #46. *Open a PR* pushes that one branch and runs `gh pr create`. *Keep* retains the
+  trees. *Discard* removes clean trees and keeps the branches.
+- **Missions view**: the table pane's third tab (`webview/dashboard/missions.ts`, fed by
+  `view/missionViews.ts`). Header chips are §18.2's metrics, aggregated from attempts. Task
+  rows open the current attempt's conversation in the right pane. The plan editor is one task
+  at a time. Layout follows `#app.narrow`, and at 300 px everything wraps and nothing is hidden.
+- **Telemetry**: `task-final` records (outcome, accepted by, attempts, first-attempt pass,
+  cost with basis, tokens, elapsed and active time). Mission metrics are computed from
+  attempts and never stored.
+
 ### P9: Scheduling, integration and contention
 
 - **Objective**: independent tasks run at the same time, safely, and their results meet on a

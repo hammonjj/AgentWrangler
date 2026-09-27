@@ -19,6 +19,8 @@ import {
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
 import { taskChips } from '../../shared/orchestration/taskView';
+import type { MissionsSnapshot } from '../../shared/orchestration/missionView';
+import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, type MissionIntent } from './missions';
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
 import { canPauseSession, clampMenuPosition, dismissAction, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
@@ -53,9 +55,12 @@ import {
   type UsageWindow,
 } from '../../shared/usage';
 
+/** The table pane's three views: status sections, project sections, and missions (#43). */
+type TableView = 'status' | 'project' | 'missions';
+
 interface WebviewState {
   collapsed?: string[];
-  tableView?: 'status' | 'project';
+  tableView?: TableView;
   /** Hook-health kind whose banner the user hid. A different kind brings the banner back. */
   bannerDismissed?: string;
   /**
@@ -131,7 +136,17 @@ const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
 let providerFilter: 'all' | 'claude' | 'codex' = saved?.provider ?? 'all';
-let tableView: 'status' | 'project' = saved?.tableView ?? 'status';
+let tableView: TableView = saved?.tableView ?? 'status';
+/** The Missions view's data (#43). Absent while orchestration is off, and then so is its tab. */
+let missionsSnap: MissionsSnapshot | undefined;
+const missionsUi = newMissionsUiState();
+/** A snapshot arrived while a plan-editor text field had focus; draw once it lets go. */
+let missionRenderDeferred = false;
+
+/** The grouping the session table uses: the Missions view has none of its own. */
+function sessionView(): 'status' | 'project' {
+  return tableView === 'project' ? 'project' : 'status';
+}
 
 function saveState(): void {
   vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, provider: providerFilter, tableView });
@@ -206,7 +221,7 @@ const ICON_DISMISS =
 /** Says which of the three things the × is about to do, since they differ. */
 function dismissTitle(s: SessionDTO): string {
   const kept = 'The transcript is kept, so it can be resumed. Asks first if it is working right now.';
-  switch (dismissAction(s, tableView)) {
+  switch (dismissAction(s, sessionView())) {
     case 'dismiss':
       return `Done with this agent: ends the process running it and drops the row to Ended, where it ages out. ${kept}`;
     case 'dismissHide':
@@ -679,7 +694,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   ${cols()
     .map((c) => CELL[c.id](s))
     .join('')}
-  <td class="c-act"><button class="dismiss" data-row-action="${dismissAction(s, tableView)}" title="${esc(dismissTitle(s))}">${ICON_DISMISS}</button></td>
+  <td class="c-act"><button class="dismiss" data-row-action="${dismissAction(s, sessionView())}" title="${esc(dismissTitle(s))}">${ICON_DISMISS}</button></td>
 </tr>${permissionRow(s, span)}`;
 }
 
@@ -1292,6 +1307,17 @@ discordBtn.addEventListener('click', () => {
 // still takes a click is worse than a disabled one that says so.
 renderControls();
 
+/** The table's view switcher. Missions is the third view, there only while orchestration is on (#43). */
+function tabsHtml(): string {
+  const tab = (view: TableView, label: string, extra = '') =>
+    `<button role="tab" aria-selected="${tableView === view}" data-table-view="${view}"${extra}>${label}</button>`;
+  const waiting = missionsSnap?.missions.filter((m) => m.state === 'plan-review' || m.state === 'review' || m.metrics.waiting > 0).length ?? 0;
+  const missions = missionsSnap
+    ? tab('missions', `Missions${waiting > 0 ? ` <span class="tabcount">${waiting}</span>` : ''}`, waiting > 0 ? ` title="${waiting} mission${waiting === 1 ? '' : 's'} waiting for you"` : '')
+    : '';
+  return `<div class="tabletabs" role="tablist" aria-label="Table view">${tab('status', 'Status')}${tab('project', 'Project')}${missions}</div>`;
+}
+
 function render(): void {
   // A drag owns the widths until the pointer is released; re-rendering under it
   // would replace the <th> being dragged.
@@ -1301,11 +1327,31 @@ function render(): void {
   }
 
   renderUsage();
+  // Orchestration was turned off (or never on): there is no Missions view to be on.
+  if (tableView === 'missions' && !missionsSnap) tableView = 'status';
+  if (tableView === 'missions' && missionsSnap) {
+    // Typing in the plan editor: a snapshot must not replace the field under the caret.
+    const active = document.activeElement;
+    if ((active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) && active.closest('.missions')) {
+      missionRenderDeferred = true;
+      return;
+    }
+    missionRenderDeferred = false;
+    menuPosition = undefined;
+    rowMenu = undefined;
+    paint(`${bannerHtml()}${tabsHtml()}${missionsHtml(missionsSnap, missionsUi, Date.now())}`);
+    if (missionsUi.reveal) {
+      app.querySelector<HTMLElement>(`[data-mission="${CSS.escape(missionsUi.reveal)}"]`)?.scrollIntoView({ block: 'nearest' });
+      missionsUi.reveal = undefined;
+    }
+    return;
+  }
   const visibleSessions = providerFilter === 'all' ? sessions : sessions.filter((s) => s.provider === providerFilter);
   if (visibleSessions.length === 0) {
     menuPosition = undefined; // no table, so no button to close the picker with
     rowMenu = undefined; // and no row for a menu to belong to
-    paint(`${bannerHtml()}<div class="empty">No ${providerFilter === 'all' ? 'agent' : capitalize(providerFilter)} sessions found.
+    // The tabs stay when there are missions: an empty table must not hide them.
+    paint(`${bannerHtml()}${missionsSnap ? tabsHtml() : ''}<div class="empty">No ${providerFilter === 'all' ? 'agent' : capitalize(providerFilter)} sessions found.
 <div class="hint">Sessions are discovered from <code>~/.claude</code> and <code>~/.codex</code>. Start an agent session anywhere and it will appear here.</div></div>`);
     return;
   }
@@ -1314,7 +1360,7 @@ function render(): void {
   // so widths live on the header cells and a column that is switched off simply
   // is not rendered.
   const span = cols().length + 3; // dot + agent + data columns + actions
-  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}<div class="tabletabs" role="tablist" aria-label="Conversation grouping"><button role="tab" aria-selected="${tableView === 'status'}" data-table-view="status">Status</button><button role="tab" aria-selected="${tableView === 'project'}" data-table-view="project">Project</button></div><table>${headHtml()}`;
+  let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}${tabsHtml()}<table>${headHtml()}`;
 
   const groups = new Map<string, SessionDTO[]>();
   for (const s of visibleSessions) {
@@ -1357,6 +1403,23 @@ function render(): void {
 
 vscodeApi.onMessage((body) => {
   const m = body as HostToDashboard;
+  if (m.type === 'showMissions') {
+    if (!missionsSnap) return;
+    tableView = 'missions';
+    if (m.missionId) {
+      missionsUi.collapsed.delete(m.missionId);
+      missionsUi.expanded.add(m.missionId);
+      missionsUi.reveal = m.missionId;
+    }
+    saveState();
+    render();
+    return;
+  }
+  if (m.type === 'missionError') {
+    missionsUi.errors.set(m.missionId, m.text);
+    render();
+    return;
+  }
   if (m.type === 'projectPicked') {
     project = m.dir;
     // The scan that will contain it is still running, and a selection with no
@@ -1370,6 +1433,7 @@ vscodeApi.onMessage((body) => {
   }
   if (m.type === 'snapshot') {
     sessions = m.sessions;
+    missionsSnap = m.missions;
     if (m.projects) {
       projects = m.projects;
       renderLauncher();
@@ -1589,9 +1653,15 @@ app.addEventListener('click', (e) => {
 
   const viewTab = target.closest<HTMLElement>('[data-table-view]');
   if (viewTab) {
-    tableView = viewTab.dataset.tableView as 'status' | 'project';
+    tableView = viewTab.dataset.tableView as TableView;
     saveState();
     render();
+    return;
+  }
+
+  if (tableView === 'missions' && target.closest('.missions')) {
+    const intent = clickIntent(target, missionsSnap);
+    if (intent) runMissionIntent(intent);
     return;
   }
 
@@ -1740,6 +1810,62 @@ setInterval(() => {
 }, 10_000);
 
 post({ type: 'ready' });
+
+// ---- the Missions view (#43) ----
+
+/** Act on a Missions view click or edit. Everything that changes a mission goes to the host. */
+function runMissionIntent(intent: MissionIntent): void {
+  switch (intent.kind) {
+    case 'new':
+      post({ type: 'newMission', cwd: currentProject() });
+      return;
+    case 'toggle': {
+      const view = missionsSnap?.missions.find((v) => v.id === intent.missionId);
+      const open = !app.querySelector(`[data-mission="${CSS.escape(intent.missionId)}"]`)?.classList.contains('shut');
+      if (open) {
+        missionsUi.collapsed.add(intent.missionId);
+        missionsUi.expanded.delete(intent.missionId);
+      } else {
+        missionsUi.collapsed.delete(intent.missionId);
+        if (view) missionsUi.expanded.add(intent.missionId);
+      }
+      render();
+      return;
+    }
+    case 'edit-toggle':
+      missionsUi.editing = missionsUi.editing === intent.taskId ? undefined : intent.taskId;
+      render();
+      return;
+    case 'dismiss':
+      missionsUi.errors.delete(intent.missionId);
+      render();
+      return;
+    case 'op':
+      missionsUi.errors.delete(intent.missionId);
+      post({ type: 'mission', missionId: intent.missionId, op: intent.op, provider: launchProvider === 'openai' ? 'codex' : 'claude' });
+      return;
+  }
+}
+
+// A plan-editor field is sent when it is committed (blur, Enter in a single
+// line, a pick in a menu), never per keystroke: every edit is a whole-plan
+// validation and a new revision, and half a word is not a revision.
+app.addEventListener('change', (event) => {
+  if (tableView !== 'missions') return;
+  const target = event.target as HTMLElement | null;
+  const intent = target ? changeIntent(target) : undefined;
+  if (intent) runMissionIntent(intent);
+});
+
+// The snapshot held back while a field had focus is drawn once focus leaves the editor.
+app.addEventListener('focusout', () => {
+  if (!missionRenderDeferred) return;
+  setTimeout(() => {
+    const active = document.activeElement;
+    if ((active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) && active.closest('.missions')) return;
+    render();
+  }, 0);
+});
 
 // Every keystroke and every tick of a radio in the question stepper, so the
 // next snapshot re-renders the card with the answer still in it.

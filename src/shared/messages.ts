@@ -296,7 +296,7 @@ export type ConversationToHost =
    * `missionId` rides along so an action cannot land on a task the strip has
    * since been replaced by.
    */
-  | { type: 'taskAction'; missionId: string; action: TaskViewAction }
+  | { type: 'taskAction'; missionId: string; action: TaskViewAction; taskId?: string }
   /** A proposal card's Run (on the route shown) or Cancel (#81). Only ever sent by a click. */
   | { type: 'proposalDecision'; missionId: string; decision: ProposalDecision }
   /**
