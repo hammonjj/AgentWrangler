@@ -737,7 +737,9 @@ unmerged or in use, and never forces a removal.
 
 **EscalationDecision**: `id`, `taskId`, `afterAttemptId`, `evidence {category, signature,
 repeats}`, `action`, `delta {tier?, effort?, harness?}`, `blockedBy? 'cap' | 'pin' | 'limit'`,
-`reason`, `decidedAt`.
+`reason`, `decidedAt`. As built (#41): `blockedBy` also takes `unavailable` (nothing to move
+to), and a launching step carries `mode` (`continue` | `fresh`), `notBefore`, `target` (a
+route step's resolved model) and `step`; `switch-model` joins the actions (§15.4).
 
 ### 7.3 Durable, runtime and reconstructible state
 
@@ -1678,6 +1680,74 @@ base, on a new `-a<n>` branch (§13.2); the failed attempt's branch is kept for 
 Every decision, including a blocked one ("would raise tier to expert; mission capped at
 standard"), is an `EscalationDecision` and a telemetry event (§16). The task detail shows the
 ladder as it was walked.
+
+### 15.4 As built (#41, 2026-09-27)
+
+- **Where it lives.** `src/orchestration/policy/outcome.ts` (`classifyOutcome`, `classifyTurn`)
+  and `src/orchestration/policy/escalation.ts` (`decideEscalation`, `limitsFor`,
+  `pendingEscalation`), both pure. The one thing the policy cannot know from values — whether a
+  model exists at the tier it would move to — it asks through `probe`, which the runner answers
+  from a resolver snapshot (`resolveRoute` with the effective pins, caps and exclusions; a new
+  `allowEscalationTiers` flag lets it resolve into `frontier` when the mission allows it) and a
+  test answers from a table. `TaskRunner` owns the rest: it classifies, records, and carries out.
+- **Classifier.** Evidence in order of trust: a cap's refusal (`budget`), #4's `interrupted`
+  (`lost`), the wall clock (`stuck`), a lost local server or a failed launch (`infra`), the last
+  turn (Claude `subtype`/`terminal_reason`/`api_error_status`: 429 → `capacity`; max turns and
+  budget → `budget`; `prompt_too_long` → `context`; 401/403 → `infra`, not retryable; 5xx,
+  `api_error`, `model_error` → `infra`; Codex `codexErrorInfo` codes likewise), #4's `failed`
+  (`infra`), a pending ask or a `plan-first` gate (`ambiguity`), three or more
+  `permission_denials` with nothing to show (`policy`), no diff (`empty`), then verification:
+  `quality-repeat` when its signature is the previous failed attempt's, else `quality-new`. The
+  detail line never quotes agent prose.
+- **Deviations from §15.2.**
+  - *A route picked by hand is the task's pins* (#40 stores the launcher's and an accepted
+    proposal's route as task pins), so in `manual` and `assisted` escalation keeps to it: it
+    retries, carries on in the session, waits, and then hands over. §15.3's "0 tier steps in
+    manual" is applied to `assisted` too, and harness switches get the same 0 outside `auto`.
+    A planned mission's default route is not a pin, so its effort can be raised. Automatic
+    route changes arrive in earnest with #42's `auto`.
+  - *Infra failover to another harness* is the harness-switch step after two retries; it is
+    blocked by the same pins and limits. A lost local server is not retried as is (the same
+    endpoint is down); #51's same-tier failover runs first, and is now recorded as a
+    `switch-model` step.
+  - *`capacity` failover to another source* is not built: no policy switch allows it yet.
+  - *`context` split-task* is a proposal only (replanning is #44): the task goes to the user
+    saying so.
+  - *Raise effort in the session* uses `SessionHandle.setEffort` where the harness supports it
+    (`midSessionEffortChange`); anything but `applied` falls back to a fresh session.
+  - *Verifier errors* (§14.3 "retried once") are unchanged from #35: the result waits for the user.
+- **Limits** (`DEFAULT_LIMITS`, overridable per runner for tests): 3 quality attempts (every
+  attempt but infra retries, capacity waits and resumes), 2 infra retries in a row (backoff
+  15 s, then 60 s), 3 capacity waits in a row (until the source's `backoffUntil`, else 5 min;
+  never more than 6 h), 1 effort step, 1 tier step (`auto` only), 1 harness switch (`auto`
+  only), same signature 3 in a row → `needs-human`, 1 empty retry, 1 stuck retry, 8 attempts of
+  any kind, 45 min of active time. The user's caps come first: `maxAttempts` and
+  `maxEstimatedCostUsd` stop a launching step (`stop`, blocked by `cap`), and are checked again
+  when a pending step runs, so a cap tightened while a step waited still holds. Check order for a
+  route step is pin → nothing to move to → cap → limit → probe, so the reason a person reads is
+  the most specific one ("Would raise tier to expert; the mission is capped at standard").
+- **Carrying out a step.** The decisions (skipped ones first) are appended to
+  `Task.escalations` and written as `escalation` telemetry in one step. A launching step leaves
+  the task `queued` (a retry; `blocked` for a capacity wait) with a timer for `notBefore`; the
+  task machine gains `queued → needs-human` for a step that cannot start. When it runs it is
+  checked again (still the newest decision, still after the newest attempt, the task still
+  waiting): `continue` sends the step's message to the failed attempt's session — live and idle
+  here, watched from its current `seq` so its old turns are not the new attempt's, or resumed
+  through the harness — as a new attempt (`continues`, same worktree, measured from the task's
+  start commit); `fresh` ends that session, keeps its worktree (`retained`, or in a planned
+  mission its own `-a<n>` branch) and starts a new attempt with the failure as an "earlier
+  attempt" section of the prompt. A step's own launch failure is an infra failure with its own
+  counter. `autoRecover`'s one resume after a clean cut goes through the same decision. Pending
+  steps survive a restart: recovery reschedules them. Cancel and Skip drop them.
+- **Attribution.** A carried-on session keeps its first attempt's registry `origin`, so its turn
+  records name that attempt; the runner credits them to the live attempt that `continues` it, so
+  usage and the spend cap stay right.
+- **Where it shows.** `TaskView.escalation`: a chip (`2 steps · raise effort → high`, yellow
+  once a step changed the route), and an *Escalation* panel with one line per step, skipped ones
+  dimmed with what stopped them, the pending one marked with when it is due.
+- **Telemetry.** An `escalation` record per decision (category, signature, repeats, action,
+  `blockedBy`, delta, continue or fresh, delay, step; never the reason text, which can quote a
+  verification summary). The `attempt` record gains `escalationStep` and `escalationAction`.
 
 ---
 

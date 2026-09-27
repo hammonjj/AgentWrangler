@@ -26,6 +26,7 @@ import {
 } from '../../shared/orchestration/executionPolicy';
 import { REVIEW, stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
 import { PROVENANCE_LABEL } from '../policy/assessment';
+import { changesRoute, pendingEscalation } from '../policy/escalation';
 import { explainDecision } from './routeExplain';
 import type {
   AssessmentRowView,
@@ -34,6 +35,7 @@ import type {
   TaskAttemptView,
   TaskBadge,
   TaskDiffView,
+  TaskEscalationView,
   TaskPolicyView,
   TaskReviewView,
   TaskRouteView,
@@ -41,8 +43,11 @@ import type {
   TaskView,
   TaskViewAction,
 } from '../../shared/orchestration/taskView';
+import { harnessLabel } from '../../shared/orchestration/taskView';
 import type {
   Assessed,
+  EscalationAction,
+  EscalationDecision,
   ExecutionAttempt,
   HarnessId,
   Mission,
@@ -286,6 +291,43 @@ export function policyViewOf(m: Mission, ctx: PolicyContext = { tiers: DEFAULT_T
   return { chip: chip.slice(0, 3).join(' · ') + (chip.length > 3 ? ` +${chip.length - 3}` : ''), lines, frozen: pinnedDimensions(p), changes, conflicts };
 }
 
+const STEP_LABEL: Record<EscalationAction, (d: EscalationDecision) => string> = {
+  'retry-same': (d) => (d.mode === 'continue' ? 'Retry in the same session' : 'Retry fresh, same route'),
+  'continue-with-feedback': (d) => (d.mode === 'continue' ? 'Send the failure back to the agent' : 'Retry fresh with the failure'),
+  'raise-effort': (d) => `Raise effort${d.delta?.effort ? ` → ${d.delta.effort}` : ''}`,
+  'raise-tier': (d) => `Raise tier${d.delta?.tier ? ` → ${d.delta.tier}` : ''}`,
+  'switch-harness': (d) => `Switch harness${d.target ? ` → ${harnessLabel(d.target.harness)}` : ''}`,
+  'switch-model': (d) => `Switch model${d.target ? ` → ${modelLabel(d.target.model) ?? d.target.model}` : ''}`,
+  wait: () => 'Wait for capacity',
+  'split-task': () => 'Split the task',
+  'needs-human': () => 'Hand to you',
+  stop: () => 'Stop',
+};
+
+/**
+ * The escalation ladder as walked (§15.3, #41): every step after every failed
+ * attempt, the skipped ones with what stopped them, and the one waiting to
+ * run, if any. Undefined when nothing has failed.
+ */
+export function escalationViewOf(m: Mission, task: Task): TaskEscalationView | undefined {
+  if (task.escalations.length === 0) return undefined;
+  const pending = pendingEscalation(task);
+  const steps = task.escalations.map((d) => ({
+    afterAttempt: m.attempts.find((a) => a.id === d.afterAttemptId)?.n ?? 0,
+    category: d.evidence.category,
+    label: STEP_LABEL[d.action](d),
+    reason: d.reason,
+    ...(d.blockedBy ? { blockedBy: d.blockedBy } : {}),
+    ...(pending?.id === d.id ? { pending: d.notBefore !== undefined ? { at: d.notBefore } : {} } : {}),
+    at: d.decidedAt,
+  }));
+  const taken = task.escalations.filter((d) => !d.blockedBy && d.step !== undefined);
+  const routeSteps = taken.filter((d) => changesRoute(d.action));
+  const last = routeSteps.at(-1);
+  const chip = [`${taken.length} step${taken.length === 1 ? '' : 's'}`, ...(last ? [STEP_LABEL[last.action](last).toLowerCase()] : []), ...(pending ? ['pending'] : [])].join(' · ');
+  return { chip, loud: routeSteps.length > 0, steps };
+}
+
 export function taskViewOf(m: Mission, actions: TaskViewAction[], taskId?: string, ctx?: PolicyContext): TaskView | undefined {
   const task = taskOf(m, taskId);
   if (!task) return undefined;
@@ -315,6 +357,7 @@ export function taskViewOf(m: Mission, actions: TaskViewAction[], taskId?: strin
     verification: verificationViewOf(task, current),
     attempts: attempts.map((a) => attemptViewOf(m, a, a.id === current?.id)),
     policy: policyViewOf(m, ctx, task.id),
+    escalation: escalationViewOf(m, task),
     actions,
   };
 }

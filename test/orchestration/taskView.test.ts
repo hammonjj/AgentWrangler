@@ -8,6 +8,7 @@ import {
   assessmentRowTitle,
   attemptLine,
   diffStatText,
+  escalationStepLine,
   routeChipText,
   routeChipTitle,
   routeIsLoud,
@@ -19,7 +20,7 @@ import {
   type TaskRouteView,
 } from '../../src/shared/orchestration/taskView';
 import { currentAttemptOf, sessionKeyFor, taskBadges, taskViewOf } from '../../src/orchestration/view/taskViews';
-import type { Mission, RoutingDecision } from '../../src/shared/orchestration/types';
+import type { EscalationDecision, Mission, RoutingDecision } from '../../src/shared/orchestration/types';
 import { assessment, attempt, mission, task, T0 } from './fixtures';
 
 const route = (o: Partial<TaskRouteView> = {}): TaskRouteView => ({
@@ -353,6 +354,57 @@ describe('the assessment on the strip (#37)', () => {
     m.tasks[0].assessmentIds = [older.id, newer.id];
     m.assessments = [older, newer];
     expect(taskViewOf(m, [])!.assessment!.summary).toContain('bugfix');
+  });
+});
+
+describe('the escalation ladder in the strip (#41)', () => {
+  const step = (id: string, o: Partial<EscalationDecision>): EscalationDecision => ({
+    id,
+    taskId: 't1',
+    afterAttemptId: 'a1',
+    evidence: { category: 'quality-repeat', signature: 's', repeats: 2 },
+    action: 'needs-human',
+    reason: 'synthetic',
+    decidedAt: T0,
+    ...o,
+  });
+
+  it('is absent until something has failed', () => {
+    expect(taskViewOf(mission(), [])!.escalation).toBeUndefined();
+  });
+
+  it('lists every step, skipped ones with what stopped them, and marks the one waiting to run', () => {
+    const m = mission({
+      tasks: [
+        task('t1', {
+          state: 'queued',
+          attemptIds: ['a1'],
+          escalations: [
+            step('d1', { action: 'raise-effort', blockedBy: 'cap', delta: { effort: 'high' }, reason: 'Would raise effort to high; the mission caps effort at medium.' }),
+            step('d2', { action: 'raise-tier', delta: { tier: 'expert' }, mode: 'fresh', step: 1, notBefore: T0 + 1000, target: { harness: 'claude-code', source: 'anthropic', model: 'opus', tier: 'expert', effortNative: 'medium', location: 'hosted' }, reason: 'Raising tier.' }),
+          ],
+        }),
+      ],
+      attempts: [attempt('a1', 't1', { n: 1, state: 'failed' })],
+    });
+    const e = taskViewOf(m, [])!.escalation!;
+    expect(e).toMatchObject({ chip: '1 step · raise tier → expert · pending', loud: true });
+    expect(e.steps.map(escalationStepLine)).toEqual([
+      'After attempt 1 · quality-repeat · ⊘ Raise effort → high (capped): Would raise effort to high; the mission caps effort at medium.',
+      'After attempt 1 · quality-repeat · … Raise tier → expert (pending): Raising tier.',
+    ]);
+    expect(e.steps[1].pending).toEqual({ at: T0 + 1000 });
+  });
+
+  it('a plain retry is not loud', () => {
+    const m = mission({
+      tasks: [task('t1', { state: 'needs-human', attemptIds: ['a1', 'a2'], escalations: [step('d1', { action: 'continue-with-feedback', mode: 'continue', step: 1 }), step('d2', { afterAttemptId: 'a2' })] })],
+      attempts: [attempt('a1', 't1', { n: 1, state: 'failed' }), attempt('a2', 't1', { n: 2, state: 'failed' })],
+    });
+    const e = taskViewOf(m, [])!.escalation!;
+    expect(e).toMatchObject({ chip: '1 step', loud: false });
+    expect(e.steps.map((s) => s.label)).toEqual(['Send the failure back to the agent', 'Hand to you']);
+    expect(e.steps[1].afterAttempt).toBe(2);
   });
 });
 

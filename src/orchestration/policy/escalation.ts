@@ -23,7 +23,23 @@
  * - **A rate limit waits; it never raises the tier.** Nothing here changes a
  *   permission mode or a tool list: a step is a route, never a permission.
  */
-import { EFFORT_LEVELS, type EffortLevel, type EscalationAction, type EscalationBlock, type EscalationDecision, type ExecutionTarget, type HarnessId, type Millis, type OutcomeCategory, type RouteCaps, type RouteDimension, type RoutingMode, type TierName } from '../../shared/orchestration/types';
+import {
+  EFFORT_LEVELS,
+  LAUNCHING_ACTIONS,
+  type EffortLevel,
+  type EscalationAction,
+  type EscalationBlock,
+  type EscalationDecision,
+  type ExecutionTarget,
+  type HarnessId,
+  type Millis,
+  type OutcomeCategory,
+  type RouteCaps,
+  type RouteDimension,
+  type RoutingMode,
+  type Task,
+  type TierName,
+} from '../../shared/orchestration/types';
 import { tierRank, type TierDef } from '../../shared/orchestration/catalog';
 import type { Classification } from './outcome';
 
@@ -380,6 +396,18 @@ function trailing<T>(items: readonly T[], f: (t: T) => boolean): number {
 
 function capitalise(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
+ * The escalation step a task is waiting on: the newest decision, taken (not
+ * blocked), one that starts an attempt, made after the task's newest attempt,
+ * with the task `queued` (a retry) or `blocked` (a capacity wait).
+ */
+export function pendingEscalation(task: Pick<Task, 'escalations' | 'attemptIds' | 'state'>): EscalationDecision | undefined {
+  const d = task.escalations.at(-1);
+  if (!d || d.blockedBy || !LAUNCHING_ACTIONS.includes(d.action)) return undefined;
+  if (task.attemptIds.at(-1) !== d.afterAttemptId) return undefined;
+  return task.state === 'queued' || task.state === 'blocked' ? d : undefined;
 }
 
 /** Whether a decision changes the route (so the next attempt is decided by escalation, not the person who picked it). */

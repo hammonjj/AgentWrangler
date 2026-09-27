@@ -120,7 +120,7 @@ import {
 } from '../../shared/orchestration/executionPolicy';
 import { resolveRoute, type ResolverSnapshot } from '../policy/resolver';
 import { compareRoutes, recommendRoute } from '../policy/recommend';
-import { changesRoute, decideEscalation, limitsFor, type EscalationInput, type EscalationLimits, type ProbeAnswer, type ProbeRequest } from '../policy/escalation';
+import { changesRoute, decideEscalation, limitsFor, pendingEscalation, type EscalationInput, type EscalationLimits, type ProbeAnswer, type ProbeRequest } from '../policy/escalation';
 import { classifyOutcome, type Classification } from '../policy/outcome';
 import { attemptRecord, addTurnUsage, escalationRecord, routingRecord, waitedMs } from './attemptRecord';
 import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from './attemptPolicy';
@@ -3253,18 +3253,6 @@ type LaunchOptions =
   | { mode: 'continue'; resumeOf: ExecutionAttempt; auto?: boolean }
   /** Escalation's "continue" (#41): the failed attempt's session gets `message` next, live or resumed. */
   | { mode: 'continue'; continues: ExecutionAttempt; route: TaskRoute; escalation: EscalationDecision; message: string };
-
-/**
- * The escalation step a task is waiting on (#41): the newest decision, taken
- * (not blocked), one that starts an attempt, made after the task's newest
- * attempt, with the task `queued` (a retry) or `blocked` (a capacity wait).
- */
-export function pendingEscalation(task: Task): EscalationDecision | undefined {
-  const d = task.escalations.at(-1);
-  if (!d || d.blockedBy || !LAUNCHING_ACTIONS.includes(d.action)) return undefined;
-  if (task.attemptIds.at(-1) !== d.afterAttemptId) return undefined;
-  return task.state === 'queued' || task.state === 'blocked' ? d : undefined;
-}
 
 /** The newest assessment of the mission's task. */
 function latestAssessment(m: Mission, taskId: string): TaskAssessment | undefined {

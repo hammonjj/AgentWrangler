@@ -276,6 +276,22 @@ body,
 #taskStrip .tspolicychange.pending {
   color: var(--vscode-charts-yellow, #d7ba7d);
 }
+/* The escalation ladder (#41). Loud once a step changed the route (a bigger
+   model, more effort, another harness): that is where usage goes. Skipped
+   steps are dimmed, not hidden: why a step did not happen is the point. */
+#taskStrip .tschip.ladder.loud {
+  border-color: var(--vscode-charts-yellow, #d7ba7d);
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
+#taskStrip .tsladderstep {
+  overflow-wrap: anywhere;
+}
+#taskStrip .tsladderstep.blocked {
+  opacity: 0.7;
+}
+#taskStrip .tsladderstep.pending {
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
 /* The reviewer's verdict per acceptance criterion (#36). */
 #taskStrip .tsreview {
   display: flex;

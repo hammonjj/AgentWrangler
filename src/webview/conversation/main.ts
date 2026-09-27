@@ -22,6 +22,7 @@ import {
   attemptLine,
   CRITERION_GLYPH,
   diffStatText,
+  escalationStepLine,
   policyChangeLine,
   reviewHeadText,
   routeChipText,
@@ -1232,6 +1233,7 @@ let attemptsOpen = false;
 let assessmentOpen = false;
 let routingOpen = false;
 let policyOpen = false;
+let ladderOpen = false;
 
 // ---- task proposal cards (#81) ----
 
@@ -1556,6 +1558,23 @@ function policyPanel(p: NonNullable<TaskView['policy']>): HTMLElement {
 }
 
 /**
+ * The escalation ladder (#41): every step after every failed attempt, in the
+ * order it was decided, skipped steps included with what stopped them.
+ */
+function ladderPanel(e: NonNullable<TaskView['escalation']>): HTMLElement {
+  const box = document.createElement('div');
+  box.className = 'tsassess tsladder';
+  for (const s of e.steps) {
+    const row = document.createElement('div');
+    row.className = s.blockedBy ? 'tsassessfoot tsladderstep blocked' : s.pending ? 'tsassessfoot tsladderstep pending' : 'tsassessfoot tsladderstep';
+    row.textContent = escalationStepLine(s);
+    row.title = s.pending?.at ? `${new Date(s.at).toLocaleString()} · due ${new Date(s.pending.at).toLocaleTimeString()}` : new Date(s.at).toLocaleString();
+    box.append(row);
+  }
+  return box;
+}
+
+/**
  * Draw the strip.
  *
  * Built as DOM rather than as HTML for the reason the rest of this pane is:
@@ -1616,6 +1635,14 @@ function renderTask(): void {
     p.textContent = t.policy.chip;
     p.title = t.policy.lines.map((l) => `${l.label}: ${l.value} (${l.from})`).join('\n');
     head.append(p);
+  }
+  // Escalation (#41): how many automatic steps it has taken, loud once one changed the route.
+  if (t.escalation) {
+    const e = document.createElement('span');
+    e.className = t.escalation.loud ? 'tschip ladder loud' : 'tschip ladder';
+    e.textContent = t.escalation.chip;
+    e.title = t.escalation.steps.map(escalationStepLine).join('\n');
+    head.append(e);
   }
   // The verdict, last on the line: what the checks made of the result (#35).
   if (t.verification) {
@@ -1764,8 +1791,21 @@ function renderTask(): void {
     });
     actions.append(toggle);
   }
+  if (t.escalation) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tsbtn link';
+    toggle.setAttribute('aria-expanded', String(ladderOpen));
+    toggle.textContent = ladderOpen ? 'Hide escalation' : 'Escalation';
+    toggle.addEventListener('click', () => {
+      ladderOpen = !ladderOpen;
+      renderTask();
+    });
+    actions.append(toggle);
+  }
   if (actions.childElementCount > 0) taskStrip.append(actions);
 
+  if (ladderOpen && t.escalation) taskStrip.append(ladderPanel(t.escalation));
   if (policyOpen && t.policy) taskStrip.append(policyPanel(t.policy));
   if (routingOpen && t.routing) taskStrip.append(routingPanel(t.routing));
   if (assessmentOpen && t.assessment) taskStrip.append(assessmentPanel(t.assessment));
