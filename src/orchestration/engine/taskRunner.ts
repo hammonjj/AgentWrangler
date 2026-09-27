@@ -107,6 +107,8 @@ export interface NewTask {
   route: TaskRoute;
   /** What the branch is cut from. Default: the primary checkout's `HEAD`. */
   baseRef?: string;
+  /** The conversation that handed it off (`aw task`), where its proposal is shown (#81). */
+  origin?: Mission['origin'];
   /**
    * The mission's policy, frozen when it is recorded (§10.2): caps, preferences
    * and exclusions the router and resolver honour. `mode` is set by the entry
@@ -426,6 +428,7 @@ export class TaskRunner implements Disposable {
       policyChanges: [],
       state: 'draft',
       source: { kind: 'user', trusted: true },
+      ...(req.origin ? { origin: { ...req.origin } } : {}),
       tasks: [task],
       assessments: [],
       decisions: [],

@@ -30,6 +30,7 @@ import {
   taskStateLabel,
   TASK_ACTION_LABEL,
   TASK_STRIP_ACTIONS,
+  type TaskProposalView,
   type TaskView,
 } from '../../shared/orchestration/taskView';
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
@@ -83,7 +84,7 @@ app.innerHTML = `
 <div id="taskStrip" hidden></div>
 <div id="banner" hidden></div>
 <form id="findbar"><input id="find" type="search" placeholder="Find in conversation" aria-label="Find in conversation"><button>Find</button><button type="button" id="clearfind">Clear</button></form>
-<div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div></div>
+<div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div><div id="proposals" hidden></div></div>
 <button id="jump" hidden></button>
 <button id="asknav" class="asknav" hidden></button>
 <div id="composer">
@@ -1230,6 +1231,160 @@ let attemptsOpen = false;
 let assessmentOpen = false;
 let routingOpen = false;
 
+// ---- task proposal cards (#81) ----
+
+const proposalsEl = document.getElementById('proposals')!;
+let proposals: TaskProposalView[] = [];
+/** What the user picked on each card, so a re-render (any task ticking) keeps it. */
+const proposalPicks = new Map<string, { optionId?: string; effort?: string }>();
+/**
+ * Cards whose button was pressed, and when. Disabled until the card goes away,
+ * or for `BUSY_MS` if it does not: a start that failed says why in a dialog,
+ * and the card can then be pressed again.
+ */
+const proposalBusy = new Map<string, number>();
+const BUSY_MS = 10_000;
+
+/**
+ * An `aw task` proposal from this conversation, drawn like a question or a plan
+ * and settled the same way: by a click on its own button. Nothing here takes
+ * focus, so an Enter meant for the composer can never start a task.
+ */
+function renderProposals(): void {
+  proposalsEl.replaceChildren(...proposals.map(proposalCard));
+  proposalsEl.hidden = proposals.length === 0;
+  const live = new Set(proposals.map((p) => p.missionId));
+  for (const id of [...proposalPicks.keys()]) if (!live.has(id)) proposalPicks.delete(id);
+  for (const [id, at] of [...proposalBusy]) if (!live.has(id) || Date.now() - at >= BUSY_MS) proposalBusy.delete(id);
+}
+
+function proposalCard(p: TaskProposalView): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'blk ask proposal st-pending';
+  const head = document.createElement('div');
+  head.className = 'askhead';
+  setText(head, p.verdict === 'route' ? 'Task proposal: waiting for you' : 'Task proposal: pick a route');
+  const title = document.createElement('div');
+  title.className = 'qtext proptitle';
+  setText(title, p.title);
+  el.append(head, title);
+
+  const details = document.createElement('details');
+  details.className = 'propdetails';
+  const summary = document.createElement('summary');
+  setText(summary, p.acceptanceCriteria.length ? `Objective and ${p.acceptanceCriteria.length} criteria` : 'Objective');
+  const objective = document.createElement('div');
+  objective.className = 'propobjective';
+  setText(objective, p.objective);
+  details.append(summary, objective);
+  if (p.acceptanceCriteria.length) {
+    const list = document.createElement('ul');
+    for (const c of p.acceptanceCriteria) {
+      const li = document.createElement('li');
+      setText(li, c);
+      list.appendChild(li);
+    }
+    details.appendChild(list);
+  }
+  el.appendChild(details);
+
+  const why = document.createElement('div');
+  why.className = 'asknote';
+  setText(why, p.why.note && p.verdict !== 'route' ? `${p.why.summary} ${p.why.note}` : p.why.summary);
+  if (p.why.rules.length) why.title = p.why.rules.map((r) => `${r.ruleId}: ${r.text}`).join('\n');
+  el.appendChild(why);
+
+  const busy = proposalBusy.has(p.missionId);
+  const row = document.createElement('div');
+  row.className = 'askrow';
+  const cancel = document.createElement('button');
+  cancel.className = 'askbtn';
+  setText(cancel, 'Cancel task');
+  cancel.disabled = busy;
+  cancel.addEventListener('click', () => decide(p, { kind: 'cancel' }));
+
+  if (p.options.length === 0) {
+    const none = document.createElement('div');
+    none.className = 'asknote';
+    setText(none, 'No model can run it: give models a tier in Preferences → Orchestration.');
+    el.appendChild(none);
+    row.appendChild(cancel);
+    el.appendChild(row);
+    return el;
+  }
+
+  const pick = proposalPicks.get(p.missionId) ?? {};
+  const optionId = pick.optionId ?? p.recommended?.optionId ?? p.options[0].id;
+  const option = p.options.find((o) => o.id === optionId) ?? p.options[0];
+
+  const picks = document.createElement('div');
+  picks.className = 'proppicks';
+  const model = document.createElement('select');
+  model.className = 'propselect';
+  model.title = 'Model';
+  model.disabled = busy;
+  for (const o of p.options) {
+    const opt = document.createElement('option');
+    opt.value = o.id;
+    opt.textContent = o.id === p.recommended?.optionId ? `${o.label} — recommended` : o.label;
+    opt.selected = o.id === option.id;
+    model.appendChild(opt);
+  }
+  const effort = document.createElement('select');
+  effort.className = 'propselect';
+  effort.title = 'Effort';
+  effort.disabled = busy;
+  const wantedEffort = pick.effort ?? p.recommended?.effort;
+  const efforts = option.efforts;
+  const chosenEffort = efforts.find((e) => e.level === wantedEffort) ?? efforts.find((e) => e.level === 'medium') ?? efforts[0];
+  for (const e of efforts) {
+    const opt = document.createElement('option');
+    opt.value = e.level;
+    opt.textContent = e.level === p.recommended?.effort && option.id === p.recommended?.optionId ? `${e.level} — recommended` : e.level;
+    opt.selected = e.level === chosenEffort?.level;
+    effort.appendChild(opt);
+  }
+  effort.hidden = efforts.length === 0;
+  model.addEventListener('change', () => {
+    proposalPicks.set(p.missionId, { optionId: model.value, effort: effort.value || undefined });
+    renderProposals();
+  });
+  effort.addEventListener('change', () => {
+    proposalPicks.set(p.missionId, { optionId: model.value, effort: effort.value });
+    renderProposals();
+  });
+  picks.append(model, effort);
+  el.appendChild(picks);
+
+  const run = document.createElement('button');
+  run.className = 'askbtn primary';
+  const native = chosenEffort?.native;
+  setText(run, `Run${native ? ` at ${native}` : ''}`);
+  run.disabled = busy;
+  run.addEventListener('click', () => {
+    const isRecommended = option.id === p.recommended?.optionId && chosenEffort?.level === p.recommended?.effort;
+    decide(p, isRecommended ? { kind: 'run' } : { kind: 'run', route: { harness: option.harness, model: option.model, ...(native ? { effort: native } : {}) } });
+  });
+  row.append(run, cancel);
+  el.appendChild(row);
+  return el;
+}
+
+function decide(p: TaskProposalView, decision: { kind: 'run'; route?: { harness: string; model: string; effort?: string } } | { kind: 'cancel' }): void {
+  proposalBusy.set(p.missionId, Date.now());
+  renderProposals();
+  post({ type: 'proposalDecision', missionId: p.missionId, decision });
+  setTimeout(renderProposals, BUSY_MS + 50);
+}
+
+function setProposals(next: TaskProposalView[] | undefined): void {
+  const before = new Set(proposals.map((x) => x.missionId));
+  proposals = next ?? [];
+  renderProposals();
+  // A new card arrives at the end of the conversation: follow it there if the user was following.
+  if (stick && proposals.some((x) => !before.has(x.missionId))) scrollToBottom();
+}
+
 /**
  * "Why this route" (§9.5, #38): the rules that fired, the requirement, and the
  * candidates passed over, as the host assembled them from the stored decision.
@@ -2275,6 +2430,8 @@ vscodeApi.onMessage((body) => {
       if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = routingOpen = false;
       task = m.task;
       renderTask();
+      proposals = [];
+      setProposals(m.proposals);
       stick = true;
       appendBlocks(m.blocks);
       // Opening a pane on a session that is already waiting lands on what it is
@@ -2315,6 +2472,9 @@ vscodeApi.onMessage((body) => {
       if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = routingOpen = false;
       task = m.task;
       renderTask();
+      break;
+    case 'proposals':
+      setProposals(m.proposals);
       break;
     case 'composer':
       setComposer(m.composer);

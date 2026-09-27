@@ -433,9 +433,14 @@ The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy
 "run this as a task", and it runs `aw task` with the objective and criteria. The task is
 always proposed, never started: the app assesses it and picks a route (as in `assisted`
 mode, whatever `orchestration.routing.mode` says), then shows a *Task proposal* notification
-and a flash. Click the notification, or pick the task from the launcher's **Tasks** menu, to
-see the route and accept or change it. The proposal is never popped up on its own, because a
-palette that opens while you type in the composer would take your Enter as "accept". The
+and a flash. The proposal is answered **in the conversation that asked for it** (#81): a card
+at the end of that conversation, styled like a question or a plan, with the recommended model
+and effort pre-selected, **Run**, and **Cancel task**. Changing the model or effort before
+Run is recorded as a disagreement with the router; Run on what was offered is an acceptance.
+The notification's click brings that conversation up. Nothing takes focus and nothing is
+accepted by keyboard alone, so an Enter meant for the composer can never start a task. A
+proposal with no known conversation (`aw task` from your own terminal) is reached from the
+notification or the launcher's **Tasks** menu instead. The
 branch is cut from the repository's primary checkout, not from the conversation's worktree.
 Needs `"orchestration.enabled": true`. A Claude Code skill telling agents when to use it is
 in `docs/skills/agentwrangler-task/SKILL.md`; copy it to `~/.claude/skills/`.

@@ -145,7 +145,7 @@ export function formatProjects(projects: readonly ControlProject[], now: number,
  * person: the last line says what to tell the user, since nothing runs until
  * they act on it in the app.
  */
-export function formatProposal(r: ControlTaskProposeResult): string {
+export function formatProposal(r: ControlTaskProposeResult, fromConversation = false): string {
   const lines = [`Task proposed: ${safe(r.task.title)}`];
   if (r.route) lines.push(`Route: ${safe(r.route)}${r.verdict === 'route' ? '' : ' (needs a decision)'}`);
   else lines.push('Route: none recommended');
@@ -154,7 +154,9 @@ export function formatProposal(r: ControlTaskProposeResult): string {
   lines.push(`Id: ${r.task.missionId}`);
   lines.push(
     '',
-    'Nothing is running yet. Approve it in Agent Wrangler: click the "Task proposal" notification, or Tasks → this task.',
+    fromConversation
+      ? 'Nothing is running yet. The user approves it on the "Task proposal" card at the end of this conversation in Agent Wrangler.'
+      : 'Nothing is running yet. Approve it in Agent Wrangler: click the "Task proposal" notification, or Tasks → this task.',
   );
   return lines.join('\n');
 }

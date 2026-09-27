@@ -25,7 +25,7 @@ import {
   type ControlTasksResult,
 } from '../core/control/protocol';
 import * as path from 'node:path';
-import { agentEnvironment, harnessOf, parseArgs, USAGE, type Command } from './args';
+import { agentEnvironment, harnessOf, originOf, parseArgs, USAGE, type Command } from './args';
 import { ATTACH_BACKLOG, AttachRenderer } from './attach';
 import { ControlClient } from './client';
 import { formatOffline, formatProjects, formatProposal, formatSession, formatSessions, formatStatus, formatTasks } from './format';
@@ -163,10 +163,11 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
         objective,
         acceptanceCriteria: cmd.criteria,
         ...((cmd.harness ?? harnessOf(process.env)) ? { harness: cmd.harness ?? harnessOf(process.env) } : {}),
+        ...(originOf(process.env) ? { origin: originOf(process.env) } : {}),
       };
       // Assessing is one model call, which can take longer than a read.
       const r = await client.request<ControlTaskProposeResult>('task.propose', params, { timeoutMs: 180_000 });
-      print(r, () => formatProposal(r), cmd.json);
+      print(r, () => formatProposal(r, params.origin !== undefined), cmd.json);
       return 0;
     }
     case 'tasks': {

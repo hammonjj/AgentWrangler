@@ -429,3 +429,42 @@ export function taskSummaryLine(v: TaskView): string {
   if (diff) parts.push(diff);
   return parts.join(' · ');
 }
+
+// ---------------------------------------------------------------------------
+// Proposal card (#81)
+// ---------------------------------------------------------------------------
+
+/** One route the proposal card offers: a model on a harness, with the effort levels it takes. */
+export interface ProposalModelOption {
+  /** `<harness>|<model>`: what the pane's select carries. */
+  id: string;
+  harness: HarnessId;
+  model: string;
+  /** "Sonnet 5 (standard) · Claude Code". */
+  label: string;
+  tier: string;
+  /** AW level → what is sent for it. Empty for a model with no effort control. */
+  efforts: { level: EffortLevel; native: string }[];
+}
+
+/**
+ * A task proposal made from a conversation (`aw task`), drawn as a card in
+ * that conversation's pane: accepted, changed or cancelled there, by a click.
+ */
+export interface TaskProposalView {
+  missionId: string;
+  title: string;
+  objective: string;
+  acceptanceCriteria: string[];
+  /** `route`: a route is recommended. Anything else: the user has to pick one. */
+  verdict: string;
+  why: RouteExplanationView;
+  /** Pre-selected in the card: the recommendation, when there is one. */
+  recommended?: { optionId: string; effort?: EffortLevel };
+  options: ProposalModelOption[];
+}
+
+/** What the card sends back. `route` absent: accept the recommendation as offered. */
+export type ProposalDecision =
+  | { kind: 'run'; route?: { harness: HarnessId; model: string; effort?: string } }
+  | { kind: 'cancel' };

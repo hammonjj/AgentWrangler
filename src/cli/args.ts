@@ -160,6 +160,13 @@ export function harnessOf(env: Record<string, string | undefined>): 'claude' | '
   return undefined;
 }
 
+/** The conversation this shell belongs to, from its agent's environment (#81), for `aw task`'s card. */
+export function originOf(env: Record<string, string | undefined>): { provider: 'claude' | 'codex'; sessionId: string } | undefined {
+  if (env.CODEX_THREAD_ID) return { provider: 'codex', sessionId: env.CODEX_THREAD_ID };
+  if (env.CLAUDE_CODE_SESSION_ID) return { provider: 'claude', sessionId: env.CLAUDE_CODE_SESSION_ID };
+  return undefined;
+}
+
 /**
  * Whether this looks like a shell an agent is running, and which one.
  *

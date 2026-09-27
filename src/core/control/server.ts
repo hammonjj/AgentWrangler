@@ -333,11 +333,18 @@ export function taskParams(p: Record<string, unknown>): ControlTaskProposeParams
   if (p.harness !== undefined && p.harness !== 'claude' && p.harness !== 'codex') {
     throw new ControlError(RPC_INVALID_PARAMS, 'harness must be claude or codex');
   }
+  // An origin that doesn't parse is dropped, not refused: it only decides where the card shows.
+  const o = p.origin as { provider?: unknown; sessionId?: unknown } | undefined;
+  const origin =
+    o && (o.provider === 'claude' || o.provider === 'codex') && typeof o.sessionId === 'string' && /^[\w-]{4,128}$/.test(o.sessionId)
+      ? { provider: o.provider as 'claude' | 'codex', sessionId: o.sessionId }
+      : undefined;
   return {
     folder: p.folder,
     objective: p.objective,
     acceptanceCriteria: ((criteria as string[] | undefined) ?? []).map((c) => c.trim()).filter(Boolean),
     ...(p.harness ? { harness: p.harness } : {}),
+    ...(origin ? { origin } : {}),
   };
 }
 

@@ -245,6 +245,12 @@ export interface ControlTaskProposeParams {
   acceptanceCriteria?: string[];
   /** Which agent the router should prefer within the tier it picks. A preference, not a pin. */
   harness?: 'claude' | 'codex';
+  /**
+   * The conversation asking, from its agent's environment (#81). Its pane
+   * shows the proposal as a card. Self-reported, so it only decides where a
+   * proposal is *shown*; it grants nothing.
+   */
+  origin?: { provider: 'claude' | 'codex'; sessionId: string };
 }
 
 /** One task, as `aw tasks` lists it. */

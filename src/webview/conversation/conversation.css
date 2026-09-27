@@ -699,6 +699,56 @@ body,
   margin-top: 6px;
 }
 
+/* ---- task proposal cards (#81): after the conversation, styled as an ask ---- */
+
+#convApp #proposals {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+#convApp #proposals[hidden] {
+  display: none;
+}
+#convApp .proposal .proptitle {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+#convApp .proposal .propdetails {
+  margin: 4px 0;
+  font-size: 0.92em;
+}
+#convApp .proposal .propdetails > summary {
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+}
+#convApp .proposal .propobjective {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 4px 0;
+}
+#convApp .proposal .propdetails ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+#convApp .proposal .proppicks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+#convApp .proposal .propselect {
+  font-family: inherit;
+  font-size: 0.9em;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 4px;
+  border-radius: 3px;
+  border: 1px solid var(--vscode-dropdown-border, var(--aw-rule));
+  background: var(--vscode-dropdown-background, transparent);
+  color: var(--vscode-dropdown-foreground, inherit);
+}
+
 /* ---- the ask you are being kept waiting by ----
    A strip directly above the composer, shown only while an unanswered ask is
    off screen. It is a pointer, not a copy: the card itself stays where it

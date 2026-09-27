@@ -60,8 +60,9 @@ import { nativeEffortFor, tierRank } from '../shared/orchestration/catalog';
 import { Emitter } from '../core/events';
 import type { TurnRecord } from '../shared/orchestration/telemetry';
 import type { Mission } from '../shared/orchestration/types';
-import type { TaskView, TaskViewAction } from '../shared/orchestration/taskView';
+import type { ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../shared/orchestration/taskView';
 import { taskBadges, taskViewOf } from '../orchestration/view/taskViews';
+import { isOpenProposal, proposalChoice, proposalViewOf } from '../orchestration/view/proposalView';
 import { TelemetryLog } from '../core/telemetry/telemetryLog';
 import { TELEMETRY_ENABLED_KEY, TELEMETRY_PRICES_KEY, TurnTelemetry } from '../core/telemetry/turnTelemetry';
 import type { PriceTable } from '../core/telemetry/turnUsage';
@@ -1120,9 +1121,31 @@ export function createApp(host: HostServices): AgentWranglerApp {
         run: async (missionId: string, action: TaskViewAction): Promise<void> => {
           await runTaskAction(tasks, missionId, action);
         },
+        proposalsFor: (sessionKey: string): TaskProposalView[] =>
+          tasks
+            .list()
+            .filter((m) => m.origin && originKey(m.origin) === sessionKey.toLowerCase() && isOpenProposal(m))
+            .map((m) => proposalViewOf(m, m.tasks[0].recommendation!, models.catalog))
+            .reverse(),
+        decideProposal: async (missionId: string, decision: ProposalDecision): Promise<void> => {
+          const m = tasks.get(missionId);
+          if (!m || !isOpenProposal(m)) throw new TaskError('That proposal has already been started or cancelled.');
+          if (decision.kind === 'cancel') {
+            await tasks.cancel(missionId);
+            dialogs.flash(`Task proposal cancelled: ${m.title}`);
+            return;
+          }
+          const started = await tasks.startProposed(missionId, proposalChoice(m.tasks[0].recommendation!, models.catalog, decision));
+          dialogs.flash(`Task started on ${started.worktrees.at(-1)?.branch ?? 'its own branch'}`);
+        },
         onDidChange: (listener: () => void) => tasks.onDidChange(listener),
       }
     : undefined;
+
+  /** The session key of the conversation a proposal came from. */
+  function originKey(origin: NonNullable<Mission['origin']>): string {
+    return `${origin.provider}:${origin.sessionId}`.toLowerCase();
+  }
 
   /**
    * Run one of the strip's actions.
@@ -1421,21 +1444,26 @@ export function createApp(host: HostServices): AgentWranglerApp {
       objective: req.objective,
       acceptanceCriteria: req.acceptanceCriteria ?? [],
       policy: { caps: routing.caps, preferences: { harness } },
+      ...(req.origin ? { origin: req.origin } : {}),
     });
     const target = recommendation.resolution.target;
     const route = target && recommendation.verdict !== 'blocked' ? targetLabel(target) : undefined;
+    // A proposal from a conversation is answered on its card there (#81): the
+    // click brings that conversation up. One with no known conversation falls
+    // back to the palette, which only a click ever opens.
+    const from = mission.origin ? store.get(originKey(mission.origin)) : undefined;
     const open = () => {
       const current = runner.get(mission.id);
-      const task = current?.tasks[0];
-      if (!task?.recommendation || task.attemptIds.length > 0 || !['routed', 'needs-human'].includes(task.state)) {
+      if (!current || !isOpenProposal(current)) {
         dialogs.flash('That proposal has already been started or cancelled.');
         return;
       }
-      void reviewProposal(runner, mission.id, task.recommendation, { showSession: false });
+      if (from && store.get(from.key)) surface?.show(from.key);
+      else void reviewProposal(runner, mission.id, current.tasks[0].recommendation!, { showSession: false });
     };
     const body = route ? `Proposed: ${route}. Click to review and start it.` : 'No route recommended: click to pick one.';
     if (host.notify) host.notify({ title: `Task proposal: ${mission.title}`, body, onClick: open });
-    dialogs.flash(`Task proposal waiting: ${mission.title} (Tasks menu)`, 6000);
+    dialogs.flash(`Task proposal waiting: ${mission.title} (${from ? 'in its conversation' : 'Tasks menu'})`, 6000);
     log(`task ${mission.id}: proposed through aw`);
     return {
       task: taskSummary(runner.get(mission.id) ?? mission),

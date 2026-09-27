@@ -12,7 +12,7 @@ import type {
   PermissionModeName,
 } from './conversation';
 import type { HookHealth, ProjectDTO, SessionDTO } from './model';
-import type { TaskView, TaskViewAction } from './orchestration/taskView';
+import type { ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from './orchestration/taskView';
 import type { UsageState } from './usage';
 
 // ---- Dashboard ----
@@ -177,6 +177,8 @@ export type HostToConversation =
        * the pane then has no strip at all.
        */
       task?: TaskView;
+      /** Task proposals this conversation handed off with `aw task`, drawn as cards at its end (#81). */
+      proposals?: TaskProposalView[];
     }
   | { type: 'append'; blocks: ConvBlock[] }
   /** In-place update of one block: a tool's result, a streaming reply, an ask being settled. */
@@ -190,6 +192,8 @@ export type HostToConversation =
    * attempt's).
    */
   | { type: 'task'; task?: TaskView }
+  /** The proposal cards changed: one arrived, or one was started or cancelled (#81). */
+  | { type: 'proposals'; proposals: TaskProposalView[] }
   | { type: 'composer'; composer: ComposerState }
   /**
    * The whole of a block the pane only got the start of — the answer to
@@ -275,6 +279,8 @@ export type ConversationToHost =
    * since been replaced by.
    */
   | { type: 'taskAction'; missionId: string; action: TaskViewAction }
+  /** A proposal card's Run (on the route shown) or Cancel (#81). Only ever sent by a click. */
+  | { type: 'proposalDecision'; missionId: string; decision: ProposalDecision }
   /**
    * A line in the strip's attempts list: show that attempt's conversation in
    * this pane. It is a session key, so it goes through the same path a row
