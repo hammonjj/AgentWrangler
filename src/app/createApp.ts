@@ -1020,6 +1020,52 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   /**
+   * Pause All as a person asks for it — the toolbar button and the menu item.
+   *
+   * Pausing asks first (#79): the button sits beside the Discord toggle, and a
+   * stray click froze every running agent. Cancel is the default so Return and
+   * Escape both back out. Resuming does not ask; it only undoes a pause.
+   * Auto-pause calls `setPausedAll` directly and never sees this: a modal nobody
+   * is there to answer would leave the plan spending.
+   *
+   * `confirmingPauseAll` swallows clicks that land while the dialog is up, so
+   * one confirmation pauses once.
+   */
+  let confirmingPauseAll = false;
+  const requestPauseAll = async (wanted: boolean): Promise<void> => {
+    if (!wanted) {
+      setPausedAll(false);
+      return;
+    }
+    if (confirmingPauseAll) return;
+    const running = store.sessions.filter(
+      (s) => s.status !== 'ended' && s.pid !== undefined && !pause.isPaused(s.pid),
+    ).length;
+    // Nothing to pause: let setPausedAll say so rather than asking about nothing.
+    if (running === 0) {
+      setPausedAll(true);
+      return;
+    }
+    confirmingPauseAll = true;
+    try {
+      const choice = await dialogs.warn(
+        `Pause all ${running} running agent${running === 1 ? '' : 's'}?`,
+        {
+          modal: true,
+          defaultToCancel: true,
+          detail:
+            'Every running Claude Code and Codex agent on this machine stops where it is. ' +
+            'Nothing is lost: Resume All carries on from exactly where they stopped.',
+        },
+        'Pause All Agents',
+      );
+      if (choice === 'Pause All Agents') setPausedAll(true);
+    } finally {
+      confirmingPauseAll = false;
+    }
+  };
+
+  /**
    * Auto-pause: stop everything by itself when the plan is nearly spent.
    *
    * Armed state is per-process and deliberately not persisted. Two windows both
@@ -2048,7 +2094,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       setPaused(s, wanted);
     },
     pauseAll(wanted) {
-      setPausedAll(wanted);
+      void requestPauseAll(wanted);
     },
     resume(key) {
       const s = store.get(key);
@@ -2709,7 +2755,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       void usage.refresh({ force: true });
     },
     pauseAll(wanted) {
-      setPausedAll(wanted);
+      void requestPauseAll(wanted);
     },
     installHooks,
     uninstallHooks,
