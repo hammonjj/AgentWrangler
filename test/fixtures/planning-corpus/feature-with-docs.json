@@ -1,0 +1,16 @@
+{
+  "id": "feature-with-docs",
+  "case": "a small feature whose docs are a mechanical follow-up",
+  "objective": "Add a --json flag to the `export` command that prints the export as JSON instead of CSV, and document the flag in the README's command reference.",
+  "repo": {
+    "files": {
+      "package.json": "{\"name\":\"cli\",\"scripts\":{\"test\":\"vitest run\",\"typecheck\":\"tsc --noEmit\"}}\n",
+      "README.md": "# cli\n\n## Commands\n\n### export\n\nWrites the records as CSV.\n",
+      "src/commands/export.ts": "export function exportCommand(args: string[], records: object[]): string {\n  return records.map((r) => Object.values(r).join(',')).join('\\n');\n}\n",
+      "src/commands/index.ts": "export * from './export';\n",
+      "test/export.test.ts": "// tests for the export command\n"
+    },
+    "verification": ["test", "typecheck"]
+  },
+  "expect": { "split": "never" }
+}

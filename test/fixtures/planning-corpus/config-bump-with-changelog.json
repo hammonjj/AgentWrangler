@@ -1,0 +1,15 @@
+{
+  "id": "config-bump-with-changelog",
+  "case": "a trivial change with a changelog line",
+  "objective": "Raise the default request timeout from 10 seconds to 30 seconds and add a line about it to the changelog.",
+  "repo": {
+    "files": {
+      "package.json": "{\"name\":\"client\",\"scripts\":{\"test\":\"vitest run\"}}\n",
+      "CHANGELOG.md": "# Changelog\n\n## Unreleased\n",
+      "src/config.ts": "export const DEFAULT_TIMEOUT_MS = 10_000;\n",
+      "src/http.ts": "import { DEFAULT_TIMEOUT_MS } from './config';\nexport const timeout = DEFAULT_TIMEOUT_MS;\n"
+    },
+    "verification": ["test"]
+  },
+  "expect": { "split": "never" }
+}

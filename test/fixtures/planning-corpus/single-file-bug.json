@@ -1,0 +1,15 @@
+{
+  "id": "single-file-bug",
+  "case": "a bug in one function, with its test",
+  "objective": "Fix pagination: page 2 repeats the last item of page 1 because the offset is computed as (page - 1) * size - 1. Add a regression test.",
+  "repo": {
+    "files": {
+      "package.json": "{\"name\":\"shop\",\"scripts\":{\"test\":\"vitest run\"}}\n",
+      "src/pagination.ts": "export function pageOffset(page: number, size: number): number {\n  return (page - 1) * size - 1;\n}\n",
+      "src/catalog.ts": "import { pageOffset } from './pagination';\nexport function page(items: string[], n: number, size: number) {\n  const at = pageOffset(n, size);\n  return items.slice(at, at + size);\n}\n",
+      "test/catalog.test.ts": "// tests for catalog paging\n"
+    },
+    "verification": ["test"]
+  },
+  "expect": { "split": "never" }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "disjoint-client-and-server",
+  "case": "two unrelated pieces of work on disjoint files, each checkable on its own (a split may pay)",
+  "objective": "Two things: add a dark theme to the web client that follows the operating system's setting, and add a GET /healthz endpoint to the API server that returns 200 with the build version.",
+  "repo": {
+    "files": {
+      "package.json": "{\"name\":\"mono\",\"workspaces\":[\"web\",\"server\"],\"scripts\":{\"test\":\"vitest run\",\"typecheck\":\"tsc -b\"}}\n",
+      "web/src/theme.ts": "export const light = { bg: '#fff', fg: '#111' };\n",
+      "web/src/app.ts": "import { light } from './theme';\nexport const theme = light;\n",
+      "web/test/theme.test.ts": "// tests for the web theme\n",
+      "server/src/routes.ts": "export const routes = { '/items': 'listItems' };\n",
+      "server/src/version.ts": "export const VERSION = '0.0.0';\n",
+      "server/test/routes.test.ts": "// tests for the server routes\n"
+    },
+    "verification": ["test", "typecheck"]
+  },
+  "expect": { "split": "allowed", "maxTasks": 2 }
+}

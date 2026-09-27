@@ -391,6 +391,22 @@ new worktree and branch of the chosen folder's repository:
   **Why this route** in the task strip (and the route chip's tooltip) shows the rules that
   fired and on what, the requirement, the fallbacks, and every model that was not picked and
   why — read back from what was recorded when the attempt started, not worked out again.
+- **Missions: a plan of tasks, reviewed before anything runs.** *+ New mission* in the table's
+  Missions view (or *New mission…* in the Tasks menu) asks for the objective, then whether to
+  write the tasks yourself or have them planned. The **planner** reads the repository — only
+  reads: plan mode, `Read`/`Grep`/`Glob`, nothing outside the checkout — and proposes a plan,
+  **one task unless a split pays for itself** (parts that can be checked on their own, or that
+  touch disjoint files). Its answer is data: titles, criteria, scope globs, dependencies and the
+  names of verification commands your repository policy already has; it cannot choose a model,
+  a tool, a permission or a command. A plan with a cycle, too many tasks, a task with no
+  criteria, an unknown check or a path outside the repository gets one repair round, then the
+  mission says *planning failed* and why (*Plan again…* or *Write it myself*). A plan that is
+  valid but splits where it should not — two tasks on the same files, a chain over one
+  subsystem, a trivial or docs-only task — is kept with a warning for you to merge in review.
+  Either way you review, edit and approve it; tasks then run one at a time on one mission
+  branch. **Replan…** on a started mission asks the planner for the rest: done tasks stay
+  exactly as they are, unfinished work is set aside on a branch of its own, and the new plan
+  goes through review again.
 - **Restarts.** A task's conversation is an ordinary row in the table. It survives quitting and
   reinstalling (Claude tasks need *Keep conversations running when Agent Wrangler quits*, and
   are refused without it). On relaunch the task is picked up where it is. If its session was

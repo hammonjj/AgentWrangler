@@ -246,7 +246,7 @@ export function missionViewOf(m: Mission, ctx: MissionViewContext): MissionView 
     canReplan:
       ctx.canPlan === true &&
       m.planned === true &&
-      (m.state === 'running' || m.state === 'paused') &&
+      m.state === 'running' &&
       !m.attempts.some((a) => LIVE_ATTEMPT.has(a.state)) &&
       m.tasks.some((t) => t.state !== 'done'),
     createdAt: m.createdAt,

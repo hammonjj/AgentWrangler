@@ -25,7 +25,8 @@
  * writer at a time; the store is written after every change.
  *
  * **Planned missions** (#43, §29 P8) are the same machinery with more than one
- * task. They are written by hand (the planner is #44), edited in plan review
+ * task. They are written by hand or proposed by the read-only planner (#44,
+ * `policy/planner.ts`; replanned the same way), edited in plan review
  * (`domain/plan.ts`), and nothing about them runs until the user presses
  * Approve and start (`approvePlan`), in any routing mode. Then their tasks run
  * one at a time in dependency order, in **one mission worktree on the mission
@@ -1071,7 +1072,7 @@ export class TaskRunner implements Disposable {
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
       if (!this.deps.planner) throw new TaskError('Replanning needs the planner, which is not running.');
-      if (!isPlanned(m) || (m.state !== 'running' && m.state !== 'paused')) throw new TaskError('Only a planned mission that is running can be replanned.');
+      if (!isPlanned(m) || m.state !== 'running') throw new TaskError('Only a planned mission that is running can be replanned.');
       const live = m.attempts.find((a) => LIVE.includes(a.state));
       if (live) throw new TaskError(`${m.tasks.find((t) => t.id === live.taskId)?.key ?? 'A task'} is running; stop it (or wait for it) before replanning.`);
       if (m.tasks.every((t) => t.state === 'done')) throw new TaskError('Every task is done: there is nothing left to replan.');
@@ -1145,6 +1146,8 @@ export class TaskRunner implements Disposable {
       const run = m.planning?.find((r) => r.id === runId);
       // Cancelled, or superseded by a newer run, while it was out.
       if (!run || run.state !== 'running' || m.state !== 'planning') return;
+      // Cut off by Cancel (which records it) or by the app stopping (recovery asks again): not a failure.
+      if (this.disposed || (!result.ok && result.aborted)) return;
       const now = this.now();
       const fail = (reason: string, rounds = result.rounds) => {
         m = this.patchRun(m, runId, (r) => ({ ...r, state: 'failed', reason, rounds, model: result.model, endedAt: now }));
@@ -1181,7 +1184,7 @@ export class TaskRunner implements Disposable {
         }
         const staying = m.tasks.filter((t) => t.state === 'done' || t.attemptIds.length > 0);
         const removed = m.tasks.filter((t) => !staying.includes(t));
-        tasks = [...staying, ...plannedTasks(result.plan.tasks, staying, ctx)];
+        tasks = [...staying, ...plannedTasks(result.plan.tasks, staying, ctx, m.tasks)];
         diff = {
           kept: staying.filter((t) => t.state === 'done').map((t) => t.key),
           setAside: aside.map((t) => t.key),
@@ -3037,10 +3040,11 @@ function latestAssessment(m: Mission, taskId: string): TaskAssessment | undefine
  * policy by kind, exactly as for a task written by hand: the planner can name
  * strategies (`checkPlan` holds it to ones that exist) but cannot weaken them.
  */
-export function plannedTasks(planned: readonly PlannedTask[], staying: readonly Task[], ctx: PlanContext): Task[] {
+export function plannedTasks(planned: readonly PlannedTask[], staying: readonly Task[], ctx: PlanContext, reserved: readonly Pick<Task, 'key'>[] = staying): Task[] {
   const ids = new Map<string, string>();
   const out: Task[] = [];
-  let taken = [...staying];
+  // Keys are never reused in a mission, not even a replaced task's: history and branches name tasks by key.
+  let taken: Pick<Task, 'key'>[] = [...reserved];
   for (const p of planned) {
     const key = nextTaskKey(taken);
     const t = planTask(key, { title: p.title, objective: p.objective, acceptanceCriteria: p.acceptanceCriteria, scopePaths: p.scope.paths, kind: p.assessmentHints.kind }, ctx);

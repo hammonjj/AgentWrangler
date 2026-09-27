@@ -1,0 +1,15 @@
+{
+  "id": "same-file-asks",
+  "case": "several asks that all edit the same file",
+  "objective": "In the settings dialog: validate that the port is a number from 1 to 65535 and show the error under the field; trim whitespace from the host field before saving; and disable Save while either field is invalid.",
+  "repo": {
+    "files": {
+      "package.json": "{\"name\":\"app\",\"scripts\":{\"test\":\"vitest run\"}}\n",
+      "src/ui/settingsDialog.ts": "export function settingsDialog(host: string, port: string) {\n  return { host, port: Number(port), canSave: true };\n}\n",
+      "src/ui/dialog.css": ".dialog { padding: 8px; }\n",
+      "test/ui/settingsDialog.test.ts": "// tests for the settings dialog\n"
+    },
+    "verification": ["test"]
+  },
+  "expect": { "split": "never" }
+}
