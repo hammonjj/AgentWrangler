@@ -64,7 +64,7 @@ async function messageBox(
   parent: BrowserWindow | undefined,
   type: 'info' | 'warning' | 'error',
   message: string,
-  options: { detail?: string; modal?: boolean },
+  options: { detail?: string; modal?: boolean; defaultToCancel?: boolean },
   items: string[],
 ): Promise<string | undefined> {
   // A dialog with no buttons of its own still needs a way out, and the caller
@@ -77,7 +77,7 @@ async function messageBox(
     message,
     detail: options.detail,
     buttons,
-    defaultId: 0,
+    defaultId: options.defaultToCancel ? cancelId : 0,
     cancelId,
     noLink: true,
   } as const;

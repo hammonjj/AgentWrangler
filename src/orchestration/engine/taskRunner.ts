@@ -25,7 +25,8 @@
  * writer at a time; the store is written after every change.
  *
  * **Planned missions** (#43, §29 P8) are the same machinery with more than one
- * task. They are written by hand (the planner is #44), edited in plan review
+ * task. They are written by hand or proposed by the read-only planner (#44,
+ * `policy/planner.ts`; replanned the same way), edited in plan review
  * (`domain/plan.ts`), and nothing about them runs until the user presses
  * Approve and start (`approvePlan`), in any routing mode. Then their tasks run
  * one at a time in dependency order, in **one mission worktree on the mission
@@ -47,7 +48,7 @@ import type { SessionRecord, SessionRegistry } from '../../core/session/sessionR
 import type { PermissionModeName } from '../../shared/conversation';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
 import { DEFAULT_REPO_POLICY } from '../../shared/orchestration/repoPolicy';
-import type { TaskFinalRecord, TelemetryRecord, TurnRecord } from '../../shared/orchestration/telemetry';
+import type { PlanRecord, TaskFinalRecord, TelemetryRecord, TurnRecord } from '../../shared/orchestration/telemetry';
 import { TELEMETRY_SCHEMA_VERSION } from '../../shared/orchestration/telemetry';
 import type { PlanEdit, PlanTaskDraft } from '../../shared/orchestration/plan';
 import {
@@ -69,6 +70,7 @@ import {
   type OrchestrationOrigin,
   type OutcomeCategory,
   type PolicyChange,
+  type PlanningRun,
   type PolicyLayers,
   type RoutePins,
   type RouteRecommendation,
@@ -83,7 +85,8 @@ import {
 } from '../../shared/orchestration/types';
 import { ulid } from '../domain/ids';
 import { dependenciesSatisfied, taskMachine, transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
-import { applyPlanEdit, executionOrder, planIssues, tasksFromDraft, type PlanContext } from '../domain/plan';
+import { applyPlanEdit, executionOrder, nextTaskKey, planIssues, planTask, taskCap, tasksFromDraft, type PlanContext } from '../domain/plan';
+import type { PlannedTask, PlanResult, Planner, ReplanContext } from '../policy/planner';
 import { MissionFinisher } from './missionFinish';
 import type { AgentHarness } from '../harness/types';
 import type { Assessor } from '../policy/assessor';
@@ -261,6 +264,8 @@ export interface TaskRunnerDeps {
   exec?: Exec;
   /** The review-agent verifier (#36). Absent: `review` stages are `unavailable`. */
   reviewer?: Pick<Reviewer, 'review'>;
+  /** The read-only planner (#44). Absent: missions are written by hand only. */
+  planner?: Pick<Planner, 'plan' | 'model' | 'effort'>;
   /** Asked to open a diff file once one is written for a notification click. */
   openFile?: (file: string) => void;
   now?: () => number;
@@ -289,6 +294,7 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const END_SESSION_WAIT_MS = 15_000;
 /** Attempt states in which a session is (or is about to be) the attempt's. */
 const LIVE: readonly AttemptState[] = ['launching', 'running', 'waiting-human', 'finishing', 'verifying'];
+const PLANNING_REASON = 'the planner is reading the repository; nothing runs until you approve its plan';
 
 interface Watcher {
   missionId: string;
@@ -323,6 +329,8 @@ export class TaskRunner implements Disposable {
   private readonly previewTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Escalation steps waiting to run (a backoff, capacity coming back), by decision id (#41). */
   private readonly escalationTimers = new Map<string, { missionId: string; timer: ReturnType<typeof setTimeout> }>();
+  /** The planner call out for each mission, to cut off on Cancel. */
+  private readonly planAborts = new Map<string, AbortController>();
   private readonly now: () => number;
   private readonly random: (bytes: number) => Uint8Array;
   private readonly settleMs: number;
@@ -907,8 +915,16 @@ export class TaskRunner implements Disposable {
   /** Stop the mission: its session is ended, its worktrees and branches are kept. */
   cancel(missionId: string): Promise<void> {
     this.clearEscalations(missionId);
+    // The planner is cut off first: its call may be what the queue is waiting behind.
+    this.planAborts.get(missionId)?.abort();
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
+      const run = this.latestRun(m);
+      if (run?.state === 'running') {
+        m = this.patchRun(m, run.id, (r) => ({ ...r, state: 'cancelled', reason: 'cancelled by the user', endedAt: this.now() }));
+        this.put(m);
+        this.writePlanRecord(m, run.id);
+      }
       const a = this.currentAttempt(m);
       if (a && LIVE.includes(a.state)) {
         m = this.endAttempt(m, a.id, 'cancelled', { status: 'cancelled' }, 'cancelled by the user');
@@ -938,6 +954,17 @@ export class TaskRunner implements Disposable {
    * Preview assessments start in the background.
    */
   async createMission(req: NewMission): Promise<Mission> {
+    let mission = await this.recordPlanned(req);
+    const now = this.now();
+    mission = transitionMission(mission, 'plan-review', { now, reason: 'written by you: review the plan, then approve and start it' });
+    this.put(mission);
+    this.log(`mission ${mission.id}: recorded with ${mission.tasks.length} task(s) in ${mission.repoRoot}, waiting for review`);
+    this.schedulePreview(mission.id);
+    return mission;
+  }
+
+  /** A planned mission, recorded as a `draft` (not yet saved): its layers frozen, its hand-written plan validated. */
+  private async recordPlanned(req: NewMission): Promise<Mission> {
     const objective = req.objective.trim();
     if (!objective) throw new TaskError('A mission needs an objective.');
     const loaded = this.deps.repoPolicies.forFolder(req.folder);
@@ -968,7 +995,7 @@ export class TaskRunner implements Disposable {
     const drafts = req.tasks && req.tasks.length > 0 ? req.tasks : [{ title, objective, acceptanceCriteria: [] }];
     const built = tasksFromDraft(drafts, policy, this.planContext(loaded.policy));
     if (!built.ok) throw new TaskError(`The plan was refused: ${built.problems.join('; ')}.`);
-    let mission: Mission = {
+    return {
       id: this.id(),
       v: 1,
       title,
@@ -990,11 +1017,241 @@ export class TaskRunner implements Disposable {
       createdAt: now,
       updatedAt: now,
     };
-    mission = transitionMission(mission, 'plan-review', { now, reason: 'written by you: review the plan, then approve and start it' });
-    this.put(mission);
-    this.log(`mission ${mission.id}: recorded with ${mission.tasks.length} task(s) in ${mission.repoRoot}, waiting for review`);
-    this.schedulePreview(mission.id);
-    return mission;
+  }
+
+  // ---- The planner (#44, §11) ----
+
+  /** Whether a mission can be planned here rather than written by hand. */
+  get canPlan(): boolean {
+    return this.deps.planner !== undefined;
+  }
+
+  /**
+   * Record a mission and ask the planner for its plan (§11.1). Resolves at
+   * once, with the mission `planning`; the plan arrives in plan review, or
+   * the mission goes `planning-failed` saying why. Until the plan comes, the
+   * mission holds one task — the objective itself — which is what "Write it
+   * yourself" starts plan review from. Nothing runs: approval is still the
+   * only way in (§11.2).
+   */
+  async planMission(req: NewMission & { note?: string }): Promise<Mission> {
+    if (!this.deps.planner) throw new TaskError('Planning a mission needs the planner, which is not running.');
+    let m = await this.recordPlanned({ ...req, tasks: undefined });
+    const run = this.newRun('plan', req.note);
+    m = transitionMission({ ...m, planning: [run] }, 'planning', { now: this.now(), reason: PLANNING_REASON });
+    this.put(m);
+    this.log(`mission ${m.id}: recorded in ${m.repoRoot}; the planner is on it`);
+    this.startPlanner(m.id, run.id);
+    return m;
+  }
+
+  /**
+   * Ask the planner again: after it failed, or from plan review for a plan
+   * nobody has started (a fresh plan), or after a replan (another replan).
+   * `note` is what the user wants done differently.
+   */
+  planAgain(missionId: string, note?: string): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (!this.deps.planner) throw new TaskError('Planning needs the planner, which is not running.');
+      if (!m.planned || (m.state !== 'planning-failed' && m.state !== 'plan-review')) throw new TaskError('The mission is not waiting on a plan.');
+      const kind = m.tasks.some((t) => t.attemptIds.length > 0 || t.state === 'done') ? 'replan' : 'plan';
+      const run = this.newRun(kind, note);
+      m = transitionMission({ ...m, planning: [...(m.planning ?? []), run], planApprovedAt: undefined }, 'planning', { now: this.now(), reason: PLANNING_REASON });
+      this.put(m);
+      this.startPlanner(missionId, run.id);
+      return m;
+    });
+  }
+
+  /** Give up on the planner and write the plan by hand, from what the mission has now. */
+  writePlan(missionId: string): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (m.state !== 'planning-failed') throw new TaskError('The mission is not waiting on a plan.');
+      m = transitionMission({ ...m, planApprovedAt: undefined }, 'plan-review', { now: this.now(), reason: 'written by you: review the plan, then approve and start it' });
+      this.put(m);
+      this.schedulePreview(missionId);
+      return m;
+    });
+  }
+
+  /**
+   * Replan a mission that has started (§11.4): the planner sees what is done,
+   * what failed and why, and proposes what is left. Its answer is a diff that
+   * goes through plan review like any plan — done tasks stay exactly as they
+   * are, a task that started and did not finish has its work set aside (kept
+   * on a branch of its own) and is skipped, and tasks not started are replaced.
+   * Refused while an attempt is running: stop it first.
+   */
+  replan(missionId: string, note?: string): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (!this.deps.planner) throw new TaskError('Replanning needs the planner, which is not running.');
+      if (!isPlanned(m) || m.state !== 'running') throw new TaskError('Only a planned mission that is running can be replanned.');
+      const live = m.attempts.find((a) => LIVE.includes(a.state));
+      if (live) throw new TaskError(`${m.tasks.find((t) => t.id === live.taskId)?.key ?? 'A task'} is running; stop it (or wait for it) before replanning.`);
+      if (m.tasks.every((t) => t.state === 'done')) throw new TaskError('Every task is done: there is nothing left to replan.');
+      const run = this.newRun('replan', note);
+      m = transitionMission({ ...m, planning: [...(m.planning ?? []), run], planApprovedAt: undefined }, 'planning', { now: this.now(), reason: PLANNING_REASON });
+      this.put(m);
+      this.log(`mission ${missionId}: replanning`);
+      this.startPlanner(missionId, run.id);
+      return m;
+    });
+  }
+
+  private newRun(kind: PlanningRun['kind'], note: string | undefined): PlanningRun {
+    const planner = this.deps.planner!;
+    return {
+      id: this.id(),
+      kind,
+      state: 'running',
+      ...(note?.trim() ? { note: note.trim() } : {}),
+      startedAt: this.now(),
+      model: planner.model,
+      effort: planner.effort,
+      rounds: [],
+      editsInReview: 0,
+    };
+  }
+
+  /** Run the planner outside the mission's queue (a long model call must not hold up a Cancel). */
+  private startPlanner(missionId: string, runId: string): void {
+    if (this.disposed) return;
+    this.planAborts.get(missionId)?.abort();
+    const abort = new AbortController();
+    this.planAborts.set(missionId, abort);
+    void this.runPlanner(missionId, runId, abort.signal)
+      .catch((e) => this.log(`mission ${missionId}: planner failed: ${errorText(e)}`))
+      .finally(() => {
+        if (this.planAborts.get(missionId) === abort) this.planAborts.delete(missionId);
+      });
+  }
+
+  private async runPlanner(missionId: string, runId: string, signal: AbortSignal): Promise<void> {
+    const m = this.need(missionId);
+    const run = m.planning?.find((r) => r.id === runId);
+    if (!run || run.state !== 'running' || m.state !== 'planning') return;
+    const policy = this.deps.repoPolicies.forFolder(m.repoRoot)?.policy ?? DEFAULT_REPO_POLICY;
+    const staying = run.kind === 'replan' ? m.tasks.filter((t) => t.state === 'done' || t.attemptIds.length > 0) : [];
+    const cap = taskCap(m.policy) - staying.length;
+    if (cap < 1) {
+      await this.endRun(missionId, runId, { ok: false, reason: `the mission already has ${staying.length} tasks that stay, the most it may have; raise its task cap or finish it as it is`, rounds: [], model: run.model });
+      return;
+    }
+    const tree = m.integration !== 'none' ? m.worktrees.find((w) => w.id === (m.integration as { worktreeId: string }).worktreeId) : undefined;
+    // A replan reads the mission's tree, where the done work is; a fresh plan reads the base checkout.
+    const cwd = run.kind === 'replan' && tree && (tree.state === 'ready' || tree.state === 'in-use' || tree.state === 'retained') ? tree.path : m.repoRoot;
+    const result = await this.deps.planner!.plan({
+      objective: m.objective,
+      cwd,
+      strategies: Object.keys(policy.verification.commands),
+      cap,
+      ...(run.kind === 'replan' ? { replan: replanContext(m) } : {}),
+      ...(run.note ? { note: run.note } : {}),
+      signal,
+    });
+    await this.endRun(missionId, runId, result);
+  }
+
+  /** The planner answered (or could not): the plan into review, or `planning-failed` with the reason. */
+  private endRun(missionId: string, runId: string, result: PlanResult): Promise<void> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      const run = m.planning?.find((r) => r.id === runId);
+      // Cancelled, or superseded by a newer run, while it was out.
+      if (!run || run.state !== 'running' || m.state !== 'planning') return;
+      // Cut off by Cancel (which records it) or by the app stopping (recovery asks again): not a failure.
+      if (this.disposed || (!result.ok && result.aborted)) return;
+      const now = this.now();
+      const fail = (reason: string, rounds = result.rounds) => {
+        m = this.patchRun(m, runId, (r) => ({ ...r, state: 'failed', reason, rounds, model: result.model, endedAt: now }));
+        m = transitionMission(m, 'planning-failed', { now, reason });
+        this.put(m);
+        this.writePlanRecord(m, runId);
+        this.notify(m, 'could not be planned', `${reason}. Plan it again, or write the plan yourself.`);
+        this.log(`mission ${missionId}: planning failed: ${reason}`);
+      };
+      if (!result.ok) return fail(result.reason);
+
+      const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
+      const ctx = this.planContext(loaded?.policy ?? DEFAULT_REPO_POLICY);
+      let diff: PlanningRun['diff'];
+      let tasks: Task[];
+      if (run.kind === 'replan') {
+        // Work of a task that started and did not finish comes off the mission branch, kept on its own (§11.4).
+        const aside = m.tasks.filter((t) => t.state !== 'done' && t.attemptIds.length > 0 && !taskMachine.isTerminal(t.state));
+        try {
+          for (const t of aside) {
+            const a = this.currentAttempt(m, t.id);
+            if (!a) continue;
+            await this.releaseTree(missionId, a.id);
+            await this.setAside(missionId, t.id, a);
+          }
+        } catch (e) {
+          m = this.need(missionId);
+          return fail(`could not set aside the unfinished work: ${errorText(e)}`);
+        }
+        m = this.need(missionId);
+        for (const t of aside) {
+          m = this.patchTask(m, t.id, (x) => transitionTask(m, x, 'skipped', { now, reason: 'replaced by a replan; its work is kept on a branch of its own' }));
+          this.writeTaskFinal(m, t.id);
+        }
+        const staying = m.tasks.filter((t) => t.state === 'done' || t.attemptIds.length > 0);
+        const removed = m.tasks.filter((t) => !staying.includes(t));
+        tasks = [...staying, ...plannedTasks(result.plan.tasks, staying, ctx, m.tasks)];
+        diff = {
+          kept: staying.filter((t) => t.state === 'done').map((t) => t.key),
+          setAside: aside.map((t) => t.key),
+          removed: removed.map((t) => t.key),
+          added: tasks.slice(staying.length).map((t) => t.key),
+        };
+      } else {
+        tasks = plannedTasks(result.plan.tasks, [], ctx);
+      }
+      const draft: Mission = { ...m, tasks: executionOrder(tasks) };
+      const errors = planIssues(draft).filter((i) => i.level === 'error');
+      // `checkPlan` holds these back; this is the domain's own word on it, before anything is kept.
+      if (errors.length > 0 || draft.tasks.length !== tasks.length) return fail(`the plan was refused: ${errors.map((i) => i.text).join('; ') || 'it could not be put in order'}`);
+      m = this.patchRun(draft, runId, (r) => ({
+        ...r,
+        state: 'proposed',
+        rounds: result.rounds,
+        model: result.model,
+        endedAt: now,
+        decomposition: result.plan.decomposition,
+        risks: result.plan.risks,
+        ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
+        proposed: result.plan.tasks.length,
+        ...(diff ? { diff } : {}),
+      }));
+      const n = result.plan.tasks.length;
+      m = transitionMission(m, 'plan-review', {
+        now,
+        reason: `${run.kind === 'replan' ? 'replanned' : 'planned'}: ${n} ${run.kind === 'replan' ? 'new ' : ''}task${n === 1 ? '' : 's'}. Review the plan, then approve and start it`,
+      });
+      this.put(m);
+      this.writePlanRecord(m, runId);
+      this.schedulePreview(missionId);
+      this.notify(m, run.kind === 'replan' ? 'is replanned' : 'is planned', `${n} task${n === 1 ? '' : 's'} to review. Nothing runs until you approve the plan.`);
+      this.log(`mission ${missionId}: ${run.kind} proposed ${n} task(s) in ${result.rounds.length} round(s)`);
+    });
+  }
+
+  private patchRun(m: Mission, runId: string, f: (r: PlanningRun) => PlanningRun): Mission {
+    return { ...m, planning: (m.planning ?? []).map((r) => (r.id === runId ? f(r) : r)) };
+  }
+
+  /** The latest planner run, if the mission was planned by one. */
+  private latestRun(m: Mission): PlanningRun | undefined {
+    return m.planning?.at(-1);
+  }
+
+  private writePlanRecord(m: Mission, runId: string): void {
+    const run = m.planning?.find((r) => r.id === runId);
+    if (!run || run.state === 'running') return;
+    this.writeTelemetry(m, planRecord(m.id, run, this.now()));
   }
 
   /**
@@ -1010,7 +1267,11 @@ export class TaskRunner implements Disposable {
       const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
       const r = applyPlanEdit(m, edit, this.planContext(loaded?.policy ?? DEFAULT_REPO_POLICY));
       if (!r.ok) throw new TaskError(`That change was refused: ${r.problems.join('; ')}.`);
-      this.put(r.mission);
+      let next = r.mission;
+      // How far review moves a proposal from what the planner said (§16).
+      const run = this.latestRun(next);
+      if (run?.state === 'proposed' && next.state === 'plan-review') next = this.patchRun(next, run.id, (x) => ({ ...x, editsInReview: x.editsInReview + 1 }));
+      this.put(next);
       this.schedulePreview(missionId);
       return this.need(missionId);
     });
@@ -1036,6 +1297,21 @@ export class TaskRunner implements Disposable {
       };
       m = transitionMission(m, 'running', { now, reason: 'plan approved' });
       this.put(m);
+      const run = this.latestRun(m);
+      if (run?.state === 'proposed') {
+        this.writeTelemetry(m, {
+          v: TELEMETRY_SCHEMA_VERSION,
+          type: 'plan-review',
+          id: `${run.id}:approved`,
+          at: now,
+          missionId,
+          planRunId: run.id,
+          proposedTasks: run.proposed ?? 0,
+          approvedTasks: m.tasks.filter((t) => t.state === 'pending' && t.attemptIds.length === 0).length,
+          edits: run.editsInReview,
+          reviewMs: Math.max(0, now - (run.endedAt ?? now)),
+        });
+      }
       this.log(`mission ${missionId}: plan approved; ${m.tasks.length} task(s) to run in order`);
       await this.launchNext(missionId);
       return this.need(missionId);
@@ -1500,6 +1776,19 @@ export class TaskRunner implements Disposable {
     // A planned mission stopped between one task finishing and the next starting: start it now.
     if (isPlanned(m) && m.state === 'running') await this.launchNext(id);
     if (m.planned && m.state === 'plan-review') this.schedulePreview(id);
+    // A planner call cut off by a restart is simply asked again (it is a completion, not a session).
+    const now0 = this.need(id);
+    if (now0.state === 'planning') {
+      const run = this.latestRun(now0);
+      if (run?.state === 'running' && this.deps.planner) {
+        this.startPlanner(id, run.id);
+      } else if (run?.state === 'running') {
+        const now = this.now();
+        let cur = this.patchRun(now0, run.id, (r) => ({ ...r, state: 'failed', reason: 'the planner is not available', endedAt: now }));
+        cur = transitionMission(cur, 'planning-failed', { now, reason: 'the planner is not available; write the plan yourself' });
+        this.put(cur);
+      }
+    }
   }
 
   /**
@@ -3121,6 +3410,8 @@ export class TaskRunner implements Disposable {
     this.clearEscalations();
     for (const t of this.previewTimers.values()) clearTimeout(t);
     this.previewTimers.clear();
+    for (const a of this.planAborts.values()) a.abort();
+    this.planAborts.clear();
     for (const id of [...this.watchers.keys()]) this.unwatch(id);
     for (const s of this.subs) s.dispose();
     this.emitter.dispose();
@@ -3322,6 +3613,82 @@ function latestAssessment(m: Mission, taskId: string): TaskAssessment | undefine
   const task = m.tasks.find((t) => t.id === taskId);
   const id = task?.assessmentIds.at(-1);
   return id ? m.assessments.find((a) => a.id === id) : undefined;
+}
+
+/**
+ * The planner's tasks as plan tasks (#44): keys renumbered after the tasks
+ * that stay (`t1`… for a fresh plan), dependencies by the planner's keys
+ * mapped to ids — a new task's, or a done task's that stays. The kind is the
+ * planner's, so it is not a default. The checks come from the repository's
+ * policy by kind, exactly as for a task written by hand: the planner can name
+ * strategies (`checkPlan` holds it to ones that exist) but cannot weaken them.
+ */
+export function plannedTasks(planned: readonly PlannedTask[], staying: readonly Task[], ctx: PlanContext, reserved: readonly Pick<Task, 'key'>[] = staying): Task[] {
+  const ids = new Map<string, string>();
+  const out: Task[] = [];
+  // Keys are never reused in a mission, not even a replaced task's: history and branches name tasks by key.
+  let taken: Pick<Task, 'key'>[] = [...reserved];
+  for (const p of planned) {
+    const key = nextTaskKey(taken);
+    const t = planTask(key, { title: p.title, objective: p.objective, acceptanceCriteria: p.acceptanceCriteria, scopePaths: p.scope.paths, kind: p.assessmentHints.kind }, ctx);
+    const task: Task = { ...t, scope: { ...t.scope, subsystems: [...p.scope.subsystems] }, createdBy: 'planner' };
+    ids.set(p.key, task.id);
+    out.push(task);
+    taken = [...taken, task];
+  }
+  const doneByKey = new Map(staying.filter((t) => t.state === 'done').map((t) => [t.key, t.id]));
+  planned.forEach((p, i) => {
+    const deps = p.dependsOn.map((d) => ({ taskId: ids.get(d.key) ?? doneByKey.get(d.key) ?? `missing:${d.key}`, kind: d.kind }));
+    out[i].dependsOn = deps;
+  });
+  return out;
+}
+
+/** What a replan is told about the mission so far (§11.4): done, started-and-unfinished (with why), and not started. */
+function replanContext(m: Mission): ReplanContext {
+  const done = m.tasks.filter((t) => t.state === 'done');
+  const started = m.tasks.filter((t) => t.state !== 'done' && t.attemptIds.length > 0);
+  const notStarted = m.tasks.filter((t) => t.state !== 'done' && t.attemptIds.length === 0);
+  return {
+    done: done.map((t) => ({ key: t.key, title: t.title, objective: t.objective, scopePaths: t.scope.paths })),
+    replaced: started.map((t) => {
+      const attempts = t.attemptIds.map((id) => m.attempts.find((a) => a.id === id)).filter((a): a is ExecutionAttempt => a !== undefined);
+      const evidence: string[] = [];
+      if (t.stateReason) evidence.push(t.stateReason);
+      for (const a of attempts) {
+        const failing = a.verification.filter((r) => r.state === 'finished' && r.outcome !== 'passed' && r.outcome !== undefined);
+        const parts = [`attempt ${a.n}: ${a.outcome?.status ?? a.state}${a.outcome?.category ? ` (${a.outcome.category})` : ''}`];
+        for (const r of failing) parts.push(`${r.strategy} ${r.outcome}${r.summary ? `: ${r.summary}` : ''}`);
+        evidence.push(parts.join('; '));
+      }
+      return { key: t.key, title: t.title, objective: t.objective, state: t.state, evidence };
+    }),
+    notStarted: notStarted.map((t) => ({ key: t.key, title: t.title })),
+  };
+}
+
+/** The `plan` telemetry record for a run that ended: counts, cost and time, never text (§16.1). */
+export function planRecord(missionId: string, run: PlanningRun, now: number): PlanRecord {
+  const cost = run.rounds.map((r) => r.costUsd).filter((x): x is number => x !== undefined);
+  const tokens = run.rounds.flatMap((r) => [r.inputTokens, r.outputTokens]).filter((x): x is number => x !== undefined);
+  return {
+    v: TELEMETRY_SCHEMA_VERSION,
+    type: 'plan',
+    id: run.id,
+    at: now,
+    missionId,
+    kind: run.kind,
+    outcome: run.state === 'proposed' ? 'proposed' : run.state === 'cancelled' ? 'cancelled' : 'failed',
+    model: run.model,
+    rounds: run.rounds.length,
+    ...(run.proposed !== undefined ? { tasks: run.proposed } : {}),
+    ...(run.decomposition ? { decomposition: run.decomposition } : {}),
+    problems: run.rounds.reduce((s, r) => s + r.problems.length, 0),
+    ...(run.warnings?.length ? { warnings: run.warnings.length } : {}),
+    cost: cost.length > 0 ? { usd: Math.round(cost.reduce((s, x) => s + x, 0) * 1e6) / 1e6, basis: 'harness-estimate' } : { basis: 'none' },
+    ...(tokens.length > 0 ? { tokens: tokens.reduce((s, x) => s + x, 0) } : {}),
+    durationMs: Math.max(0, (run.endedAt ?? now) - run.startedAt),
+  };
 }
 
 /** A planned mission (#43): reviewed as a plan, run in the mission tree. */

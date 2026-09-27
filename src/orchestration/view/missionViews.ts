@@ -8,7 +8,8 @@
  * basis the weakest of them had, and absent when none reported one.
  */
 import { summariseVerification } from '../../shared/orchestration/verification';
-import type { MissionMetricsView, MissionTaskView, MissionView, TaskPreviewView } from '../../shared/orchestration/missionView';
+import { planDiffText, type MissionMetricsView, type MissionPlannerView, type MissionTaskView, type MissionView, type TaskPreviewView } from '../../shared/orchestration/missionView';
+import { formatUsd } from '../../shared/sessionUsage';
 import type { TaskViewAction } from '../../shared/orchestration/taskView';
 import type { CostBasis, ExecutionAttempt, Mission, MissionFinish, Task } from '../../shared/orchestration/types';
 import { canApprove, executionOrder, planIssues, taskCap } from '../domain/plan';
@@ -121,7 +122,47 @@ export interface MissionViewContext {
   actions: (taskId: string) => TaskViewAction[];
   /** The repository's own finish default (§13.6), when it has a policy. */
   finishDefault?: MissionFinish;
+  /** A planner is running here (#44), so Plan again and Replan can be offered. */
+  canPlan?: boolean;
 }
+
+/** The planner's latest run as review shows it (#44). */
+export function plannerViewOf(m: Mission): MissionPlannerView | undefined {
+  const run = m.planning?.at(-1);
+  if (!run) return undefined;
+  const cost = sum(run.rounds.map((r) => r.costUsd));
+  const verb = run.kind === 'replan' ? 'Replanned' : 'Planned';
+  const text =
+    run.state === 'running'
+      ? `${run.kind === 'replan' ? 'Replanning' : 'Planning'} with ${run.model}…`
+      : run.state === 'proposed'
+        ? [
+            `${verb} by ${run.model}`,
+            `${run.proposed ?? 0} ${run.kind === 'replan' ? 'new ' : ''}task${run.proposed === 1 ? '' : 's'}`,
+            `${run.rounds.length} round${run.rounds.length === 1 ? '' : 's'}`,
+            ...(cost !== undefined ? [formatUsd(cost)] : []),
+          ].join(' · ')
+        : run.state === 'failed'
+          ? `${run.kind === 'replan' ? 'Replanning' : 'Planning'} failed`
+          : `${run.kind === 'replan' ? 'Replanning' : 'Planning'} cancelled`;
+  const title = [
+    `Read-only planner (${run.model}${run.effort ? `, ${run.effort} effort` : ''}): it can read the repository, never change it.`,
+    ...run.rounds.map((r) => `Round ${r.n}: ${r.ok ? 'accepted' : `${r.problems.length} problem${r.problems.length === 1 ? '' : 's'}`}`),
+    ...(run.state === 'proposed' ? [`${run.editsInReview} edit${run.editsInReview === 1 ? '' : 's'} in review so far`] : []),
+  ].join('\n');
+  return {
+    kind: run.kind,
+    state: run.state,
+    text,
+    title,
+    risks: run.risks ?? [],
+    warnings: run.warnings ?? [],
+    ...(run.diff ? { diff: planDiffText(run.diff) } : {}),
+    ...(run.reason ? { reason: run.reason } : {}),
+  };
+}
+
+const LIVE_ATTEMPT = new Set(['launching', 'running', 'waiting-human', 'finishing', 'verifying']);
 
 function taskRowOf(m: Mission, t: Task, ctx: MissionViewContext): MissionTaskView {
   const attempts = attemptsOf(m, t);
@@ -199,6 +240,15 @@ export function missionViewOf(m: Mission, ctx: MissionViewContext): MissionView 
     ...(m.finish ? { finish: m.finish } : {}),
     ...(m.finishResult ? { finishResult: m.finishResult } : {}),
     canCancel: !['completed', 'cancelled', 'failed', 'review'].includes(m.state),
+    ...(plannerViewOf(m) ? { planner: plannerViewOf(m) } : {}),
+    canPlanAgain: ctx.canPlan === true && m.planned === true && (m.state === 'planning-failed' || (m.state === 'plan-review' && (m.planning?.length ?? 0) > 0)),
+    canWritePlan: m.state === 'planning-failed',
+    canReplan:
+      ctx.canPlan === true &&
+      m.planned === true &&
+      m.state === 'running' &&
+      !m.attempts.some((a) => LIVE_ATTEMPT.has(a.state)) &&
+      m.tasks.some((t) => t.state !== 'done'),
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
   };

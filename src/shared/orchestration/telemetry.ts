@@ -321,6 +321,46 @@ export interface EscalationRecord extends RecordBase {
   step?: number;
 }
 
+/**
+ * A planner run ended (§16.2, #44): what it cost, how big a plan it proposed,
+ * and how many rounds that took. Counts only: never the objective, a task's
+ * text or a problem the validator named. Written once per run, by run id.
+ */
+export interface PlanRecord extends RecordBase {
+  type: 'plan';
+  missionId: string;
+  kind: 'plan' | 'replan';
+  outcome: 'proposed' | 'failed' | 'cancelled';
+  model: string;
+  rounds: number;
+  /** Tasks proposed, when it proposed a plan. */
+  tasks?: number;
+  decomposition?: 'single' | 'multiple';
+  /** Problems the validator found, over every round. */
+  problems: number;
+  /** Advice (§11.3) the proposal still broke after its repair round. */
+  warnings?: number;
+  cost: { usd?: number; basis: CostBasis };
+  tokens?: number;
+  durationMs: number;
+}
+
+/**
+ * A plan the planner proposed was approved (§16.2, #44): how far the user's
+ * review moved it from the proposal, the signal of plan quality.
+ */
+export interface PlanReviewRecord extends RecordBase {
+  type: 'plan-review';
+  missionId: string;
+  planRunId: string;
+  proposedTasks: number;
+  approvedTasks: number;
+  /** Plan edits the user made between the proposal and Approve. */
+  edits: number;
+  /** Time from the proposal to Approve. */
+  reviewMs: number;
+}
+
 export type TelemetryRecord =
   | TurnRecord
   | AttemptRecord
@@ -329,4 +369,6 @@ export type TelemetryRecord =
   | OverrideRecord
   | PolicyChangeRecord
   | TaskFinalRecord
-  | EscalationRecord;
+  | EscalationRecord
+  | PlanRecord
+  | PlanReviewRecord;

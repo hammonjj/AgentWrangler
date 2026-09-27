@@ -102,6 +102,22 @@ export interface MissionIssueView {
   taskId?: string;
 }
 
+/** What the planner did for this mission (#44): its latest run, as review shows it. */
+export interface MissionPlannerView {
+  kind: 'plan' | 'replan';
+  state: 'running' | 'proposed' | 'failed' | 'cancelled';
+  /** "Planned by opus · 1 task · 1 round · $0.41". */
+  text: string;
+  /** Everything else, for the tooltip. */
+  title: string;
+  risks: string[];
+  /** §11.3 advice the plan still breaks: worth a look before approving. */
+  warnings: string[];
+  /** For a replan: "kept t1 · set aside t2 · added t3, t4". */
+  diff?: string;
+  reason?: string;
+}
+
 export interface MissionView {
   id: string;
   title: string;
@@ -128,6 +144,14 @@ export interface MissionView {
   finish?: MissionFinish;
   finishResult?: { mergeCommit?: string; pullRequestUrl?: string; note?: string };
   canCancel: boolean;
+  /** The planner's latest run, for a mission it planned. */
+  planner?: MissionPlannerView;
+  /** Ask the planner (again): after it failed, or for a plan it proposed that nobody has started. */
+  canPlanAgain: boolean;
+  /** Give up on the planner and write the plan by hand. */
+  canWritePlan: boolean;
+  /** Replan a started mission (§11.4): nothing running, something left to do. */
+  canReplan: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -146,7 +170,12 @@ export type MissionOp =
   | { kind: 'cancel' }
   | { kind: 'finish'; how: MissionFinish }
   | { kind: 'task'; taskId: string; action: TaskViewAction }
-  | { kind: 'open'; taskId: string };
+  | { kind: 'open'; taskId: string }
+  /** Ask the planner again (#44). The host asks what to do differently. */
+  | { kind: 'plan-again' }
+  | { kind: 'write-plan' }
+  /** Replan the rest of a started mission (§11.4). */
+  | { kind: 'replan' };
 
 // ---------------------------------------------------------------------------
 // Formatters
@@ -255,6 +284,20 @@ export const ISSUE_LABEL: Record<PlanIssueLevel, string> = {
   blocker: 'Before it can start',
   warning: 'Worth a look',
 };
+
+/** "kept t1 · set aside t2 · removed t3 · added t4, t5". Parts with nothing in them are left out. */
+export function planDiffText(d: { kept: string[]; setAside: string[]; removed: string[]; added: string[] }): string {
+  const parts: [string, string[]][] = [
+    ['kept', d.kept],
+    ['set aside', d.setAside],
+    ['replaced', d.removed],
+    ['added', d.added],
+  ];
+  return parts
+    .filter(([, keys]) => keys.length > 0)
+    .map(([label, keys]) => `${label} ${keys.join(', ')}`)
+    .join(' · ');
+}
 
 /** "3 commits, +81 −12" for the review line. */
 export function reviewStatText(r: NonNullable<MissionView['review']>): string {

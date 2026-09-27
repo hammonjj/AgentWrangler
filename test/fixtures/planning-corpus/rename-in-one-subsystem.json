@@ -1,0 +1,17 @@
+{
+  "id": "rename-in-one-subsystem",
+  "case": "a strictly sequential change over one subsystem's files",
+  "objective": "Rename ParserState to LexerState throughout the parser, then update the parser's tests and the one error message that names it.",
+  "repo": {
+    "files": {
+      "package.json": "{\"name\":\"lang\",\"scripts\":{\"test\":\"vitest run\",\"typecheck\":\"tsc --noEmit\"}}\n",
+      "src/parser/state.ts": "export interface ParserState { pos: number; line: number }\n",
+      "src/parser/lexer.ts": "import type { ParserState } from './state';\nexport function next(s: ParserState): ParserState { return { ...s, pos: s.pos + 1 }; }\n",
+      "src/parser/errors.ts": "export const BAD_STATE = 'ParserState is corrupt';\n",
+      "src/parser/index.ts": "export * from './state';\nexport * from './lexer';\n",
+      "test/parser/lexer.test.ts": "// tests for ParserState transitions\n"
+    },
+    "verification": ["test", "typecheck"]
+  },
+  "expect": { "split": "never" }
+}
