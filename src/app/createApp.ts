@@ -1371,7 +1371,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
         const level = await dialogs.pick(levels, { placeHolder: `Effort for ${targetLabel(target)}` });
         if (!level) continue;
         const native = entry ? nativeEffortFor(entry, level.level) : level.level;
-        route = { harness: target.harness, model: target.model, ...(native !== 'none' ? { effort: native } : {}) };
+        route = {
+          harness: target.harness,
+          ...(isEndpointSource(target.source) ? { source: target.source } : {}),
+          model: target.model,
+          ...(native !== 'none' ? { effort: native } : {}),
+        };
       }
       if (picked.action === 'model') {
         const cat = models.catalog;
@@ -1381,7 +1386,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
           .flatMap((e) => e.harnesses.map((h) => ({ entry: e, harness: h })))
           .map(({ entry, harness: h }) => ({
             label: entry.descriptor.label,
-            description: `${entry.tier} · ${h === 'codex' ? 'Codex' : 'Claude Code'}${entry.key === (target && `${target.source}:${target.resolvedModel ?? target.model}`) ? ' · recommended' : ''}`,
+            description: `${entry.tier} · ${h === 'codex' ? 'Codex' : 'Claude Code'}${entry.descriptor.location === 'local' ? ' · local' : ''}${entry.external ? ' · data leaves this machine' : ''}${entry.key === (target && `${target.source}:${target.resolvedModel ?? target.model}`) ? ' · recommended' : ''}`,
             entry,
             harness: h,
           }));
@@ -1392,7 +1397,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
         const m = await dialogs.pick(choices, { placeHolder: `Model — the task needs ${rec.requirement.minTier}` });
         if (!m) continue;
         const native = nativeEffortFor(m.entry, rec.requirement.effort);
-        route = { harness: m.harness, model: m.entry.descriptor.modelId, ...(native !== 'none' ? { effort: native } : {}) };
+        route = {
+          harness: m.harness,
+          ...(isEndpointSource(m.entry.descriptor.source) ? { source: m.entry.descriptor.source } : {}),
+          model: m.entry.descriptor.modelId,
+          ...(native !== 'none' ? { effort: native } : {}),
+        };
       }
       try {
         const mission = await runner.startProposed(missionId, route ? { route } : {});

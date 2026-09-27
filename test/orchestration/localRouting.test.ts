@@ -9,6 +9,7 @@ import type { LaunchRequest, SessionHandle } from '../../src/core/session/sessio
 import { CodexRunnerService, codexThreadParams } from '../../src/codex/runner';
 import { CodexHarness } from '../../src/orchestration/harness/codexHarness';
 import { resolveRoute } from '../../src/orchestration/policy/resolver';
+import { proposalChoice } from '../../src/orchestration/view/proposalView';
 import { buildCatalog, known, UNKNOWN, type ModelDescriptor } from '../../src/shared/orchestration/catalog';
 import { parseLaunchPolicy, type CodexModelProvider } from '../../src/shared/launchPolicy';
 import type { LocalModelReport } from '../../src/shared/orchestration/localModels';
@@ -90,6 +91,24 @@ describe('the resolver and a local model', () => {
     const r = resolveRoute(REQ, { catalog: tiered([localReport()]), sources: {}, now: 0 }, { exclusions: { disableLocal: true } });
     expect(r.outcome).toBe('needs-human');
     expect(r.candidates[0].reason).toMatch(/local models are off/);
+  });
+});
+
+describe('the proposal card and a local model', () => {
+  it('a card choice of a local model carries its source to the runner', () => {
+    const catalog = tiered([localReport()]);
+    const rec = {
+      assessmentId: 'a',
+      policyVersion: 'v',
+      requirement: REQ,
+      reasons: [],
+      verdict: 'needs-human' as const,
+      resolution: { candidates: [], catalogVersion: catalog.version },
+      at: 0,
+    };
+    expect(proposalChoice(rec, catalog, { kind: 'run', route: { harness: 'codex', model: 'coder' } })).toEqual({
+      route: { harness: 'codex', source: 'local:box', model: 'coder' },
+    });
   });
 });
 
