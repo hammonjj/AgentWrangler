@@ -1486,3 +1486,438 @@ body:has(#app.narrow) #usage {
 .banner button.bx:hover {
   color: var(--vscode-foreground);
 }
+
+/* ---- Missions view (#43) ----
+ *
+ * The table pane's third view. Everything is scoped to `#app .missions` so
+ * nothing here reaches the conversation pane, which shares the webview. The
+ * narrow layout is `#app.narrow`, set from the pane's own width: the pane can
+ * be 300 px inside a window of any size. Every chip and figure wraps instead
+ * of being cut, so nothing here is hidden to make room. */
+
+.tabletabs .tabcount {
+  display: inline-block;
+  min-width: 1.2em;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 0.78em;
+  text-align: center;
+  color: var(--vscode-editor-background);
+  background: var(--aw-waiting);
+}
+
+#app .missions {
+  padding: 0 0 16px;
+}
+#app .missions .mbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+}
+#app .missions .mhint {
+  flex: 1 1 12rem;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .mempty {
+  padding: 20px 14px;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .mempty .hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.9em;
+}
+#app .missions button {
+  font: inherit;
+  cursor: pointer;
+}
+#app .missions button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+#app .missions .mnew,
+#app .missions .mbtn,
+#app .missions .tact,
+#app .missions .pbtn2 {
+  padding: 2px 9px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+#app .missions .mnew:hover:not(:disabled),
+#app .missions .mbtn:hover:not(:disabled),
+#app .missions .tact:hover:not(:disabled),
+#app .missions .pbtn2:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+#app .missions .primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+#app .missions .primary:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+#app .missions .danger {
+  color: var(--aw-stuck);
+}
+
+#app .missions .mission {
+  margin: 0 6px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-left: 3px solid var(--aw-busy);
+  border-radius: 3px;
+}
+#app .missions .mission.m-plan-review,
+#app .missions .mission.m-review {
+  border-left-color: var(--aw-waiting);
+}
+#app .missions .mission.m-completed {
+  border-left-color: var(--aw-done);
+}
+#app .missions .mission.m-cancelled,
+#app .missions .mission.m-failed {
+  border-left-color: var(--aw-ended);
+}
+#app .missions .mhdr {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+#app .missions .mhdr .twist {
+  flex: 0 0 auto;
+  width: 1em;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .mtitle {
+  flex: 1 1 10rem;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+#app .missions .mchips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+#app .missions .mchip {
+  padding: 0 6px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, #555));
+  border-radius: 9px;
+  font-size: 0.78em;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .mchip.state.tone-plan-review,
+#app .missions .mchip.state.tone-review {
+  border-color: var(--aw-waiting);
+  color: var(--aw-waiting);
+}
+#app .missions .mchip.state.tone-running {
+  border-color: var(--aw-busy);
+  color: var(--aw-busy);
+}
+#app .missions .mchip.state.tone-completed {
+  border-color: var(--aw-done);
+  color: var(--aw-done);
+}
+#app .missions .mchip.health {
+  border-color: transparent;
+}
+#app .missions .mchip.health.tone-good {
+  color: var(--aw-done);
+}
+#app .missions .mchip.health.tone-mixed {
+  color: var(--aw-waiting);
+}
+#app .missions .mchip.health.tone-bad {
+  color: var(--aw-stuck);
+}
+#app .missions .mmeta,
+#app .missions .mreason {
+  padding: 0 8px 4px 26px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+#app .missions .merror {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin: 2px 8px 6px 26px;
+  padding: 4px 8px;
+  border-left: 3px solid var(--aw-stuck);
+  background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.12));
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+#app .missions .merror .mdismiss {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .missues {
+  margin: 0 8px 6px 26px;
+  padding: 0;
+  list-style: none;
+  font-size: 0.88em;
+}
+#app .missions .missues.ok {
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .missues .issue {
+  padding: 1px 0;
+  overflow-wrap: anywhere;
+}
+#app .missions .issue .ilevel {
+  font-weight: 600;
+}
+#app .missions .issue.error .ilevel {
+  color: var(--aw-stuck);
+}
+#app .missions .issue.blocker .ilevel {
+  color: var(--aw-blocked);
+}
+#app .missions .issue.warning .ilevel {
+  color: var(--aw-waiting);
+}
+
+#app .missions .mtasks {
+  margin: 0;
+  padding: 0 0 4px;
+  list-style: none;
+}
+#app .missions .mtask {
+  padding: 4px 8px 4px 26px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+#app .missions .trow,
+#app .missions .prow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+#app .missions .trow.openable {
+  cursor: pointer;
+}
+#app .missions .trow.openable:hover .ttitle {
+  text-decoration: underline;
+}
+#app .missions .tdot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  align-self: center;
+  background: var(--aw-ended);
+}
+#app .missions .ts-running .tdot,
+#app .missions .ts-verifying .tdot,
+#app .missions .ts-queued .tdot {
+  background: var(--aw-busy);
+}
+#app .missions .ts-needs-human .tdot {
+  background: var(--aw-waiting);
+}
+#app .missions .ts-blocked .tdot {
+  background: var(--aw-blocked);
+}
+#app .missions .ts-done .tdot {
+  background: var(--aw-done);
+}
+#app .missions .ts-failed .tdot {
+  background: var(--aw-stuck);
+}
+#app .missions .tkey {
+  flex: 0 0 auto;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .ttitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+#app .missions .tstate,
+#app .missions .tverify {
+  flex: 0 0 auto;
+  font-size: 0.85em;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .ts-needs-human .tstate {
+  color: var(--aw-waiting);
+}
+#app .missions .tline2,
+#app .missions .pline2 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  padding-left: 14px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .tbranch {
+  font-family: var(--vscode-editor-font-family, monospace);
+  overflow-wrap: anywhere;
+}
+#app .missions .tacts,
+#app .missions .pactions,
+#app .missions .mfoot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 2px 14px;
+}
+#app .missions .mfoot {
+  padding: 6px 8px 8px 26px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+}
+#app .missions .mstat {
+  font-size: 0.88em;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+
+/* Plan review: a compact line per task, and one task's editor open at a time. */
+#app .missions .ptools {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 3px;
+}
+#app .missions .pbtn2 {
+  padding: 0 6px;
+}
+#app .missions .pflag {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.8em;
+  color: var(--vscode-editor-background);
+  background: var(--aw-blocked);
+}
+#app .missions .tpreview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  padding-left: 14px;
+  font-size: 0.82em;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .tpreview.pending {
+  font-style: italic;
+}
+#app .missions .tpreview .pv-target {
+  color: var(--vscode-textLink-foreground, #569cd6);
+}
+#app .missions .ptask.editing {
+  background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.08));
+}
+#app .missions .peditor {
+  display: grid;
+  gap: 6px;
+  padding: 6px 0 4px 14px;
+}
+#app .missions .pfield {
+  display: grid;
+  gap: 2px;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .peditor input,
+#app .missions .peditor textarea,
+#app .missions .peditor select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 5px;
+  font: inherit;
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-input-foreground, var(--vscode-foreground));
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, transparent));
+  border-radius: 2px;
+}
+#app .missions .peditor textarea {
+  resize: vertical;
+}
+#app .missions .pgroup {
+  margin: 0;
+  padding: 4px 6px 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.3));
+  border-radius: 2px;
+  font-size: 0.85em;
+}
+#app .missions .pgroup legend {
+  padding: 0 4px;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .pdep {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 12rem);
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+#app .missions .pdep > span {
+  overflow-wrap: anywhere;
+}
+#app .missions .pgroup.pins {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 4px 8px;
+}
+#app .missions .pmini {
+  display: grid;
+  gap: 2px;
+  color: var(--vscode-descriptionForeground);
+}
+#app .missions .pactions select {
+  width: auto;
+  max-width: 100%;
+}
+
+/* 300 px: less indent, and the plan editor's two-column rows stack. */
+#app.narrow .missions .mission {
+  margin: 0 3px 6px;
+}
+#app.narrow .missions .mmeta,
+#app.narrow .missions .mreason,
+#app.narrow .missions .missues,
+#app.narrow .missions .merror {
+  margin-left: 8px;
+  padding-left: 8px;
+}
+#app.narrow .missions .mtask,
+#app.narrow .missions .mfoot {
+  padding-left: 8px;
+}
+#app.narrow .missions .tline2,
+#app.narrow .missions .pline2,
+#app.narrow .missions .tpreview,
+#app.narrow .missions .tacts,
+#app.narrow .missions .pactions,
+#app.narrow .missions .peditor {
+  padding-left: 0;
+}
+#app.narrow .missions .trow {
+  flex-wrap: wrap;
+}
+#app.narrow .missions .pdep {
+  grid-template-columns: minmax(0, 1fr);
+}
+#app.narrow .missions .mhint {
+  display: none;
+}

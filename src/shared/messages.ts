@@ -13,6 +13,7 @@ import type {
 } from './conversation';
 import type { HookHealth, ProjectDTO, SessionDTO } from './model';
 import type { ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from './orchestration/taskView';
+import type { MissionOp, MissionsSnapshot } from './orchestration/missionView';
 import type { UsageState } from './usage';
 
 // ---- Dashboard ----
@@ -59,7 +60,16 @@ export type HostToDashboard =
        * nothing, which is a different thing and leaves only "Browse…".
        */
       projects?: ProjectDTO[];
+      /**
+       * The Missions view (#43): every mission, as flat records. Absent while
+       * orchestration is off, and then the table has no Missions tab at all.
+       */
+      missions?: MissionsSnapshot;
     }
+  /** Bring the Missions view up, scrolled to this mission: one was just created, or its notice was clicked. */
+  | { type: 'showMissions'; missionId?: string }
+  /** A Missions view action was refused or failed; shown beside the mission, not as a modal. */
+  | { type: 'missionError'; missionId: string; text: string }
   /**
    * The folder dialog closed on a choice. Sent before the snapshot that will
    * contain it, because the webview has to know which entry to select and the
@@ -137,6 +147,14 @@ export type DashboardToHost =
   | { type: 'newConversation'; cwd: string; provider?: 'claude' | 'codex' }
   /** The Tasks button: run a task in `cwd` on the launcher's route, or act on a running one (#33). */
   | { type: 'taskMenu'; cwd: string; provider?: 'claude' | 'codex' }
+  /** The Missions view's "New mission": write a plan for `cwd`'s repository, which opens in review (#43). */
+  | { type: 'newMission'; cwd: string }
+  /**
+   * Anything done in the Missions view (#43): a plan edit, Approve and start,
+   * a task's action, a finish button. `provider` is the launcher's, which is
+   * the route Approve and start gives tasks without a pin of their own.
+   */
+  | { type: 'mission'; missionId: string; op: MissionOp; provider?: 'claude' | 'codex' }
   /** The launcher's dropdowns: the default a *new* conversation starts on. */
   | { type: 'setRunnerModel'; provider: 'anthropic' | 'openai'; model: string }
   | { type: 'setRunnerEffort'; provider: 'anthropic' | 'openai'; effort: string }
@@ -278,7 +296,7 @@ export type ConversationToHost =
    * `missionId` rides along so an action cannot land on a task the strip has
    * since been replaced by.
    */
-  | { type: 'taskAction'; missionId: string; action: TaskViewAction }
+  | { type: 'taskAction'; missionId: string; action: TaskViewAction; taskId?: string }
   /** A proposal card's Run (on the route shown) or Cancel (#81). Only ever sent by a click. */
   | { type: 'proposalDecision'; missionId: string; decision: ProposalDecision }
   /**

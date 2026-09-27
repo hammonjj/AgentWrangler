@@ -228,6 +228,29 @@ export interface RoutingRecord extends RecordBase {
   candidates: { chosen: number; fallback: number; rejected: number };
 }
 
+/**
+ * A task's end (§16.2, #43): how it finished, who accepted it, and what it
+ * took. Written once per task, by task id; the totals are sums of its
+ * attempts, with the cost's basis (absent cost: nothing reported one).
+ */
+export interface TaskFinalRecord extends RecordBase {
+  type: 'task-final';
+  missionId: string;
+  taskId: string;
+  /** Tasks in the mission, so a single task and a planned one can be told apart. */
+  missionTasks: number;
+  outcome: 'done' | 'failed' | 'cancelled' | 'skipped';
+  acceptedBy?: 'verification' | 'user';
+  attempts: number;
+  /** The first attempt passed its checks and was the result. */
+  firstAttemptPass: boolean;
+  cost: { usd?: number; basis: CostBasis };
+  tokens?: number;
+  /** Launch of the first attempt to the end of the last. */
+  elapsedMs?: number;
+  activeMs?: number;
+}
+
 /** A policy value as telemetry carries it: an enum, a number, a flag, or harness/source/model ids. Never text a person wrote. */
 export type PolicyFieldValue = string | number | boolean | string[];
 
@@ -266,4 +289,4 @@ export interface PolicyChangeRecord extends RecordBase {
   runningAttempts: number;
 }
 
-export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord | LocalCallRecord | OverrideRecord | PolicyChangeRecord;
+export type TelemetryRecord = TurnRecord | AttemptRecord | RoutingRecord | LocalCallRecord | OverrideRecord | PolicyChangeRecord | TaskFinalRecord;

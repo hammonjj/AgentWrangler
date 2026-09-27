@@ -23,6 +23,18 @@
  *
  * Every mutation of a mission runs through a per-mission queue, so one
  * writer at a time; the store is written after every change.
+ *
+ * **Planned missions** (#43, §29 P8) are the same machinery with more than one
+ * task. They are written by hand (the planner is #44), edited in plan review
+ * (`domain/plan.ts`), and nothing about them runs until the user presses
+ * Approve and start (`approvePlan`), in any routing mode. Then their tasks run
+ * one at a time in dependency order, in **one mission worktree on the mission
+ * branch** (`aw/<mission>/mission`): each attempt starts from the head the
+ * task before it left, so a `code` dependency holds without a merge. A task
+ * whose checks pass is done by verification and the next starts; anything
+ * else waits for the user, as a single task does. A fresh retry keeps the
+ * rejected work on its own branch and restarts from the pre-task commit on
+ * `aw/<mission>/<task>-a<n>`, in the same tree.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -35,7 +47,9 @@ import type { SessionRecord, SessionRegistry } from '../../core/session/sessionR
 import type { PermissionModeName } from '../../shared/conversation';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
 import { DEFAULT_REPO_POLICY } from '../../shared/orchestration/repoPolicy';
-import type { TelemetryRecord, TurnRecord } from '../../shared/orchestration/telemetry';
+import type { TaskFinalRecord, TelemetryRecord, TurnRecord } from '../../shared/orchestration/telemetry';
+import { TELEMETRY_SCHEMA_VERSION } from '../../shared/orchestration/telemetry';
+import type { PlanEdit, PlanTaskDraft } from '../../shared/orchestration/plan';
 import {
   EFFORT_LEVELS,
   isOrchestrationOrigin,
@@ -46,6 +60,7 @@ import {
   type ExecutionTarget,
   type HarnessId,
   type Mission,
+  type MissionFinish,
   type ModelSourceId,
   type OrchestrationOrigin,
   type OutcomeCategory,
@@ -63,12 +78,14 @@ import {
   type WorktreeAssignment,
 } from '../../shared/orchestration/types';
 import { ulid } from '../domain/ids';
-import { transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
+import { dependenciesSatisfied, taskMachine, transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
+import { applyPlanEdit, executionOrder, planIssues, tasksFromDraft, type PlanContext } from '../domain/plan';
+import { MissionFinisher } from './missionFinish';
 import type { AgentHarness } from '../harness/types';
 import type { Assessor } from '../policy/assessor';
 import type { LoadedRepoPolicy, RepoPolicyStore } from '../policy/repoPolicyStore';
 import type { MissionStore } from '../store/missionStore';
-import { slugify } from '../worktrees/naming';
+import { slugify, taskBranch } from '../worktrees/naming';
 import { nodeExec, type Exec } from '../worktrees/exec';
 import type { WorktreeManager } from '../worktrees/worktreeManager';
 import type { Reviewer } from '../verify/reviewer';
@@ -77,7 +94,7 @@ import { buildVerificationPlan, summariseVerification } from '../../shared/orche
 import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import type { HealthState } from '../../shared/orchestration/sourceHealth';
 import type { LocalRunMetrics } from '../../shared/orchestration/telemetry';
-import { DEFAULT_TIERS, isKnown, nativeEffortFor } from '../../shared/orchestration/catalog';
+import { DEFAULT_TIERS, isKnown, nativeEffortFor, tierRank } from '../../shared/orchestration/catalog';
 import {
   admissionRefusal,
   asTaskOverrides,
@@ -148,6 +165,21 @@ export interface NewTask {
 /** A task the router is to propose a route for (`assisted`, #38): everything but the route. */
 export type NewTaskDraft = Omit<NewTask, 'route'>;
 
+/**
+ * A mission the user writes by hand (#43): an objective and a plan of tasks,
+ * recorded straight into plan review. Nothing runs until `approvePlan`.
+ */
+export interface NewMission {
+  folder: string;
+  title?: string;
+  objective: string;
+  /** The plan. Absent or empty: one task, the objective itself, to be edited in review. */
+  tasks?: PlanTaskDraft[];
+  baseRef?: string;
+  /** Caps, preferences and `maxTasks` (default 8, never above 12). `mode` is always `manual` in P8. */
+  policy?: ExecutionPolicy;
+}
+
 /** What the user did with an `assisted` proposal: took it (no route), or changed it (their route). */
 export interface ProposalChoice {
   route?: TaskRoute;
@@ -162,7 +194,7 @@ export class TaskError extends Error {
 }
 
 /** What can be done with a task now. The launcher's task menu offers these (#34 draws them properly). */
-export type TaskAction = 'show-session' | 'open-diff' | 'accept' | 'resume' | 'retry' | 'recreate-worktree' | 'edit-policy' | 'cancel';
+export type TaskAction = 'show-session' | 'open-diff' | 'accept' | 'resume' | 'retry' | 'recreate-worktree' | 'skip' | 'edit-policy' | 'cancel';
 
 export interface TaskRunnerDeps {
   store: Pick<MissionStore, 'save' | 'loadActive'>;
@@ -227,6 +259,8 @@ export interface TaskRunnerDeps {
   random?: (bytes: number) => Uint8Array;
   /** How long an idle, finished-looking session must stay so before the attempt finishes. */
   settleMs?: number;
+  /** How long plan review waits after an edit before assessing the changed tasks (default 800 ms). */
+  previewDelayMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -271,6 +305,10 @@ export class TaskRunner implements Disposable {
   private readonly managers = new Map<string, Promise<WorktreeManager>>();
   private readonly emitter = new Emitter<void>();
   private readonly subs: Disposable[] = [];
+  /** A mission worktree being created, before its mission has it on record: assignment id → mission id. */
+  private readonly worktreeOwners = new Map<string, string>();
+  /** Plan review's pending preview assessments, per mission. */
+  private readonly previewTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly now: () => number;
   private readonly random: (bytes: number) => Uint8Array;
   private readonly settleMs: number;
@@ -300,41 +338,62 @@ export class TaskRunner implements Disposable {
     return this.missions.get(missionId);
   }
 
-  /** The task's current attempt. */
-  currentAttempt(m: Mission): ExecutionAttempt | undefined {
-    const task = m.tasks[0];
+  /**
+   * The task the mission is on: its only task, or in a planned mission the
+   * first one in run order that is not finished (§29 P8: one at a time).
+   */
+  currentTask(m: Mission): Task {
+    if (m.tasks.length <= 1 || !isPlanned(m)) return m.tasks[0];
+    const order = executionOrder(m.tasks);
+    return order.find((t) => !['done', 'skipped', 'cancelled', 'failed'].includes(t.state)) ?? order.at(-1) ?? m.tasks[0];
+  }
+
+  /** The current task's current attempt. */
+  currentAttempt(m: Mission, taskId?: string): ExecutionAttempt | undefined {
+    const task = taskId ? m.tasks.find((t) => t.id === taskId) : this.currentTask(m);
     const id = task?.attemptIds.at(-1);
     return id ? m.attempts.find((a) => a.id === id) : undefined;
   }
 
-  /** The session the task's current attempt runs in, if one is live here. */
-  handleOf(missionId: string): SessionHandle | undefined {
+  /** The session the current (or the named) task's current attempt runs in, if one is live here. */
+  handleOf(missionId: string, taskId?: string): SessionHandle | undefined {
     const m = this.missions.get(missionId);
-    const a = m && this.currentAttempt(m);
+    const a = m && this.currentAttempt(m, taskId);
     const id = a?.assignment.sessionIds.at(-1);
     return id ? this.deps.sessions.get(id) : undefined;
   }
 
-  /** What the user can do with the task now. */
-  actions(missionId: string): TaskAction[] {
+  /** What the user can do with the mission's current task now (or with the named one). */
+  actions(missionId: string, taskId?: string): TaskAction[] {
     const m = this.missions.get(missionId);
     if (!m) return [];
-    const task = m.tasks[0];
-    const a = this.currentAttempt(m);
+    const current = this.currentTask(m);
+    const task = (taskId && m.tasks.find((t) => t.id === taskId)) || current;
+    const a = this.currentAttempt(m, task.id);
     const out: TaskAction[] = [];
-    if (this.handleOf(missionId)) out.push('show-session');
+    if (this.handleOf(missionId, task.id)) out.push('show-session');
     const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
     if (a?.git && a.git.filesChanged > 0 && wt && wt.state !== 'removed') out.push('open-diff');
+    // Only the task the mission is on can be acted on: the rest have finished or have not started.
+    const live = task.id === current.id && ['running', 'paused'].includes(m.state);
     // A proposal nobody has started (#38) is started from the launcher's task menu, not retried.
-    if (task.state === 'needs-human' && task.attemptIds.length > 0) {
+    if (task.state === 'needs-human' && task.attemptIds.length > 0 && (live || !isPlanned(m))) {
       if (a?.state === 'succeeded') out.push('accept');
       if (a?.state === 'interrupted' && a.resumable && wt?.state !== 'missing') out.push('resume');
       if (wt?.state === 'missing') out.push('recreate-worktree');
       out.push('retry');
     }
+    // Skipping is for a task in a plan: the mission carries on without it.
+    if (isPlanned(m) && live && ['needs-human', 'blocked'].includes(task.state)) out.push('skip');
     // Pins and caps can change until the mission ends; a change reaches the next attempt (#40).
     if (!['completed', 'cancelled', 'failed', 'review'].includes(m.state)) out.push('edit-policy', 'cancel');
     return out;
+  }
+
+  /** The plan's problems as review shows them (§11.2), for a planned mission. */
+  planIssues(missionId: string): ReturnType<typeof planIssues> {
+    const m = this.missions.get(missionId);
+    return m ? planIssues(m) : [];
   }
 
   // ---- Starting ----
@@ -371,19 +430,20 @@ export class TaskRunner implements Disposable {
     try {
       return await this.queue(id, async () => {
         let m = this.need(id);
+        const tid = m.tasks[0].id;
         const now = this.now();
         for (const to of ['ready', 'assessing'] as TaskState[]) {
-          m = this.patchTask(m, (t) => transitionTask(m, t, to, { now, reason: to === 'assessing' ? 'assessing before it is routed' : undefined }));
+          m = this.patchTask(m, tid, (t) => transitionTask(m, t, to, { now, reason: to === 'assessing' ? 'assessing before it is routed' : undefined }));
         }
         this.put(m);
-        await this.assess(id);
+        await this.assess(id, tid);
         m = this.need(id);
-        const assessment = latestAssessment(m);
-        const rec = assessment && this.recommendationFor(m, assessment);
+        const assessment = latestAssessment(m, tid);
+        const rec = assessment && this.recommendationFor(m, tid, assessment);
         if (!rec) throw new TaskError('The task could not be routed: no assessment or no catalog.');
         const at = this.now();
-        m = this.patchTask(m, (t) => transitionTask(m, { ...t, recommendation: rec }, 'routed', { now: at, reason: 'route proposed; waiting for you to accept or change it' }));
-        if (rec.verdict !== 'route') m = this.patchTask(m, (t) => transitionTask(m, t, 'needs-human', { now: at, reason: rec.note ?? 'a person has to decide the route' }));
+        m = this.patchTask(m, tid, (t) => transitionTask(m, { ...t, recommendation: rec }, 'routed', { now: at, reason: 'route proposed; waiting for you to accept or change it' }));
+        if (rec.verdict !== 'route') m = this.patchTask(m, tid, (t) => transitionTask(m, t, 'needs-human', { now: at, reason: rec.note ?? 'a person has to decide the route' }));
         this.put(m);
         this.log(`task ${id}: proposed ${rec.requirement.minTier}/${rec.requirement.effort} → ${rec.resolution.target?.model ?? rec.verdict}`);
         return { mission: this.need(id), recommendation: rec };
@@ -422,9 +482,9 @@ export class TaskRunner implements Disposable {
       const overrides = { ...task.overrides, pins: routePins(route) };
       const conflicts = checkPolicyEdit(missionLayers(m, task), 'task', taskLayer(overrides), this.policyContext());
       if (conflicts.length > 0) throw new TaskError(conflictText(conflicts));
-      this.put(this.patchTask(m, (t) => ({ ...t, overrides })));
+      this.put(this.patchTask(m, task.id, (t) => ({ ...t, overrides })));
       if (!accepted) this.writeProposalOverride(m, rec, route);
-      await this.launch(missionId, { mode: 'fresh', route, routing: { recommendation: rec, offered: true, accepted } });
+      await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation: rec, offered: true, accepted } });
       return this.need(missionId);
     });
   }
@@ -534,7 +594,7 @@ export class TaskRunner implements Disposable {
    * `override` and `policy-change` telemetry. On a proposal nobody has
    * started, the proposal is routed again under the new policy.
    */
-  setPolicy(missionId: string, scope: 'mission' | 'task', next: ExecutionPolicy | undefined, opts: { reason?: string } = {}): Promise<Mission> {
+  setPolicy(missionId: string, scope: 'mission' | 'task', next: ExecutionPolicy | undefined, opts: { reason?: string; taskId?: string } = {}): Promise<Mission> {
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
       if (['completed', 'cancelled', 'failed', 'review'].includes(m.state)) throw new TaskError('The task has finished; its policy no longer changes anything.');
@@ -545,7 +605,8 @@ export class TaskRunner implements Disposable {
       });
       if (!shape.ok) throw new TaskError(shape.errors.map((e) => `${e.path}: ${e.message}`).join('; '));
       const layer = compactPolicy(shape.policy);
-      const task = m.tasks[0];
+      // A planned mission's task scope is the task that runs next, unless one is named.
+      const task = (opts.taskId ? m.tasks.find((t) => t.id === opts.taskId) : undefined) ?? this.currentTask(m);
       const conflicts = checkPolicyEdit(missionLayers(m, task), scope, layer, ctx);
       if (conflicts.length > 0) throw new TaskError(conflictText(conflicts));
       const before = scope === 'mission' ? missionLayer(m) : taskLayer(task.overrides);
@@ -558,7 +619,7 @@ export class TaskRunner implements Disposable {
         if (!layer) delete layers.mission;
         m = { ...m, policyLayers: layers, policy: resolveEffectivePolicy(missionLayers({ policy: {}, policyLayers: layers }), ctx).policy };
       } else {
-        m = this.patchTask(m, (t) => {
+        m = this.patchTask(m, task.id, (t) => {
           const { overrides: _old, ...rest } = t;
           const overrides = asTaskOverrides(layer);
           return overrides ? { ...rest, overrides } : rest;
@@ -622,11 +683,13 @@ export class TaskRunner implements Disposable {
     const rec = this.recommendationFor(m);
     if (!rec) return m;
     const now = this.now();
-    m = this.patchTask(m, (t) => ({ ...t, recommendation: rec }));
+    // A proposal is a single-task mission.
+    const tid = m.tasks[0].id;
+    m = this.patchTask(m, tid, (t) => ({ ...t, recommendation: rec }));
     if (rec.verdict !== 'route' && m.tasks[0].state === 'routed') {
-      m = this.patchTask(m, (t) => transitionTask(m, t, 'needs-human', { now, reason: rec.note ?? 'a person has to decide the route' }));
+      m = this.patchTask(m, tid, (t) => transitionTask(m, t, 'needs-human', { now, reason: rec.note ?? 'a person has to decide the route' }));
     } else if (rec.verdict === 'route' && m.tasks[0].state === 'needs-human') {
-      m = this.patchTask(m, (t) => ({ ...t, stateReason: 'route proposed under the changed policy; waiting for you to accept or change it' }));
+      m = this.patchTask(m, tid, (t) => ({ ...t, stateReason: 'route proposed under the changed policy; waiting for you to accept or change it' }));
     }
     return m;
   }
@@ -652,7 +715,7 @@ export class TaskRunner implements Disposable {
   }
 
   /** Every layer resolved for the task: what its next attempt runs under. */
-  private effective(m: Mission, task: Task = m.tasks[0], ctx: PolicyContext = this.policyContext()): EffectivePolicy {
+  private effective(m: Mission, task: Task = this.currentTask(m), ctx: PolicyContext = this.policyContext()): EffectivePolicy {
     return resolveEffectivePolicy(missionLayers(m, task), ctx);
   }
 
@@ -694,8 +757,7 @@ export class TaskRunner implements Disposable {
   }
 
   /** What the count caps are checked against for the task's next attempt. */
-  private admissionFacts(m: Mission, route: TaskRoute, mode: 'fresh' | 'continue'): AdmissionFacts {
-    const task = m.tasks[0];
+  private admissionFacts(m: Mission, route: TaskRoute, mode: 'fresh' | 'continue', task: Task = this.currentTask(m)): AdmissionFacts {
     const liveAgents = [...this.missions.values()].reduce((n, x) => n + x.attempts.filter((a) => LIVE.includes(a.state)).length, 0);
     const costs = m.attempts.filter((a) => a.taskId === task.id && a.usage?.costUsd !== undefined).map((a) => a.usage!.costUsd!);
     let windowPercent: number | undefined;
@@ -752,61 +814,82 @@ export class TaskRunner implements Disposable {
   resume(missionId: string, opts: { auto?: boolean } = {}): Promise<void> {
     return this.queue(missionId, async () => {
       const m = this.need(missionId);
-      const prev = this.currentAttempt(m);
+      const task = this.currentTask(m);
+      const prev = this.currentAttempt(m, task.id);
       if (!prev || prev.state !== 'interrupted' || !prev.resumable) throw new TaskError('There is no interrupted attempt to resume.');
       // An automatic resume queued behind a Cancel (or anything else) must not revive the task.
-      if (m.tasks[0].state !== 'needs-human' || !['running', 'paused'].includes(m.state)) throw new TaskError('The task is no longer waiting to be resumed.');
+      if (task.state !== 'needs-human' || !['running', 'paused'].includes(m.state)) throw new TaskError('The task is no longer waiting to be resumed.');
       await this.launch(missionId, { mode: 'continue', resumeOf: prev, auto: opts.auto });
     });
   }
 
-  /** Start again from the base in a new worktree and branch, keeping the last attempt's for comparison. */
+  /**
+   * Start again from the base, keeping the last attempt's work for comparison:
+   * a new worktree and branch for a single task, or in a planned mission the
+   * same tree on a new `-a<n>` branch cut at the commit the task started from.
+   */
   retry(missionId: string): Promise<void> {
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
-      const prev = this.currentAttempt(m);
-      if (m.tasks[0].state !== 'needs-human') throw new TaskError('The task is not waiting for a decision.');
+      const task = this.currentTask(m);
+      const prev = this.currentAttempt(m, task.id);
+      if (task.state !== 'needs-human') throw new TaskError('The task is not waiting for a decision.');
       if (prev && LIVE.includes(prev.state)) {
         // Held by something this build cannot follow: give it up, without touching it.
         m = this.endAttempt(m, prev.id, 'cancelled', { status: 'cancelled' }, 'given up for a fresh retry');
         this.put(m);
       }
       await this.endSession(m, prev);
-      m = await this.retainTree(this.missions.get(missionId)!, prev);
-      await this.launch(missionId, { mode: 'fresh', route: routeOf(m, prev) });
+      if (isPlanned(m)) {
+        if (prev) await this.releaseTree(missionId, prev.id);
+        m = await this.restartTree(missionId, task.id, prev);
+      } else {
+        m = await this.retainTree(this.missions.get(missionId)!, prev);
+      }
+      await this.launch(missionId, { mode: 'fresh', route: this.routeFor(m, task.id, prev), taskId: task.id });
     });
   }
 
   /**
-   * Accept the result: the task is done and the mission goes to review, where
-   * #34 offers merge, pull request, keep or discard. Commits anything the
-   * session did after the attempt finished first, so the branch is the result.
+   * Accept the result: the task is done. A single task's mission goes to
+   * review (merge, pull request, keep or discard); a planned mission carries
+   * on with its next task. Commits anything the session did after the attempt
+   * finished first, so the branch is the result.
    */
   accept(missionId: string): Promise<void> {
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
-      const a = this.currentAttempt(m);
+      const task = this.currentTask(m);
+      const a = this.currentAttempt(m, task.id);
       const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
-      if (!a || a.state !== 'succeeded' || !wt || m.tasks[0].state !== 'needs-human') throw new TaskError('There is no finished attempt to accept.');
+      if (!a || a.state !== 'succeeded' || !wt || task.state !== 'needs-human') throw new TaskError('There is no finished attempt to accept.');
       const manager = await this.managerFor(m);
       // A missing tree has nothing more to commit; any other failure is the user's to see, not to lose.
-      const extra = wt.state === 'missing' ? undefined : await manager.commitAll(wt, `aw: ${m.tasks[0].key}: changes after attempt ${a.n}`).catch((e: Error) => {
+      const extra = wt.state === 'missing' ? undefined : await manager.commitAll(wt, `aw: ${task.key}: changes after attempt ${a.n}`).catch((e: Error) => {
         throw new TaskError(`Could not commit the changes made after the attempt, so nothing was accepted: ${e.message}`);
       });
-      const stats = await manager.diffStats(wt);
+      const stats = await manager.diffStats(measured(wt, a));
       if (extra || stats.headCommit !== a.git?.headCommit) {
         m = this.patchAttempt(m, a.id, (x) => ({ ...x, flags: { ...x.flags, userEditedBranch: true } }));
+        this.put(m);
+      }
+      if (isPlanned(m)) {
+        await this.markDone(missionId, task.id, 'user', 'accepted by the user');
+        await this.endSession(this.need(missionId), a);
+        await this.launchNext(missionId);
+        return;
       }
       const now = this.now();
-      m = this.patchTask(m, (t) => transitionTask(m, { ...t, result: { branch: wt.branch, commit: stats.headCommit, acceptedBy: 'user' } }, 'done', { now, reason: 'accepted by the user' }));
+      m = this.patchTask(m, task.id, (t) => transitionTask(m, { ...t, result: { branch: wt.branch, commit: stats.headCommit, acceptedBy: 'user' } }, 'done', { now, reason: 'accepted by the user' }));
       m = transitionMission(m, 'finishing', { now });
       m = transitionMission(m, 'review', { now, reason: 'accepted; merge, open a pull request, keep or discard the branch' });
       this.put(m);
+      this.writeTaskFinal(m, task.id);
       await this.endSession(m, a);
     });
   }
 
-  /** Stop the task: its session is ended, its worktree and branch are kept. */
+  /** Stop the mission: its session is ended, its worktrees and branches are kept. */
   cancel(missionId: string): Promise<void> {
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
@@ -818,12 +901,472 @@ export class TaskRunner implements Disposable {
       await this.endSession(m, a);
       m = await this.retainTree(this.missions.get(missionId)!, a);
       const now = this.now();
-      if (!['done', 'failed', 'cancelled', 'skipped'].includes(m.tasks[0].state)) {
-        m = this.patchTask(m, (t) => transitionTask(m, t, 'cancelled', { now, reason: 'cancelled by the user' }));
+      const ended: string[] = [];
+      for (const t of m.tasks) {
+        if (['done', 'failed', 'cancelled', 'skipped'].includes(t.state)) continue;
+        m = this.patchTask(m, t.id, (x) => transitionTask(m, x, 'cancelled', { now, reason: 'cancelled by the user' }));
+        ended.push(t.id);
       }
       if (!['completed', 'failed', 'cancelled'].includes(m.state)) m = transitionMission(m, 'cancelled', { now, reason: 'cancelled by the user' });
       this.put(m);
+      for (const id of ended) this.writeTaskFinal(m, id);
     });
+  }
+
+  // ---- Planned missions (#43) ----
+
+  /**
+   * Record a mission written by hand, straight into plan review. The plan is
+   * validated first — a cycle, a dangling edge or too many tasks refuses it,
+   * saying which — and **nothing runs**: not an attempt, not a worktree.
+   * Preview assessments start in the background.
+   */
+  async createMission(req: NewMission): Promise<Mission> {
+    const objective = req.objective.trim();
+    if (!objective) throw new TaskError('A mission needs an objective.');
+    const loaded = this.deps.repoPolicies.forFolder(req.folder);
+    if (!loaded) throw new TaskError(`${req.folder} is not in a git repository. A mission runs in a worktree of one.`);
+    const manager = await this.manager(loaded);
+    // The branch the primary checkout is on, by name, so review knows what to merge into.
+    const baseRef = req.baseRef?.trim() || (await manager.primaryBranch()) || 'HEAD';
+    const baseCommit = await manager.resolveCommit(baseRef).catch((e: Error) => {
+      throw new TaskError(`Cannot start from ${baseRef}: ${e.message}`);
+    });
+    const now = this.now();
+    const title = (req.title?.trim() || firstLine(objective)).slice(0, 120);
+    // The policy layers, frozen here as `record` freezes them (§10.2, #40).
+    const ctx = this.policyContext();
+    const shape = validateExecutionPolicy(req.policy ?? {}, { tiers: ctx.tiers });
+    if (!shape.ok) throw new TaskError(`The mission's policy is not valid: ${shape.errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`);
+    const policyLayers: PolicyLayers = {};
+    const global = compactPolicy(this.deps.globalPolicy?.());
+    const repo = compactPolicy(loaded.policy.routing);
+    const own = compactPolicy(shape.policy);
+    if (global) policyLayers.global = global;
+    if (repo) policyLayers.repo = repo;
+    if (own) policyLayers.mission = own;
+    const layered = resolveEffectivePolicy(missionLayers({ policy: {}, policyLayers }), ctx);
+    if (layered.conflicts.length > 0) throw new TaskError(conflictText(layered.conflicts));
+    // P8 routes by hand (the launcher's route, or a task's pin); the router's view is a preview.
+    const policy: ExecutionPolicy = { ...layered.policy, mode: 'manual' };
+    const drafts = req.tasks && req.tasks.length > 0 ? req.tasks : [{ title, objective, acceptanceCriteria: [] }];
+    const built = tasksFromDraft(drafts, policy, this.planContext(loaded.policy));
+    if (!built.ok) throw new TaskError(`The plan was refused: ${built.problems.join('; ')}.`);
+    let mission: Mission = {
+      id: this.id(),
+      v: 1,
+      title,
+      objective,
+      repoRoot: manager.repoRoot,
+      base: { ref: baseRef, commit: baseCommit },
+      integration: 'none',
+      policy,
+      policyLayers,
+      policyChanges: [],
+      state: 'draft',
+      planned: true,
+      source: { kind: 'user', trusted: true },
+      tasks: built.tasks,
+      assessments: [],
+      decisions: [],
+      attempts: [],
+      worktrees: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    mission = transitionMission(mission, 'plan-review', { now, reason: 'written by you: review the plan, then approve and start it' });
+    this.put(mission);
+    this.log(`mission ${mission.id}: recorded with ${mission.tasks.length} task(s) in ${mission.repoRoot}, waiting for review`);
+    this.schedulePreview(mission.id);
+    return mission;
+  }
+
+  /**
+   * One plan-review edit (§11.2): edit, merge, split, reorder, delete, change
+   * a dependency, set pins and caps. The whole plan is validated after it, and
+   * an edit that would leave a cycle (shown as its path) or break the cap is
+   * refused with nothing changed.
+   */
+  editPlan(missionId: string, edit: PlanEdit): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      const m = this.need(missionId);
+      if (!m.planned) throw new TaskError('Only a planned mission has a plan to edit.');
+      const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
+      const r = applyPlanEdit(m, edit, this.planContext(loaded?.policy ?? DEFAULT_REPO_POLICY));
+      if (!r.ok) throw new TaskError(`That change was refused: ${r.problems.join('; ')}.`);
+      this.put(r.mission);
+      this.schedulePreview(missionId);
+      return this.need(missionId);
+    });
+  }
+
+  /**
+   * Approve and start (§11.2, §18.4): the only way a planned mission's work
+   * begins, in every routing mode. Refused while the plan has an error or a
+   * blocker. `route` is the launcher's: what tasks without a pin run on.
+   */
+  approvePlan(missionId: string, route: TaskRoute): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (m.state !== 'plan-review' || !m.planned) throw new TaskError('The plan is not waiting for approval.');
+      const stops = planIssues(m).filter((i) => i.level !== 'warning');
+      if (stops.length > 0) throw new TaskError(`The plan cannot start yet: ${stops.map((i) => i.text).join('; ')}.`);
+      this.checkRoute(route);
+      const now = this.now();
+      m = {
+        ...m,
+        planApprovedAt: now,
+        defaultRoute: { harness: route.harness, ...(route.model?.trim() ? { model: route.model.trim() } : {}), ...(route.effort?.trim() ? { effort: route.effort.trim() } : {}) },
+      };
+      m = transitionMission(m, 'running', { now, reason: 'plan approved' });
+      this.put(m);
+      this.log(`mission ${missionId}: plan approved; ${m.tasks.length} task(s) to run in order`);
+      await this.launchNext(missionId);
+      return this.need(missionId);
+    });
+  }
+
+  /** Leave a task out of a planned mission and carry on with the rest. Its work, if any, is kept on a branch of its own. */
+  skip(missionId: string, taskId?: string): Promise<void> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (!isPlanned(m)) throw new TaskError('Only a task in a plan can be skipped.');
+      const task = (taskId && m.tasks.find((t) => t.id === taskId)) || this.currentTask(m);
+      if (!['needs-human', 'blocked', 'pending'].includes(task.state)) throw new TaskError(`${task.key} is ${task.state}; it cannot be skipped now.`);
+      const a = this.currentAttempt(m, task.id);
+      if (a && LIVE.includes(a.state)) {
+        m = this.endAttempt(m, a.id, 'cancelled', { status: 'cancelled' }, 'skipped by the user');
+        this.put(m);
+      }
+      await this.endSession(m, a);
+      if (a) {
+        await this.releaseTree(missionId, a.id);
+        await this.setAside(missionId, task.id, a);
+      }
+      m = this.need(missionId);
+      m = this.patchTask(m, task.id, (t) => transitionTask(m, t, 'skipped', { now: this.now(), reason: 'skipped by the user' }));
+      this.put(m);
+      this.writeTaskFinal(m, task.id);
+      await this.launchNext(missionId);
+    });
+  }
+
+  /**
+   * Mission review's buttons (§13.3, §18.4) for a mission whose result is one
+   * branch — a single task's, or a planned mission's mission branch: merge it
+   * into the base in the primary checkout (`--no-ff`, refused unless that
+   * checkout is on the base and clean), push it and open a pull request, keep
+   * it, or discard it (its trees go; its branches stay, so nothing is lost).
+   */
+  finishMission(missionId: string, how: MissionFinish): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (m.state !== 'review') throw new TaskError('The mission is not waiting for review.');
+      const branch = resultBranch(m);
+      if (!branch) throw new TaskError('The mission has no result branch.');
+      const manager = await this.managerFor(m);
+      const finisher = new MissionFinisher({ exec: this.deps.exec ?? nodeExec, repoRoot: m.repoRoot, log: this.log });
+      let result: Mission['finishResult'];
+      let removeInto: string | undefined;
+      switch (how) {
+        case 'merge-local': {
+          const r = await finisher.mergeLocal({ branch, baseRef: m.base.ref, message: `Merge ${branch}: ${m.title}` });
+          if (!r.ok) throw new TaskError(r.why);
+          result = { mergeCommit: r.mergeCommit, note: `merged into ${r.into}` };
+          removeInto = r.into;
+          break;
+        }
+        case 'pull-request': {
+          const r = await finisher.openPullRequest({ branch, baseRef: m.base.ref, title: m.title, body: pullRequestBody(m) });
+          if (!r.ok) throw new TaskError(r.why);
+          result = { pullRequestUrl: r.url };
+          break;
+        }
+        case 'keep':
+          result = { note: `kept on ${branch}` };
+          break;
+        case 'discard':
+          result = { note: `discarded; the branches are kept until you delete them` };
+          break;
+      }
+      // Tidy up what can be tidied without losing anything; a refusal only means a tree stays.
+      for (const wt of this.need(missionId).worktrees) {
+        if (wt.state === 'removed' || wt.state === 'creating' || wt.state === 'in-use') continue;
+        try {
+          if (removeInto) {
+            const out = await manager.remove(wt, { mergedInto: removeInto });
+            if (!out.removed) await manager.release(wt, 'retained').catch(() => undefined);
+          } else if (how === 'discard') {
+            const head = await manager.headOf(wt).catch(() => undefined);
+            if (head) await manager.remove(wt, { mergedInto: head, deleteBranch: false });
+          } else if (wt.state === 'ready') {
+            await manager.release(wt, 'retained');
+          }
+        } catch (e) {
+          this.log(`mission ${missionId}: could not tidy ${wt.branch}: ${errorText(e)}`);
+        }
+      }
+      m = { ...this.need(missionId), finish: how, finishResult: result };
+      m = transitionMission(m, how === 'discard' ? 'cancelled' : 'completed', { now: this.now(), reason: result?.note ?? how });
+      this.put(m);
+      this.log(`mission ${missionId}: finished (${how})`);
+      return m;
+    });
+  }
+
+  /**
+   * Start whatever the plan says is next, one task at a time (§29 P8). Runs
+   * inside the mission's queue. Finishes the mission once every task is done
+   * or skipped; waits (tasks `blocked`) when what is left needs a task that
+   * failed, was skipped or was cancelled.
+   */
+  private async launchNext(missionId: string): Promise<void> {
+    let m = this.need(missionId);
+    if (!isPlanned(m) || m.state !== 'running' || this.disposed) return;
+    // Nothing runs before approval, however this was reached.
+    if (m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
+    const busy: TaskState[] = ['ready', 'assessing', 'routed', 'queued', 'running', 'verifying', 'integrating', 'needs-human'];
+    if (m.tasks.some((t) => busy.includes(t.state))) return;
+    const now = this.now();
+    const open = executionOrder(m.tasks).filter((t) => t.state === 'pending' || t.state === 'blocked');
+    if (open.length === 0) {
+      if (m.tasks.every((t) => t.state === 'done' || t.state === 'skipped')) {
+        m = transitionMission(m, 'finishing', { now });
+        m = transitionMission(m, 'review', { now, reason: 'every task is done: merge, open a pull request, keep or discard the mission branch' });
+        this.put(m);
+        this.notify(m, 'is ready for review', `${m.tasks.filter((t) => t.state === 'done').length} task(s) done on ${resultBranch(m) ?? 'the mission branch'}.`);
+      }
+      return;
+    }
+    const next = open.find((t) => dependenciesSatisfied(m, t));
+    if (!next) {
+      for (const t of open) {
+        const waiting = t.dependsOn.map((d) => m.tasks.find((x) => x.id === d.taskId)).filter((u) => u && u.state !== 'done').map((u) => `${u!.key} (${u!.state})`);
+        const reason = `waiting on ${waiting.join(', ')}`;
+        m = this.patchTask(m, t.id, (x) => (x.state === 'pending' ? transitionTask(m, x, 'blocked', { now, reason }) : { ...x, stateReason: reason }));
+      }
+      this.put(m);
+      this.notify(m, 'needs you', 'What is left depends on a task that did not finish. Skip it, or cancel the mission.');
+      return;
+    }
+    const route = this.routeFor(m, next.id);
+    const capped = this.capRefusal(m, next.id, route);
+    if (capped) {
+      this.put(this.failBeforeLaunch(m, next.id, capped));
+      this.notify(this.need(missionId), 'needs you', `${next.key}: ${capped}`);
+      return;
+    }
+    try {
+      await this.launch(missionId, { mode: 'fresh', route, taskId: next.id });
+    } catch (e) {
+      // `launch` has already left the task waiting on the user, saying why.
+      this.log(`mission ${missionId}: ${next.key} could not start: ${errorText(e)}`);
+      this.notify(this.need(missionId), 'needs you', `${next.key} could not start: ${errorText(e)}`);
+    }
+  }
+
+  /**
+   * The route a task runs on: its own pins, over the mission's default route
+   * (the launcher's, at approval). A retry runs on what the last attempt ran on.
+   */
+  private routeFor(m: Mission, taskId: string, prev?: ExecutionAttempt): TaskRoute {
+    if (prev) return routeOf(m, prev);
+    const task = m.tasks.find((t) => t.id === taskId);
+    const base = m.defaultRoute ?? { harness: 'claude-code' };
+    const pins = task?.overrides?.pins;
+    if (!pins) return { ...base };
+    const harness = pins.harness ?? base.harness;
+    const sameHarness = harness === base.harness;
+    const model = pins.model ?? (sameHarness ? base.model : undefined);
+    const sameModel = sameHarness && model === base.model;
+    const effort = pins.effort ? this.plannedEffort(harness, model, pins.effort) : sameModel ? base.effort : undefined;
+    return { harness, ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+  }
+
+  /** AW's effort level as the model's own, through the catalog when it knows the model. */
+  private plannedEffort(harness: HarnessId, model: string | undefined, level: EffortLevel): string | undefined {
+    const source = SOURCE[harness] ?? harness;
+    const alias = model || (harness === 'claude-code' ? 'default' : '');
+    const entry = alias ? this.deps.routing?.snapshot().catalog.entries.find((e) => e.descriptor.source === source && e.aliases.includes(alias)) : undefined;
+    const native = entry ? nativeEffortFor(entry, level) : level === 'max' && harness === 'codex' ? 'xhigh' : level;
+    return native === 'none' ? undefined : native;
+  }
+
+  /** Why a task's route breaks its caps, if it does (§10.2): the caps of every scope, as #40 combines them. */
+  private capRefusal(m: Mission, taskId: string, route: TaskRoute): string | undefined {
+    const task = m.tasks.find((t) => t.id === taskId);
+    const caps = (task ? this.effective(m, task).policy.caps : m.policy.caps) ?? {};
+    const tiers = this.deps.routing?.snapshot().catalog.tiers;
+    if (caps.maxTier && tiers) {
+      const target = this.targetFor(route);
+      const cap = tierRank(tiers, caps.maxTier);
+      if (cap >= 0 && tierRank(tiers, target.tier) > cap) return `${target.model || 'the default model'} is ${target.tier}, above its cap of ${caps.maxTier}; pin a model within the cap`;
+    }
+    if (caps.maxEffort && route.effort && EFFORT_LEVELS.indexOf(awEffort(route.effort)) > EFFORT_LEVELS.indexOf(caps.maxEffort)) {
+      return `effort ${route.effort} is above its cap of ${caps.maxEffort}; pin a lower effort`;
+    }
+    return undefined;
+  }
+
+  /** The mission's one worktree, on the mission branch: created (write-ahead) the first time a task needs it. */
+  private async missionTree(missionId: string, manager: WorktreeManager): Promise<WorktreeAssignment> {
+    let m = this.need(missionId);
+    const existing = m.integration !== 'none' ? m.worktrees.find((w) => w.id === (m.integration as { worktreeId: string }).worktreeId) : undefined;
+    if (existing && existing.state !== 'removed') {
+      if (existing.state === 'missing') throw new TaskError('The mission’s worktree has gone; recreate it from its branch, or cancel the mission.');
+      // Recorded but never finished (a crash mid-create): finish it.
+      return existing.state === 'creating' ? manager.create(existing) : existing;
+    }
+    const planned = manager.plan({ id: this.id(), missionSlug: missionSlug(m), purpose: 'integration', baseCommit: m.base.commit });
+    this.worktreeOwners.set(planned.id, missionId);
+    m = { ...m, integration: { branch: planned.branch, worktreeId: planned.id }, worktrees: [...m.worktrees, planned] };
+    this.put(m);
+    return manager.create(planned);
+  }
+
+  /**
+   * Before a fresh retry in the mission tree: commit what the last attempt
+   * left, keep its work on a branch of its own, and put the tree on a new
+   * `-a<n>` branch at the commit the task started from.
+   */
+  private async restartTree(missionId: string, taskId: string, prev: ExecutionAttempt | undefined): Promise<Mission> {
+    let m = this.need(missionId);
+    const task = m.tasks.find((t) => t.id === taskId)!;
+    const wt = m.integration !== 'none' ? m.worktrees.find((w) => w.id === (m.integration as { worktreeId: string }).worktreeId) : undefined;
+    if (!wt || wt.state === 'missing' || wt.state === 'removed' || m.integration === 'none') {
+      throw new TaskError('The mission’s worktree has gone; recreate it from its branch, or cancel the mission.');
+    }
+    const manager = await this.managerFor(m);
+    await manager.commitAll(wt, `aw: ${task.key}: attempt ${prev?.n ?? 0}, not accepted`).catch((e: Error) => {
+      throw new TaskError(`Could not commit what the last attempt left, so nothing was reset: ${e.message}`);
+    });
+    const from = prev?.startCommit ?? (await manager.headOf(wt));
+    const slug = missionSlugOf(m);
+    const n = task.attemptIds.length + 1;
+    m = this.need(missionId);
+    const current = m.worktrees.find((w) => w.id === wt.id)!;
+    await manager.restartOn(current, {
+      branch: taskBranch(slug, task.key, n),
+      from,
+      resetBranch: m.integration === 'none' ? undefined : m.integration.branch,
+      keepAs: taskBranch(slug, task.key, prev?.n ?? 1),
+    });
+    return this.need(missionId);
+  }
+
+  /** A skipped task's work comes off the mission branch (kept on its own), so the next task starts clean. */
+  private async setAside(missionId: string, taskId: string, a: ExecutionAttempt): Promise<void> {
+    const m = this.need(missionId);
+    const task = m.tasks.find((t) => t.id === taskId)!;
+    const wt = m.worktrees.find((w) => w.id === a.worktreeId);
+    if (!wt || m.integration === 'none' || !a.startCommit || wt.state === 'missing' || wt.state === 'removed') return;
+    const manager = await this.managerFor(m);
+    await manager.commitAll(wt, `aw: ${task.key}: attempt ${a.n}, skipped`).catch((e: Error) => {
+      throw new TaskError(`Could not commit what the attempt left, so nothing was skipped: ${e.message}`);
+    });
+    await manager.setAside(this.need(missionId).worktrees.find((w) => w.id === wt.id)!, {
+      branch: m.integration.branch,
+      resetTo: a.startCommit,
+      keepAs: taskBranch(missionSlugOf(m), task.key, a.n),
+    });
+  }
+
+  /**
+   * A planned mission's task is done: back on the mission branch if it ran on
+   * a retry branch (a fast-forward: the mission branch is still at the commit
+   * the task started from), with its result recorded.
+   */
+  private async markDone(missionId: string, taskId: string, acceptedBy: 'verification' | 'user', reason: string): Promise<void> {
+    let m = this.need(missionId);
+    const a = this.currentAttempt(m, taskId);
+    let wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
+    if (!a || !wt) throw new TaskError('The task has no worktree to take its result from.');
+    const manager = await this.managerFor(m);
+    if (m.integration !== 'none' && wt.branch !== m.integration.branch) {
+      try {
+        wt = await manager.returnTo(wt, m.integration.branch);
+      } catch (e) {
+        m = this.need(missionId);
+        this.put(this.patchTask(m, taskId, (t) => ({ ...t, stateReason: `could not move the mission branch on: ${errorText(e)}` })));
+        throw new TaskError(`Could not move the mission branch to the task’s result: ${errorText(e)}`);
+      }
+    }
+    const head = await manager.headOf(wt);
+    m = this.need(missionId);
+    const now = this.now();
+    m = this.patchTask(m, taskId, (t) => transitionTask(m, { ...t, result: { branch: wt!.branch, commit: head, acceptedBy } }, 'done', { now, reason }));
+    this.put(m);
+    this.writeTaskFinal(m, taskId);
+  }
+
+  /** What plan editing needs from outside: fresh ids, the checks a task gets under the repository's policy, the clock. */
+  private planContext(policy: import('../../shared/orchestration/repoPolicy').RepoPolicy): PlanContext {
+    return {
+      newId: () => this.id(),
+      verification: (kind, criteria) => buildVerificationPlan({ kind, policy, criteria }),
+      now: this.now(),
+    };
+  }
+
+  /** Preview assessments for plan review, a moment after the last edit (§11.2). */
+  private schedulePreview(missionId: string): void {
+    if (this.disposed) return;
+    clearTimeout(this.previewTimers.get(missionId));
+    const timer = setTimeout(() => {
+      this.previewTimers.delete(missionId);
+      void this.preview(missionId).catch((e) => this.log(`mission ${missionId}: preview failed: ${errorText(e)}`));
+    }, this.deps.previewDelayMs ?? 800);
+    this.previewTimers.set(missionId, timer);
+  }
+
+  /**
+   * Assess every task whose content changed, outside the mission's queue (a
+   * model call must not hold up the next edit), then route each from its
+   * newest assessment. An assessment for a revision that has since been
+   * edited again is dropped: the next preview makes the right one.
+   */
+  private async preview(missionId: string): Promise<void> {
+    const m = this.missions.get(missionId);
+    if (!m || m.state !== 'plan-review' || this.disposed) return;
+    const assessor = this.deps.assessor;
+    if (assessor) {
+      const stale = m.tasks.filter((t) => !m.assessments.some((x) => x.taskId === t.id && x.taskRevision === t.revision));
+      const results = await Promise.all(stale.map((t) => assessor.assess(this.assessInput(m, t)).then((a) => ({ t, a }))));
+      await this.queue(missionId, async () => {
+        let cur = this.need(missionId);
+        for (const { t, a } of results) {
+          const task = cur.tasks.find((x) => x.id === t.id);
+          if (!task || task.revision !== t.revision || cur.assessments.some((x) => x.id === a.id)) continue;
+          cur = this.patchTask({ ...cur, assessments: [...cur.assessments, a] }, t.id, (x) => ({ ...x, assessmentIds: [...x.assessmentIds, a.id] }));
+        }
+        this.put(cur);
+      });
+    }
+    await this.queue(missionId, async () => {
+      let cur = this.need(missionId);
+      if (cur.state !== 'plan-review') return;
+      let changed = false;
+      for (const t of cur.tasks) {
+        const latest = latestAssessment(cur, t.id);
+        if (!latest || latest.taskRevision !== t.revision || t.recommendation?.assessmentId === latest.id) continue;
+        const rec = this.recommendationFor(cur, t.id, latest);
+        if (!rec) continue;
+        cur = this.patchTask(cur, t.id, (x) => ({ ...x, recommendation: rec }));
+        changed = true;
+      }
+      if (changed) this.put(cur);
+    });
+  }
+
+  /** A `task-final` record (§16.2), once per task that got somewhere: at least one attempt, or done. */
+  private writeTaskFinal(m: Mission, taskId: string): void {
+    const record = taskFinalRecord(m, taskId, this.now());
+    if (!record) return;
+    try {
+      this.deps.telemetry?.append(record);
+    } catch (e) {
+      this.log(`mission ${m.id}: could not write its task-final record: ${String(e)}`);
+    }
   }
 
   /** Put a vanished worktree back from its surviving branch (§23.3 step 5). */
@@ -837,14 +1380,14 @@ export class TaskRunner implements Disposable {
     });
   }
 
-  /** Write the current attempt's diff to a file and return its path. */
-  diff(missionId: string): Promise<string> {
+  /** Write the current (or the named) task's current attempt's diff to a file and return its path. */
+  diff(missionId: string, taskId?: string): Promise<string> {
     return this.queue(missionId, async () => {
       const m = this.need(missionId);
-      const a = this.currentAttempt(m);
+      const a = this.currentAttempt(m, taskId);
       const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
       if (!a || !wt) throw new TaskError('The task has no branch yet.');
-      const text = await (await this.managerFor(m)).diffText(wt);
+      const text = await (await this.managerFor(m)).diffText(measured(wt, a));
       fs.mkdirSync(this.deps.diffsDir, { recursive: true });
       const file = path.join(this.deps.diffsDir, `${m.id}-a${a.n}.diff`);
       fs.writeFileSync(file, text, 'utf8');
@@ -921,11 +1464,15 @@ export class TaskRunner implements Disposable {
       await this.apply(id, a.id, verdict);
       return;
     }
+    const task = this.currentTask(m);
     const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
-    if (wt?.state === 'missing' && m.tasks[0].state === 'needs-human') {
+    if (wt?.state === 'missing' && task.state === 'needs-human') {
       const why = branchGone.has(wt.id) ? 'its worktree and branch have gone; retry it fresh' : 'its worktree has gone; recreate it from its branch, or retry';
-      this.put(this.patchTask(m, (t) => ({ ...t, stateReason: why })));
+      this.put(this.patchTask(m, task.id, (t) => ({ ...t, stateReason: why })));
     }
+    // A planned mission stopped between one task finishing and the next starting: start it now.
+    if (isPlanned(m) && m.state === 'running') await this.launchNext(id);
+    if (m.planned && m.state === 'plan-review') this.schedulePreview(id);
   }
 
   /**
@@ -939,7 +1486,8 @@ export class TaskRunner implements Disposable {
     const promptId = a.sentIds?.[0];
     const wt = m.worktrees.find((w) => w.id === a.worktreeId);
     if ((a.turnsSeen ?? 0) > 0 || !promptId || !wt) return;
-    const prompt = a.assignment.mode === 'continue' ? CONTINUE_PROMPT : attemptPrompt(m.tasks[0], { harness: a.assignment.harness, branch: wt.branch });
+    const task = m.tasks.find((t) => t.id === a.taskId) ?? m.tasks[0];
+    const prompt = a.assignment.mode === 'continue' ? CONTINUE_PROMPT : attemptPrompt(task, { harness: a.assignment.harness, branch: wt.branch, mission: missionContext(m, task) });
     this.log(`task ${m.id}: attempt ${a.n} had no turn seen before the restart; sending its prompt again (deduplicated by id)`);
     try {
       await handle.send(prompt, undefined, { clientMessageId: promptId });
@@ -976,18 +1524,24 @@ export class TaskRunner implements Disposable {
   }
 
   /**
-   * Launch the task's next attempt. Runs inside the mission's queue.
-   * `fresh`: a new session in a new worktree (the first, or `-a<n>`).
+   * Launch a task's next attempt. Runs inside the mission's queue.
+   * `fresh`: a new session in a new worktree (the first, or `-a<n>`), or in a
+   * planned mission in the mission's one tree, from wherever it now stands.
    * `continue`: the interrupted attempt's session, resumed in its own tree.
    */
   private async launch(
     missionId: string,
     opts:
-      | { mode: 'fresh'; route: TaskRoute; routing?: DecisionRouting }
+      | { mode: 'fresh'; route: TaskRoute; taskId?: string; routing?: DecisionRouting }
       | { mode: 'continue'; resumeOf: ExecutionAttempt; auto?: boolean },
   ): Promise<void> {
     let m = this.need(missionId);
-    const task = m.tasks[0];
+    const taskId = opts.mode === 'continue' ? opts.resumeOf.taskId : opts.taskId ?? this.currentTask(m).id;
+    const task = m.tasks.find((t) => t.id === taskId);
+    if (!task) throw new TaskError('That task is no longer in the mission.');
+    // The one gate that holds whatever called this: a planned mission's work waits for Approve and start.
+    if (m.planned && m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
+    const planned = isPlanned(m);
     const n = task.attemptIds.length + 1;
     const prevDecision = opts.mode === 'continue' ? m.decisions.find((d) => d.id === opts.resumeOf.routingDecisionId) : undefined;
     // The policy as it is now, not as it was at the last attempt: a change
@@ -999,7 +1553,7 @@ export class TaskRunner implements Disposable {
     let loaded: LoadedRepoPolicy;
     try {
       if (eff.conflicts.length > 0) throw new TaskError(conflictText(eff.conflicts));
-      const refusal = admissionRefusal(eff, this.admissionFacts(m, route, opts.mode));
+      const refusal = admissionRefusal(eff, this.admissionFacts(m, route, opts.mode, task));
       if (refusal) throw new TaskError(refusal);
       harness = this.checkRoute(route);
       const policy = this.deps.repoPolicies.forFolder(m.repoRoot);
@@ -1007,29 +1561,38 @@ export class TaskRunner implements Disposable {
       loaded = policy;
     } catch (e) {
       // Nothing was started; a first attempt that never got going leaves the task waiting on the user.
-      if (task.attemptIds.length === 0) this.put(this.failBeforeLaunch(m, errorText(e)));
-      else if (e instanceof TaskError) this.put(this.patchTask(m, (t) => ({ ...t, stateReason: e.message })));
+      if (task.attemptIds.length === 0) this.put(this.failBeforeLaunch(m, task.id, errorText(e)));
+      else if (e instanceof TaskError) this.put(this.patchTask(m, task.id, (t) => ({ ...t, stateReason: e.message })));
       throw e;
     }
     const now = this.now();
     // Check the task can take an attempt now, before any worktree is made or taken:
     // a throw after that would leave the tree held by nothing.
-    this.advanceTaskToRunning(m, now);
+    this.advanceTaskToRunning(m, task.id, now);
 
     // The worktree: recorded `creating` before any git work (§23.2).
     const manager = await this.manager(loaded);
     let wt: WorktreeAssignment;
+    let startCommit: string;
     if (opts.mode === 'continue') {
       const prev = m.worktrees.find((w) => w.id === opts.resumeOf.worktreeId);
       if (!prev || prev.state === 'missing' || prev.state === 'removed') throw new TaskError('The attempt’s worktree has gone; recreate it or retry fresh.');
       wt = prev;
+      startCommit = opts.resumeOf.startCommit ?? prev.baseCommit;
     } else {
-      const planned = manager.plan({ id: this.id(), missionSlug: missionSlug(m), purpose: 'task', taskKey: task.key, taskId: task.id, attempt: n, baseCommit: m.base.commit });
       try {
-        wt = await manager.create(planned);
+        if (planned) {
+          // One tree for the whole mission: each task starts from what the one before it left.
+          wt = await this.missionTree(missionId, manager);
+          startCommit = await manager.headOf(wt);
+        } else {
+          const plan = manager.plan({ id: this.id(), missionSlug: missionSlug(m), purpose: 'task', taskKey: task.key, taskId: task.id, attempt: n, baseCommit: m.base.commit });
+          wt = await manager.create(plan);
+          startCommit = plan.baseCommit;
+        }
       } catch (e) {
         m = this.need(missionId);
-        if (task.attemptIds.length === 0) this.put(this.failBeforeLaunch(m, `could not create its worktree: ${errorText(e)}`));
+        if (task.attemptIds.length === 0) this.put(this.failBeforeLaunch(m, task.id, `could not create its worktree: ${errorText(e)}`));
         throw new TaskError(`Could not create the task’s worktree: ${errorText(e)}`);
       }
     }
@@ -1040,7 +1603,7 @@ export class TaskRunner implements Disposable {
     // The routing decision, immutable (§7.2). Beside a route the user picked,
     // what the router would have picked, whenever there is an assessment to route from.
     const routing: DecisionRouting =
-      (opts.mode === 'fresh' ? opts.routing : undefined) ?? { recommendation: this.recommendationFor(m), offered: false, accepted: false };
+      (opts.mode === 'fresh' ? opts.routing : undefined) ?? { recommendation: this.recommendationFor(m, task.id), offered: false, accepted: false };
     const decision = this.decision(m, task, n, route, harness, routing);
     const provider = PROVIDER[route.harness] ?? 'claude';
     const preassigned = harness.capabilities().preassignedSessionId;
@@ -1051,6 +1614,7 @@ export class TaskRunner implements Disposable {
       taskId: task.id,
       n,
       routingDecisionId: decision.id,
+      startCommit,
       repoPolicyVersion: loaded.version,
       assignment: { mode: opts.mode, sessionIds, harness: route.harness },
       worktreeId: wt.id,
@@ -1064,8 +1628,8 @@ export class TaskRunner implements Disposable {
       ...(opts.mode === 'continue' ? { resumeOf: opts.resumeOf.id, ...(opts.auto ? { autoResumed: true } : {}) } : {}),
     };
     m = { ...m, decisions: [...m.decisions, decision], attempts: [...m.attempts, attempt] };
-    m = this.patchTask(m, (t) => ({ ...t, attemptIds: [...t.attemptIds, attempt.id] }));
-    m = this.advanceTaskToRunning(m, now);
+    m = this.patchTask(m, task.id, (t) => ({ ...t, attemptIds: [...t.attemptIds, attempt.id] }));
+    m = this.advanceTaskToRunning(m, task.id, now);
     if (m.state === 'draft') m = transitionMission(m, 'running', { now, reason: 'a single task started directly' });
     m = this.patchAttempt(m, attempt.id, (x) => transitionAttempt(m, x, 'launching', { now }));
     // Write-ahead: the attempt, its session id and origin are on disk before anything starts.
@@ -1073,7 +1637,7 @@ export class TaskRunner implements Disposable {
     this.writeRouting(m, decision);
 
     const policy: LaunchPolicy = attemptLaunchPolicy({ harness: route.harness, primaryRoot: m.repoRoot, repoPolicy: loaded.policy });
-    const prompt = opts.mode === 'continue' ? CONTINUE_PROMPT : attemptPrompt(task, { harness: route.harness, branch: wt.branch });
+    const prompt = opts.mode === 'continue' ? CONTINUE_PROMPT : attemptPrompt(task, { harness: route.harness, branch: wt.branch, mission: missionContext(m, task) });
     let handle: SessionHandle;
     try {
       handle = await harness.launch({
@@ -1105,18 +1669,21 @@ export class TaskRunner implements Disposable {
   }
 
   /** The task's path to `running` for its next attempt, through the states §7.5 says it passes. */
-  private advanceTaskToRunning(m: Mission, now: number): Mission {
+  private advanceTaskToRunning(m: Mission, taskId: string, now: number): Mission {
     const steps: Partial<Record<TaskState, TaskState[]>> = {
       pending: ['ready', 'assessing', 'routed', 'queued', 'running'],
+      // A planned task whose upstream has since come good.
+      blocked: ['ready', 'assessing', 'routed', 'queued', 'running'],
       // An `assisted` task, proposed and now accepted or changed (#38).
       routed: ['queued', 'running'],
       'needs-human': ['queued', 'running'],
       queued: ['running'],
     };
-    const path = steps[m.tasks[0].state];
-    if (!path) throw new TaskError(`The task is ${m.tasks[0].state}; it cannot start an attempt.`);
+    const state = m.tasks.find((t) => t.id === taskId)?.state;
+    const path = state && steps[state];
+    if (!path) throw new TaskError(`The task is ${state ?? 'gone'}; it cannot start an attempt.`);
     for (const to of path) {
-      m = this.patchTask(m, (t) =>
+      m = this.patchTask(m, taskId, (t) =>
         transitionTask(m, t, to, {
           now,
           reason:
@@ -1134,14 +1701,17 @@ export class TaskRunner implements Disposable {
   }
 
   /** A first attempt that could not even be launched: the task waits for the user. */
-  private failBeforeLaunch(m: Mission, why: string): Mission {
+  private failBeforeLaunch(m: Mission, taskId: string, why: string): Mission {
     const now = this.now();
     if (m.state === 'draft') m = transitionMission(m, 'running', { now });
-    for (const to of ['ready', 'assessing', 'routed', 'queued', 'running', 'needs-human'] as TaskState[]) {
-      if (m.tasks[0].state === 'needs-human') break;
-      m = this.patchTask(m, (t) => transitionTask(m, t, to, { now }));
+    // Routed, then handed to the user (§7.5 `routed → needs-human`), from wherever it got to.
+    for (const to of ['ready', 'assessing', 'routed', 'needs-human'] as TaskState[]) {
+      const state = m.tasks.find((t) => t.id === taskId)?.state;
+      if (!state || state === 'needs-human') break;
+      if (!taskMachine.can(state, to)) continue;
+      m = this.patchTask(m, taskId, (t) => transitionTask(m, t, to, { now }));
     }
-    return this.patchTask(m, (t) => ({ ...t, stateReason: why }));
+    return this.patchTask(m, taskId, (t) => ({ ...t, stateReason: why }));
   }
 
   /**
@@ -1211,15 +1781,20 @@ export class TaskRunner implements Disposable {
    * assessment and a fresh snapshot. Undefined when there is no assessment or
    * no catalog. Never throws: a routing bug must not stop a launch.
    */
-  private recommendationFor(m: Mission, assessment: TaskAssessment | undefined = latestAssessment(m)): RouteRecommendation | undefined {
+  private recommendationFor(
+    m: Mission,
+    taskId: string = this.currentTask(m).id,
+    assessment: TaskAssessment | undefined = latestAssessment(m, taskId),
+  ): RouteRecommendation | undefined {
     if (!assessment || !this.deps.routing) return undefined;
     try {
-      // Every scope's controls apply (§10.2). In `manual`, the task's pins are
-      // the route the user picked, so the shadow leaves them out: it is what
-      // the router would have picked instead, under the same policy.
-      const task = m.tasks[0];
+      // Every scope's controls apply (§10.2), the task's own caps from plan
+      // review included. In `manual`, the task's pins are the route the user
+      // picked, so the shadow leaves them out: it is what the router would
+      // have picked instead, under the same policy.
+      const task = m.tasks.find((t) => t.id === taskId);
       const mode = m.policy.mode ?? 'manual';
-      const forTask = mode === 'manual' && task.overrides?.pins ? { overrides: { ...task.overrides, pins: undefined } } : task;
+      const forTask = task && mode === 'manual' && task.overrides?.pins ? { overrides: { ...task.overrides, pins: undefined } } : task;
       const policy = { ...resolveEffectivePolicy(missionLayers(m, forTask), this.policyContext()).policy, mode };
       return recommendRoute(assessment, policy, this.deps.routing.snapshot(), this.now());
     } catch (e) {
@@ -1238,8 +1813,8 @@ export class TaskRunner implements Disposable {
     let m = this.need(missionId);
     const a = this.currentAttempt(m);
     const d = a && m.decisions.find((x) => x.id === a.routingDecisionId);
-    if (!d || d.shadow || d.mode !== 'manual') return;
-    const rec = this.recommendationFor(m);
+    if (!a || !d || d.shadow || d.mode !== 'manual') return;
+    const rec = this.recommendationFor(m, a.taskId);
     if (!rec) return;
     const cmp = compareRoutes(rec.resolution.target, d.resolution.target, false);
     const filled: RoutingDecision = { ...d, assessmentId: rec.assessmentId, shadow: rec, agreement: cmp.agreement, overrides: cmp.changed };
@@ -1276,15 +1851,33 @@ export class TaskRunner implements Disposable {
     void this.queue(missionId, () => this.assess(missionId)).catch((e) => this.log(`task ${missionId}: assessment failed: ${errorText(e)}`));
   }
 
-  private async assess(missionId: string): Promise<void> {
+  private async assess(missionId: string, taskId?: string): Promise<void> {
     const assessor = this.deps.assessor;
     const before = this.missions.get(missionId);
     if (!assessor || !before || this.disposed) return;
-    const task = before.tasks[0];
+    const task = (taskId && before.tasks.find((t) => t.id === taskId)) || this.currentTask(before);
     // Immutable records: one assessment per task revision, and it is not made twice.
     if (before.assessments.some((a) => a.taskId === task.id && a.taskRevision === task.revision)) return;
-    const loaded = this.deps.repoPolicies.forFolder(before.repoRoot);
-    const assessment = await assessor.assess({
+    const assessment = await assessor.assess(this.assessInput(before, task));
+    // The mission moved on while the model was thinking; take it as it is now.
+    const m = this.missions.get(missionId);
+    if (!m || m.assessments.some((a) => a.id === assessment.id)) return;
+    const next = this.patchTask({ ...m, assessments: [...m.assessments, assessment] }, task.id, (t) =>
+      t.assessmentIds.includes(assessment.id) ? t : { ...t, assessmentIds: [...t.assessmentIds, assessment.id] },
+    );
+    this.put(next);
+    const d = assessment.dimensions;
+    this.log(
+      `task ${missionId}: assessed ${assessment.kind.value}, complexity ${d.complexity.value}, risk ${d.risk.value}, verifiability ${d.verifiability.value} (${assessment.confidence} confidence)`,
+    );
+    // In `manual`, the router runs in shadow beside the route the user picked (§27.3).
+    this.fillShadow(missionId);
+  }
+
+  /** What the assessor is told about a task: its own words, and the checks it will face. */
+  private assessInput(m: Mission, task: Task): Parameters<Assessor['assess']>[0] {
+    const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
+    return {
       taskId: task.id,
       taskRevision: task.revision,
       task: {
@@ -1296,24 +1889,11 @@ export class TaskRunner implements Disposable {
         verification: task.verification,
         createdBy: task.createdBy,
       },
-      repoRoot: before.repoRoot,
+      repoRoot: m.repoRoot,
       policy: loaded?.policy ?? DEFAULT_REPO_POLICY,
       repoPolicyVersion: loaded?.version ?? 'default',
       upstream: [],
-    });
-    // The mission moved on while the model was thinking; take it as it is now.
-    const m = this.missions.get(missionId);
-    if (!m || m.assessments.some((a) => a.id === assessment.id)) return;
-    const next = this.patchTask({ ...m, assessments: [...m.assessments, assessment] }, (t) =>
-      t.assessmentIds.includes(assessment.id) ? t : { ...t, assessmentIds: [...t.assessmentIds, assessment.id] },
-    );
-    this.put(next);
-    const d = assessment.dimensions;
-    this.log(
-      `task ${missionId}: assessed ${assessment.kind.value}, complexity ${d.complexity.value}, risk ${d.risk.value}, verifiability ${d.verifiability.value} (${assessment.confidence} confidence)`,
-    );
-    // In `manual`, the router runs in shadow beside the route the user picked (§27.3).
-    this.fillShadow(missionId);
+    };
   }
 
   // ---- Watching ----
@@ -1467,8 +2047,8 @@ export class TaskRunner implements Disposable {
         return;
       }
       case 'held': {
-        if (m.tasks[0].state === 'needs-human') return;
-        m = this.patchTask(m, (t) => transitionTask(m, t, 'needs-human', { now, reason: v.reason }));
+        if (m.tasks.find((t) => t.id === a.taskId)?.state === 'needs-human') return;
+        m = this.patchTask(m, a.taskId, (t) => transitionTask(m, t, 'needs-human', { now, reason: v.reason }));
         m = this.patchAttempt(m, a.id, (x) => ({ ...x, stateReason: v.reason }));
         this.put(m);
         this.notify(m, 'needs you', `Its session is ${v.reason}.`);
@@ -1563,8 +2143,7 @@ export class TaskRunner implements Disposable {
   }
 
   /** Why the task may not fail over on its own, or undefined when it may. */
-  private failoverBlocked(m: Mission, d: RoutingDecision): string | undefined {
-    const task = m.tasks[0];
+  private failoverBlocked(m: Mission, d: RoutingDecision, task: Task): string | undefined {
     if (m.state !== 'running' || task.state !== 'needs-human') return 'the task is not waiting';
     // A route the user picked by hand is theirs to change, unless they opted into automatic recovery.
     if (d.decidedBy !== 'router' && m.policy.autoRecover !== true) return 'the route was picked by hand';
@@ -1584,8 +2163,9 @@ export class TaskRunner implements Disposable {
     let m = this.need(missionId);
     const failed = m.attempts.find((x) => x.id === failedAttemptId);
     const d = failed && m.decisions.find((x) => x.id === failed.routingDecisionId);
-    if (!failed || !d) return false;
-    const blocked = this.failoverBlocked(m, d);
+    const task = failed && m.tasks.find((x) => x.id === failed.taskId);
+    if (!failed || !d || !task) return false;
+    const blocked = this.failoverBlocked(m, d, task);
     if (blocked) {
       this.log(`task ${missionId}: no failover: ${blocked}`);
       return false;
@@ -1628,7 +2208,6 @@ export class TaskRunner implements Disposable {
     // The task's pins (#40) name the route that lost its server; launch applies
     // pins over the route, so they move with the failover. A pin or cap at a
     // wider scope that forbids the new route stops the failover instead.
-    const task = m.tasks[0];
     const overrides = { ...task.overrides, pins: routePins(route) };
     const conflicts = checkPolicyEdit(missionLayers(m, task), 'task', taskLayer(overrides), this.policyContext());
     if (conflicts.length > 0) {
@@ -1636,11 +2215,11 @@ export class TaskRunner implements Disposable {
       return false;
     }
     m = await this.retainTree(m, failed);
-    m = this.patchTask(m, (x) => ({ ...x, overrides }));
+    m = this.patchTask(m, task.id, (x) => ({ ...x, overrides }));
     this.put(m);
     this.log(`task ${missionId}: failing over from ${from.model} to ${t.model} (${t.tier})`);
     try {
-      await this.launch(missionId, { mode: 'fresh', route, routing: { recommendation, offered: false, accepted: true, failover: true } });
+      await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation, offered: false, accepted: true, failover: true } });
     } catch (e) {
       this.log(`task ${missionId}: failover could not start: ${errorText(e)}`);
       return false;
@@ -1713,17 +2292,20 @@ export class TaskRunner implements Disposable {
       this.put(m);
     }
     a = m.attempts.find((x) => x.id === attemptId)!;
+    const task = m.tasks.find((t) => t.id === a.taskId)!;
     // Only the turn this core saw end: after a restart there may be none, and then nothing says it failed.
     const failure = turnFailure(lastTurn);
-    const wt = m.worktrees.find((w) => w.id === a.worktreeId);
-    if (!wt) {
+    const tree = m.worktrees.find((w) => w.id === a.worktreeId);
+    if (!tree) {
       this.put(this.endAttempt(m, a.id, 'failed', { status: 'failed', category: 'infra', signature: 'no-worktree' }, 'its worktree record has gone'));
       return;
     }
+    // Measured from where the attempt started: in a mission tree, the task before it's result.
+    const wt = measured(tree, a);
     let stats: Awaited<ReturnType<WorktreeManager['diffStats']>>;
     try {
       const manager = await this.managerFor(m);
-      if (wt.state !== 'missing') await manager.commitAll(wt, `aw: ${m.tasks[0].key}: attempt ${a.n}`);
+      if (wt.state !== 'missing') await manager.commitAll(wt, `aw: ${task.key}: attempt ${a.n}`);
       stats = await manager.diffStats(wt);
     } catch (e) {
       m = this.need(missionId);
@@ -1769,7 +2351,7 @@ export class TaskRunner implements Disposable {
     this.put(m);
     m = await this.releaseTree(missionId, a.id);
 
-    const plan = m.tasks[0].verification;
+    const plan = task.verification;
     const verdict = summariseVerification(plan, results);
     this.log(`task ${missionId}: attempt ${a.n} ${verdict.verdict}: ${verdict.summary}`);
     if (verdict.verdict === 'failed') {
@@ -1785,6 +2367,25 @@ export class TaskRunner implements Disposable {
         ),
       );
       this.notify(this.need(missionId), 'failed verification', `${verdict.summary}. Retry it, or open the diff and decide.`, 'open-diff');
+      return;
+    }
+    // In a planned mission a pass is the result (§7.2: done by verification),
+    // and the next task starts from it; nobody is asked.
+    if (isPlanned(m) && verdict.verdict === 'passed') {
+      m = this.endAttempt(m, a.id, 'succeeded', { status: 'succeeded' }, `passed: ${verdict.summary}`, {}, { hold: true });
+      this.put(m);
+      try {
+        await this.markDone(missionId, task.id, 'verification', `passed its checks: ${verdict.summary}`);
+      } catch (e) {
+        // The result stands; only moving the mission branch on failed. The user decides.
+        m = this.need(missionId);
+        this.put(this.patchTask(m, task.id, (t) => (t.state === 'verifying' ? transitionTask(m, t, 'needs-human', { now: this.now(), reason: errorText(e) }) : t)));
+        this.notify(this.need(missionId), 'needs you', `${task.key} passed, but ${errorText(e)}`);
+        return;
+      }
+      await this.endSession(this.need(missionId), a);
+      this.log(`mission ${missionId}: ${task.key} done (${stats.commits} commit(s), ${stats.filesChanged} file(s))`);
+      await this.launchNext(missionId);
       return;
     }
     // Everything else is the user's call. `passed` is a result they can accept
@@ -1814,8 +2415,8 @@ export class TaskRunner implements Disposable {
     headCommit: string | undefined,
   ): Promise<VerificationResult[]> {
     const m = this.need(missionId);
-    const task = m.tasks[0];
     const a = m.attempts.find((x) => x.id === attemptId)!;
+    const task = m.tasks.find((t) => t.id === a.taskId)!;
     if (task.verification.stages.length === 0) return [];
     const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
     if (!loaded) return [];
@@ -1858,7 +2459,8 @@ export class TaskRunner implements Disposable {
 
   /**
    * End an attempt (terminal state, outcome, telemetry) and move its task to
-   * `needs-human`. Returns the mission; the caller saves it.
+   * `needs-human` — or, with `hold`, leave a succeeded one `verifying` for
+   * the caller to mark done. Returns the mission; the caller saves it.
    */
   private endAttempt(
     m: Mission,
@@ -1867,17 +2469,20 @@ export class TaskRunner implements Disposable {
     outcome: { status: 'succeeded' | 'failed' | 'cancelled' | 'interrupted'; category?: OutcomeCategory; signature?: string },
     reason: string,
     extra: Partial<ExecutionAttempt> = {},
+    opts: { hold?: boolean } = {},
   ): Mission {
     const now = this.now();
     m = this.patchAttempt(m, attemptId, (x) => ({ ...transitionAttempt(m, closeWait(x, now), to, { now, reason }), outcome, ...extra }));
-    const task = m.tasks[0];
+    const taskId = m.attempts.find((x) => x.id === attemptId)!.taskId;
+    const task = m.tasks.find((t) => t.id === taskId)!;
     if (task.state === 'running' || task.state === 'verifying') {
-      if (to === 'succeeded' && task.state === 'running') m = this.patchTask(m, (t) => transitionTask(m, t, 'verifying', { now }));
-      if (to !== 'cancelled' || reason !== 'cancelled by the user') {
-        m = this.patchTask(m, (t) => transitionTask(m, t, 'needs-human', { now, reason }));
+      if (to === 'succeeded' && task.state === 'running') m = this.patchTask(m, taskId, (t) => transitionTask(m, t, 'verifying', { now }));
+      const userStop = to === 'cancelled' && (reason === 'cancelled by the user' || reason === 'skipped by the user');
+      if (!userStop && !(opts.hold && to === 'succeeded')) {
+        m = this.patchTask(m, taskId, (t) => transitionTask(m, t, 'needs-human', { now, reason }));
       }
     } else if (task.state === 'needs-human') {
-      m = this.patchTask(m, (t) => ({ ...t, stateReason: reason }));
+      m = this.patchTask(m, taskId, (t) => ({ ...t, stateReason: reason }));
     }
     const a = m.attempts.find((x) => x.id === attemptId)!;
     const record = attemptRecord(m, a, now);
@@ -1963,8 +2568,10 @@ export class TaskRunner implements Disposable {
 
   /** The worktree manager's write-ahead: every assignment it records lands in its mission. */
   private recordWorktree(a: WorktreeAssignment): void {
+    const owner = this.worktreeOwners.get(a.id);
     for (const m of this.missions.values()) {
-      if (!m.tasks.some((t) => t.id === a.taskId)) continue;
+      // A task's tree by its task; the mission tree (no task) by its id, or by who asked for it.
+      if (m.id !== owner && !m.worktrees.some((w) => w.id === a.id) && !(a.taskId && m.tasks.some((t) => t.id === a.taskId))) continue;
       const has = m.worktrees.some((w) => w.id === a.id);
       this.put({ ...m, worktrees: has ? m.worktrees.map((w) => (w.id === a.id ? a : w)) : [...m.worktrees, a] });
       return;
@@ -2025,8 +2632,8 @@ export class TaskRunner implements Disposable {
     this.emitter.fire();
   }
 
-  private patchTask(m: Mission, f: (t: Task) => Task): Mission {
-    return { ...m, tasks: m.tasks.map((t, i) => (i === 0 ? f(t) : t)) };
+  private patchTask(m: Mission, taskId: string, f: (t: Task) => Task): Mission {
+    return { ...m, tasks: m.tasks.map((t) => (t.id === taskId ? f(t) : t)) };
   }
 
   private patchAttempt(m: Mission, id: string, f: (a: ExecutionAttempt) => ExecutionAttempt): Mission {
@@ -2039,6 +2646,8 @@ export class TaskRunner implements Disposable {
 
   dispose(): void {
     this.disposed = true;
+    for (const t of this.previewTimers.values()) clearTimeout(t);
+    this.previewTimers.clear();
     for (const id of [...this.watchers.keys()]) this.unwatch(id);
     for (const s of this.subs) s.dispose();
     this.emitter.dispose();
@@ -2094,7 +2703,7 @@ function routePins(route: TaskRoute): { harness: HarnessId; source?: ModelSource
 function routeOf(m: Mission, a: ExecutionAttempt | undefined): TaskRoute {
   const d = a ? m.decisions.find((x) => x.id === a.routingDecisionId) : undefined;
   if (d && a) return routeFromDecision(d, a);
-  const pins = m.tasks[0].overrides?.pins;
+  const pins = (a && m.tasks.find((t) => t.id === a.taskId))?.overrides?.pins ?? m.tasks[0].overrides?.pins;
   return { harness: pins?.harness ?? 'claude-code', model: pins?.model, ...(pins?.source ? { source: pins.source } : {}) };
 }
 
@@ -2126,10 +2735,98 @@ interface DecisionRouting {
 }
 
 /** The newest assessment of the mission's task. */
-function latestAssessment(m: Mission): TaskAssessment | undefined {
-  const task = m.tasks[0];
+function latestAssessment(m: Mission, taskId: string): TaskAssessment | undefined {
+  const task = m.tasks.find((t) => t.id === taskId);
   const id = task?.assessmentIds.at(-1);
   return id ? m.assessments.find((a) => a.id === id) : undefined;
+}
+
+/** A planned mission (#43): reviewed as a plan, run in the mission tree. */
+export function isPlanned(m: Pick<Mission, 'planned'>): boolean {
+  return m.planned === true;
+}
+
+/** The slug the mission's branches are under: from its mission branch once it has one, which is what git knows it by. */
+function missionSlugOf(m: Mission): string {
+  if (m.integration !== 'none') {
+    const parts = m.integration.branch.split('/');
+    if (parts.length === 3) return parts[1];
+  }
+  return missionSlug(m);
+}
+
+/** The assignment as seen from where the attempt started, which its diff and its checks are measured against. */
+function measured(wt: WorktreeAssignment, a: Pick<ExecutionAttempt, 'startCommit'> | undefined): WorktreeAssignment {
+  return a?.startCommit && a.startCommit !== wt.baseCommit ? { ...wt, baseCommit: a.startCommit } : wt;
+}
+
+/** The one branch a mission's result is on: the mission branch, or a single task's result branch. */
+export function resultBranch(m: Mission): string | undefined {
+  if (m.planned) return m.integration !== 'none' ? m.integration.branch : undefined;
+  return m.tasks[0]?.result?.branch;
+}
+
+/** For the prompt: where this task sits in its mission, so the agent knows earlier work is already there. */
+function missionContext(m: Mission, task: Task): { title: string; position: number; of: number; before: string[] } | undefined {
+  if (!m.planned || m.tasks.length < 2) return undefined;
+  const order = executionOrder(m.tasks);
+  const position = order.findIndex((t) => t.id === task.id) + 1;
+  const before = order.slice(0, Math.max(0, position - 1)).filter((t) => t.state === 'done').map((t) => `${t.key}: ${t.title}`);
+  return { title: m.title, position, of: m.tasks.length, before };
+}
+
+/** What a pull request says: the mission and what each task did. The user's own words, sent by their click. */
+function pullRequestBody(m: Mission): string {
+  const lines = [m.objective.trim(), '', '## Tasks'];
+  for (const t of executionOrder(m.tasks)) lines.push(`- ${t.state === 'done' ? '✓' : t.state === 'skipped' ? '–' : '·'} ${t.key}: ${t.title}`);
+  lines.push('', 'Made with Agent Wrangler.');
+  return lines.join('\n');
+}
+
+/** The `task-final` record for a task that has ended (§16.2): sums of its attempts, metadata only. */
+export function taskFinalRecord(m: Mission, taskId: string, now: number): TaskFinalRecord | undefined {
+  const task = m.tasks.find((t) => t.id === taskId);
+  if (!task) return undefined;
+  const outcome = task.state === 'done' || task.state === 'failed' || task.state === 'cancelled' || task.state === 'skipped' ? task.state : undefined;
+  if (!outcome) return undefined;
+  const attempts = task.attemptIds.map((id) => m.attempts.find((a) => a.id === id)).filter((a): a is ExecutionAttempt => !!a);
+  if (attempts.length === 0 && outcome !== 'done') return undefined;
+  let usd: number | undefined;
+  let basis: TaskFinalRecord['cost']['basis'] = 'none';
+  let tokens: number | undefined;
+  let activeMs: number | undefined;
+  for (const a of attempts) {
+    const u = a.usage;
+    if (u?.costUsd !== undefined && u.costBasis !== 'none') {
+      usd = (usd ?? 0) + u.costUsd;
+      basis = basis === 'none' || basis === u.costBasis ? u.costBasis : 'price-table';
+    }
+    const parts = [u?.inputTokens, u?.outputTokens, u?.cacheReadTokens, u?.cacheWriteTokens].filter((x): x is number => x !== undefined);
+    if (parts.length > 0) tokens = (tokens ?? 0) + parts.reduce((s, x) => s + x, 0);
+    if (a.launchedAt !== undefined && a.endedAt !== undefined) {
+      activeMs = (activeMs ?? 0) + Math.max(0, a.endedAt - a.launchedAt - (a.timing?.waitedOnHumanMs ?? 0));
+    }
+  }
+  const first = attempts[0];
+  const start = first?.launchedAt ?? first?.createdAt;
+  const end = attempts.at(-1)?.endedAt;
+  return {
+    v: TELEMETRY_SCHEMA_VERSION,
+    type: 'task-final',
+    id: `task-final:${task.id}`,
+    at: now,
+    missionId: m.id,
+    taskId: task.id,
+    missionTasks: m.tasks.length,
+    outcome,
+    ...(task.result ? { acceptedBy: task.result.acceptedBy } : {}),
+    attempts: attempts.length,
+    firstAttemptPass: outcome === 'done' && attempts.length === 1 && task.result?.acceptedBy === 'verification',
+    cost: { ...(usd !== undefined ? { usd: Math.round(usd * 1e6) / 1e6 } : {}), basis },
+    ...(tokens !== undefined ? { tokens } : {}),
+    ...(start !== undefined && end !== undefined ? { elapsedMs: Math.max(0, end - start) } : {}),
+    ...(activeMs !== undefined ? { activeMs } : {}),
+  };
 }
 
 /** A native effort level on AW's scale, for the routing record: `xhigh` and above are `max`. */

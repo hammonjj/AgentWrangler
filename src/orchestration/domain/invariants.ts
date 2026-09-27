@@ -6,11 +6,12 @@
  * first, so plan review and the store can say everything that is wrong.
  */
 import type { Mission, Task } from '../../shared/orchestration/types';
+import { DEFAULT_MAX_TASKS, HARD_MAX_TASKS } from '../../shared/orchestration/plan';
 import { ACTIVE_ATTEMPT_STATES } from './lifecycles';
+import { cycleText, findCycle } from './plan';
 
 /** The hard cap on tasks per mission (§11.2); a mission's own `maxTasks` may only be lower. */
-export const HARD_MAX_TASKS = 12;
-export const DEFAULT_MAX_TASKS = 8;
+export { DEFAULT_MAX_TASKS, HARD_MAX_TASKS };
 
 /**
  * Problems with the dependency graph: dangling or self references, and every
@@ -49,7 +50,9 @@ export function graphProblems(tasks: Pick<Task, 'id' | 'key' | 'dependsOn'>[]): 
   }
   if (ordered < tasks.length) {
     const stuck = tasks.filter((t) => (indegree.get(t.id) ?? 0) > 0).map((t) => t.key);
-    problems.push(`dependency cycle among ${stuck.join(', ')}`);
+    // The members, then one cycle as a path, which is what a person fixes.
+    const cycle = findCycle(tasks);
+    problems.push(`dependency cycle among ${stuck.join(', ')}${cycle ? `: ${cycleText(cycle)}` : ''}`);
   }
   return problems;
 }
@@ -91,7 +94,7 @@ export function validateMission(mission: Mission): string[] {
   }
 
   if ((mission.state === 'running' || mission.state === 'paused' || mission.state === 'finishing' || mission.state === 'review') &&
-      mission.planApprovedAt === undefined && mission.tasks.length !== 1) {
+      mission.planApprovedAt === undefined && (mission.tasks.length !== 1 || mission.planned)) {
     problems.push(`mission is ${mission.state} without an approved plan`);
   }
   if (mission.state === 'completed' && (mission.finish === undefined || mission.finish === 'discard')) {

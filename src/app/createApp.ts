@@ -66,7 +66,7 @@ import { LocalEndpointService } from '../orchestration/local/localEndpointServic
 import { LocalMetricsIndex } from '../core/telemetry/localMetricsIndex';
 import type { Mission } from '../shared/orchestration/types';
 import type { ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../shared/orchestration/taskView';
-import { taskBadges, taskViewOf } from '../orchestration/view/taskViews';
+import { sessionKeyFor, taskBadges, taskViewOf } from '../orchestration/view/taskViews';
 import { isOpenProposal, proposalChoice, proposalViewOf } from '../orchestration/view/proposalView';
 import { TelemetryLog } from '../core/telemetry/telemetryLog';
 import { TELEMETRY_ENABLED_KEY, TELEMETRY_PRICES_KEY, TurnTelemetry } from '../core/telemetry/turnTelemetry';
@@ -120,11 +120,13 @@ import type {
 } from '../core/control/protocol';
 import type {
   ConversationLauncher,
+  MissionSource,
   ProjectSource,
   RunnerOwnership,
   TaskBadgeSource,
   UsageSource,
 } from '../ui/dashboardHost';
+import { missionViewOf } from '../orchestration/view/missionViews';
 import type { TaskPaneSource } from '../ui/conversation/conversationHost';
 import { adoptActionFor } from '../ui/openTarget';
 import { resumeInTerminal } from '../ui/terminal';
@@ -187,6 +189,8 @@ export interface AgentWranglerApp {
    * Absent while orchestration is off, and the panes then draw neither.
    */
   taskPanes?: TaskBadgeSource & TaskPaneSource;
+  /** The table's Missions view (#43). Absent while orchestration is off. */
+  missions?: MissionSource;
   dictation: DictationService;
   files: FileSuggestService;
   actions: SessionActions;
@@ -1176,10 +1180,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
         viewFor: (sessionKey: string): TaskView | undefined => {
           const badge = taskBadges(tasks.list()).get(sessionKey);
           const mission = badge && tasks.get(badge.missionId);
-          return mission ? taskViewOf(mission, tasks.actions(mission.id), policyContextFor(models.catalog)) : undefined;
+          return mission ? taskViewOf(mission, tasks.actions(mission.id, badge.taskId), badge.taskId, policyContextFor(models.catalog)) : undefined;
         },
-        run: async (missionId: string, action: TaskViewAction): Promise<void> => {
-          await runTaskAction(tasks, missionId, action);
+        run: async (missionId: string, action: TaskViewAction, taskId?: string): Promise<void> => {
+          await runTaskAction(tasks, missionId, action, taskId);
         },
         proposalsFor: (sessionKey: string): TaskProposalView[] =>
           tasks
@@ -1214,15 +1218,24 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * perform: one points a pane at a session and the other opens a file, both of
    * which belong to the app. The rest go straight through.
    */
-  async function runTaskAction(runner: TaskRunner, missionId: string, action: TaskViewAction): Promise<void> {
+  async function runTaskAction(runner: TaskRunner, missionId: string, action: TaskViewAction, taskId?: string): Promise<void> {
+    const m = runner.get(missionId);
+    // A button drawn for one task must not land on another: only offered actions run, and
+    // the ones that move a task along only on the task the mission is on.
+    if (taskId && m) {
+      if (!runner.actions(missionId, taskId).includes(action)) throw new TaskError('That action is no longer available for this task.');
+      if (['accept', 'resume', 'retry', 'recreate-worktree'].includes(action) && runner.currentTask(m).id !== taskId) {
+        throw new TaskError('That task is not the one the mission is on.');
+      }
+    }
     switch (action) {
       case 'show-session': {
-        const handle = runner.handleOf(missionId);
+        const handle = runner.handleOf(missionId, taskId);
         if (handle) surface?.showSession(handle);
         return;
       }
       case 'open-diff':
-        host.shell.openFile(await runner.diff(missionId));
+        host.shell.openFile(await runner.diff(missionId, taskId));
         return;
       case 'accept':
         return runner.accept(missionId);
@@ -1232,6 +1245,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
         return runner.retry(missionId);
       case 'recreate-worktree':
         return runner.recreateWorktree(missionId);
+      case 'skip':
+        return runner.skip(missionId, taskId);
       case 'edit-policy':
         return editPolicy(policyEditorDeps(runner), missionId);
       case 'cancel':
@@ -1242,6 +1257,99 @@ export function createApp(host: HostServices): AgentWranglerApp {
   function policyEditorDeps(runner: TaskRunner): PolicyEditorDeps {
     return { dialogs, runner, catalog: () => models.catalog, log };
   }
+
+  const showMissionRequests = new Emitter<string | undefined>();
+
+  /**
+   * The Missions view (#43): every mission as the table's third view draws it,
+   * and the clicks it sends back — plan edits, Approve and start, a task's
+   * buttons, the finish buttons. `undefined` while orchestration is off.
+   */
+  const missionSource: MissionSource | undefined = tasks
+    ? {
+        snapshot: () => ({
+          missions: tasks
+            .list()
+            // A proposal waiting on its card (#81) is not a mission yet.
+            .filter((m) => !isOpenProposal(m))
+            .map((m) =>
+              missionViewOf(m, {
+                actions: (taskId) => tasks.actions(m.id, taskId),
+                finishDefault: m.state === 'review' ? orchestration.repoPolicies?.forFolder(m.repoRoot)?.policy.finish.default : undefined,
+              }),
+            ),
+          tiers: models.catalog.tiers.map((t) => t.name),
+          harnesses: [
+            { id: 'claude-code', label: 'Claude Code' },
+            { id: 'codex', label: 'Codex' },
+          ],
+        }),
+        run: async (missionId, op, provider) => {
+          switch (op.kind) {
+            case 'edit':
+              await tasks.editPlan(missionId, op.edit);
+              return;
+            case 'approve': {
+              const defaults = launchDefaults.for(provider);
+              await tasks.approvePlan(missionId, { harness: provider === 'codex' ? 'codex' : 'claude-code', model: defaults.model, effort: defaults.effort });
+              dialogs.flash('Plan approved: its tasks run one at a time on the mission branch.');
+              return;
+            }
+            case 'cancel': {
+              const m = tasks.get(missionId);
+              const ok = await dialogs.warn(`Cancel “${m?.title ?? 'this mission'}”?`, { modal: true, detail: 'Its session is ended. Its worktree and branches are kept.' }, 'Cancel Mission');
+              if (ok === 'Cancel Mission') await tasks.cancel(missionId);
+              return;
+            }
+            case 'finish': {
+              if (op.how === 'discard') {
+                const ok = await dialogs.warn('Discard this mission’s result?', { modal: true, detail: 'Its worktrees are removed if they are clean. Its branches are kept until you delete them.' }, 'Discard');
+                if (ok !== 'Discard') return;
+              }
+              const done = await tasks.finishMission(missionId, op.how);
+              const r = done.finishResult;
+              if (r?.pullRequestUrl) {
+                dialogs.flash(`Pull request opened: ${r.pullRequestUrl}`, 6000);
+                if (/^https:\/\//.test(r.pullRequestUrl)) host.shell.openExternal(r.pullRequestUrl);
+              } else dialogs.flash(`Mission ${op.how === 'merge-local' ? 'merged' : op.how === 'keep' ? 'kept' : 'discarded'}${r?.note ? `: ${r.note}` : ''}.`);
+              return;
+            }
+            case 'task':
+              await runTaskAction(tasks, missionId, op.action, op.taskId);
+              return;
+            case 'open': {
+              // The task's current attempt's conversation, in the right pane; never another window.
+              const m = tasks.get(missionId);
+              const handle = tasks.handleOf(missionId, op.taskId);
+              if (handle) {
+                surface?.showSession(handle);
+                return;
+              }
+              const t = m?.tasks.find((x) => x.id === op.taskId);
+              const a = t && m?.attempts.find((x) => x.id === t.attemptIds.at(-1));
+              const key = a && sessionKeyFor(a.assignment.harness, a.assignment.sessionIds.at(-1));
+              if (key && store.get(key)) surface?.show(key);
+              else dialogs.flash(t && t.attemptIds.length === 0 ? `${t.key} has not started yet.` : 'That conversation is not in the table any more.');
+              return;
+            }
+          }
+        },
+        create: async (cwd) => {
+          if (cwd === GLOBAL_PROJECT_DIR) throw new TaskError('A mission runs in a worktree of a git repository. Pick a project folder in the launcher first.');
+          const objective = await dialogs.input({
+            title: 'New mission',
+            prompt: `What is the mission? You write its tasks next, in plan review; nothing runs until you approve the plan. (${path.basename(cwd)})`,
+            validateInput: (v) => (v.trim() ? undefined : 'Say what the mission is for.'),
+          });
+          if (!objective?.trim()) return undefined;
+          // The global routing defaults are frozen into the mission by the runner (#40).
+          const m = await tasks.createMission({ folder: cwd, objective });
+          return m.id;
+        },
+        onDidChange: (listener) => tasks.onDidChange(listener),
+        onDidRequestShow: (listener) => showMissionRequests.event(listener),
+      }
+    : undefined;
 
   const launcher: ConversationLauncher = {
     newConversation: (cwd, selectedProvider) =>
@@ -1259,13 +1367,28 @@ export function createApp(host: HostServices): AgentWranglerApp {
   async function taskMenu(runner: TaskRunner, cwd: string, provider: 'claude' | 'codex'): Promise<void> {
     type Row = { label: string; description?: string; detail?: string; missionId?: string; create?: true };
     const recent = runner.list().filter((m) => !['completed', 'cancelled'].includes(m.state));
-    const rows: Row[] = [
+    const rows: (Row & { mission?: true })[] = [
       { label: '$(add) Run a new task…', description: cwd === GLOBAL_PROJECT_DIR ? 'pick a project folder first' : cwd, create: true },
-      ...recent.map((m) => ({ label: m.title, description: taskStateLabel(m), detail: m.tasks[0].stateReason, missionId: m.id })),
+      { label: '$(list-tree) New mission…', description: 'several tasks, reviewed as a plan before anything runs', mission: true },
+      ...recent.map((m) => ({ label: m.title, description: taskStateLabel(m), detail: runner.currentTask(m).stateReason, missionId: m.id })),
     ];
     const picked = await dialogs.pick(rows, { placeHolder: 'Tasks run in a worktree and branch of their own' });
     if (!picked) return;
     if (picked.create) return newTask(runner, cwd, provider);
+    if (picked.mission) {
+      try {
+        const id = await missionSource?.create(cwd);
+        if (id) showMissionRequests.fire(id);
+      } catch (error) {
+        dialogs.error(`Agent Wrangler: ${(error as Error).message}`);
+      }
+      return;
+    }
+    // A planned mission lives in the Missions view, where its plan and tasks are.
+    if (picked.missionId && runner.get(picked.missionId)?.planned) {
+      showMissionRequests.fire(picked.missionId);
+      return;
+    }
     if (picked.missionId) {
       // An `assisted` proposal nobody has started yet: back to the proposal (#38).
       const task = runner.get(picked.missionId)?.tasks[0];
@@ -1441,6 +1564,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     resume: 'Resume the attempt',
     retry: 'Retry fresh, in a new worktree',
     'recreate-worktree': 'Recreate its worktree from its branch',
+    skip: 'Skip it; the mission carries on',
     'edit-policy': 'Edit its pins and caps…',
     cancel: 'Cancel the task',
   };
@@ -1474,6 +1598,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
         case 'recreate-worktree':
           await runner.recreateWorktree(missionId);
           return;
+        case 'skip':
+          await runner.skip(missionId);
+          return;
         case 'edit-policy':
           await editPolicy(policyEditorDeps(runner), missionId);
           return;
@@ -1490,6 +1617,13 @@ export function createApp(host: HostServices): AgentWranglerApp {
   }
 
   function taskStateLabel(m: Mission): string {
+    if (m.planned) {
+      if (m.state === 'plan-review') return `plan review — ${m.tasks.length} task(s), nothing runs until you approve`;
+      if (m.state === 'review') return 'ready for review — merge, open a PR, keep or discard';
+      const current = tasks?.currentTask(m);
+      const done = m.tasks.filter((t) => t.state === 'done').length;
+      return `${done}/${m.tasks.length} done${current && m.state === 'running' ? ` — ${current.key} ${current.state === 'needs-human' ? 'needs you' : current.state}` : ` — ${m.state}`}`;
+    }
     const task = m.tasks[0];
     const attempt = runnerAttempt(m);
     if (m.state === 'review') return 'accepted — branch kept';
@@ -2557,6 +2691,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     projects,
     launcher,
     taskPanes,
+    missions: missionSource,
     dictation,
     files,
     actions,

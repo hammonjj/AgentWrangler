@@ -60,9 +60,9 @@ export function sessionKeyFor(harness: HarnessId, sessionId: string | undefined)
   return provider && sessionId ? `${provider}:${sessionId}` : undefined;
 }
 
-/** The task of a single-task mission, and the one every view below is about. */
-function taskOf(m: Mission): Task | undefined {
-  return m.tasks[0];
+/** The task a view is about: the one named, or a single-task mission's only task. */
+function taskOf(m: Mission, taskId?: string): Task | undefined {
+  return taskId ? m.tasks.find((t) => t.id === taskId) : m.tasks[0];
 }
 
 function decisionOf(m: Mission, a: ExecutionAttempt | undefined): RoutingDecision | undefined {
@@ -161,8 +161,8 @@ function diffOf(a: ExecutionAttempt | undefined): TaskDiffView | undefined {
 }
 
 /** The attempt the task is on now: the last one it recorded. */
-export function currentAttemptOf(m: Mission): ExecutionAttempt | undefined {
-  const id = taskOf(m)?.attemptIds.at(-1);
+export function currentAttemptOf(m: Mission, taskId?: string): ExecutionAttempt | undefined {
+  const id = taskOf(m, taskId)?.attemptIds.at(-1);
   return id ? m.attempts.find((a) => a.id === id) : undefined;
 }
 
@@ -209,8 +209,8 @@ const LOUD_VALUES = new Set(['critical', 'open-ended', 'none']);
  * they are the only reason a person can tell "risk: critical because a path
  * rule says so" from "risk: critical because a model had a feeling".
  */
-export function assessmentViewOf(m: Mission): TaskAssessmentView | undefined {
-  const task = taskOf(m);
+export function assessmentViewOf(m: Mission, taskId?: string): TaskAssessmentView | undefined {
+  const task = taskOf(m, taskId);
   if (!task) return undefined;
   const id = task.assessmentIds.at(-1);
   const a = (id && m.assessments.find((x) => x.id === id)) || undefined;
@@ -256,8 +256,8 @@ export function assessmentViewOf(m: Mission): TaskAssessmentView | undefined {
  * task's next attempt, where each came from, and every change since the
  * mission started. `ctx` gives the tier order; without it, the default tiers.
  */
-export function policyViewOf(m: Mission, ctx: PolicyContext = { tiers: DEFAULT_TIERS }): TaskPolicyView | undefined {
-  const task = taskOf(m);
+export function policyViewOf(m: Mission, ctx: PolicyContext = { tiers: DEFAULT_TIERS }, taskId?: string): TaskPolicyView | undefined {
+  const task = taskOf(m, taskId);
   if (!task) return undefined;
   const eff = resolveEffectivePolicy(missionLayers(m, task), ctx);
   const p = eff.policy;
@@ -286,8 +286,8 @@ export function policyViewOf(m: Mission, ctx: PolicyContext = { tiers: DEFAULT_T
   return { chip: chip.slice(0, 3).join(' · ') + (chip.length > 3 ? ` +${chip.length - 3}` : ''), lines, frozen: pinnedDimensions(p), changes, conflicts };
 }
 
-export function taskViewOf(m: Mission, actions: TaskViewAction[], ctx?: PolicyContext): TaskView | undefined {
-  const task = taskOf(m);
+export function taskViewOf(m: Mission, actions: TaskViewAction[], taskId?: string, ctx?: PolicyContext): TaskView | undefined {
+  const task = taskOf(m, taskId);
   if (!task) return undefined;
   const attempts = task.attemptIds
     .map((id) => m.attempts.find((a) => a.id === id))
@@ -296,14 +296,16 @@ export function taskViewOf(m: Mission, actions: TaskViewAction[], ctx?: PolicyCo
   const wt = current?.worktreeId ? m.worktrees.find((w) => w.id === current.worktreeId) : undefined;
   return {
     missionId: m.id,
+    taskId: task.id,
     taskKey: task.key,
+    ...(m.tasks.length > 1 ? { mission: { title: m.title, tasks: m.tasks.length } } : {}),
     title: task.title,
     objective: task.objective,
     acceptanceCriteria: task.acceptanceCriteria,
     state: task.state,
     stateReason: task.stateReason,
     route: routeViewOf(m, current),
-    assessment: assessmentViewOf(m),
+    assessment: assessmentViewOf(m, task.id),
     routing: routingViewOf(m, current),
     attempt: current ? { n: current.n, of: attempts.length } : undefined,
     branch: wt?.branch,
@@ -312,17 +314,18 @@ export function taskViewOf(m: Mission, actions: TaskViewAction[], ctx?: PolicyCo
     diff: diffOf(current),
     verification: verificationViewOf(task, current),
     attempts: attempts.map((a) => attemptViewOf(m, a, a.id === current?.id)),
-    policy: policyViewOf(m, ctx),
+    policy: policyViewOf(m, ctx, task.id),
     actions,
   };
 }
 
 /** The chips on the row of a session that is running one of this mission's attempts. */
 export function taskBadgeOf(m: Mission, attempt: ExecutionAttempt): TaskBadge | undefined {
-  const task = taskOf(m);
+  const task = taskOf(m, attempt.taskId);
   if (!task) return undefined;
   return {
     missionId: m.id,
+    taskId: task.id,
     taskKey: task.key,
     title: task.title,
     state: task.state,
@@ -345,16 +348,16 @@ export function taskBadgeOf(m: Mission, attempt: ExecutionAttempt): TaskBadge | 
 export function taskBadges(missions: readonly Mission[]): Map<string, TaskBadge> {
   const out = new Map<string, TaskBadge>();
   for (const m of missions) {
-    const task = taskOf(m);
-    if (!task) continue;
-    for (const id of task.attemptIds) {
-      const a = m.attempts.find((x) => x.id === id);
-      if (!a) continue;
-      const badge = taskBadgeOf(m, a);
-      if (!badge) continue;
-      for (const sessionId of a.assignment.sessionIds) {
-        const key = sessionKeyFor(a.assignment.harness, sessionId);
-        if (key) out.set(key, badge);
+    for (const task of m.tasks) {
+      for (const id of task.attemptIds) {
+        const a = m.attempts.find((x) => x.id === id);
+        if (!a) continue;
+        const badge = taskBadgeOf(m, a);
+        if (!badge) continue;
+        for (const sessionId of a.assignment.sessionIds) {
+          const key = sessionKeyFor(a.assignment.harness, sessionId);
+          if (key) out.set(key, badge);
+        }
       }
     }
   }

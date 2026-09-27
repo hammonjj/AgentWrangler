@@ -647,7 +647,7 @@ describe('TaskRunner', () => {
       expect(m.policyChanges).toHaveLength(1);
       expect(m.policyChanges[0]).toMatchObject({ scope: 'task', fields: ['pins.effort'], appliesFromAttempt: 2, before: { pins: { effort: 'low' } }, changed: { pins: { effort: 'high' } } });
       expect(m.decisions[0]).toMatchObject({ policyRevision: 0, resolution: { target: { effortNative: 'low' } } });
-      let view = taskViewOf(m, [], policyContextFor(catalog({ openai: false })))!;
+      let view = taskViewOf(m, [], undefined, policyContextFor(catalog({ openai: false })))!;
       expect(view.policy?.changes).toEqual([expect.objectContaining({ scope: 'task', text: 'pinned effort low → high', appliesFromAttempt: 2, pending: true })]);
       expect(view.policy?.frozen).toEqual(['harness', 'model', 'tier', 'effort']);
 

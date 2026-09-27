@@ -212,10 +212,24 @@ export interface Mission {
   policyChanges: PolicyChange[];
   state: MissionState;
   stateReason?: string;
+  /**
+   * Written as a plan and reviewed before anything runs (#43), however many
+   * tasks it has: its tasks run one at a time in the mission worktree once
+   * the plan is approved. Absent for a single task started directly.
+   */
+  planned?: boolean;
   /** Set when the user approves the plan. `running` requires it, except for a single task started directly. */
   planApprovedAt?: Millis;
   /** Set when the user picks how to finish. `completed` requires it. */
   finish?: MissionFinish;
+  /** What finishing left behind: the merge commit, or the pull request's address (#43). */
+  finishResult?: { mergeCommit?: string; pullRequestUrl?: string; note?: string };
+  /**
+   * The route a planned mission's tasks run on unless a task pins its own
+   * (#43): the launcher's model and effort when the user pressed Approve and
+   * start. Like a pin, the user's instruction; `effort` is the model's native level.
+   */
+  defaultRoute?: { harness: HarnessId; model?: string; effort?: string };
   plannerAttemptId?: string;
   source: { kind: 'user' | 'issue' | 'schedule'; ref?: string; trusted: boolean };
   /**
@@ -574,6 +588,12 @@ export interface ExecutionAttempt {
   taskId: string;
   n: number;
   routingDecisionId?: string;
+  /**
+   * The commit the attempt started from. A task worktree's base; in a planned
+   * mission's one worktree, the head the task before it left (§29 P8, #43),
+   * which is what its diff and its checks are measured against.
+   */
+  startCommit?: string;
   /** The repository policy it ran under, frozen at launch (`LoadedRepoPolicy.version`, §13.6). */
   repoPolicyVersion?: string;
   assignment: AgentAssignment;
