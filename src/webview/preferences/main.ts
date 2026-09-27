@@ -15,7 +15,7 @@ import './preferences.css';
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
 import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId } from '../../shared/preferences';
 import { settingGroups, type SettingSpec } from '../../shared/settings';
-import { ORCHESTRATION_GROUP, renderOrchestration } from './orchestration';
+import { ORCHESTRATION_GROUP, onRoutingResult, renderOrchestration } from './orchestration';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
 
@@ -494,12 +494,17 @@ window.addEventListener('message', (event: MessageEvent) => {
     showActionResult(message.ok, message.lines);
     return;
   }
+  if (message.type === 'routingResult') {
+    onRoutingResult(message.ok, message.errors);
+    if (orchestrationBody) renderOrchestration(orchestrationBody, orchestration, post);
+    return;
+  }
   if (message.type === 'orchestration') {
     orchestration = message.view;
     // A usage read re-sends the view every minute or so. Redrawing under an
     // open tier dropdown would close it, so wait until focus leaves it.
     const active = document.activeElement;
-    if (orchestrationBody?.contains(active) && active instanceof HTMLSelectElement) {
+    if (orchestrationBody?.contains(active) && (active instanceof HTMLSelectElement || active instanceof HTMLInputElement)) {
       orchestrationStale = true;
       return;
     }

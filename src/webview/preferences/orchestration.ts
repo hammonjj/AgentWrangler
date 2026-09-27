@@ -11,8 +11,10 @@
  * until someone decides what they are for.
  */
 
-import type { PreferencesToHost, OrchestrationPrefsView } from '../../shared/preferences';
+import { routingPolicyUpdate, type PreferencesToHost, type OrchestrationPrefsView } from '../../shared/preferences';
 import { effortMapText, isKnown, type CatalogEntry, type Known, type TierDef } from '../../shared/orchestration/catalog';
+import { POLICY_FIELDS, fieldValue, withField, type PolicyFieldSpec, type PolicyValue } from '../../shared/orchestration/executionPolicy';
+import { EFFORT_LEVELS, type ExecutionPolicy } from '../../shared/orchestration/types';
 import type { SourceStatus } from '../../shared/orchestration/sourceHealth';
 import { harnessLabel, sourceLabel } from '../../shared/harness';
 import { formatTokens } from '../../shared/sessionUsage';
@@ -123,9 +125,180 @@ function renderSource(s: SourceStatus): HTMLElement {
   return row;
 }
 
+// ---------------------------------------------------------------------------
+// Routing defaults: the global scope of pins and caps (#40)
+// ---------------------------------------------------------------------------
+
+type RoutingDraft = { mode: 'manual' | 'assisted'; policy: ExecutionPolicy };
+
+/** What the user set and has not had confirmed yet; kept across redraws so a refused value stays on screen. */
+let routingDraft: RoutingDraft | undefined;
+let routingErrors: string[] = [];
+let routingStatus = '';
+
+/** The host saved the defaults, or refused them. Call `renderOrchestration` after. */
+export function onRoutingResult(ok: boolean, errors: string[]): void {
+  if (ok) {
+    routingDraft = undefined;
+    routingErrors = [];
+    routingStatus = 'Saved. Applies to tasks started from now on.';
+  } else {
+    routingErrors = errors;
+    routingStatus = '';
+  }
+}
+
+function option(select: HTMLSelectElement, value: string, label: string): void {
+  const o = el('option', undefined, label);
+  o.value = value;
+  select.appendChild(o);
+}
+
+function renderRouting(host: HTMLElement, view: OrchestrationPrefsView, post: (m: PreferencesToHost) => void, redraw: () => void): void {
+  const stored = view.routing;
+  if (!stored) return;
+  const current: RoutingDraft = routingDraft ?? { mode: stored.mode, policy: stored.policy };
+  host.appendChild(el('h3', 'pf-subhead', 'Routing defaults'));
+  host.appendChild(
+    el(
+      'p',
+      'pf-desc',
+      'The global scope. A repository’s policy, a mission and a task can each override these: the more specific scope wins, but a cap can only be tightened, never loosened. A pin that breaks a cap is refused when it is set. Each task freezes these when it starts.',
+    ),
+  );
+
+  const commit = (next: RoutingDraft) => {
+    routingDraft = next;
+    routingStatus = '';
+    // The same check the host runs, so a pin above a cap is refused here and now.
+    const r = routingPolicyUpdate({ type: 'routingPolicy', ...next }, view.catalog);
+    if (!r.ok) {
+      routingErrors = r.errors;
+      redraw();
+      return;
+    }
+    routingErrors = [];
+    routingStatus = 'Saving…';
+    post({ type: 'routingPolicy', mode: next.mode, policy: next.policy });
+    redraw();
+  };
+  const set = (field: string, value: PolicyValue | undefined) => {
+    let policy = withField(current.policy, field, value);
+    if (field === 'pins.model' && typeof value === 'string' && !fieldValue(policy, 'pins.harness')) {
+      const entry = view.catalog.entries.find((e) => e.aliases.includes(value));
+      if (entry?.harnesses[0]) policy = withField(policy, 'pins.harness', entry.harnesses[0]);
+    }
+    commit({ mode: current.mode, policy });
+  };
+
+  const form = el('div', 'pf-policy');
+  const modeRow = el('div', 'pf-policy-row');
+  const modeSelect = el('select', 'pf-input pf-select');
+  modeSelect.setAttribute('aria-label', 'Routing mode');
+  option(modeSelect, 'manual', 'Manual — run on the launcher’s route');
+  option(modeSelect, 'assisted', 'Assisted — propose a route, wait for a click');
+  modeSelect.value = current.mode;
+  modeSelect.addEventListener('change', () => commit({ mode: modeSelect.value === 'assisted' ? 'assisted' : 'manual', policy: current.policy }));
+  modeRow.append(el('span', 'pf-label pf-policy-label', 'Mode'), modeSelect);
+  form.appendChild(modeRow);
+
+  let group = '';
+  for (const spec of POLICY_FIELDS) {
+    if (spec.group !== group) {
+      group = spec.group;
+      form.appendChild(el('div', 'pf-policy-group', group));
+    }
+    const row = el('div', 'pf-policy-row');
+    const value = fieldValue(current.policy, spec.field);
+    row.appendChild(el('span', 'pf-label pf-policy-label', spec.label));
+    row.appendChild(policyControl(spec, value, view, set));
+    row.appendChild(el('span', 'pf-desc pf-policy-help', spec.help));
+    form.appendChild(row);
+  }
+  host.appendChild(form);
+
+  for (const e of routingErrors) host.appendChild(el('p', 'pf-policy-error', e));
+  for (const e of stored.ignored) host.appendChild(el('p', 'pf-policy-error', `Ignored in settings.json — ${e}`));
+  if (routingStatus) host.appendChild(el('p', 'pf-desc pf-policy-status', routingStatus));
+}
+
+function policyControl(spec: PolicyFieldSpec, value: PolicyValue | undefined, view: OrchestrationPrefsView, set: (field: string, v: PolicyValue | undefined) => void): HTMLElement {
+  const label = `${spec.group}: ${spec.label}`;
+  const select = (options: [string, string][]) => {
+    const s = el('select', 'pf-input pf-select');
+    s.setAttribute('aria-label', label);
+    option(s, '', '— not set');
+    for (const [v, text] of options) option(s, v, text);
+    s.value = value === undefined ? '' : String(value);
+    s.addEventListener('change', () => set(spec.field, s.value === '' ? undefined : s.value));
+    return s;
+  };
+  switch (spec.kind) {
+    case 'tier':
+      return select(view.catalog.tiers.map((t) => [t.name, tierLabel(t)]));
+    case 'effort':
+      return select(EFFORT_LEVELS.map((l) => [l, l]));
+    case 'location':
+      return select([
+        ['local-only', 'Local only'],
+        ['hosted-only', 'Hosted only'],
+      ]);
+    case 'harness':
+      return select(POLICY_HARNESSES.map((h) => [h, harnessLabel(h)]));
+    case 'model': {
+      const entries = view.catalog.entries.filter((e) => e.enabled);
+      const options: [string, string][] = entries.map((e) => [e.aliases[0] ?? e.descriptor.modelId, `${e.descriptor.label} (${e.tier ?? 'unassigned'})`]);
+      // A pinned model the catalog no longer lists is still shown, so it can be cleared.
+      if (typeof value === 'string' && !options.some(([v]) => v === value)) options.push([value, `${value} (not reported)`]);
+      return select(options);
+    }
+    case 'flag': {
+      const c = el('input', 'pf-check');
+      c.type = 'checkbox';
+      c.checked = value === true;
+      c.setAttribute('aria-label', label);
+      c.addEventListener('change', () => set(spec.field, c.checked ? true : undefined));
+      return c;
+    }
+    case 'harnesses': {
+      const box = el('span', 'pf-policy-checks');
+      const now = Array.isArray(value) ? value.map(String) : [];
+      for (const h of POLICY_HARNESSES) {
+        const item = el('label', 'pf-model-enabled');
+        const c = el('input', 'pf-check');
+        c.type = 'checkbox';
+        c.checked = now.includes(h);
+        c.setAttribute('aria-label', `Exclude ${harnessLabel(h)}`);
+        c.addEventListener('change', () => set(spec.field, c.checked ? [...now, h] : now.filter((x) => x !== h)));
+        item.append(c, document.createTextNode(harnessLabel(h)));
+        box.appendChild(item);
+      }
+      return box;
+    }
+    default: {
+      const input = el('input', 'pf-input pf-number');
+      input.type = 'number';
+      if (spec.min !== undefined) input.min = String(spec.min);
+      if (spec.max !== undefined) input.max = String(spec.max);
+      input.step = spec.kind === 'usd' ? '0.01' : '1';
+      input.placeholder = 'not set';
+      input.value = value === undefined ? '' : String(value);
+      input.setAttribute('aria-label', label);
+      input.addEventListener('change', () => {
+        const t = input.value.trim();
+        set(spec.field, t === '' ? undefined : Number(t));
+      });
+      return input;
+    }
+  }
+}
+
+const POLICY_HARNESSES = ['claude-code', 'codex'] as const;
+
 /** Fill `host` (the section's body) from the view, replacing what was there. */
 export function renderOrchestration(host: HTMLElement, view: OrchestrationPrefsView | undefined, post: (m: PreferencesToHost) => void): void {
   host.textContent = '';
+  if (view) renderRouting(host, view, post, () => renderOrchestration(host, view, post));
   host.appendChild(
     el(
       'p',

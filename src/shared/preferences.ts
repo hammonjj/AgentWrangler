@@ -9,7 +9,16 @@
  */
 
 import type { CapabilityCatalogView, ModelPolicyChange } from './orchestration/catalog';
+import {
+  FIELD_LABEL,
+  GLOBAL_POLICY_KEYS,
+  checkPolicyEdit,
+  policyContextFor,
+  routingSettingsValue,
+  validateExecutionPolicy,
+} from './orchestration/executionPolicy';
 import type { SourceStatus } from './orchestration/sourceHealth';
+import type { ExecutionPolicy } from './orchestration/types';
 
 export type PreferencesToHost =
   /** The window has rendered and wants the current values. */
@@ -27,12 +36,38 @@ export type PreferencesToHost =
   | { type: 'action'; id: SettingActionId }
   /** A change to one model's tier or enabled flag, from Orchestration → tier map. */
   | { type: 'modelPolicy'; change: ModelPolicyChange }
+  /** The global routing defaults, whole, from Orchestration → Routing defaults (#40). */
+  | { type: 'routingPolicy'; mode: 'manual' | 'assisted'; policy: ExecutionPolicy }
   | { type: 'close' };
 
-/** What Preferences → Orchestration shows: the catalog and each source's health. */
+/** What Preferences → Orchestration shows: the catalog, each source's health, and the routing defaults. */
 export interface OrchestrationPrefsView {
   catalog: CapabilityCatalogView;
   sources: SourceStatus[];
+  /** The global scope of §10.2 as stored (#40). Absent: the host has none to offer. */
+  routing?: { mode: 'manual' | 'assisted'; policy: ExecutionPolicy; ignored: string[] };
+}
+
+/**
+ * Check the routing defaults a Preferences window sent (#40): the shape, the
+ * tier names against the catalog, and a pin at this scope against a cap at
+ * this scope — the one conflict the global scope can have on its own. The
+ * narrower scopes are checked against it when a mission is recorded. The same
+ * function runs in the window, so an error shows the moment a value is set,
+ * and in the host, which trusts nothing the window sends.
+ */
+export function routingPolicyUpdate(
+  message: unknown,
+  catalog: Pick<CapabilityCatalogView, 'tiers' | 'entries'>,
+): { ok: true; value: Record<string, unknown> } | { ok: false; errors: string[] } {
+  if (!message || typeof message !== 'object') return { ok: false, errors: ['not a routing change'] };
+  const m = message as { type?: unknown; mode?: unknown; policy?: unknown };
+  if (m.type !== 'routingPolicy' || (m.mode !== 'manual' && m.mode !== 'assisted')) return { ok: false, errors: ['not a routing change'] };
+  const parsed = validateExecutionPolicy(m.policy ?? {}, { tiers: catalog.tiers, allowed: GLOBAL_POLICY_KEYS });
+  if (!parsed.ok) return { ok: false, errors: parsed.errors.map((e) => `${FIELD_LABEL[e.path] ?? e.path}: ${e.message}`) };
+  const conflicts = checkPolicyEdit([], 'global', parsed.policy, policyContextFor(catalog));
+  if (conflicts.length > 0) return { ok: false, errors: conflicts.map((c) => c.message) };
+  return { ok: true, value: routingSettingsValue(m.mode, parsed.policy) };
 }
 
 /**
@@ -81,7 +116,9 @@ export type HostToPreferences =
   /** The action has started; the button says so and cannot be pressed twice. */
   | { type: 'actionBusy'; id: SettingActionId }
   /** The model catalog changed, or the window just opened. */
-  | { type: 'orchestration'; view: OrchestrationPrefsView };
+  | { type: 'orchestration'; view: OrchestrationPrefsView }
+  /** The routing defaults the window sent were saved, or refused and why (#40). */
+  | { type: 'routingResult'; ok: boolean; errors: string[] };
 
 /**
  * What a `set` or `reset` should actually write, or nothing.
