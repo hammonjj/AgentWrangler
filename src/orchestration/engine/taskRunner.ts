@@ -49,6 +49,9 @@ import {
   type ModelSourceId,
   type OrchestrationOrigin,
   type OutcomeCategory,
+  type PolicyChange,
+  type PolicyLayers,
+  type RoutePins,
   type RouteRecommendation,
   type RoutingDecision,
   type RoutingReason,
@@ -71,10 +74,27 @@ import type { WorktreeManager } from '../worktrees/worktreeManager';
 import type { Reviewer } from '../verify/reviewer';
 import { Verifier } from '../verify/verifier';
 import { buildVerificationPlan, summariseVerification } from '../../shared/orchestration/verification';
-import { tierRank } from '../../shared/orchestration/catalog';
 import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import type { HealthState } from '../../shared/orchestration/sourceHealth';
 import type { LocalRunMetrics } from '../../shared/orchestration/telemetry';
+import { DEFAULT_TIERS, isKnown, nativeEffortFor } from '../../shared/orchestration/catalog';
+import {
+  admissionRefusal,
+  asTaskOverrides,
+  checkPolicyEdit,
+  compactPolicy,
+  conflictText,
+  missionLayer,
+  missionLayers,
+  policyContextFor,
+  policyDiff,
+  resolveEffectivePolicy,
+  taskLayer,
+  validateExecutionPolicy,
+  type AdmissionFacts,
+  type EffectivePolicy,
+  type PolicyContext,
+} from '../../shared/orchestration/executionPolicy';
 import { resolveRoute, type ResolverSnapshot } from '../policy/resolver';
 import { compareRoutes, recommendRoute } from '../policy/recommend';
 import { attemptRecord, addTurnUsage, routingRecord } from './attemptRecord';
@@ -142,7 +162,7 @@ export class TaskError extends Error {
 }
 
 /** What can be done with a task now. The launcher's task menu offers these (#34 draws them properly). */
-export type TaskAction = 'show-session' | 'open-diff' | 'accept' | 'resume' | 'retry' | 'recreate-worktree' | 'cancel';
+export type TaskAction = 'show-session' | 'open-diff' | 'accept' | 'resume' | 'retry' | 'recreate-worktree' | 'edit-policy' | 'cancel';
 
 export interface TaskRunnerDeps {
   store: Pick<MissionStore, 'save' | 'loadActive'>;
@@ -164,6 +184,11 @@ export interface TaskRunnerDeps {
   assessor?: Pick<Assessor, 'assess'>;
   /** The catalog's tier for a model, recorded on the routing decision as history. */
   tierOf?: (source: ModelSourceId, model: string) => string | undefined;
+  /**
+   * The global scope's pins, caps, preferences and exclusions (§10.2, #40),
+   * read when a mission is recorded and frozen into it. Absent: none.
+   */
+  globalPolicy?: () => ExecutionPolicy | undefined;
   /**
    * The catalog and source health the resolver decides against (#38), read
    * fresh for every recommendation. Absent: no recommendations — `manual`
@@ -307,7 +332,8 @@ export class TaskRunner implements Disposable {
       if (wt?.state === 'missing') out.push('recreate-worktree');
       out.push('retry');
     }
-    if (!['completed', 'cancelled', 'failed', 'review'].includes(m.state)) out.push('cancel');
+    // Pins and caps can change until the mission ends; a change reaches the next attempt (#40).
+    if (!['completed', 'cancelled', 'failed', 'review'].includes(m.state)) out.push('edit-policy', 'cancel');
     return out;
   }
 
@@ -391,13 +417,13 @@ export class TaskRunner implements Disposable {
         route = { harness: t.harness, model: t.model, ...(isEndpointSource(t.source) ? { source: t.source } : {}), ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
       }
       this.checkRoute(route);
-      const target = accepted ? rec.resolution.target! : this.targetFor(route);
-      const tiers = this.deps.routing?.snapshot().catalog.tiers;
-      const cap = m.policy.caps?.maxTier;
-      if (!accepted && cap && tiers && tierRank(tiers, target.tier) > tierRank(tiers, cap) && tierRank(tiers, cap) >= 0) {
-        throw new TaskError(`${target.model || 'That model'} is ${target.tier}; this task is capped at ${cap}.`);
-      }
-      this.put(this.patchTask(m, (t) => ({ ...t, overrides: { ...t.overrides, pins: routePins(route!) } })));
+      // The route becomes the task's pins, which may break no cap at any
+      // scope (§10.2): refused here, naming both, before anything is changed.
+      const overrides = { ...task.overrides, pins: routePins(route) };
+      const conflicts = checkPolicyEdit(missionLayers(m, task), 'task', taskLayer(overrides), this.policyContext());
+      if (conflicts.length > 0) throw new TaskError(conflictText(conflicts));
+      this.put(this.patchTask(m, (t) => ({ ...t, overrides })));
+      if (!accepted) this.writeProposalOverride(m, rec, route);
       await this.launch(missionId, { mode: 'fresh', route, routing: { recommendation: rec, offered: true, accepted } });
       return this.need(missionId);
     });
@@ -409,6 +435,22 @@ export class TaskRunner implements Disposable {
     if (!objective) throw new TaskError('A task needs an objective.');
     const loaded = this.deps.repoPolicies.forFolder(req.folder);
     if (!loaded) throw new TaskError(`${req.folder} is not in a git repository. A task runs in a worktree of one.`);
+    // The policy layers, frozen here (§10.2): the global defaults and the
+    // repository's policy as they are now, and what this mission and task set.
+    // Anything that conflicts is refused before a mission exists.
+    const ctx = this.policyContext();
+    const shape = validateExecutionPolicy(policy, { tiers: ctx.tiers });
+    if (!shape.ok) throw new TaskError(`The mission's policy is not valid: ${shape.errors.map((e) => `${e.path}: ${e.message}`).join('; ')}`);
+    const policyLayers: PolicyLayers = {};
+    const global = compactPolicy(this.deps.globalPolicy?.());
+    const repo = compactPolicy(loaded.policy.routing);
+    const own = compactPolicy(shape.policy);
+    if (global) policyLayers.global = global;
+    if (repo) policyLayers.repo = repo;
+    if (own) policyLayers.mission = own;
+    const withTask = resolveEffectivePolicy(missionLayers({ policy: {}, policyLayers }, { overrides }), ctx);
+    if (withTask.conflicts.length > 0) throw new TaskError(conflictText(withTask.conflicts));
+    const effective = resolveEffectivePolicy(missionLayers({ policy: {}, policyLayers }), ctx).policy;
     const manager = await this.manager(loaded);
     const baseRef = req.baseRef?.trim() || 'HEAD';
     const baseCommit = await manager.resolveCommit(baseRef).catch((e: Error) => {
@@ -451,7 +493,8 @@ export class TaskRunner implements Disposable {
       repoRoot: manager.repoRoot,
       base: { ref: baseRef, commit: baseCommit },
       integration: 'none',
-      policy,
+      policy: effective,
+      policyLayers,
       policyChanges: [],
       state: 'draft',
       source: { kind: 'user', trusted: true },
@@ -465,8 +508,244 @@ export class TaskRunner implements Disposable {
       updatedAt: now,
     };
     this.put(mission);
-    this.log(`task ${id}: recorded in ${mission.repoRoot} (${policy.mode ?? 'manual'} routing)`);
+    this.log(`task ${id}: recorded in ${mission.repoRoot} (${effective.mode ?? 'manual'} routing)`);
     return id;
+  }
+
+  // ---- Policy (§10.2, #40) ----
+
+  /** The policy the task's next attempt would run under, with where each value came from and any conflict. */
+  effectivePolicy(missionId: string): EffectivePolicy | undefined {
+    const m = this.missions.get(missionId);
+    return m ? this.effective(m) : undefined;
+  }
+
+  /**
+   * Replace the mission's own layer, or the task's overrides.
+   *
+   * Refused — with a `TaskError` naming both scopes — when the new layer is
+   * malformed, when a pin in it breaks a cap at any scope, or when it would
+   * leave a pin elsewhere breaking a cap it sets (§10.2: a validation error
+   * at the time it is set, never resolved silently). Nothing changes then.
+   *
+   * On a started mission the change applies to attempts not yet started: a
+   * running attempt keeps the policy it launched with and is not restarted.
+   * It is recorded as a `PolicyChange` (shown in the mission header) and as
+   * `override` and `policy-change` telemetry. On a proposal nobody has
+   * started, the proposal is routed again under the new policy.
+   */
+  setPolicy(missionId: string, scope: 'mission' | 'task', next: ExecutionPolicy | undefined, opts: { reason?: string } = {}): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (['completed', 'cancelled', 'failed', 'review'].includes(m.state)) throw new TaskError('The task has finished; its policy no longer changes anything.');
+      const ctx = this.policyContext();
+      const shape = validateExecutionPolicy(next ?? {}, {
+        tiers: ctx.tiers,
+        ...(scope === 'task' ? { allowed: ['pins', 'caps', 'preferences', 'exclusions'] } : {}),
+      });
+      if (!shape.ok) throw new TaskError(shape.errors.map((e) => `${e.path}: ${e.message}`).join('; '));
+      const layer = compactPolicy(shape.policy);
+      const task = m.tasks[0];
+      const conflicts = checkPolicyEdit(missionLayers(m, task), scope, layer, ctx);
+      if (conflicts.length > 0) throw new TaskError(conflictText(conflicts));
+      const before = scope === 'mission' ? missionLayer(m) : taskLayer(task.overrides);
+      const diff = policyDiff(before, layer);
+      if (diff.length === 0) return m;
+
+      const now = this.now();
+      if (scope === 'mission') {
+        const layers: PolicyLayers = { ...(m.policyLayers ?? {}), mission: layer };
+        if (!layer) delete layers.mission;
+        m = { ...m, policyLayers: layers, policy: resolveEffectivePolicy(missionLayers({ policy: {}, policyLayers: layers }), ctx).policy };
+      } else {
+        m = this.patchTask(m, (t) => {
+          const { overrides: _old, ...rest } = t;
+          const overrides = asTaskOverrides(layer);
+          return overrides ? { ...rest, overrides } : rest;
+        });
+      }
+      const started = m.state !== 'draft' || task.attemptIds.length > 0;
+      let change: PolicyChange | undefined;
+      if (started) {
+        change = {
+          id: this.id(),
+          at: now,
+          by: 'user',
+          scope,
+          ...(scope === 'task' ? { taskId: task.id } : {}),
+          fields: diff.map((d) => d.field),
+          before: before ?? {},
+          changed: layer ?? {},
+          appliesFromAttempt: task.attemptIds.length + 1,
+          ...(opts.reason ? { reason: opts.reason } : {}),
+        };
+        m = { ...m, policyChanges: [...m.policyChanges, change] };
+      } else if (task.recommendation && task.attemptIds.length === 0) {
+        m = this.reproposed(m);
+      }
+      this.put(m);
+      this.log(`task ${missionId}: ${scope} policy changed (${diff.map((d) => d.field).join(', ')})${change ? `, from attempt ${change.appliesFromAttempt}` : ''}`);
+      this.writeTelemetry(m, {
+        v: 1,
+        type: 'override',
+        id: `override:${change?.id ?? this.id()}`,
+        at: now,
+        missionId: m.id,
+        ...(scope === 'task' ? { taskId: task.id } : {}),
+        scope,
+        by: 'user',
+        via: 'editor',
+        changes: diff,
+        missionState: m.state,
+      });
+      if (change) {
+        this.writeTelemetry(m, {
+          v: 1,
+          type: 'policy-change',
+          id: `policy-change:${change.id}`,
+          at: now,
+          missionId: m.id,
+          ...(change.taskId ? { taskId: change.taskId } : {}),
+          scope,
+          fields: change.fields,
+          revision: m.policyChanges.length,
+          appliesFromAttempt: change.appliesFromAttempt,
+          runningAttempts: m.attempts.filter((a) => LIVE.includes(a.state)).length,
+        });
+      }
+      return m;
+    });
+  }
+
+  /** A proposal nobody has started, routed again under the policy as it now is. */
+  private reproposed(m: Mission): Mission {
+    const rec = this.recommendationFor(m);
+    if (!rec) return m;
+    const now = this.now();
+    m = this.patchTask(m, (t) => ({ ...t, recommendation: rec }));
+    if (rec.verdict !== 'route' && m.tasks[0].state === 'routed') {
+      m = this.patchTask(m, (t) => transitionTask(m, t, 'needs-human', { now, reason: rec.note ?? 'a person has to decide the route' }));
+    } else if (rec.verdict === 'route' && m.tasks[0].state === 'needs-human') {
+      m = this.patchTask(m, (t) => ({ ...t, stateReason: 'route proposed under the changed policy; waiting for you to accept or change it' }));
+    }
+    return m;
+  }
+
+  /** The tiers and models pins and caps are checked against: the router's catalog, or the default tiers. */
+  private policyContext(): PolicyContext {
+    try {
+      const catalog = this.deps.routing?.snapshot().catalog;
+      if (catalog) return policyContextFor(catalog);
+    } catch (e) {
+      this.log(`policy: could not read the catalog: ${errorText(e)}`);
+    }
+    return {
+      tiers: DEFAULT_TIERS,
+      model: (pins) => {
+        const model = pins.model?.trim();
+        if (!model) return undefined;
+        const source = pins.source ?? SOURCE[pins.harness ?? ''];
+        const tier = source ? this.deps.tierOf?.(source, model) : undefined;
+        return { label: model, ...(tier ? { tier } : {}), ...(source ? { source } : {}) };
+      },
+    };
+  }
+
+  /** Every layer resolved for the task: what its next attempt runs under. */
+  private effective(m: Mission, task: Task = m.tasks[0], ctx: PolicyContext = this.policyContext()): EffectivePolicy {
+    return resolveEffectivePolicy(missionLayers(m, task), ctx);
+  }
+
+  /**
+   * A route with the policy's pins applied (§10.2): a pinned dimension
+   * replaces the route's, so a pin set after the last attempt reaches the
+   * next one. A pinned effort is sent as the model's own level for it.
+   */
+  private withPins(route: TaskRoute, pins: RoutePins | undefined): TaskRoute {
+    if (!pins) return route;
+    const out: TaskRoute = { ...route };
+    if (pins.harness && pins.harness !== route.harness) {
+      out.harness = pins.harness;
+      if (!pins.model) delete out.model;
+      delete out.permissionMode;
+    }
+    if (pins.model) out.model = pins.model;
+    if (pins.effort && (!route.effort || awEffort(route.effort) !== pins.effort || out.model !== route.model)) {
+      const native = this.nativeEffort(out, pins.effort);
+      if (native) out.effort = native;
+      else delete out.effort;
+    }
+    return out;
+  }
+
+  /** The model's own level for an AW effort level, from the catalog; the level itself when the model is unknown. */
+  private nativeEffort(route: TaskRoute, level: EffortLevel): string | undefined {
+    const source = SOURCE[route.harness] ?? route.harness;
+    const alias = route.model?.trim() || (route.harness === 'claude-code' ? 'default' : '');
+    let entry;
+    try {
+      entry = alias ? this.deps.routing?.snapshot().catalog.entries.find((e) => e.descriptor.source === source && e.aliases.includes(alias)) : undefined;
+    } catch {
+      entry = undefined;
+    }
+    if (!entry) return level;
+    const native = nativeEffortFor(entry, level);
+    return native === 'none' ? undefined : native;
+  }
+
+  /** What the count caps are checked against for the task's next attempt. */
+  private admissionFacts(m: Mission, route: TaskRoute, mode: 'fresh' | 'continue'): AdmissionFacts {
+    const task = m.tasks[0];
+    const liveAgents = [...this.missions.values()].reduce((n, x) => n + x.attempts.filter((a) => LIVE.includes(a.state)).length, 0);
+    const costs = m.attempts.filter((a) => a.taskId === task.id && a.usage?.costUsd !== undefined).map((a) => a.usage!.costUsd!);
+    let windowPercent: number | undefined;
+    try {
+      const pct = this.deps.routing?.snapshot().sources[SOURCE[route.harness] ?? route.harness]?.capacity.windowPercent;
+      if (pct && isKnown(pct)) windowPercent = pct.value;
+    } catch {
+      windowPercent = undefined;
+    }
+    return {
+      // A resume carries on an attempt; it is not another try at the task.
+      attemptsSoFar: mode === 'continue' ? 0 : m.attempts.filter((a) => a.taskId === task.id && !a.resumeOf).length,
+      liveAgents,
+      ...(costs.length > 0 ? { spentUsd: costs.reduce((s, c) => s + c, 0) } : {}),
+      ...(windowPercent !== undefined ? { windowPercent } : {}),
+    };
+  }
+
+  /** An `assisted` proposal the user changed: an `override` at task scope, from the recommendation to their route. */
+  private writeProposalOverride(m: Mission, rec: RouteRecommendation, route: TaskRoute): void {
+    const t = rec.resolution.target;
+    const changes: { field: string; from?: string; to?: string }[] = [];
+    const add = (field: string, from: string | undefined, to: string | undefined) => {
+      if ((from ?? '') !== (to ?? '')) changes.push({ field, ...(from ? { from } : {}), ...(to ? { to } : {}) });
+    };
+    add('pins.harness', t?.harness, route.harness);
+    add('pins.model', t?.model, route.model?.trim() || undefined);
+    add('pins.effort', t ? rec.requirement.effort : undefined, route.effort?.trim() ? awEffort(route.effort) : undefined);
+    if (changes.length === 0) return;
+    this.writeTelemetry(m, {
+      v: 1,
+      type: 'override',
+      id: `override:${this.id()}`,
+      at: this.now(),
+      missionId: m.id,
+      taskId: m.tasks[0].id,
+      scope: 'task',
+      by: 'user',
+      via: 'proposal',
+      changes,
+      missionState: m.state,
+    });
+  }
+
+  private writeTelemetry(m: Mission, record: TelemetryRecord): void {
+    try {
+      this.deps.telemetry?.append(record);
+    } catch (e) {
+      this.log(`task ${m.id}: could not write its ${record.type} record: ${String(e)}`);
+    }
   }
 
   /** Resume an interrupted attempt: the same session id, through #4's Resume (orphan sweep first). */
@@ -711,10 +990,17 @@ export class TaskRunner implements Disposable {
     const task = m.tasks[0];
     const n = task.attemptIds.length + 1;
     const prevDecision = opts.mode === 'continue' ? m.decisions.find((d) => d.id === opts.resumeOf.routingDecisionId) : undefined;
-    const route: TaskRoute = opts.mode === 'fresh' ? opts.route : routeFromDecision(prevDecision, opts.resumeOf);
+    // The policy as it is now, not as it was at the last attempt: a change
+    // since then applies from this one (§10.2). Pins replace the route's own
+    // dimensions; a conflict or a spent count cap stops it here.
+    const eff = this.effective(m, task);
+    const route: TaskRoute = this.withPins(opts.mode === 'fresh' ? opts.route : routeFromDecision(prevDecision, opts.resumeOf), eff.policy.pins);
     let harness: AgentHarness;
     let loaded: LoadedRepoPolicy;
     try {
+      if (eff.conflicts.length > 0) throw new TaskError(conflictText(eff.conflicts));
+      const refusal = admissionRefusal(eff, this.admissionFacts(m, route, opts.mode));
+      if (refusal) throw new TaskError(refusal);
       harness = this.checkRoute(route);
       const policy = this.deps.repoPolicies.forFolder(m.repoRoot);
       if (!policy) throw new TaskError(`${m.repoRoot} is no longer a git repository.`);
@@ -722,6 +1008,7 @@ export class TaskRunner implements Disposable {
     } catch (e) {
       // Nothing was started; a first attempt that never got going leaves the task waiting on the user.
       if (task.attemptIds.length === 0) this.put(this.failBeforeLaunch(m, errorText(e)));
+      else if (e instanceof TaskError) this.put(this.patchTask(m, (t) => ({ ...t, stateReason: e.message })));
       throw e;
     }
     const now = this.now();
@@ -911,6 +1198,7 @@ export class TaskRunner implements Disposable {
         ? { target, candidates: rec!.resolution.candidates, catalogVersion: rec!.resolution.catalogVersion, ...(rec!.resolution.note ? { note: rec!.resolution.note } : {}) }
         : { target, candidates: [{ target, verdict: 'chosen', reason: 'picked by the user' }], catalogVersion: 'manual' },
       ...(rec ? { shadow: rec, agreement: cmp!.agreement } : {}),
+      policyRevision: m.policyChanges.length,
       decidedBy: accepted ? 'router' : 'user',
       decidedAt: this.now(),
     };
@@ -926,7 +1214,14 @@ export class TaskRunner implements Disposable {
   private recommendationFor(m: Mission, assessment: TaskAssessment | undefined = latestAssessment(m)): RouteRecommendation | undefined {
     if (!assessment || !this.deps.routing) return undefined;
     try {
-      return recommendRoute(assessment, m.policy, this.deps.routing.snapshot(), this.now());
+      // Every scope's controls apply (§10.2). In `manual`, the task's pins are
+      // the route the user picked, so the shadow leaves them out: it is what
+      // the router would have picked instead, under the same policy.
+      const task = m.tasks[0];
+      const mode = m.policy.mode ?? 'manual';
+      const forTask = mode === 'manual' && task.overrides?.pins ? { overrides: { ...task.overrides, pins: undefined } } : task;
+      const policy = { ...resolveEffectivePolicy(missionLayers(m, forTask), this.policyContext()).policy, mode };
+      return recommendRoute(assessment, policy, this.deps.routing.snapshot(), this.now());
     } catch (e) {
       this.log(`task ${m.id}: could not route: ${errorText(e)}`);
       return undefined;
@@ -1330,7 +1625,19 @@ export class TaskRunner implements Disposable {
       ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}),
       permissionMode: decisionMode(d),
     };
+    // The task's pins (#40) name the route that lost its server; launch applies
+    // pins over the route, so they move with the failover. A pin or cap at a
+    // wider scope that forbids the new route stops the failover instead.
+    const task = m.tasks[0];
+    const overrides = { ...task.overrides, pins: routePins(route) };
+    const conflicts = checkPolicyEdit(missionLayers(m, task), 'task', taskLayer(overrides), this.policyContext());
+    if (conflicts.length > 0) {
+      this.log(`task ${missionId}: no failover: ${conflictText(conflicts)}`);
+      return false;
+    }
     m = await this.retainTree(m, failed);
+    m = this.patchTask(m, (x) => ({ ...x, overrides }));
+    this.put(m);
     this.log(`task ${missionId}: failing over from ${from.model} to ${t.model} (${t.tier})`);
     try {
       await this.launch(missionId, { mode: 'fresh', route, routing: { recommendation, offered: false, accepted: true, failover: true } });

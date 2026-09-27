@@ -32,6 +32,14 @@ export function recommendRoute(
     caps: policy.caps,
     preferences: policy.preferences,
   });
+  // A pinned effort is the user's, not the rules' (§10.2): it replaces what
+  // the rules asked for, and says so. It was checked against the effort cap
+  // when it was set, so it never breaks one here.
+  const pinnedEffort = policy.pins?.effort;
+  if (pinnedEffort && pinnedEffort !== routed.requirement.effort) {
+    routed.reasons.push({ ruleId: 'pin.effort', text: `Effort is pinned at ${pinnedEffort} (the rules asked for ${routed.requirement.effort}).`, inputs: { effort: pinnedEffort } });
+    routed.requirement = { ...routed.requirement, effort: pinnedEffort };
+  }
   const base = {
     assessmentId: assessment.id,
     policyVersion: ROUTER_VERSION,
@@ -44,7 +52,7 @@ export function recommendRoute(
   if (routed.verdict === 'needs-human') {
     return { ...base, verdict: 'needs-human', note: routed.needsHuman, resolution: { candidates: [], catalogVersion: snapshot.catalog.version } };
   }
-  const r = resolveRoute(routed.requirement, snapshot, { caps: policy.caps, preferences: policy.preferences, exclusions: policy.exclusions });
+  const r = resolveRoute(routed.requirement, snapshot, { caps: policy.caps, preferences: policy.preferences, exclusions: policy.exclusions, pins: policy.pins });
   const resolution = { target: r.target, candidates: r.candidates, catalogVersion: r.catalogVersion, ...(r.note ? { note: r.note } : {}) };
   if (r.outcome !== 'resolved') return { ...base, verdict: r.outcome, note: r.note, resolution };
   // A resolved route with a plan-first gate still needs a person before an agent edits anything (§7.5).

@@ -16,7 +16,8 @@
  *   command by name (`command:<name>`), but nothing a model produces is ever
  *   parsed as a policy.
  */
-import { TASK_KINDS, type MissionFinish, type Risk, type TaskKind } from './types';
+import { validateExecutionPolicy } from './executionPolicy';
+import { TASK_KINDS, type ExecutionPolicy, type MissionFinish, type Risk, type TaskKind } from './types';
 
 export const REPO_POLICY_VERSION = 1;
 
@@ -94,6 +95,13 @@ export interface RepoPolicy {
     /** Commands the merged result must pass before a local merge moves the base (§13.3). */
     gate: string[];
   };
+  /**
+   * Routing controls at repository scope (§10.2, #40): pins, caps,
+   * preferences and exclusions for every mission in this repository, between
+   * the global defaults and the mission's own. Absent when the file sets none,
+   * so a file without it keeps the version it had before #40.
+   */
+  routing?: ExecutionPolicy;
 }
 
 /** A policy file as written: every section optional, laid over the defaults field by field. */
@@ -106,6 +114,7 @@ export interface RepoPolicyFile {
   risk?: RiskRule[];
   exclusive?: ExclusiveResource[];
   finish?: { default?: FinishDefault; gate?: string[] };
+  routing?: ExecutionPolicy;
 }
 
 /** What a repository gets with no policy: no verification (so results are `unverified`), no risk paths, sibling worktrees. */
@@ -152,7 +161,7 @@ export function validateRepoPolicyFile(doc: unknown): ParseResult {
     err('', 'a policy must be a JSON object');
     return { ok: false, errors };
   }
-  unknownKeys(doc, ['$schema', 'v', 'worktrees', 'verification', 'review', 'risk', 'exclusive', 'finish'], '', err);
+  unknownKeys(doc, ['$schema', 'v', 'worktrees', 'verification', 'review', 'risk', 'exclusive', 'finish', 'routing'], '', err);
   if ('v' in doc && doc.v !== REPO_POLICY_VERSION) err('v', `unsupported version ${JSON.stringify(doc.v)}; this build reads ${REPO_POLICY_VERSION}`);
 
   if ('worktrees' in doc) {
@@ -233,6 +242,14 @@ export function validateRepoPolicyFile(doc: unknown): ParseResult {
       }
       if ('gate' in f) nameList(f.gate, 'finish.gate', err);
     }
+  }
+
+  if ('routing' in doc) {
+    // The same checks a global default or a mission override gets (#40). Tier
+    // names are checked against the catalog where the policy is used, since
+    // the tier list is a setting and not part of this file.
+    const r = validateExecutionPolicy(doc.routing, { prefix: 'routing' });
+    if (!r.ok) for (const e of r.errors) err(e.path, e.message);
   }
 
   if (errors.length > 0) return { ok: false, errors };
@@ -422,6 +439,10 @@ export function resolveRepoPolicy(
     if (layer.exclusive !== undefined) policy.exclusive = layer.exclusive.map((r) => ({ ...r, ...(r.paths ? { paths: [...r.paths] } : {}) }));
     if (layer.finish?.default !== undefined) policy.finish.default = layer.finish.default;
     if (layer.finish?.gate !== undefined) policy.finish.gate = [...layer.finish.gate];
+    if (layer.routing !== undefined) {
+      const parsed = validateExecutionPolicy(layer.routing);
+      if (parsed.ok && Object.keys(parsed.policy).length > 0) policy.routing = mergeRouting(policy.routing, parsed.policy);
+    }
   }
 
   const errors: PolicyError[] = [];
@@ -433,6 +454,16 @@ export function resolveRepoPolicy(
     if (!(n in known)) errors.push({ path: `finish.gate[${i}]`, message: `no verification command named ${JSON.stringify(n)}` });
   });
   return errors.length > 0 ? { ok: false, errors } : { ok: true, policy };
+}
+
+/** A later file's routing over an earlier one's, field by field within each group. */
+function mergeRouting(base: ExecutionPolicy | undefined, next: ExecutionPolicy): ExecutionPolicy {
+  if (!base) return next;
+  const out: ExecutionPolicy = { ...base, ...next };
+  for (const g of ['pins', 'caps', 'preferences', 'exclusions'] as const) {
+    if (base[g] || next[g]) (out as Record<string, unknown>)[g] = { ...base[g], ...next[g] };
+  }
+  return out;
 }
 
 function normalStep(s: SetupStep): SetupStep {
