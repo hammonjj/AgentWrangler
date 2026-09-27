@@ -51,10 +51,12 @@ export const RPC_AMBIGUOUS = -32005;
 /** The session exists, but not in a way that allows this (e.g. `send` to one AW does not run). */
 export const RPC_UNSUPPORTED = -32006;
 
-export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects'] as const;
+export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'tasks'] as const;
 export type ControlMethod = (typeof CONTROL_METHODS)[number];
 /** Methods that change something. Logged by the core (method and session, never content). */
-export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop'];
+export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose'];
+/** The longest objective `task.propose` accepts. A task, not a document. */
+export const MAX_TASK_OBJECTIVE_CHARS = 20_000;
 
 // ---- the wire's own enumerations (they may grow; see the header) ----
 
@@ -228,6 +230,47 @@ export interface ControlProject {
 
 export interface ControlProjectsResult {
   projects: ControlProject[];
+}
+
+/**
+ * `task.propose` (#80): hand a piece of work to a task. It only ever makes a
+ * **proposal**: AW assesses the task, routes it, and waits for the user to
+ * accept or change the route in the app. Nothing runs until they do, which is
+ * why an agent may call it where it may not call `send` or `stop`.
+ */
+export interface ControlTaskProposeParams {
+  /** Any folder inside the repository. The task's branch is cut from the primary checkout's HEAD. */
+  folder: string;
+  objective: string;
+  acceptanceCriteria?: string[];
+  /** Which agent the router should prefer within the tier it picks. A preference, not a pin. */
+  harness?: 'claude' | 'codex';
+}
+
+/** One task, as `aw tasks` lists it. */
+export interface ControlTaskView {
+  missionId: string;
+  title: string;
+  /** One line: "route proposed — waiting for you", "running", "verified", … Not an enumeration. */
+  state: string;
+  repoRoot: string;
+  branch?: string;
+  createdAt: number;
+}
+
+export interface ControlTaskProposeResult {
+  task: ControlTaskView;
+  /** `route`: a route is proposed; anything else: the user has to pick one. May grow. */
+  verdict: string;
+  /** The proposed model and effort, when there is one ("Sonnet · medium"). */
+  route?: string;
+  /** Why the router decided as it did, in one line. */
+  summary?: string;
+  note?: string;
+}
+
+export interface ControlTasksResult {
+  tasks: ControlTaskView[];
 }
 
 /**

@@ -424,11 +424,25 @@ The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy
 | `aw send <id> <text…>` | Send a message to a session the app runs (`-` reads the text from stdin). |
 | `aw stop <id> [--force]` | End the process running a session, as the row menu's *Close session* does. A session mid-turn is left alone unless `--force`. |
 | `aw projects` | The project folders the launcher offers. |
+| `aw task <objective…> [--criteria "a; b"] [--folder <dir>] [--claude\|--codex]` | Propose a task. The app assesses and routes it, then waits for you to start it (see below). `-` reads the objective from stdin. |
+| `aw tasks` | Tasks that are not finished, with their state and branch. |
 
 `<id>` is a session id, a unique prefix of one (four characters or more), or a key such as `claude:<id>`. `--json` prints the raw result.
 
+**Handing work to a task from a conversation (#80).** Ask the agent you are talking to to
+"run this as a task", and it runs `aw task` with the objective and criteria. The task is
+always proposed, never started: the app assesses it and picks a route (as in `assisted`
+mode, whatever `orchestration.routing.mode` says), then shows a *Task proposal* notification
+and a flash. Click the notification, or pick the task from the launcher's **Tasks** menu, to
+see the route and accept or change it. The proposal is never popped up on its own, because a
+palette that opens while you type in the composer would take your Enter as "accept". The
+branch is cut from the repository's primary checkout, not from the conversation's worktree.
+Needs `"orchestration.enabled": true`. A Claude Code skill telling agents when to use it is
+in `docs/skills/agentwrangler-task/SKILL.md`; copy it to `~/.claude/skills/`.
+
 - **It is a client of the app, never a supervisor.** It talks only to the app's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new at every launch). It never connects to session hosts, and every command goes the same way as the equivalent click. The app shows a short notice when `aw` sends or stops something.
 - **With the app quit**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the app starts) and what the app last recorded. Everything else says the app is not running.
+- **`task` is allowed there**, because it only ever creates a proposal. Nothing runs until you accept it in the app, so an agent calling it can't start work you haven't seen.
 - **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12).
 
 ## Remote control (experimental)

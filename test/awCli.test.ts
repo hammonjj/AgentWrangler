@@ -2,9 +2,22 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { agentEnvironment, parseArgs } from '../src/cli/args';
+import { agentEnvironment, harnessOf, parseArgs } from '../src/cli/args';
 import { AttachRenderer, ATTACH_BACKLOG, renderBlock } from '../src/cli/attach';
-import { ago, clip, formatOffline, formatProjects, formatSession, formatSessions, formatStatus, runByLabel, safe, statusLabel } from '../src/cli/format';
+import {
+  ago,
+  clip,
+  formatOffline,
+  formatProjects,
+  formatProposal,
+  formatSession,
+  formatSessions,
+  formatStatus,
+  formatTasks,
+  runByLabel,
+  safe,
+  statusLabel,
+} from '../src/cli/format';
 import { onClosedIfGone } from '../src/app/controlBackend';
 import type { SessionHandle } from '../src/core/session/sessionHandle';
 import { readRecords } from '../src/cli/offline';
@@ -297,6 +310,63 @@ describe('review fixes', () => {
     const ended = { lifecycle: 'ended' } as unknown as SessionHandle;
     onClosedIfGone({ list: () => [] }, ended, (r) => closed.push(r));
     expect(closed).toEqual(['gone', 'ended']);
+  });
+});
+
+describe('aw task (#80)', () => {
+  const base = { criteria: [], folder: undefined, harness: undefined, json: false };
+
+  it('takes the free words as the objective and options anywhere', () => {
+    expect(parseArgs(['task', 'fix', 'the', 'parser'])).toEqual({ kind: 'task', objective: 'fix the parser', ...base });
+    expect(parseArgs(['task', '--criteria', 'tests pass; no new deps', 'fix', 'it', '--codex', '--folder', '/Users/test/proj', '--json'])).toEqual({
+      kind: 'task',
+      objective: 'fix it',
+      criteria: ['tests pass', 'no new deps'],
+      folder: '/Users/test/proj',
+      harness: 'codex',
+      json: true,
+    });
+    // Repeated --criteria add up; empty pieces are dropped.
+    expect(parseArgs(['task', 'x', '--criteria', 'a;', '--criteria', ' b ']).valueOf()).toMatchObject({ criteria: ['a', 'b'] });
+    expect(parseArgs(['task', '-'])).toEqual({ kind: 'task', objective: undefined, ...base });
+    // After --, option-looking words belong to the objective.
+    expect(parseArgs(['task', '--', 'remove', '--criteria', 'flag'])).toEqual({ kind: 'task', objective: 'remove --criteria flag', ...base });
+    expect(parseArgs(['tasks', '--json'])).toEqual({ kind: 'tasks', json: true });
+  });
+
+  it('explains what is missing or wrong', () => {
+    expect(parseArgs(['task'])).toEqual({ error: 'aw task: what should the task do? Give the objective, or "-" to read it from stdin.' });
+    expect(parseArgs(['task', 'x', '--criteria'])).toEqual({ error: 'aw task: --criteria needs a value.' });
+    expect(parseArgs(['task', 'x', '--folder', '--json'])).toEqual({ error: 'aw task: --folder needs a value.' });
+    expect(parseArgs(['task', 'x', '--claude', '--codex'])).toEqual({ error: 'aw task: give --claude or --codex, not both.' });
+    expect(parseArgs(['task', 'x', '--force'])).toEqual({ error: 'aw task: unknown option --force' });
+    expect(parseArgs(['tasks', 'extra'])).toEqual({ error: 'aw tasks: unexpected "extra"' });
+  });
+
+  it('prefers the agent the shell belongs to', () => {
+    expect(harnessOf({ CLAUDECODE: '1' })).toBe('claude');
+    expect(harnessOf({ CODEX_THREAD_ID: 't' })).toBe('codex');
+    expect(harnessOf({})).toBeUndefined();
+  });
+
+  it('prints the proposal with what to do next, and the task list', () => {
+    const task = { missionId: 'm1', title: 'Fix the parser', state: 'route proposed — waiting for you', repoRoot: '/Users/test/proj', createdAt: NOW - 5 * 60_000 };
+    expect(formatProposal({ task, verdict: 'route', route: 'Sonnet · medium', summary: 'routine change with tests' })).toBe(
+      [
+        'Task proposed: Fix the parser',
+        'Route: Sonnet · medium',
+        'Why: routine change with tests',
+        'Id: m1',
+        '',
+        'Nothing is running yet. Approve it in Agent Wrangler: click the "Task proposal" notification, or Tasks → this task.',
+      ].join('\n'),
+    );
+    expect(formatProposal({ task, verdict: 'blocked', note: 'nothing routable' })).toContain('Route: none recommended\nNote: nothing routable');
+    expect(formatTasks([], NOW)).toBe('No tasks.');
+    const listed = formatTasks([{ ...task, branch: 'aw/fix-the-parser' }], NOW, 200);
+    expect(listed).toContain('Fix the parser');
+    expect(listed).toContain('5m ago');
+    expect(listed).toContain('aw/fix-the-parser');
   });
 });
 

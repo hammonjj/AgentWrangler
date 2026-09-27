@@ -12,7 +12,14 @@ export type Command =
   /** `text` undefined: read it from stdin (`aw send <id> -`). */
   | { kind: 'send'; ref: string; text: string | undefined }
   | { kind: 'stop'; ref: string; force: boolean }
-  | { kind: 'projects'; json: boolean };
+  | { kind: 'projects'; json: boolean }
+  /**
+   * `objective` undefined: read it from stdin (`aw task -`). `folder`
+   * undefined: the current directory. `harness` undefined: the agent this
+   * shell belongs to, else Claude.
+   */
+  | { kind: 'task'; objective: string | undefined; criteria: string[]; folder: string | undefined; harness: 'claude' | 'codex' | undefined; json: boolean }
+  | { kind: 'tasks'; json: boolean };
 
 export const USAGE = `aw — Agent Wrangler from a terminal
 
@@ -24,14 +31,22 @@ Usage:
   aw send <id> <text…>      send a message to a session Agent Wrangler runs ("-" reads stdin)
   aw stop <id> [--force]    end the process running a session (--force: even mid-turn)
   aw projects               the project folders the launcher offers
+  aw task <objective…>      propose a task: Agent Wrangler routes it and waits for you to
+                            start it in the app ("-" reads the objective from stdin)
+      --criteria "a; b"     acceptance criteria, separated by semicolons
+      --folder <dir>        the repository (default: the current directory)
+      --claude | --codex    which agent to prefer (default: the one running this shell)
+  aw tasks                  tasks that are not finished
 
 <id> is a session id, a unique prefix of one (4+ characters), or a key like claude:<id>.
---json prints the raw result for status, sessions, session and projects.
+--json prints the raw result for status, sessions, session, projects, task and tasks.
 `;
 
 export function parseArgs(argv: readonly string[]): Command | { error: string } {
   // First, because everything after the id is the message, `--help` included.
   if (argv[0] === 'send') return parseSend(argv.slice(1));
+  // First too: its options take values, and the objective is free text.
+  if (argv[0] === 'task') return parseTask(argv.slice(1));
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const words = argv.filter((a) => !a.startsWith('--') || a === '--');
   if (flags.has('--help') || argv.includes('-h')) return { kind: 'help' };
@@ -45,7 +60,7 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
   const takesRef = ['session', 'show', 'attach', 'stop'].includes(name ?? '');
   // `aw stop abcd -f` must not quietly stop without force, nor `aw stop a b` stop only one.
   const extra = rest.find((w, i) => w.startsWith('-') || i >= (takesRef ? 1 : 0));
-  const checked = ['status', 'sessions', 'ls', 'session', 'show', 'attach', 'stop', 'projects'];
+  const checked = ['status', 'sessions', 'ls', 'session', 'show', 'attach', 'stop', 'projects', 'tasks'];
   if (extra !== undefined && checked.includes(name ?? '')) {
     return { error: extra.startsWith('-') ? `aw ${name}: unknown option ${extra}` : `aw ${name}: unexpected "${extra}"` };
   }
@@ -73,6 +88,8 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
       return allowed('--force') ?? needRef() ?? { kind: 'stop', ref: rest[0], force: flags.has('--force') };
     case 'projects':
       return allowed('--json') ?? { kind: 'projects', json };
+    case 'tasks':
+      return allowed('--json') ?? { kind: 'tasks', json };
     default:
       return { error: `aw: no command "${name}". Run aw help.` };
   }
@@ -87,6 +104,60 @@ function parseSend(tail: readonly string[]): Command | { error: string } {
   const text = words.join(' ');
   if (text.trim().length === 0) return { error: 'aw send: the message is empty.' };
   return { kind: 'send', ref, text };
+}
+
+/**
+ * `aw task <objective…> [--criteria "a; b"] [--folder <dir>] [--claude|--codex] [--json]`.
+ * Options may come anywhere; every other word is the objective. `--` ends the
+ * options, so an objective may itself contain `--criteria`.
+ */
+function parseTask(tail: readonly string[]): Command | { error: string } {
+  const words: string[] = [];
+  let criteria: string[] = [];
+  let folder: string | undefined;
+  let harness: 'claude' | 'codex' | undefined;
+  let json = false;
+  for (let i = 0; i < tail.length; i++) {
+    const a = tail[i];
+    if (a === '--') {
+      words.push(...tail.slice(i + 1));
+      break;
+    }
+    if (a === '--criteria' || a === '--folder') {
+      const value = tail[i + 1];
+      if (value === undefined || value.startsWith('--')) return { error: `aw task: ${a} needs a value.` };
+      i++;
+      if (a === '--criteria') criteria = [...criteria, ...value.split(';').map((c) => c.trim()).filter(Boolean)];
+      else folder = value;
+      continue;
+    }
+    if (a === '--claude' || a === '--codex') {
+      const wanted = a === '--claude' ? 'claude' : 'codex';
+      if (harness && harness !== wanted) return { error: 'aw task: give --claude or --codex, not both.' };
+      harness = wanted;
+      continue;
+    }
+    if (a === '--json') {
+      json = true;
+      continue;
+    }
+    if (a === '--help' || a === '-h') return { kind: 'help' };
+    if (a.startsWith('--')) return { error: `aw task: unknown option ${a}` };
+    words.push(a);
+  }
+  if (words.length === 0) return { error: 'aw task: what should the task do? Give the objective, or "-" to read it from stdin.' };
+  const base = { criteria, folder, harness, json } as const;
+  if (words.length === 1 && words[0] === '-') return { kind: 'task', objective: undefined, ...base };
+  const objective = words.join(' ');
+  if (objective.trim().length === 0) return { error: 'aw task: the objective is empty.' };
+  return { kind: 'task', objective, ...base };
+}
+
+/** The agent a shell belongs to, for `aw task`'s default harness preference. */
+export function harnessOf(env: Record<string, string | undefined>): 'claude' | 'codex' | undefined {
+  if (env.CODEX_SANDBOX || env.CODEX_SANDBOX_NETWORK_DISABLED || env.CODEX_THREAD_ID) return 'codex';
+  if (env.CLAUDECODE || env.CLAUDE_CODE_ENTRYPOINT) return 'claude';
+  return undefined;
 }
 
 /**

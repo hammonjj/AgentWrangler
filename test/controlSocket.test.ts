@@ -14,6 +14,8 @@ import {
   type ControlSession,
   type ControlSessionsResult,
   type ControlSubscribeResult,
+  type ControlTaskView,
+  type ControlTasksResult,
 } from '../src/core/control/protocol';
 import { ControlError, ControlServer, writeControlToken, type ControlBackend } from '../src/core/control/server';
 import { NdjsonPeer, RpcRemoteError, type IncomingNotification } from '../src/core/rpc/ndjsonPeer';
@@ -29,6 +31,14 @@ const row: ControlSession = {
   lastActivityAt: 0,
   archived: false,
   runBy: 'hosted',
+};
+
+const taskView: ControlTaskView = {
+  missionId: 'm1',
+  title: 'Fix the parser',
+  state: 'route proposed — waiting for you',
+  repoRoot: '/Users/test/proj',
+  createdAt: 0,
 };
 
 function fakeBackend() {
@@ -62,6 +72,12 @@ function fakeBackend() {
       return 'working';
     },
     projects: () => [],
+    proposeTask: async (p) => {
+      calls.push(`propose ${p.folder} ${p.objective} [${(p.acceptanceCriteria ?? []).join('|')}] ${p.harness ?? '-'}`);
+      if (p.objective === 'off') throw new ControlError(RPC_UNSUPPORTED, 'Tasks are off.');
+      return { task: { ...taskView }, verdict: 'route', route: 'Sonnet · medium' };
+    },
+    tasks: () => [taskView],
   };
   return { backend, calls, emit: (e: SessionViewEvent) => emit?.(e), close: (r: 'ended') => close?.(r), disposed: () => disposed };
 }
@@ -202,6 +218,38 @@ describe('control socket', () => {
     expect(await codeOf(client.request('stop', { ref: '1a2b' }))).toBe(RPC_UNSUPPORTED);
     expect((await client.request<ControlSessionsResult>('sessions', {})).sessions).toEqual([row]);
     expect(fake.calls).toEqual(['sessions all=false']);
+    client.close();
+  });
+
+  it('proposes a task, validates it, logs the repository but never the objective, and lists tasks (#80)', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    const r = await client.request('task.propose', {
+      folder: '/Users/test/proj',
+      objective: 'secret objective',
+      acceptanceCriteria: [' a ', '', 'b'],
+      harness: 'codex',
+    });
+    expect(r).toEqual({ task: taskView, verdict: 'route', route: 'Sonnet · medium' });
+    expect(fake.calls).toEqual(['propose /Users/test/proj secret objective [a|b] codex']);
+    expect(logs).toEqual([`control socket: task.propose proj by aw pid ${process.pid}`]);
+    expect(logs.join('\n')).not.toContain('secret');
+    expect((await client.request<ControlTasksResult>('tasks')).tasks).toEqual([taskView]);
+
+    expect(await codeOf(client.request('task.propose', { folder: 'relative/dir', objective: 'x' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('task.propose', { folder: '/Users/test/proj', objective: '  ' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('task.propose', { folder: '/Users/test/proj', objective: 'x'.repeat(20_001) }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('task.propose', { folder: '/Users/test/proj', objective: 'x', acceptanceCriteria: 'a; b' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('task.propose', { folder: '/Users/test/proj', objective: 'x', harness: 'gpt' }))).toBe(RPC_INVALID_PARAMS);
+    const off = await client.request('task.propose', { folder: '/Users/test/proj', objective: 'off' }).catch((e: RpcRemoteError) => e);
+    expect((off as RpcRemoteError).code).toBe(RPC_UNSUPPORTED);
+    expect((off as RpcRemoteError).message).toBe('Tasks are off.');
+
+    // A proposal is a change: refused once the app is quitting, like send and stop.
+    server!.stopMutations();
+    expect(await codeOf(client.request('task.propose', { folder: '/Users/test/proj', objective: 'x' }))).toBe(RPC_UNSUPPORTED);
+    expect((await client.request<ControlTasksResult>('tasks')).tasks).toEqual([taskView]);
     client.close();
   });
 
