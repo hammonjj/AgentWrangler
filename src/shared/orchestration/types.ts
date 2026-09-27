@@ -174,6 +174,11 @@ export interface Mission {
   finish?: MissionFinish;
   plannerAttemptId?: string;
   source: { kind: 'user' | 'issue' | 'schedule'; ref?: string; trusted: boolean };
+  /**
+   * The conversation that handed this work off (`aw task`, #81): where its
+   * proposal card is shown. Absent for a task started from the Tasks menu.
+   */
+  origin?: { provider: 'claude' | 'codex'; sessionId: string };
   tasks: Task[];
   assessments: TaskAssessment[];
   decisions: RoutingDecision[];

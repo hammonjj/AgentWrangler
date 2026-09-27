@@ -34,9 +34,10 @@ you never start work on their behalf.
 
    For a one-liner: `aw task "Add a --json flag to aw tasks" --criteria "npm test passes"`.
    `--claude` / `--codex` sets which agent to prefer. The default is the one running this shell.
-4. Tell the user what `aw task` printed: the proposed route, and that it is waiting for them
-   (the *Task proposal* notification, or the launcher's **Tasks** menu). Then carry on with the
-   conversation. Don't wait for the task.
+4. Tell the user what `aw task` printed: the proposed route, and that it is waiting for them on
+   the *Task proposal* card at the end of this conversation in Agent Wrangler, where they can
+   run it, change the model or effort, or cancel it. Then carry on with the conversation. Don't
+   wait for the task.
 
 `aw tasks` lists unfinished tasks and their state, if the user asks how one is going.
 

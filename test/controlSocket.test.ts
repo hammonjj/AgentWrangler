@@ -43,6 +43,7 @@ const taskView: ControlTaskView = {
 
 function fakeBackend() {
   const calls: string[] = [];
+  const origins: unknown[] = [];
   let emit: ((e: SessionViewEvent) => void) | undefined;
   let close: ((reason: 'ended' | 'gone' | 'overflow') => void) | undefined;
   let disposed = 0;
@@ -73,13 +74,14 @@ function fakeBackend() {
     },
     projects: () => [],
     proposeTask: async (p) => {
+      origins.push(p.origin);
       calls.push(`propose ${p.folder} ${p.objective} [${(p.acceptanceCriteria ?? []).join('|')}] ${p.harness ?? '-'}`);
       if (p.objective === 'off') throw new ControlError(RPC_UNSUPPORTED, 'Tasks are off.');
       return { task: { ...taskView }, verdict: 'route', route: 'Sonnet · medium' };
     },
     tasks: () => [taskView],
   };
-  return { backend, calls, emit: (e: SessionViewEvent) => emit?.(e), close: (r: 'ended') => close?.(r), disposed: () => disposed };
+  return { backend, calls, origins, emit: (e: SessionViewEvent) => emit?.(e), close: (r: 'ended') => close?.(r), disposed: () => disposed };
 }
 
 let dir: string;
@@ -242,6 +244,10 @@ describe('control socket', () => {
     expect(await codeOf(client.request('task.propose', { folder: '/Users/test/proj', objective: 'x'.repeat(20_001) }))).toBe(RPC_INVALID_PARAMS);
     expect(await codeOf(client.request('task.propose', { folder: '/Users/test/proj', objective: 'x', acceptanceCriteria: 'a; b' }))).toBe(RPC_INVALID_PARAMS);
     expect(await codeOf(client.request('task.propose', { folder: '/Users/test/proj', objective: 'x', harness: 'gpt' }))).toBe(RPC_INVALID_PARAMS);
+    // The origin only decides where the card shows: a malformed one is dropped, not refused (#81).
+    await client.request('task.propose', { folder: '/Users/test/proj', objective: 'o', origin: { provider: 'claude', sessionId: 'abcd-1234' } });
+    await client.request('task.propose', { folder: '/Users/test/proj', objective: 'o', origin: { provider: 'claude', sessionId: '../../etc' } });
+    expect(fake.origins.slice(-2)).toEqual([{ provider: 'claude', sessionId: 'abcd-1234' }, undefined]);
     const off = await client.request('task.propose', { folder: '/Users/test/proj', objective: 'off' }).catch((e: RpcRemoteError) => e);
     expect((off as RpcRemoteError).code).toBe(RPC_UNSUPPORTED);
     expect((off as RpcRemoteError).message).toBe('Tasks are off.');

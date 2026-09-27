@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { agentEnvironment, harnessOf, parseArgs } from '../src/cli/args';
+import { agentEnvironment, harnessOf, originOf, parseArgs } from '../src/cli/args';
 import { AttachRenderer, ATTACH_BACKLOG, renderBlock } from '../src/cli/attach';
 import {
   ago,
@@ -349,6 +349,12 @@ describe('aw task (#80)', () => {
     expect(harnessOf({})).toBeUndefined();
   });
 
+  it('names the conversation asking, so its card shows there (#81)', () => {
+    expect(originOf({ CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'abcd-1234' })).toEqual({ provider: 'claude', sessionId: 'abcd-1234' });
+    expect(originOf({ CODEX_THREAD_ID: 't-1' })).toEqual({ provider: 'codex', sessionId: 't-1' });
+    expect(originOf({})).toBeUndefined();
+  });
+
   it('prints the proposal with what to do next, and the task list', () => {
     const task = { missionId: 'm1', title: 'Fix the parser', state: 'route proposed — waiting for you', repoRoot: '/Users/test/proj', createdAt: NOW - 5 * 60_000 };
     expect(formatProposal({ task, verdict: 'route', route: 'Sonnet · medium', summary: 'routine change with tests' })).toBe(
@@ -362,6 +368,7 @@ describe('aw task (#80)', () => {
       ].join('\n'),
     );
     expect(formatProposal({ task, verdict: 'blocked', note: 'nothing routable' })).toContain('Route: none recommended\nNote: nothing routable');
+    expect(formatProposal({ task, verdict: 'route' }, true)).toContain('card at the end of this conversation');
     expect(formatTasks([], NOW)).toBe('No tasks.');
     const listed = formatTasks([{ ...task, branch: 'aw/fix-the-parser' }], NOW, 200);
     expect(listed).toContain('Fix the parser');
