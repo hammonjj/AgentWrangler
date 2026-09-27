@@ -1276,6 +1276,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
               missionViewOf(m, {
                 actions: (taskId) => tasks.actions(m.id, taskId),
                 finishDefault: m.state === 'review' ? orchestration.repoPolicies?.forFolder(m.repoRoot)?.policy.finish.default : undefined,
+                canPlan: tasks.canPlan,
               }),
             ),
           tiers: models.catalog.tiers.map((t) => t.name),
@@ -1317,6 +1318,24 @@ export function createApp(host: HostServices): AgentWranglerApp {
             case 'task':
               await runTaskAction(tasks, missionId, op.action, op.taskId);
               return;
+            case 'plan-again':
+            case 'replan': {
+              // Optional: what to do differently. Escape cancels; an empty answer plans without a note.
+              const note = await dialogs.input({
+                title: op.kind === 'replan' ? 'Replan the mission' : 'Plan again',
+                prompt:
+                  op.kind === 'replan'
+                    ? 'What should change? Done tasks stay as they are; unfinished work is set aside on a branch of its own. (Optional)'
+                    : 'Anything the planner should do differently? (Optional)',
+              });
+              if (note === undefined) return;
+              if (op.kind === 'replan') await tasks.replan(missionId, note);
+              else await tasks.planAgain(missionId, note);
+              return;
+            }
+            case 'write-plan':
+              await tasks.writePlan(missionId);
+              return;
             case 'open': {
               // The task's current attempt's conversation, in the right pane; never another window.
               const m = tasks.get(missionId);
@@ -1338,10 +1357,22 @@ export function createApp(host: HostServices): AgentWranglerApp {
           if (cwd === GLOBAL_PROJECT_DIR) throw new TaskError('A mission runs in a worktree of a git repository. Pick a project folder in the launcher first.');
           const objective = await dialogs.input({
             title: 'New mission',
-            prompt: `What is the mission? You write its tasks next, in plan review; nothing runs until you approve the plan. (${path.basename(cwd)})`,
+            prompt: `What is the mission? Its plan is reviewed before anything runs, and nothing runs until you approve it. (${path.basename(cwd)})`,
             validateInput: (v) => (v.trim() ? undefined : 'Say what the mission is for.'),
           });
           if (!objective?.trim()) return undefined;
+          // The planner (#44), when there is one: a read-only look at the repository, then the same review.
+          if (tasks.canPlan) {
+            const how = await dialogs.pick(
+              [
+                { label: '$(sparkle) Plan it for me', description: 'a read-only planner reads the repository and proposes the tasks; usually one', plan: true },
+                { label: '$(edit) Write the tasks myself', description: 'start plan review from the objective', plan: false },
+              ],
+              { placeHolder: 'How should the plan be written? Either way you review it before anything runs.' },
+            );
+            if (!how) return undefined;
+            if (how.plan) return (await tasks.planMission({ folder: cwd, objective })).id;
+          }
           // The global routing defaults are frozen into the mission by the runner (#40).
           const m = await tasks.createMission({ folder: cwd, objective });
           return m.id;

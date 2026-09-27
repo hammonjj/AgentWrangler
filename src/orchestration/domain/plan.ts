@@ -216,7 +216,8 @@ export function canApprove(m: Pick<Mission, 'tasks' | 'policy'>): boolean {
   return !planIssues(m).some((i) => i.level !== 'warning');
 }
 
-function insideRepo(p: string): boolean {
+/** Whether a scope path stays inside the repository: relative, and never climbing out with `..`. */
+export function insideRepo(p: string): boolean {
   const s = p.trim();
   if (s === '' || s.startsWith('/') || s.startsWith('~') || /^[A-Za-z]:[\\/]/.test(s)) return false;
   return !s.split(/[\\/]/).includes('..');

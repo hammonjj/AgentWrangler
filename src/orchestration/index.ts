@@ -26,6 +26,7 @@ import { ClaudeCodeHarness } from './harness/claudeCodeHarness';
 import { CodexHarness } from './harness/codexHarness';
 import type { AgentHarness } from './harness/types';
 import { Assessor } from './policy/assessor';
+import { Planner } from './policy/planner';
 import { RepoPolicyStore, repoPoliciesDir, worktreeRootPath } from './policy/repoPolicyStore';
 import { MissionStore } from './store/missionStore';
 import { Reviewer } from './verify/reviewer';
@@ -178,6 +179,8 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
   // Without a completion there is no reviewer, and `review` stages say so (#36).
   // The reviewer reads the worktree, which only the hosted completion can (a local one has no tools).
   const reviewer = hosted && completion ? new Reviewer({ completion }) : undefined;
+  // The planner reads the repository too (#44): hosted only, like the reviewer.
+  const planner = hosted && completion ? new Planner({ completion }) : undefined;
   const tasks = new TaskRunner({
     store,
     harnesses,
@@ -199,6 +202,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     cannotLaunch: (harness) => (harness === 'claude-code' && deps.hostsEnabled?.() !== true ? HOSTS_REQUIRED : undefined),
     assessor,
     reviewer,
+    planner,
     tierOf: deps.tierOf,
     // The global scope (§10.2), read when a mission is recorded and frozen into it.
     globalPolicy: () => parseRoutingSettings(deps.settings.get<unknown>(ROUTING_KEY, undefined)).policy,

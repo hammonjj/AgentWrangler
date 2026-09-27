@@ -231,6 +231,12 @@ export interface Mission {
    */
   defaultRoute?: { harness: HarnessId; model?: string; effort?: string };
   plannerAttemptId?: string;
+  /**
+   * Every time the planner was asked for this mission's plan, oldest first
+   * (#44, §11). Absent for a plan written by hand. The newest run is the one
+   * plan review is about.
+   */
+  planning?: PlanningRun[];
   source: { kind: 'user' | 'issue' | 'schedule'; ref?: string; trusted: boolean };
   /**
    * The conversation that handed this work off (`aw task`, #81): where its
@@ -244,6 +250,53 @@ export interface Mission {
   worktrees: WorktreeAssignment[];
   createdAt: Millis;
   updatedAt: Millis;
+}
+
+/** One round of a planner run: one structured call and what the validator said about its answer (§11.2). */
+export interface PlanningRound {
+  n: number;
+  /** The answer passed every hard check. */
+  ok: boolean;
+  /** What the validator (or the call) said was wrong. Empty when `ok`. */
+  problems: string[];
+  model: string;
+  durationMs: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUsd?: number;
+}
+
+/**
+ * A planner run (#44, §11.1): the read-only call that turns the mission's
+ * objective into a plan, at most two rounds (the answer, and one repair), and
+ * what came of it. A `replan` is the same over a mission that has started;
+ * its result is a diff that never takes a done task away (§11.4).
+ */
+export interface PlanningRun {
+  id: string;
+  kind: 'plan' | 'replan';
+  state: 'running' | 'proposed' | 'failed' | 'cancelled';
+  /** Why it failed or was cancelled. */
+  reason?: string;
+  /** What the user asked the replan (or the retry) to do differently, in their words. Stays on this machine. */
+  note?: string;
+  startedAt: Millis;
+  endedAt?: Millis;
+  /** The model and native effort it was asked on. */
+  model: string;
+  effort?: string;
+  rounds: PlanningRound[];
+  /** What the planner said about its own plan, once it proposed one. */
+  decomposition?: 'single' | 'multiple';
+  risks?: string[];
+  /** §11.3 advice the plan still breaks after its repair round: shown in review, never a stop. */
+  warnings?: string[];
+  /** Tasks it proposed. */
+  proposed?: number;
+  /** For a replan: what it did to the plan, by task key. */
+  diff?: { kept: string[]; setAside: string[]; removed: string[]; added: string[] };
+  /** Edits the user made in review after this proposal: a signal of how good it was (§16). */
+  editsInReview: number;
 }
 
 export type DependencyKind = 'code' | 'order';
