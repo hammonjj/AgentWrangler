@@ -69,7 +69,6 @@ interface WebviewState {
    * changing where the other starts its next conversation.
    */
   project?: string;
-  provider?: 'all' | 'claude' | 'codex';
 }
 
 // Shared with the conversation pane when both live in one webview: the VSCode
@@ -135,7 +134,6 @@ const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
-let providerFilter: 'all' | 'claude' | 'codex' = saved?.provider ?? 'all';
 let tableView: TableView = saved?.tableView ?? 'status';
 /** The Missions view's data (#43). Absent while orchestration is off, and then so is its tab. */
 let missionsSnap: MissionsSnapshot | undefined;
@@ -149,7 +147,7 @@ function sessionView(): 'status' | 'project' {
 }
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, provider: providerFilter, tableView });
+  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, tableView });
 }
 
 function esc(s: string): string {
@@ -703,7 +701,6 @@ function rowHtml(s: SessionDTO, span: number): string {
  * a guess), or installed while some live sessions still predate the install.
  */
 function bannerHtml(): string {
-  if (providerFilter === 'codex') return '';
   const estimatedLive = sessions.filter((s) => s.provider === 'claude' && s.status !== 'ended' && s.statusIsEstimated && !s.archived).length;
   const b = hookBanner(hooks, estimatedLive);
   if (!b) return '';
@@ -823,8 +820,6 @@ function providerUsageHtml(state: UsageState | undefined, provider: 'Claude' | '
 }
 
 function usageHtml(): string {
-  if (providerFilter === 'claude') return providerUsageHtml(usage, 'Claude', false);
-  if (providerFilter === 'codex') return providerUsageHtml(codexUsage, 'Codex', false);
   return providerUsageHtml(usage, 'Claude', true) + providerUsageHtml(codexUsage, 'Codex', true);
 }
 
@@ -927,7 +922,7 @@ bar.innerHTML = `<div class="launch"><button id="proj" class="projbtn" aria-hasp
 <select id="launcheffort" class="launchsel" title="How hard Claude thinks, for the next conversation"></select>
 <button id="new" class="newbtn" title="Start a Claude Code conversation in this folder, running in this window">+ New</button>
 <button id="tasks" class="newbtn taskbtn" hidden title="Run a task in its own worktree and branch of this folder's repository, on this model and effort — or see the tasks already running">Tasks</button></div>
-<div id="ctl" class="ctlgroup"><select id="provider" class="providerfilter" title="Filter sessions by provider"><option value="all">All</option><option value="claude">Claude</option><option value="codex">Codex</option></select><button id="discord" class="ctlbtn discordbtn" hidden aria-pressed="false"></button><button id="pauseall" class="ctlbtn"></button></div>
+<div id="ctl" class="ctlgroup"><button id="discord" class="ctlbtn discordbtn" hidden aria-pressed="false"></button><button id="pauseall" class="ctlbtn"></button></div>
 <div id="projmenu" class="projmenu" role="listbox" hidden></div>`;
 // First in the body, above the usage strip, which is itself above the scrolling
 // `#app` — the three are a flex column, so only the last one moves.
@@ -1059,13 +1054,6 @@ launchModel.addEventListener('change', () => {
 launchEffort.addEventListener('change', () => post({ type: 'setRunnerEffort', provider: launchProvider, effort: launchEffort.value }));
 const pauseBtn = bar.querySelector<HTMLButtonElement>('#pauseall')!;
 const discordBtn = bar.querySelector<HTMLButtonElement>('#discord')!;
-const providerSelect = bar.querySelector<HTMLSelectElement>('#provider')!;
-providerSelect.value = providerFilter;
-providerSelect.addEventListener('change', () => {
-  providerFilter = providerSelect.value as typeof providerFilter;
-  saveState();
-  render();
-});
 
 let projects: ProjectDTO[] = [];
 let menuOpen = false;
@@ -1346,12 +1334,11 @@ function render(): void {
     }
     return;
   }
-  const visibleSessions = providerFilter === 'all' ? sessions : sessions.filter((s) => s.provider === providerFilter);
-  if (visibleSessions.length === 0) {
+  if (sessions.length === 0) {
     menuPosition = undefined; // no table, so no button to close the picker with
     rowMenu = undefined; // and no row for a menu to belong to
     // The tabs stay when there are missions: an empty table must not hide them.
-    paint(`${bannerHtml()}${missionsSnap ? tabsHtml() : ''}<div class="empty">No ${providerFilter === 'all' ? 'agent' : capitalize(providerFilter)} sessions found.
+    paint(`${bannerHtml()}${missionsSnap ? tabsHtml() : ''}<div class="empty">No agent sessions found.
 <div class="hint">Sessions are discovered from <code>~/.claude</code> and <code>~/.codex</code>. Start an agent session anywhere and it will appear here.</div></div>`);
     return;
   }
@@ -1363,7 +1350,7 @@ function render(): void {
   let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}${tabsHtml()}<table>${headHtml()}`;
 
   const groups = new Map<string, SessionDTO[]>();
-  for (const s of visibleSessions) {
+  for (const s of sessions) {
     // The Project tab has no Archived group to put an archived row in — its
     // groups are project names — so archived means gone from it, which is what
     // its × relies on to take a finished agent off the table. The Status tab
