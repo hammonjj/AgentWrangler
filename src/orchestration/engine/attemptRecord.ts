@@ -153,6 +153,7 @@ export function routingRecord(mission: Mission, d: RoutingDecision, now: Millis)
   if (!rec) return undefined;
   // The resolver's view of the pool, whoever decided: that is what the router is being judged on.
   const count = (v: string) => rec.resolution.candidates.filter((c) => c.verdict === v).length;
+  const attempt = mission.attempts.find((a) => a.routingDecisionId === d.id);
   return prune<RoutingRecord>({
     v: TELEMETRY_SCHEMA_VERSION,
     type: 'routing',
@@ -177,6 +178,8 @@ export function routingRecord(mission: Mission, d: RoutingDecision, now: Millis)
     verdict: rec.verdict,
     recommended: rec.resolution.target,
     ran: d.resolution.target,
+    ranEffort: d.requirement.effort,
+    escalationStep: attempt?.escalation?.step,
     agreement: d.agreement ?? 'no-recommendation',
     changed: [...d.overrides],
     candidates: { chosen: count('chosen'), fallback: count('fallback'), rejected: count('rejected') },

@@ -445,10 +445,32 @@ export class TaskRunner implements Disposable {
    * must decide (a cap below what the work needs, a plan-first gate, nothing
    * allowed that can run it). `startProposed` launches it; `cancel` drops it.
    */
-  async propose(req: NewTaskDraft): Promise<{ mission: Mission; recommendation: RouteRecommendation }> {
+  propose(req: NewTaskDraft): Promise<{ mission: Mission; recommendation: RouteRecommendation }> {
+    return this.proposeAs(req, 'assisted');
+  }
+
+  /**
+   * `auto` (§10.1, #42): record the task, assess it, route it, and launch the
+   * route the router picked, within the mission's caps — no click. The
+   * decision carries the router's reasons like any other, plus an
+   * `auto.routed` one. When the router cannot route it (a cap below what the
+   * work needs, a plan-first gate, nothing allowed), nothing launches: the
+   * task waits as a proposal with `needs-human`, exactly as in `assisted`.
+   *
+   * Whether `auto` may be used at all is the gate's question (§27.3), asked
+   * by the caller: the runner runs what it is told.
+   */
+  async startAuto(req: NewTaskDraft): Promise<{ mission: Mission; recommendation: RouteRecommendation; started: boolean }> {
+    const { mission, recommendation } = await this.proposeAs(req, 'auto');
+    if (recommendation.verdict !== 'route' || !recommendation.resolution.target) return { mission, recommendation, started: false };
+    const started = await this.queue(mission.id, () => this.launchProposal(mission.id, {}, false));
+    return { mission: started, recommendation, started: true };
+  }
+
+  private async proposeAs(req: NewTaskDraft, mode: 'assisted' | 'auto'): Promise<{ mission: Mission; recommendation: RouteRecommendation }> {
     if (!this.deps.assessor) throw new TaskError('Proposing a route needs the assessor, which is not running.');
     if (!this.deps.routing) throw new TaskError('Proposing a route needs the model catalog, which is not available.');
-    const id = await this.record(req, { ...req.policy, mode: 'assisted' });
+    const id = await this.record(req, { ...req.policy, mode });
     try {
       return await this.queue(id, async () => {
         let m = this.need(id);
@@ -464,7 +486,8 @@ export class TaskRunner implements Disposable {
         const rec = assessment && this.recommendationFor(m, tid, assessment);
         if (!rec) throw new TaskError('The task could not be routed: no assessment or no catalog.');
         const at = this.now();
-        m = this.patchTask(m, tid, (t) => transitionTask(m, { ...t, recommendation: rec }, 'routed', { now: at, reason: 'route proposed; waiting for you to accept or change it' }));
+        const reason = mode === 'auto' && rec.verdict === 'route' ? 'routed automatically; launching' : 'route proposed; waiting for you to accept or change it';
+        m = this.patchTask(m, tid, (t) => transitionTask(m, { ...t, recommendation: rec }, 'routed', { now: at, reason }));
         if (rec.verdict !== 'route') m = this.patchTask(m, tid, (t) => transitionTask(m, t, 'needs-human', { now: at, reason: rec.note ?? 'a person has to decide the route' }));
         this.put(m);
         this.log(`task ${id}: proposed ${rec.requirement.minTier}/${rec.requirement.effort} → ${rec.resolution.target?.model ?? rec.verdict}`);
@@ -484,21 +507,31 @@ export class TaskRunner implements Disposable {
    * (§10.2: a pin that violates a cap is refused when it is set).
    */
   startProposed(missionId: string, choice: ProposalChoice = {}): Promise<Mission> {
-    return this.queue(missionId, async () => {
-      const m = this.need(missionId);
-      const task = m.tasks[0];
-      const rec = task.recommendation;
-      if (!rec || task.attemptIds.length > 0 || !['routed', 'needs-human'].includes(task.state)) {
-        throw new TaskError('There is no proposal waiting to be started.');
-      }
-      let route = choice.route;
-      const accepted = !route;
-      if (!route) {
-        const t = rec.resolution.target;
-        if (!t || rec.verdict === 'blocked') throw new TaskError(rec.note ?? 'There is no recommended route to accept; pick one.');
-        route = { harness: t.harness, model: t.model, ...(isEndpointSource(t.source) ? { source: t.source } : {}), ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
-      }
-      this.checkRoute(route);
+    return this.queue(missionId, () => this.launchProposal(missionId, choice, true));
+  }
+
+  /**
+   * Launch the proposal on the task (inside the mission's queue). `offered`:
+   * a person saw it and chose (`assisted`, or an `auto` task that fell back to
+   * a proposal). Not offered: the router's own choice in `auto`, which pins
+   * nothing, so escalation stays free to move the route within the caps.
+   */
+  private async launchProposal(missionId: string, choice: ProposalChoice, offered: boolean): Promise<Mission> {
+    const m = this.need(missionId);
+    const task = m.tasks[0];
+    const rec = task.recommendation;
+    if (!rec || task.attemptIds.length > 0 || !['routed', 'needs-human'].includes(task.state)) {
+      throw new TaskError('There is no proposal waiting to be started.');
+    }
+    let route = choice.route;
+    const accepted = !route;
+    if (!route) {
+      const t = rec.resolution.target;
+      if (!t || rec.verdict === 'blocked') throw new TaskError(rec.note ?? 'There is no recommended route to accept; pick one.');
+      route = { harness: t.harness, model: t.model, ...(isEndpointSource(t.source) ? { source: t.source } : {}), ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
+    }
+    this.checkRoute(route);
+    if (offered) {
       // The route becomes the task's pins, which may break no cap at any
       // scope (§10.2): refused here, naming both, before anything is changed.
       const overrides = { ...task.overrides, pins: routePins(route) };
@@ -506,9 +539,9 @@ export class TaskRunner implements Disposable {
       if (conflicts.length > 0) throw new TaskError(conflictText(conflicts));
       this.put(this.patchTask(m, task.id, (t) => ({ ...t, overrides })));
       if (!accepted) this.writeProposalOverride(m, rec, route);
-      await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation: rec, offered: true, accepted } });
-      return this.need(missionId);
-    });
+    }
+    await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation: rec, offered, accepted } });
+    return this.need(missionId);
   }
 
   /** Record a new single-task mission, not yet started. */
@@ -2110,6 +2143,7 @@ export class TaskRunner implements Disposable {
     let reasons: RoutingReason[];
     const esc = routing.escalation;
     if (accepted && routing.failover) reasons = rec!.reasons.map((r, i) => (i === 0 && permissionMode ? { ...r, inputs: { ...r.inputs, permissionMode } } : r));
+    else if (accepted && !routing.offered && mode === 'auto') reasons = [...rec!.reasons, { ruleId: 'auto.routed', text: 'Routed automatically, within the caps (auto mode).', ...inputs }];
     else if (accepted) reasons = [...rec!.reasons, { ruleId: 'assisted.accepted', text: 'Recommendation accepted.', ...inputs }];
     else if (esc) reasons = [{ ruleId: `escalation.${esc.action}`, text: esc.reason, ...inputs }];
     else if (routing.offered && cmp) reasons = [{ ruleId: 'assisted.changed', text: `Changed from the recommendation: ${cmp.changed.join(', ') || 'nothing'}.`, ...inputs }];

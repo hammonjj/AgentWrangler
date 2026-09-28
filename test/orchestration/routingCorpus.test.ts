@@ -12,6 +12,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import { ASSESSOR_VERSION } from '../../src/orchestration/policy/assessment';
+import { CORPUS_STATUS } from '../../src/orchestration/policy/corpusStatus';
+import { ROUTER_VERSION } from '../../src/orchestration/policy/router';
+import type { CorpusStatus } from '../../src/shared/orchestration/autoRouting';
 import type { RouteRequirement } from '../../src/shared/orchestration/types';
 import { corpusRouter } from './corpusRouter';
 import {
@@ -140,6 +143,20 @@ describe.skipIf(!corpusRouter)('routing corpus: labelled assessments through the
       .filter((v) => v.egregious.length > 0)
       .map((v) => `${v.id}: ${v.egregious.join(', ')}`);
     expect(bad).toEqual([]);
+  });
+
+  it('matches CORPUS_STATUS, the result the automatic-routing gate reads (#42)', () => {
+    const labelled = corpus.map((c) => evaluateCard(c, assessCard(c, labelsAsAnswer(c.labels)), route));
+    const rulesOnly = corpus.map((c) => evaluateCard(c, assessCard(c, undefined), route));
+    const status: CorpusStatus = {
+      routerVersion: ROUTER_VERSION,
+      assessorVersion: ASSESSOR_VERSION,
+      cards: corpus.length,
+      failing: labelled.filter((v) => v.misses.length > 0).length,
+      egregious: [...labelled, ...rulesOnly].reduce((n, v) => n + v.egregious.length, 0),
+    };
+    // Out of date: copy this value into src/orchestration/policy/corpusStatus.ts.
+    expect(CORPUS_STATUS).toEqual(status);
   });
 
   it('routes a rules-only assessment (the completion failed) without an egregious misroute', () => {

@@ -500,7 +500,7 @@ window.addEventListener('message', (event: MessageEvent) => {
     return;
   }
   if (message.type === 'routingResult') {
-    onRoutingResult(message.ok, message.errors);
+    onRoutingResult(message.ok, message.errors, message.needsOverride === true);
     if (orchestrationBody) renderOrchestration(orchestrationBody, orchestration, post);
     return;
   }

@@ -730,6 +730,60 @@ describe('TaskRunner', () => {
       expect(r.telemetry.find((t) => t.type === 'override')).toMatchObject({ scope: 'task', via: 'proposal', changes: [{ field: 'pins.effort', from: 'medium', to: 'high' }] });
     });
 
+    // ---- automatic routing (#42) ----
+
+    it('auto: routes and launches without a click, and the decision still carries every reason', async () => {
+      const r = routed();
+      const { mission, recommendation, started } = await r.runner.startAuto({ ...DRAFT, folder: repo });
+      expect(started).toBe(true);
+      expect(recommendation.resolution.target).toMatchObject({ model: 'sonnet', effortNative: 'medium' });
+      const m = r.runner.get(mission.id)!;
+      expect(m.policy.mode).toBe('auto');
+      const d = m.decisions[0];
+      expect(d).toMatchObject({ mode: 'auto', decidedBy: 'router', agreement: 'matched', overrides: [], policyVersion: 'rtr-1' });
+      expect(d.reasons.map((x) => x.ruleId)).toEqual(expect.arrayContaining(['tier.band', 'effort.complexity', 'auto.routed']));
+      expect(d.reasons.map((x) => x.ruleId)).not.toContain('assisted.accepted');
+      // The router's choice pins nothing, so escalation may still move it within the caps.
+      expect(m.tasks[0].overrides?.pins).toBeUndefined();
+      expect(r.registry.get(attemptOf(m)!.assignment.sessionIds[0])?.launch).toMatchObject({ model: 'sonnet', effort: 'medium' });
+      expect(r.telemetry.find((t) => t.type === 'routing')).toMatchObject({ mode: 'auto', decidedBy: 'router', agreement: 'matched', ranEffort: 'medium' });
+      const view = taskViewOf(m, [])!;
+      expect(view.routing).toMatchObject({ decided: 'Routed automatically' });
+      expect(view.routing!.summary).toMatch(/Mode: auto, automatic/);
+      expect(view.routing!.rules.map((x) => x.ruleId)).toContain('tier.band');
+      expect(view.route?.mode).toBe('auto');
+    });
+
+    it('auto: work the router cannot route within the caps waits as a proposal, and runs nothing', async () => {
+      const r = routed(shared(), {
+        assessor: new Assessor({ completion: new SimulatedCompletion([{ output: { ...ANSWER, kind: { value: 'architecture', confidence: 'high', evidence: 'a redesign' } } }]) }),
+      });
+      const { mission, recommendation, started } = await r.runner.startAuto({ ...DRAFT, folder: repo, policy: { caps: { maxTier: 'standard' } } });
+      expect(started).toBe(false);
+      expect(recommendation.verdict).toBe('needs-human');
+      const m = r.runner.get(mission.id)!;
+      expect(m.tasks[0].state).toBe('needs-human');
+      expect(m.attempts).toEqual([]);
+      // The person picks within the cap; it is theirs, not the router's.
+      await r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'sonnet', effort: 'medium' } });
+      expect(r.runner.get(mission.id)!.decisions[0]).toMatchObject({ mode: 'auto', decidedBy: 'user' });
+    });
+
+    it('mode switching: each mission keeps the mode it was recorded with', async () => {
+      const r = routed(shared(), {
+        assessor: new Assessor({ completion: new SimulatedCompletion([{ output: ANSWER }, { output: ANSWER }, { output: ANSWER }]) }),
+      });
+      const manual = (await r.runner.start({ ...TASK, folder: repo })).id;
+      const assisted = (await r.runner.propose({ ...DRAFT, folder: repo })).mission.id;
+      const auto = (await r.runner.startAuto({ ...DRAFT, folder: repo })).mission.id;
+      await r.runner.startProposed(assisted);
+      expect(r.runner.get(manual)!.decisions[0]).toMatchObject({ mode: 'manual', decidedBy: 'user' });
+      expect(r.runner.get(assisted)!.decisions[0]).toMatchObject({ mode: 'assisted', decidedBy: 'router', agreement: 'accepted' });
+      expect(r.runner.get(auto)!.decisions[0]).toMatchObject({ mode: 'auto', decidedBy: 'router', agreement: 'matched' });
+      // `mode` is a mission's own: a task-scope edit may not set it.
+      await expect(r.runner.setPolicy(auto, 'task', { mode: 'manual' } as ExecutionPolicy)).rejects.toThrow();
+    });
+
     it('propose refuses without a catalog, and records nothing it cannot finish', async () => {
       const r = rig(EDIT, shared(), { assessor: new Assessor({ completion: new SimulatedCompletion([{ output: ANSWER }]) }) });
       await expect(r.runner.propose({ ...DRAFT, folder: repo })).rejects.toThrow(/model catalog/);

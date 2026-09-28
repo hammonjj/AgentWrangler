@@ -212,7 +212,14 @@ void app.whenReady().then(() => {
             secretsAvailable: host.secrets.available,
           },
           // The global scope of pins and caps (#40), with anything in settings.json that was ignored.
-          routing: { mode: routing.mode, policy: routing.policy, ignored: routing.errors.map((e) => `${e.path}: ${e.message}`) },
+          // With automatic routing's gate and the shadow comparison report (#42).
+          routing: {
+            mode: routing.mode,
+            policy: routing.policy,
+            ignored: routing.errors.map((e) => `${e.path}: ${e.message}`),
+            ...(routing.autoOverride ? { autoOverride: routing.autoOverride } : {}),
+            ...wrangler.autoRouting(),
+          },
         };
       },
       onDidChange: (listener) => {
@@ -222,6 +229,7 @@ void app.whenReady().then(() => {
           wrangler.codexUsage.onDidChange(listener),
           wrangler.localEndpoints.onDidChange(listener),
           wrangler.localMetrics.onDidChange(listener),
+          wrangler.onDidChangeRoutingEvidence(listener),
         ];
         return { dispose: () => subs.forEach((s) => s.dispose()) };
       },
