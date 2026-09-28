@@ -13,9 +13,25 @@ import { HookLog, hookLogDir, type PermissionBehavior } from './hookLog';
 import { suggestionDestination, suggestionLabels } from './permissionDetail';
 import { isSessionJsonlName, projectsDir, sessionsDir } from './paths';
 import { readRegistry, type RegistryEntry } from './registry';
-import { blockClearedByClaude, deriveStatus, turnOver } from './status';
+import { countTasks, liveTranscriptTasks, type BackgroundTaskRef } from './backgroundTasks';
+import { blockClearedByClaude, deriveStatus, holdForBackground, turnOver } from './status';
 import { TranscriptIndex, type IndexedTranscript } from './transcriptIndex';
 import type { TranscriptSummary } from './transcriptTail';
+
+/**
+ * Background work a live session still has running. The last `Stop`'s own list
+ * when this process sent one; otherwise (an older Claude Code, a session with
+ * no hooks, a resume that has not finished a turn yet) what the transcript
+ * launched and has not seen end, since this process started.
+ */
+export function backgroundTasksFor(
+  hook: Pick<HookSessionState, 'backgroundTasks'> | undefined,
+  summary: Pick<TranscriptSummary, 'backgroundTasks'> | undefined,
+  processStartedAtMs: number | undefined,
+): BackgroundTaskRef[] {
+  if (hook?.backgroundTasks !== undefined) return hook.backgroundTasks;
+  return liveTranscriptTasks(summary?.backgroundTasks, processStartedAtMs);
+}
 
 const REGISTRY_DEBOUNCE_MS = 250;
 const TRANSCRIPT_DEBOUNCE_MS = 300;
@@ -169,7 +185,13 @@ export class ClaudeProvider implements AgentProvider {
       // reply stands in.
       if (hook && status === 'waiting') status = this.idleStatus(hook, s);
 
-      sessions.push(this.buildSession(r, idx, status, now, hook));
+      // Turn over, but work it launched is still running: not Done yet.
+      const background = backgroundTasksFor(hook, s, r.startedAt);
+      const held = holdForBackground(status, background.length);
+      const heldFor = held !== status ? countTasks(background) : undefined;
+      status = held;
+
+      sessions.push({ ...this.buildSession(r, idx, status, now, hook), backgroundTasks: heldFor });
     }
 
     const endedCutoff = now - cfg.endedWindowHours * 3_600_000;

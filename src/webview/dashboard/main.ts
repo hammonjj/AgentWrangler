@@ -27,6 +27,7 @@ import { canPauseSession, clampMenuPosition, dismissAction, rowMenuItems, rowMen
 import {
   askLine,
   capitalize,
+  backgroundTasksChip,
   displayLabel,
   etaText,
   formatAge,
@@ -356,6 +357,10 @@ function statusChip(s: SessionDTO): string {
   if (s.status !== 'busy') return '';
 
   const chips: string[] = [];
+  if (s.backgroundTasks) {
+    const bg = backgroundTasksChip(s.backgroundTasks);
+    chips.push(`<span class="chip tool bg" title="${esc(bg.title)}">${esc(bg.text)}</span>`);
+  }
   if (s.activeTool) {
     chips.push(
       `<span class="chip tool">${esc(s.activeTool.name)} · <span data-age-ts="${s.activeTool.sinceMs}">${formatAge(Date.now(), s.activeTool.sinceMs)}</span></span>`,

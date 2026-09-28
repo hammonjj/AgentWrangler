@@ -10,6 +10,13 @@
  */
 import * as fs from 'node:fs/promises';
 import type { PrLink } from '../shared/model';
+import {
+  applyTaskChanges,
+  finishedTaskIdsIn,
+  launchedTaskOf,
+  stoppedTaskOf,
+  type BackgroundTaskRef,
+} from './backgroundTasks';
 
 export const TAIL_CHUNK_BYTES = 256 * 1024;
 export const MAX_CHUNK_BYTES = 1024 * 1024;
@@ -46,6 +53,12 @@ export interface TranscriptSummary {
   cwd?: string;
   gitBranch?: string;
   prLink?: PrLink;
+  /**
+   * Background tasks this transcript launched and has not yet seen end (#60),
+   * oldest first. Only what the tail reads covers: a launch older than the
+   * first tail read is not known, which errs towards today's Done.
+   */
+  backgroundTasks?: BackgroundTaskRef[];
   /** Head-read fallback title, fetched at most once per file. */
   firstUserText?: string;
   headReadDone: boolean;
@@ -107,7 +120,12 @@ export type SummaryPartial = Pick<
   | 'cwd'
   | 'gitBranch'
   | 'prLink'
->;
+> & {
+  /** Background tasks launched in this chunk, in order. */
+  tasksOpened?: BackgroundTaskRef[];
+  /** Ids of background tasks this chunk saw end. */
+  tasksClosed?: string[];
+};
 
 /** Cap on the reply text kept per transcript; `needsReply` only reads the tail anyway. */
 const MAX_REPLY_CHARS = 4000;
@@ -156,20 +174,30 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
         if (typeof model === 'string' && model.length > 0 && !model.startsWith('<')) out.model = model;
         break;
       }
-      case 'user':
+      case 'user': {
         out.lastMeaningful = {
           kind: 'user',
           timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : undefined,
         };
+        const content = obj.message?.content;
         // A real prompt starts a new turn, so the previous reply is spent. Tool
         // results are also `user` lines but belong to the turn in progress.
-        if (!isToolResultOnly(obj.message?.content)) out.lastAssistantText = undefined;
+        if (!isToolResultOnly(content)) out.lastAssistantText = undefined;
+        const launched = launchedTaskOf(obj.toolUseResult, timestampMs(obj.timestamp));
+        if (launched) (out.tasksOpened ??= []).push(launched);
+        const stopped = stoppedTaskOf(obj.toolUseResult);
+        if (stopped) (out.tasksClosed ??= []).push(stopped);
+        if (typeof content === 'string') closeTasks(out, content);
         break;
+      }
       case 'queue-operation':
         out.lastMeaningful = {
           kind: 'queue-operation',
           timestamp: typeof obj.timestamp === 'string' ? obj.timestamp : undefined,
         };
+        // The enqueue is written the moment a task ends, even while the agent
+        // is idle; the user line it becomes may come much later.
+        if (obj.operation === 'enqueue' && typeof obj.content === 'string') closeTasks(out, obj.content);
         break;
       case 'ai-title':
         if (typeof obj.aiTitle === 'string' && obj.aiTitle.trim()) out.aiTitle = obj.aiTitle.trim();
@@ -191,6 +219,17 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
     }
   }
   return out;
+}
+
+function closeTasks(out: SummaryPartial, text: string): void {
+  const ids = finishedTaskIdsIn(text);
+  if (ids.length > 0) (out.tasksClosed ??= []).push(...ids);
+}
+
+function timestampMs(ts: unknown): number | undefined {
+  if (typeof ts !== 'string') return undefined;
+  const ms = Date.parse(ts);
+  return Number.isFinite(ms) ? ms : undefined;
 }
 
 /** True for a `user` line that only carries tool results (mid-turn plumbing, not a prompt). */
@@ -267,6 +306,7 @@ export function mergeSummaries(
     cwd: next.cwd ?? prev?.cwd,
     gitBranch: next.gitBranch ?? prev?.gitBranch,
     prLink: next.prLink ?? prev?.prLink,
+    backgroundTasks: applyTaskChanges(prev?.backgroundTasks, next.tasksOpened ?? [], next.tasksClosed ?? []),
     firstUserText: prev?.firstUserText,
     headReadDone: stat.headReadDone ?? prev?.headReadDone ?? false,
     byteOffset: stat.byteOffset,

@@ -948,6 +948,11 @@ button.pbtn:disabled {
   border-color: var(--aw-busy);
   color: var(--aw-busy);
 }
+/* Turn over, waiting on background work (#60): busy, but nothing in flight in
+   the foreground, so dashed rather than solid. */
+.chip.tool.bg {
+  border-style: dashed;
+}
 /* Stopped, and spending nothing. Filled rather than outlined like the others,
    because it contradicts the status chips beside it and has to win that
    argument at a glance. */
