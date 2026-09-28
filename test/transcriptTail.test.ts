@@ -120,6 +120,16 @@ describe('parseSummaryLines', () => {
     expect(p.slug).toBe('test-session-slug');
     expect(p.prLink).toEqual({ prNumber: 4851, prUrl: 'https://github.com/x/y/pull/4851', prRepository: 'x/y' });
   });
+
+  it('captures a result line’s is_error and api_error_status (#75)', () => {
+    const p = parseSummaryLines([JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, api_error_status: 429 })]);
+    expect(p.lastResultError).toEqual({ isError: true, apiErrorStatus: 429 });
+  });
+
+  it('captures a successful result line as not an error', () => {
+    const p = parseSummaryLines([JSON.stringify({ type: 'result', subtype: 'success', is_error: false })]);
+    expect(p.lastResultError).toEqual({ isError: false, apiErrorStatus: undefined });
+  });
 });
 
 describe('parseHeadLines', () => {

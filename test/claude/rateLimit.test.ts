@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { claudeRateLimitFromLatest } from '../../src/claude/rateLimit';
+import { claudeRateLimitFromLatest, claudeRateLimitFromTranscript } from '../../src/claude/rateLimit';
 
 describe('claudeRateLimitFromLatest', () => {
   it('returns undefined when latest is empty', () => {
@@ -46,5 +46,27 @@ describe('claudeRateLimitFromLatest', () => {
   it('reports nothing for a non-429 error result', () => {
     const msg = { type: 'result', subtype: 'error_during_execution', is_error: true, api_error_status: 500 };
     expect(claudeRateLimitFromLatest({ result: msg })).toBeUndefined();
+  });
+});
+
+describe('claudeRateLimitFromTranscript', () => {
+  it('reports nothing for an undefined result', () => {
+    expect(claudeRateLimitFromTranscript(undefined)).toBeUndefined();
+  });
+
+  it('reports nothing for a non-error result', () => {
+    expect(claudeRateLimitFromTranscript({ isError: false })).toBeUndefined();
+  });
+
+  it('reports nothing for an error with no 429 status', () => {
+    expect(claudeRateLimitFromTranscript({ isError: true, apiErrorStatus: 500 })).toBeUndefined();
+  });
+
+  it('classifies a 429 transcript result as unknown, never weekly', () => {
+    const result = claudeRateLimitFromTranscript({ isError: true, apiErrorStatus: 429 });
+    expect(result?.provider).toBe('claude');
+    expect(result?.category).toBe('unknown');
+    expect(result?.category).not.toBe('claude-weekly');
+    expect(result?.resetAtMs).toBeUndefined();
   });
 });

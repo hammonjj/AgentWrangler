@@ -13,6 +13,7 @@ import { HookLog, hookLogDir, type PermissionBehavior } from './hookLog';
 import { suggestionDestination, suggestionLabels } from './permissionDetail';
 import { isSessionJsonlName, projectsDir, sessionsDir } from './paths';
 import { readRegistry, type RegistryEntry } from './registry';
+import { claudeRateLimitFromTranscript } from './rateLimit';
 import { blockClearedByClaude, deriveStatus, turnOver } from './status';
 import { TranscriptIndex, type IndexedTranscript } from './transcriptIndex';
 import type { TranscriptSummary } from './transcriptTail';
@@ -228,6 +229,7 @@ export class ClaudeProvider implements AgentProvider {
       transcriptPath: idx?.path,
       pid: r.pid,
       prLink: s?.prLink,
+      rateLimit: claudeRateLimitFromTranscript(s?.lastResultError),
       // The transcript's birth time, not the registry's `startedAt`: this
       // process may be the third one to pick up a conversation that began
       // yesterday, and the age of the conversation is what the column is for.

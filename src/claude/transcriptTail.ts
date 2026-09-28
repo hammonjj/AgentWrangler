@@ -22,6 +22,17 @@ export interface LastMeaningful {
   timestamp?: string;
 }
 
+/**
+ * A `result` line's own error fields (#75), when the transcript carries one.
+ * Distinct from `lastMeaningful`: a `result` line is a turn-end summary, not
+ * itself a user/assistant turn boundary, so it is tracked alongside rather
+ * than folded into it.
+ */
+export interface LastResultError {
+  isError: boolean;
+  apiErrorStatus?: number;
+}
+
 export interface TranscriptSummary {
   lastMeaningful?: LastMeaningful;
   /**
@@ -46,6 +57,14 @@ export interface TranscriptSummary {
   cwd?: string;
   gitBranch?: string;
   prLink?: PrLink;
+  /**
+   * The most recent `result` line's error fields (#75), when the transcript
+   * has one. Most Claude Code versions never write a `result` line to the
+   * transcript file at all — this is additive for the ones that do (or come
+   * to) so a bare 429 is still visible to status derivation without a
+   * session host's `latest` cache.
+   */
+  lastResultError?: LastResultError;
   /** Head-read fallback title, fetched at most once per file. */
   firstUserText?: string;
   headReadDone: boolean;
@@ -107,6 +126,7 @@ export type SummaryPartial = Pick<
   | 'cwd'
   | 'gitBranch'
   | 'prLink'
+  | 'lastResultError'
 >;
 
 /** Cap on the reply text kept per transcript; `needsReply` only reads the tail anyway. */
@@ -176,6 +196,12 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
         break;
       case 'last-prompt':
         if (typeof obj.lastPrompt === 'string' && obj.lastPrompt.trim()) out.lastPrompt = obj.lastPrompt.trim();
+        break;
+      case 'result':
+        out.lastResultError = {
+          isError: obj.is_error === true,
+          apiErrorStatus: typeof obj.api_error_status === 'number' ? obj.api_error_status : undefined,
+        };
         break;
       case 'pr-link':
         if (typeof obj.prUrl === 'string') {
@@ -267,6 +293,7 @@ export function mergeSummaries(
     cwd: next.cwd ?? prev?.cwd,
     gitBranch: next.gitBranch ?? prev?.gitBranch,
     prLink: next.prLink ?? prev?.prLink,
+    lastResultError: next.lastResultError ?? prev?.lastResultError,
     firstUserText: prev?.firstUserText,
     headReadDone: stat.headReadDone ?? prev?.headReadDone ?? false,
     byteOffset: stat.byteOffset,

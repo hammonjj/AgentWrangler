@@ -16,6 +16,7 @@
  * Pure: takes the cache, returns a stoppage or undefined. No filesystem, no SDK import.
  */
 import { classifyClaudeRateLimit, type RateLimitStoppage } from '../shared/rateLimitClassification';
+import type { LastResultError } from './transcriptTail';
 
 interface RateLimitInfo {
   rateLimitType?: unknown;
@@ -60,4 +61,17 @@ export function claudeRateLimitFromLatest(latest: Record<string, unknown> | unde
   const fromEvent = fromRateLimitEvent(latest['rate_limit_event']);
   if (fromEvent) return fromEvent;
   return fromResult(latest['result']);
+}
+
+/**
+ * The 429 fallback for a session Agent Wrangler only observes (registry +
+ * transcript + hooks — no session host, so no `latest` cache): the
+ * transcript's own most recent `result` line, when its Claude Code build
+ * writes one. Never a `rate_limit_event`: that message is only ever seen on
+ * the live host event stream, not in the transcript file, so an observed
+ * session can only ever produce `unknown`, exactly as a bare 429 should.
+ */
+export function claudeRateLimitFromTranscript(lastResultError: LastResultError | undefined): RateLimitStoppage | undefined {
+  if (!lastResultError?.isError || lastResultError.apiErrorStatus !== 429) return undefined;
+  return classifyClaudeRateLimit({ kind: 'generic-429', raw: lastResultError });
 }
