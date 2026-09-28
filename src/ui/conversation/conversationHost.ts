@@ -24,7 +24,7 @@ import type { ConversationCapabilities, ImageAttachment } from '../../shared/con
 import { MAX_IMAGE_BYTES, rememberFullText } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import type { Disposable } from '../../core/events';
-import type { ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../../shared/orchestration/taskView';
+import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../../shared/orchestration/taskView';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
 import type { PaneChannel } from '../paneChannel';
@@ -73,6 +73,10 @@ export interface TaskPaneSource {
   proposalsFor?(sessionKey: string): TaskProposalView[];
   /** The proposal card's Run or Cancel. Rejects with a message the user should read. */
   decideProposal?(missionId: string, decision: ProposalDecision): Promise<void>;
+  /** Work this conversation delegated (#82) that is being planned, failed to plan, or is a plan to review. */
+  delegationsFor?(sessionKey: string): DelegationView[];
+  /** A delegation card's button. Rejects with a message the user should read. */
+  delegationAction?(missionId: string, action: DelegationAction): Promise<void>;
   onDidChange(listener: () => void): Disposable;
 }
 
@@ -150,15 +154,36 @@ export class ConversationHost {
   private pushTask(): void {
     if (!this.ready) return;
     this.post({ type: 'task', task: this.taskView() });
-    this.post({ type: 'proposals', proposals: this.proposals() });
+    this.post({ type: 'proposals', proposals: this.proposals(), delegations: this.delegations() });
+  }
+
+  /** Every key the pane's conversation has been known by. */
+  private cardKeys(): string[] {
+    return [...new Set([...this.boundKeys, ...(this.session?.key ? [this.session.key] : [])])];
   }
 
   /** Proposal cards for whatever the pane is showing, under any key it has been known by. */
   private proposals(): TaskProposalView[] {
     if (!this.tasks?.proposalsFor) return [];
-    const keys = new Set([...this.boundKeys, ...(this.session?.key ? [this.session.key] : [])]);
     const seen = new Set<string>();
-    return [...keys].flatMap((k) => this.tasks!.proposalsFor!(k)).filter((p) => !seen.has(p.missionId) && !!seen.add(p.missionId));
+    return this.cardKeys().flatMap((k) => this.tasks!.proposalsFor!(k)).filter((p) => !seen.has(p.missionId) && !!seen.add(p.missionId));
+  }
+
+  /** Delegation cards (#82), the same way. */
+  private delegations(): DelegationView[] {
+    if (!this.tasks?.delegationsFor) return [];
+    const seen = new Set<string>();
+    return this.cardKeys().flatMap((k) => this.tasks!.delegationsFor!(k)).filter((d) => !seen.has(d.missionId) && !!seen.add(d.missionId));
+  }
+
+  private async delegationAction(missionId: string, action: DelegationAction): Promise<void> {
+    if (!this.tasks?.delegationAction) return;
+    try {
+      await this.tasks.delegationAction(missionId, action);
+    } catch (error) {
+      this.ui.dialogs.error(`Agent Wrangler: ${(error as Error).message ?? String(error)}`);
+    }
+    this.pushTask();
   }
 
   private async decideProposal(missionId: string, decision: ProposalDecision): Promise<void> {
@@ -286,6 +311,7 @@ export class ConversationHost {
       composer: source.composer,
       task: this.taskView(),
       proposals: this.proposals(),
+      delegations: this.delegations(),
     });
   }
 
@@ -526,6 +552,9 @@ export class ConversationHost {
         return;
       case 'proposalDecision':
         await this.decideProposal(m.missionId, m.decision);
+        return;
+      case 'delegationAction':
+        await this.delegationAction(m.missionId, m.action);
         return;
       case 'openAttempt':
         // The same path a row click takes, so an attempt opens here rather

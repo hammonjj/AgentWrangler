@@ -172,6 +172,8 @@ export interface ReplanContext {
 
 export interface PlanRequest {
   objective: string;
+  /** The user's criteria for the whole outcome (a delegation, #82). Every one must be some task's. */
+  acceptanceCriteria?: readonly string[];
   /** Where it may read: the repository's primary checkout, or for a replan the mission's worktree. */
   cwd: string;
   /** Verification command names the repository's policy defines. */
@@ -206,8 +208,16 @@ function block(tag: string, body: string): string {
 }
 
 /** The planner's input: the objective, what the repository can verify, the cap, and for a replan what already ran. */
-export function plannerInput(req: Pick<PlanRequest, 'objective' | 'strategies' | 'cap' | 'replan' | 'note'>): string {
+export function plannerInput(req: Pick<PlanRequest, 'objective' | 'acceptanceCriteria' | 'strategies' | 'cap' | 'replan' | 'note'>): string {
   const out: string[] = [block('objective', req.objective.trim())];
+  const criteria = (req.acceptanceCriteria ?? []).map((c) => c.trim()).filter(Boolean);
+  if (criteria.length > 0) {
+    out.push(
+      '',
+      'The user’s acceptance criteria for the whole objective; each one must be among some task’s criteria:',
+      block('acceptance_criteria', criteria.map((c) => `- ${oneLine(c)}`).join('\n')),
+    );
+  }
   out.push(
     '',
     req.strategies.length > 0

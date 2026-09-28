@@ -32,6 +32,8 @@ import {
   taskStateLabel,
   TASK_ACTION_LABEL,
   TASK_STRIP_ACTIONS,
+  type DelegationAction,
+  type DelegationView,
   type TaskProposalView,
   type TaskView,
 } from '../../shared/orchestration/taskView';
@@ -1255,10 +1257,11 @@ const BUSY_MS = 10_000;
  * focus, so an Enter meant for the composer can never start a task.
  */
 function renderProposals(): void {
-  proposalsEl.replaceChildren(...proposals.map(proposalCard));
-  proposalsEl.hidden = proposals.length === 0;
-  const live = new Set(proposals.map((p) => p.missionId));
-  for (const id of [...proposalPicks.keys()]) if (!live.has(id)) proposalPicks.delete(id);
+  proposalsEl.replaceChildren(...delegations.map(delegationCard), ...proposals.map(proposalCard));
+  proposalsEl.hidden = proposals.length === 0 && delegations.length === 0;
+  for (const id of [...proposalPicks.keys()]) if (!proposals.some((p) => p.missionId === id)) proposalPicks.delete(id);
+  // Busy entries are per card (`p:` or `d:` and the mission), so a delegation that became a proposal is pressable at once.
+  const live = new Set([...proposals.map((p) => `p:${p.missionId}`), ...delegations.map((d) => `d:${d.missionId}`)]);
   for (const [id, at] of [...proposalBusy]) if (!live.has(id) || Date.now() - at >= BUSY_MS) proposalBusy.delete(id);
 }
 
@@ -1267,7 +1270,17 @@ function proposalCard(p: TaskProposalView): HTMLElement {
   el.className = 'blk ask proposal st-pending';
   const head = document.createElement('div');
   head.className = 'askhead';
-  setText(head, p.verdict === 'route' ? 'Task proposal: waiting for you' : 'Task proposal: pick a route');
+  // Delegate (#82) is the handoff's name; the explicit `aw task` shortcut keeps its own.
+  setText(
+    head,
+    p.delegated
+      ? p.verdict === 'route'
+        ? 'Delegated: one task, waiting for you'
+        : 'Delegated: one task, pick a route'
+      : p.verdict === 'route'
+        ? 'Task proposal: waiting for you'
+        : 'Task proposal: pick a route',
+  );
   const title = document.createElement('div');
   title.className = 'qtext proptitle';
   setText(title, p.title);
@@ -1298,12 +1311,12 @@ function proposalCard(p: TaskProposalView): HTMLElement {
   if (p.why.rules.length) why.title = p.why.rules.map((r) => `${r.ruleId}: ${r.text}`).join('\n');
   el.appendChild(why);
 
-  const busy = proposalBusy.has(p.missionId);
+  const busy = proposalBusy.has(`p:${p.missionId}`);
   const row = document.createElement('div');
   row.className = 'askrow';
   const cancel = document.createElement('button');
   cancel.className = 'askbtn';
-  setText(cancel, 'Cancel task');
+  setText(cancel, p.delegated ? 'Cancel' : 'Cancel task');
   cancel.disabled = busy;
   cancel.addEventListener('click', () => decide(p, { kind: 'cancel' }));
 
@@ -1375,18 +1388,137 @@ function proposalCard(p: TaskProposalView): HTMLElement {
 }
 
 function decide(p: TaskProposalView, decision: { kind: 'run'; route?: { harness: string; model: string; effort?: string } } | { kind: 'cancel' }): void {
-  proposalBusy.set(p.missionId, Date.now());
+  proposalBusy.set(`p:${p.missionId}`, Date.now());
   renderProposals();
   post({ type: 'proposalDecision', missionId: p.missionId, decision });
   setTimeout(renderProposals, BUSY_MS + 50);
 }
 
-function setProposals(next: TaskProposalView[] | undefined): void {
-  const before = new Set(proposals.map((x) => x.missionId));
+function setProposals(next: TaskProposalView[] | undefined, nextDelegations: DelegationView[] | undefined): void {
+  const cards = () => [...proposals.map((x) => `p:${x.missionId}`), ...delegations.map((d) => `d:${d.missionId}:${d.state}`)];
+  const before = new Set(cards());
   proposals = next ?? [];
+  delegations = nextDelegations ?? [];
   renderProposals();
-  // A new card arrives at the end of the conversation: follow it there if the user was following.
-  if (stick && proposals.some((x) => !before.has(x.missionId))) scrollToBottom();
+  // A new card arrives at the end of the conversation (or a plan arrives in one): follow it there if the user was following.
+  if (stick && cards().some((x) => !before.has(x))) scrollToBottom();
+}
+
+// ---- delegation cards (#82) ----
+
+let delegations: DelegationView[] = [];
+
+const DELEGATION_HEAD: Record<DelegationView['state'], string> = {
+  planning: 'Delegated: deciding whether it is one task or several',
+  failed: 'Delegated: it could not be planned',
+  review: 'Delegated: a plan, waiting for you',
+};
+
+/**
+ * Work this conversation delegated (`aw delegate`) that the planner is
+ * deciding on, could not plan, or planned as several tasks. Drawn like the
+ * proposal card and settled the same way, by a click: nothing here takes
+ * focus. One the planner keeps as one task becomes a proposal card instead.
+ */
+function delegationCard(d: DelegationView): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'blk ask proposal delegation st-pending';
+  const head = document.createElement('div');
+  head.className = 'askhead';
+  setText(head, d.state === 'review' ? `Delegated: a plan of ${d.tasks.length} tasks, waiting for you` : DELEGATION_HEAD[d.state]);
+  const title = document.createElement('div');
+  title.className = 'qtext proptitle';
+  setText(title, d.title);
+  el.append(head, title);
+
+  const details = document.createElement('details');
+  details.className = 'propdetails';
+  const summary = document.createElement('summary');
+  setText(summary, d.acceptanceCriteria.length ? `What was delegated, and ${d.acceptanceCriteria.length} criteria` : 'What was delegated');
+  const objective = document.createElement('div');
+  objective.className = 'propobjective';
+  setText(objective, d.objective);
+  details.append(summary, objective);
+  if (d.acceptanceCriteria.length) details.appendChild(bulletList(d.acceptanceCriteria));
+  el.appendChild(details);
+
+  const note = (text: string) => {
+    const n = document.createElement('div');
+    n.className = 'asknote';
+    setText(n, text);
+    el.appendChild(n);
+  };
+  if (d.state === 'planning') note('A read-only planner is reading the repository. Nothing runs until you approve what it proposes.');
+  if (d.state === 'failed' && d.reason) note(d.reason);
+
+  if (d.state === 'review') {
+    const list = document.createElement('ol');
+    list.className = 'delegtasks';
+    for (const t of d.tasks) {
+      const li = document.createElement('li');
+      const item = document.createElement('details');
+      item.className = 'propdetails';
+      const s = document.createElement('summary');
+      setText(s, `${t.key} · ${t.title}${t.after.length ? ` (after ${t.after.join(', ')})` : ''}`);
+      const o = document.createElement('div');
+      o.className = 'propobjective';
+      setText(o, t.objective);
+      item.append(s, o);
+      if (t.acceptanceCriteria.length) item.appendChild(bulletList(t.acceptanceCriteria));
+      li.appendChild(item);
+      list.appendChild(li);
+    }
+    el.appendChild(list);
+    if (d.risks.length) note(`Risks: ${d.risks.join(' · ')}`);
+    for (const w of d.warnings) note(`Warning: ${w}`);
+    for (const b of d.blockers) note(`Before it can start: ${b}`);
+    note(
+      `The tasks run one at a time on a mission branch${d.route ? `, on ${d.route} unless a task pins its own` : ''}. ` +
+        'Edit the plan, or change a task’s route, in Missions.',
+    );
+  }
+
+  const busy = proposalBusy.has(`d:${d.missionId}`);
+  const row = document.createElement('div');
+  row.className = 'askrow';
+  const button = (label: string, action: DelegationAction, primary = false, enabled = true) => {
+    const b = document.createElement('button');
+    b.className = primary ? 'askbtn primary' : 'askbtn';
+    setText(b, label);
+    b.disabled = busy || !enabled;
+    b.addEventListener('click', () => {
+      // Opening Missions is not a decision: the card stays pressable.
+      if (action !== 'open-mission') {
+        proposalBusy.set(`d:${d.missionId}`, Date.now());
+        renderProposals();
+        setTimeout(renderProposals, BUSY_MS + 50);
+      }
+      post({ type: 'delegationAction', missionId: d.missionId, action });
+    });
+    row.appendChild(b);
+  };
+  if (d.state === 'review') {
+    button('Approve and start', 'approve', true, d.canApprove);
+    button('Edit in Missions', 'open-mission');
+  }
+  if (d.state === 'failed') {
+    if (d.canRunAsTask) button('Run as one task', 'as-task', true);
+    if (d.canPlanAgain) button('Plan again…', 'plan-again');
+  }
+  if (d.state === 'review' && d.canPlanAgain) button('Plan again…', 'plan-again');
+  button('Cancel', 'cancel');
+  el.appendChild(row);
+  return el;
+}
+
+function bulletList(items: readonly string[]): HTMLElement {
+  const list = document.createElement('ul');
+  for (const c of items) {
+    const li = document.createElement('li');
+    setText(li, c);
+    list.appendChild(li);
+  }
+  return list;
 }
 
 /**
@@ -2557,7 +2689,8 @@ vscodeApi.onMessage((body) => {
       task = m.task;
       renderTask();
       proposals = [];
-      setProposals(m.proposals);
+      delegations = [];
+      setProposals(m.proposals, m.delegations);
       stick = true;
       appendBlocks(m.blocks);
       // Opening a pane on a session that is already waiting lands on what it is
@@ -2600,7 +2733,7 @@ vscodeApi.onMessage((body) => {
       renderTask();
       break;
     case 'proposals':
-      setProposals(m.proposals);
+      setProposals(m.proposals, m.delegations);
       break;
     case 'composer':
       setComposer(m.composer);

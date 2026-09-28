@@ -34,8 +34,9 @@ describe('transition tables', () => {
     expect(edges(missionMachine, MISSION_STATES)).toEqual(
       [
         'draft→planning', 'draft→plan-review', 'draft→running',
-        'planning→plan-review', 'planning→planning-failed',
-        'planning-failed→planning', 'planning-failed→plan-review',
+        // `draft`: a delegation the planner kept as one task (#82).
+        'planning→plan-review', 'planning→planning-failed', 'planning→draft',
+        'planning-failed→planning', 'planning-failed→plan-review', 'planning-failed→draft',
         'plan-review→running', 'plan-review→planning',
         'running→paused', 'running→planning', 'running→finishing', 'running→failed',
         'paused→running',
@@ -130,6 +131,17 @@ describe('mission guards (§7.2)', () => {
     const m = mission({ state: 'plan-review', tasks: [task('t1'), task('t2')] });
     expect(() => transitionMission(m, 'running', opts)).toThrow(/not been approved/);
     expect(transitionMission({ ...m, planApprovedAt: T0 }, 'running', opts).state).toBe('running');
+  });
+
+  it('only a delegation kept as one unplanned task goes back from planning to draft (#82)', () => {
+    const delegation = { at: T0, acceptanceCriteria: [] };
+    const kept = mission({ state: 'planning', delegation });
+    expect(transitionMission(kept, 'draft', opts).state).toBe('draft');
+    expect(transitionMission({ ...kept, state: 'planning-failed' }, 'draft', opts).state).toBe('draft');
+    // A mission the user planned stays a plan; a delegation still planned, or of several tasks, too.
+    expect(() => transitionMission(mission({ state: 'planning', planned: true }), 'draft', opts)).toThrow(/delegation/);
+    expect(() => transitionMission({ ...kept, planned: true }, 'draft', opts)).toThrow(/delegation/);
+    expect(() => transitionMission({ ...kept, tasks: [task('t1'), task('t2')] }, 'draft', opts)).toThrow(/delegation/);
   });
 
   it('finishing needs every task done or skipped', () => {

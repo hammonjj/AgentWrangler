@@ -36,6 +36,8 @@ import {
   type ControlSessionResult,
   type ControlStatusResult,
   type ControlSubscribeResult,
+  type ControlDelegateParams,
+  type ControlDelegateResult,
   type ControlTaskProposeParams,
   type ControlTaskProposeResult,
   type ControlTaskView,
@@ -75,6 +77,8 @@ export interface ControlBackend {
   projects(): ControlProject[];
   /** A task proposal the user accepts in the app (#80). Throws `ControlError` when orchestration is off. */
   proposeTask(params: ControlTaskProposeParams): Promise<ControlTaskProposeResult>;
+  /** Delegate an outcome (#82): the planner decides one task or several. Throws `ControlError` when orchestration is off. */
+  delegate(params: ControlDelegateParams): Promise<ControlDelegateResult>;
   tasks(): ControlTaskView[];
 }
 
@@ -211,7 +215,7 @@ export class ControlServer implements Disposable {
     const mutating = MUTATING_CONTROL_METHODS.includes(method);
     if (mutating || method === 'subscribe') {
       // The session, or the repository a task is for; never the text.
-      const target = method === 'task.propose' ? path.basename(String(p.folder ?? '')) : String(p.ref);
+      const target = method === 'task.propose' || method === 'delegate' ? path.basename(String(p.folder ?? '')) : String(p.ref);
       this.opts.log(`control socket: ${method} ${target.slice(0, 80)} by ${conn.client ?? '?'}`);
     }
     if (mutating && this.mutationsStopped) throw new ControlError(RPC_UNSUPPORTED, 'Agent Wrangler is quitting');
@@ -236,6 +240,8 @@ export class ControlServer implements Disposable {
         return { projects: backend.projects() };
       case 'task.propose':
         return (await backend.proposeTask(taskParams(p))) satisfies ControlTaskProposeResult;
+      case 'delegate':
+        return (await backend.delegate(taskParams(p))) satisfies ControlDelegateResult;
       case 'tasks':
         return { tasks: backend.tasks() };
       default:
@@ -319,7 +325,7 @@ export function ensurePrivateDir(dir: string): void {
   if ((st.mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
 }
 
-/** `task.propose`'s params, checked. The folder must be absolute: the app has no cwd of the caller's. */
+/** `task.propose`'s params, and `delegate`'s, checked. The folder must be absolute: the app has no cwd of the caller's. */
 export function taskParams(p: Record<string, unknown>): ControlTaskProposeParams {
   if (typeof p.folder !== 'string' || !path.isAbsolute(p.folder)) throw new ControlError(RPC_INVALID_PARAMS, 'folder must be an absolute path');
   if (typeof p.objective !== 'string' || p.objective.trim().length === 0) throw new ControlError(RPC_INVALID_PARAMS, 'objective is required');
