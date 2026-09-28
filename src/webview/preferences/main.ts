@@ -14,7 +14,7 @@
 import './preferences.css';
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
 import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId } from '../../shared/preferences';
-import { settingGroups, type SettingSpec } from '../../shared/settings';
+import { settingGroups, SETTINGS, type SettingSpec } from '../../shared/settings';
 import { ORCHESTRATION_GROUP, onRoutingResult, renderOrchestration, setLocalEndpointResult } from './orchestration';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
@@ -26,6 +26,9 @@ const post = (message: PreferencesToHost) => host.postMessage(message);
 
 /** How long to let someone stop typing before the value is written. */
 const TYPING_SETTLE_MS = 350;
+
+/** Every setting's own spec by key, to name a `dependsOn` card after its switch. */
+const specByKey = new Map(SETTINGS.map((s) => [s.key, s]));
 
 const root = document.getElementById('prefsApp');
 /** Section elements by group name, for the sidebar to scroll to. */
@@ -258,14 +261,62 @@ function renderRow(spec: SettingSpec): HTMLElement {
  * lines on a narrow window.
  *
  * `inert` as well as hidden: a collapsed field that is still tabbable is a
- * field someone can type into without being able to see it.
+ * field someone can type into without being able to see it. If focus was
+ * inside the card when it closed — an external change collapsed it out from
+ * under someone — it goes back to the switch, rather than to whatever the
+ * browser picks once its container turns inert.
+ *
+ * `animate: false` is for the first paint: the card must already be in its
+ * final state — open for a setting that is on when the window opens — with
+ * nothing sliding into view. Toggling the class straight into a transitioned
+ * property would still animate that first frame, so the transition itself is
+ * held off for one frame instead.
  */
-function syncReveal(parentKey: string): void {
+function syncReveal(parentKey: string, opts?: { animate?: boolean }): void {
   const wrapper = dependents.get(parentKey);
   if (!wrapper) return;
   const on = values[parentKey] === true;
+  if (!on && wrapper.contains(document.activeElement)) controls.get(parentKey)?.focus();
+  if (opts?.animate === false) wrapper.classList.add('pf-no-anim');
   wrapper.classList.toggle('open', on);
   wrapper.inert = !on;
+  wrapper.setAttribute('aria-hidden', String(!on));
+  const control = controls.get(parentKey);
+  if (control instanceof HTMLInputElement && control.type === 'checkbox') control.setAttribute('aria-expanded', String(on));
+  if (opts?.animate === false) {
+    // Force layout with the transition suppressed, then drop the class next
+    // frame so a change from here on animates normally.
+    void wrapper.offsetHeight;
+    requestAnimationFrame(() => wrapper.classList.remove('pf-no-anim'));
+  }
+}
+
+/**
+ * The card a boolean's dependent fields live in, created once per parent key
+ * and reused by whichever setting reaches it first.
+ *
+ * `role="group"` plus an `aria-label` naming the switch it follows, because a
+ * screen reader landing inside it otherwise has no idea what it is a group
+ * of — the visual answer ("it's indented under Discord integration") does not
+ * reach it. The switch itself gets `aria-controls`/`aria-expanded` pointing
+ * at it, the standard disclosure-widget pair, wired here rather than left to
+ * the caller so every card gets it the same way.
+ */
+function createDependents(parentKey: string, label: string): HTMLElement {
+  let wrapper = dependents.get(parentKey);
+  if (wrapper) return wrapper;
+  wrapper = document.createElement('div');
+  wrapper.className = 'pf-dependents';
+  wrapper.id = `pf-dependents-${parentKey.replace(/\./g, '-')}`;
+  wrapper.setAttribute('role', 'group');
+  wrapper.setAttribute('aria-label', `${label} settings`);
+  const inner = document.createElement('div');
+  inner.className = 'pf-dependents-inner';
+  wrapper.appendChild(inner);
+  dependents.set(parentKey, wrapper);
+  const control = controls.get(parentKey);
+  if (control instanceof HTMLInputElement && control.type === 'checkbox') control.setAttribute('aria-controls', wrapper.id);
+  return wrapper;
 }
 
 /** Push the current value into an existing control. */
@@ -436,16 +487,9 @@ function render(): void {
     // rather than as a flat list where three of five fields do nothing.
     for (const spec of settings) {
       if (spec.dependsOn) {
-        let wrapper = dependents.get(spec.dependsOn);
-        if (!wrapper) {
-          wrapper = document.createElement('div');
-          wrapper.className = 'pf-dependents';
-          const inner = document.createElement('div');
-          inner.className = 'pf-dependents-inner';
-          wrapper.appendChild(inner);
-          dependents.set(spec.dependsOn, wrapper);
-          section.appendChild(wrapper);
-        }
+        const firstOfThisParent = !dependents.has(spec.dependsOn);
+        const wrapper = createDependents(spec.dependsOn, specByKey.get(spec.dependsOn)?.label ?? spec.dependsOn);
+        if (firstOfThisParent) section.appendChild(wrapper);
         wrapper.firstElementChild!.appendChild(renderRow(spec));
         continue;
       }
@@ -458,12 +502,19 @@ function render(): void {
   }
 
   // Not a settings group: one row per model, from the catalog the host sends.
+  // Everything in it exists to configure tasks, so it collapses with the same
+  // switch that turns tasks on ('orchestration.enabled', in Conversations) —
+  // its own row is rendered above, in that loop, before this runs.
   const orch = document.createElement('section');
   orch.className = 'pf-group pf-orchestration';
   orch.dataset.group = ORCHESTRATION_GROUP;
   sections.set(ORCHESTRATION_GROUP, orch);
   const orchHeading = document.createElement('h2');
   orchHeading.textContent = ORCHESTRATION_GROUP;
+  const orchIntro = document.createElement('p');
+  orchIntro.className = 'pf-desc pf-intro';
+  orchIntro.textContent = 'Configures tasks. Turn on “Run tasks in worktrees of their own” under Conversations to see it.';
+  const orchWrapper = createDependents('orchestration.enabled', ORCHESTRATION_GROUP);
   const body = document.createElement('div');
   orchestrationBody = body;
   body.addEventListener('focusout', () => {
@@ -471,12 +522,13 @@ function render(): void {
     orchestrationStale = false;
     renderOrchestration(body, orchestration, post);
   });
-  orch.append(orchHeading, body);
+  orchWrapper.firstElementChild!.appendChild(body);
+  orch.append(orchHeading, orchIntro, orchWrapper);
   renderOrchestration(orchestrationBody, orchestration, post);
   main.appendChild(orch);
 
   root.appendChild(main);
-  for (const parentKey of dependents.keys()) syncReveal(parentKey);
+  for (const parentKey of dependents.keys()) syncReveal(parentKey, { animate: false });
   markCurrent(groups[0]?.group ?? '');
   watchScroll(main);
 }

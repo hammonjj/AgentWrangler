@@ -332,6 +332,13 @@
   }
 }
 
+/* The first paint of a card that opens because its switch is already on: the
+   state is final immediately, nothing slides into view. Applied for one frame
+   and dropped, so every change after that first paint animates as normal. */
+#prefsApp .pf-dependents.pf-no-anim {
+  transition: none;
+}
+
 /*
  * The buttons a feature needs that are not settings, and what they report.
  *
