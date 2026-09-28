@@ -64,6 +64,11 @@ import type { TelemetryRecord, TurnRecord } from '../shared/orchestration/teleme
 import { isEndpointSource } from '../shared/orchestration/localEndpoints';
 import { LocalEndpointService } from '../orchestration/local/localEndpointService';
 import { LocalMetricsIndex } from '../core/telemetry/localMetricsIndex';
+import { RoutingEvidenceIndex } from '../core/telemetry/routingEvidenceIndex';
+import { comparisonReport, effectiveMode, evaluateGate, type ComparisonReport, type GateResult } from '../shared/orchestration/autoRouting';
+import { CORPUS_STATUS } from '../orchestration/policy/corpusStatus';
+import { ROUTER_VERSION } from '../orchestration/policy/router';
+import { ASSESSOR_VERSION } from '../orchestration/policy/assessment';
 import type { Mission } from '../shared/orchestration/types';
 import type { ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../shared/orchestration/taskView';
 import { sessionKeyFor, taskBadges, taskViewOf } from '../orchestration/view/taskViews';
@@ -179,6 +184,10 @@ export interface AgentWranglerApp {
   localEndpoints: LocalEndpointService;
   /** What local models have done (§19.4), from the telemetry log. */
   localMetrics: LocalMetricsIndex;
+  /** Automatic routing's gate and the shadow comparison report (#42), from the telemetry log, computed now. */
+  autoRouting: () => { gate: GateResult; report: ComparisonReport };
+  /** Fires when a routing or attempt record is added: the gate and the report may have moved. */
+  onDidChangeRoutingEvidence: (listener: () => void) => { dispose(): void };
   pause: PauseService;
   usage: UsageSource;
   codexUsage: UsageSource;
@@ -549,10 +558,24 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const localMetrics = new LocalMetricsIndex();
   host.subscribe(localMetrics);
   void localMetrics.load(telemetryDir).catch((err) => log(`telemetry: could not read local metrics: ${String(err)}`));
+  // Automatic routing's evidence (§27.3, #42): routing and attempt records.
+  const routingEvidence = new RoutingEvidenceIndex();
+  host.subscribe(routingEvidence);
+  void routingEvidence.load(telemetryDir).catch((err) => log(`telemetry: could not read routing evidence: ${String(err)}`));
+  const autoRouting = (): { gate: GateResult; report: ComparisonReport } => {
+    const input = { records: routingEvidence.records(), tiers: models.catalog.tiers.map((t) => t.name) };
+    return {
+      gate: evaluateGate({ ...input, corpus: CORPUS_STATUS, routerVersion: ROUTER_VERSION, assessorVersion: ASSESSOR_VERSION }),
+      report: comparisonReport(input),
+    };
+  };
   const appendTelemetry = (record: TelemetryRecord): boolean => {
     if (host.settings.get<boolean>(TELEMETRY_ENABLED_KEY, true) === false) return false;
     const written = telemetryLog.append(record);
-    if (written) localMetrics.add(record);
+    if (written) {
+      localMetrics.add(record);
+      routingEvidence.add(record);
+    }
     return written;
   };
   const turnRecords = new Emitter<TurnRecord>();
@@ -1498,7 +1521,30 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // The launcher's harness is a preference, not a pin: the router ranks it first within the tier it picks.
     // It is the mission's own layer; the global defaults are frozen in by the runner (#40).
     const policy = { preferences: { harness } };
-    if (routing.mode === 'assisted') {
+    // `auto` only while its gate is met or an override stands (§27.3, #42); otherwise assisted, and say why.
+    const { mode, note } = effectiveMode(routing.mode, routing.mode === 'auto' ? autoRouting().gate : undefined, routing.autoOverride);
+    if (note) log(`task: ${note}`);
+    if (mode === 'auto') {
+      try {
+        dialogs.flash('Assessing the task to route it automatically…');
+        const { mission, recommendation, started } = await runner.startAuto({ folder: cwd, objective, acceptanceCriteria: criteria.split(';'), policy });
+        if (!started) {
+          // The router could not route it within the caps: it waits as a proposal, as in assisted.
+          await reviewProposal(runner, mission.id, recommendation);
+          return;
+        }
+        const handle = runner.handleOf(mission.id);
+        if (handle) surface?.showSession(handle);
+        const target = recommendation.resolution.target;
+        dialogs.flash(`Task routed automatically${target ? ` to ${targetLabel(target)}` : ''} on ${mission.worktrees.at(-1)?.branch ?? 'its own branch'}`);
+      } catch (error) {
+        log(`task: ${String(error)}`);
+        dialogs.error(`Agent Wrangler: ${error instanceof TaskError ? error.message : `could not route the task — ${(error as Error).message}`}`);
+      }
+      return;
+    }
+    if (mode === 'assisted') {
+      if (note) dialogs.flash(note, 8000);
       try {
         dialogs.flash('Assessing the task to propose a route…');
         const { mission, recommendation } = await runner.propose({ folder: cwd, objective, acceptanceCriteria: criteria.split(';'), policy });
@@ -2762,6 +2808,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     models,
     localEndpoints,
     localMetrics,
+    autoRouting,
+    onDidChangeRoutingEvidence: (listener) => routingEvidence.onDidChange(listener),
     pause,
     usage,
     codexUsage,

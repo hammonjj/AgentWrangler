@@ -16,7 +16,10 @@ import {
   policyContextFor,
   routingSettingsValue,
   validateExecutionPolicy,
+  type LauncherRoutingMode,
+  type StoredAutoOverride,
 } from './orchestration/executionPolicy';
+import { gateLines, type ComparisonReport, type GateResult } from './orchestration/autoRouting';
 import type { SourceStatus } from './orchestration/sourceHealth';
 import type { LocalEndpointChange, LocalEndpointView } from './orchestration/localEndpoints';
 import type { LocalModelSummary } from './orchestration/localMetrics';
@@ -40,8 +43,12 @@ export type PreferencesToHost =
   | { type: 'modelPolicy'; change: ModelPolicyChange }
   /** Add, remove, turn on or off, key, probe or qualify a local endpoint (#51). */
   | { type: 'localEndpoint'; change: LocalEndpointChange }
-  /** The global routing defaults, whole, from Orchestration → Routing defaults (#40). */
-  | { type: 'routingPolicy'; mode: 'manual' | 'assisted'; policy: ExecutionPolicy }
+  /**
+   * The global routing defaults, whole, from Orchestration → Routing defaults
+   * (#40). `overrideGate`: the user pressed "Enable anyway" with the gate's
+   * numbers in front of them (#42); only then may `auto` be set over an unmet gate.
+   */
+  | { type: 'routingPolicy'; mode: LauncherRoutingMode; policy: ExecutionPolicy; overrideGate?: boolean }
   | { type: 'close' };
 
 /** What Preferences → Orchestration shows: the catalog, each source's health, and the routing defaults. */
@@ -56,7 +63,24 @@ export interface OrchestrationPrefsView {
     secretsAvailable: boolean;
   };
   /** The global scope of §10.2 as stored (#40). Absent: the host has none to offer. */
-  routing?: { mode: 'manual' | 'assisted'; policy: ExecutionPolicy; ignored: string[] };
+  routing?: {
+    mode: LauncherRoutingMode;
+    policy: ExecutionPolicy;
+    ignored: string[];
+    /** `auto` was enabled over an unmet gate (#42). */
+    autoOverride?: StoredAutoOverride;
+    /** Automatic routing's gate, with its numbers (§27.3, #42). */
+    gate?: GateResult;
+    /** The shadow comparison report (§27.3, #42). */
+    report?: ComparisonReport;
+  };
+}
+
+/** What a routing change needs to know besides the message: the gate now, what is stored, and the time. */
+export interface RoutingUpdateContext {
+  gate?: GateResult;
+  stored?: { mode: LauncherRoutingMode; autoOverride?: StoredAutoOverride };
+  now?: number;
 }
 
 /**
@@ -70,15 +94,25 @@ export interface OrchestrationPrefsView {
 export function routingPolicyUpdate(
   message: unknown,
   catalog: Pick<CapabilityCatalogView, 'tiers' | 'entries'>,
-): { ok: true; value: Record<string, unknown> } | { ok: false; errors: string[] } {
+  ctx: RoutingUpdateContext = {},
+): { ok: true; value: Record<string, unknown> } | { ok: false; errors: string[]; needsOverride?: true } {
   if (!message || typeof message !== 'object') return { ok: false, errors: ['not a routing change'] };
-  const m = message as { type?: unknown; mode?: unknown; policy?: unknown };
-  if (m.type !== 'routingPolicy' || (m.mode !== 'manual' && m.mode !== 'assisted')) return { ok: false, errors: ['not a routing change'] };
+  const m = message as { type?: unknown; mode?: unknown; policy?: unknown; overrideGate?: unknown };
+  if (m.type !== 'routingPolicy' || (m.mode !== 'manual' && m.mode !== 'assisted' && m.mode !== 'auto')) return { ok: false, errors: ['not a routing change'] };
   const parsed = validateExecutionPolicy(m.policy ?? {}, { tiers: catalog.tiers, allowed: GLOBAL_POLICY_KEYS });
   if (!parsed.ok) return { ok: false, errors: parsed.errors.map((e) => `${FIELD_LABEL[e.path] ?? e.path}: ${e.message}`) };
   const conflicts = checkPolicyEdit([], 'global', parsed.policy, policyContextFor(catalog));
   if (conflicts.length > 0) return { ok: false, errors: conflicts.map((c) => c.message) };
-  return { ok: true, value: routingSettingsValue(m.mode, parsed.policy) };
+  if (m.mode !== 'auto') return { ok: true, value: routingSettingsValue(m.mode, parsed.policy) };
+  // `auto` (§27.3, #42): with the gate met, as is. Over an unmet gate, only by
+  // an explicit override with the numbers shown — or an override that already
+  // stands, so editing a cap while on `auto` does not ask again.
+  if (ctx.gate?.met) return { ok: true, value: routingSettingsValue('auto', parsed.policy) };
+  const standing = ctx.stored?.mode === 'auto' ? ctx.stored.autoOverride : undefined;
+  if (standing) return { ok: true, value: routingSettingsValue('auto', parsed.policy, standing) };
+  const shown = ctx.gate ? gateLines(ctx.gate) : ['✗ The gate could not be read'];
+  if (m.overrideGate === true) return { ok: true, value: routingSettingsValue('auto', parsed.policy, { at: ctx.now ?? Date.now(), shown }) };
+  return { ok: false, needsOverride: true, errors: ['Automatic routing’s gate is not met:', ...shown] };
 }
 
 /**
@@ -131,7 +165,7 @@ export type HostToPreferences =
   /** What a local endpoint change did, shown beside the endpoints. */
   | { type: 'localEndpointResult'; ok: boolean; lines: string[] }
   /** The routing defaults the window sent were saved, or refused and why (#40). */
-  | { type: 'routingResult'; ok: boolean; errors: string[] };
+  | { type: 'routingResult'; ok: boolean; errors: string[]; needsOverride?: boolean };
 
 /**
  * What a `set` or `reset` should actually write, or nothing.

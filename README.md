@@ -415,6 +415,20 @@ new worktree and branch of the chosen folder's repository:
   - `{"mode": "assisted"}`: *Run a new task…* assesses first and shows the proposed route.
     One click runs it; *Change effort…* or *Change model…* runs yours instead, and the change
     is recorded. Dismissing it leaves the proposal in the Tasks menu.
+  - `{"mode": "auto"}`: *Run a new task…* assesses, routes and starts the task with no click,
+    within your caps; the route chip is marked **A** and *Why this route?* gives the same
+    reasons as any other decision. Work the router cannot route within the caps waits as a
+    proposal instead. `auto` is gated on the record (Preferences → Orchestration → Automatic
+    routing shows each check with its numbers): the routing corpus green with no egregious
+    misroute, at least 30 tasks routed in manual (shadow) or assisted mode, at least 70% of
+    at least 10 assisted proposals run without a tier change, and no kind of task where the
+    router wanted a cheaper route than ran and the route that ran still needed escalation.
+    Choosing *Automatic* before that shows the numbers and asks you to *Enable anyway*; the
+    override and the numbers you saw are saved in `orchestration.routing.autoOverride`, and
+    leaving `auto` drops it. `auto` in `settings.json` with the gate unmet and no override runs
+    as `assisted`, and says why. Below the gate, *Shadow comparison* lists what the router
+    predicted, what ran and how it went — "router wanted cheaper, the route that ran was
+    dearer" and the reverse, with outcomes — by task kind and by the dimension changed.
   - `"maxTier"` and `"maxEffort"` cap every new task. A cap is never exceeded: work that needs
     more than the cap waits for you, saying both why it needs more and what the cap is.
 - **Pins and caps, at four scopes.** You can *pin* a harness, model or effort, *cap* the tier,

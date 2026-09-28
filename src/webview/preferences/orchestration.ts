@@ -13,7 +13,8 @@
 
 import { routingPolicyUpdate, type PreferencesToHost, type OrchestrationPrefsView } from '../../shared/preferences';
 import { effortMapText, isKnown, type CatalogEntry, type Known, type TierDef } from '../../shared/orchestration/catalog';
-import { POLICY_FIELDS, fieldValue, withField, type PolicyFieldSpec, type PolicyValue } from '../../shared/orchestration/executionPolicy';
+import { POLICY_FIELDS, fieldValue, withField, type LauncherRoutingMode, type PolicyFieldSpec, type PolicyValue } from '../../shared/orchestration/executionPolicy';
+import { effectiveMode, type ComparisonReport } from '../../shared/orchestration/autoRouting';
 import { EFFORT_LEVELS, type ExecutionPolicy } from '../../shared/orchestration/types';
 import type { SourceStatus } from '../../shared/orchestration/sourceHealth';
 import { harnessLabel, sourceLabel } from '../../shared/harness';
@@ -243,19 +244,26 @@ function renderSource(s: SourceStatus): HTMLElement {
 // Routing defaults: the global scope of pins and caps (#40)
 // ---------------------------------------------------------------------------
 
-type RoutingDraft = { mode: 'manual' | 'assisted'; policy: ExecutionPolicy };
+type RoutingDraft = { mode: LauncherRoutingMode; policy: ExecutionPolicy };
 
 /** What the user set and has not had confirmed yet; kept across redraws so a refused value stays on screen. */
 let routingDraft: RoutingDraft | undefined;
 let routingErrors: string[] = [];
 let routingStatus = '';
+/** `auto` was asked for over an unmet gate: the numbers and "Enable anyway" are on screen (#42). */
+let overridePending: string[] | undefined;
 
 /** The host saved the defaults, or refused them. Call `renderOrchestration` after. */
-export function onRoutingResult(ok: boolean, errors: string[]): void {
+export function onRoutingResult(ok: boolean, errors: string[], needsOverride = false): void {
   if (ok) {
     routingDraft = undefined;
     routingErrors = [];
+    overridePending = undefined;
     routingStatus = 'Saved. Applies to tasks started from now on.';
+  } else if (needsOverride) {
+    overridePending = errors.slice(1);
+    routingErrors = [];
+    routingStatus = '';
   } else {
     routingErrors = errors;
     routingStatus = '';
@@ -281,19 +289,28 @@ function renderRouting(host: HTMLElement, view: OrchestrationPrefsView, post: (m
     ),
   );
 
-  const commit = (next: RoutingDraft) => {
+  const commit = (next: RoutingDraft, overrideGate = false) => {
     routingDraft = next;
     routingStatus = '';
-    // The same check the host runs, so a pin above a cap is refused here and now.
-    const r = routingPolicyUpdate({ type: 'routingPolicy', ...next }, view.catalog);
+    // The same check the host runs, so a pin above a cap is refused here and
+    // now, and `auto` over an unmet gate stops at its numbers (#42).
+    const r = routingPolicyUpdate({ type: 'routingPolicy', ...next, overrideGate }, view.catalog, {
+      gate: stored.gate,
+      stored: { mode: stored.mode, autoOverride: stored.autoOverride },
+      now: Date.now(),
+    });
     if (!r.ok) {
-      routingErrors = r.errors;
+      if (r.needsOverride) {
+        overridePending = r.errors.slice(1);
+        routingErrors = [];
+      } else routingErrors = r.errors;
       redraw();
       return;
     }
     routingErrors = [];
+    overridePending = undefined;
     routingStatus = 'Saving…';
-    post({ type: 'routingPolicy', mode: next.mode, policy: next.policy });
+    post({ type: 'routingPolicy', mode: next.mode, policy: next.policy, ...(overrideGate ? { overrideGate: true } : {}) });
     redraw();
   };
   const set = (field: string, value: PolicyValue | undefined) => {
@@ -311,10 +328,20 @@ function renderRouting(host: HTMLElement, view: OrchestrationPrefsView, post: (m
   modeSelect.setAttribute('aria-label', 'Routing mode');
   option(modeSelect, 'manual', 'Manual — run on the launcher’s route');
   option(modeSelect, 'assisted', 'Assisted — propose a route, wait for a click');
+  option(modeSelect, 'auto', `Automatic — the router decides, within the caps${stored.gate && !stored.gate.met ? ' (gate not met)' : ''}`);
+  // A pending override shows what was asked for, not what is stored.
   modeSelect.value = current.mode;
-  modeSelect.addEventListener('change', () => commit({ mode: modeSelect.value === 'assisted' ? 'assisted' : 'manual', policy: current.policy }));
+  modeSelect.addEventListener('change', () => {
+    const v = modeSelect.value;
+    commit({ mode: v === 'assisted' || v === 'auto' ? v : 'manual', policy: current.policy });
+  });
   modeRow.append(el('span', 'pf-label pf-policy-label', 'Mode'), modeSelect);
   form.appendChild(modeRow);
+  if (overridePending) form.appendChild(renderOverridePrompt(overridePending, () => commit({ mode: 'auto', policy: current.policy }, true), () => {
+    overridePending = undefined;
+    routingDraft = undefined;
+    redraw();
+  }));
 
   let group = '';
   for (const spec of POLICY_FIELDS) {
@@ -334,6 +361,104 @@ function renderRouting(host: HTMLElement, view: OrchestrationPrefsView, post: (m
   for (const e of routingErrors) host.appendChild(el('p', 'pf-policy-error', e));
   for (const e of stored.ignored) host.appendChild(el('p', 'pf-policy-error', `Ignored in settings.json — ${e}`));
   if (routingStatus) host.appendChild(el('p', 'pf-desc pf-policy-status', routingStatus));
+  renderAutoRouting(host, stored);
+}
+
+// ---------------------------------------------------------------------------
+// Automatic routing: the gate and the shadow comparison report (#42)
+// ---------------------------------------------------------------------------
+
+/** "Enable anyway" with the numbers in front of the user: the only way to turn `auto` on over an unmet gate. */
+function renderOverridePrompt(lines: string[], confirm: () => void, cancel: () => void): HTMLElement {
+  const box = el('div', 'pf-gate-override');
+  box.appendChild(el('p', 'pf-policy-error', 'Automatic routing’s gate is not met. The record so far:'));
+  for (const l of lines) box.appendChild(el('p', 'pf-desc pf-gate-line', l));
+  box.appendChild(
+    el(
+      'p',
+      'pf-desc',
+      'Enabling it anyway lets the router pick every new launcher task’s route, within your caps, without asking. Each decision still records its reasons, and escalation may raise the tier within the caps. The numbers above are saved with the override.',
+    ),
+  );
+  const row = el('div', 'pf-model-controls');
+  row.append(button('Enable anyway', confirm, 'pf-action danger'), button('Keep the current mode', cancel));
+  box.appendChild(row);
+  return box;
+}
+
+function renderAutoRouting(host: HTMLElement, stored: NonNullable<OrchestrationPrefsView['routing']>): void {
+  const gate = stored.gate;
+  const report = stored.report;
+  if (!gate && !report) return;
+  host.appendChild(el('h3', 'pf-subhead', 'Automatic routing'));
+  host.appendChild(
+    el(
+      'p',
+      'pf-desc',
+      'Automatic routing can be switched on once the record supports it: the routing corpus is green, the router has been shadowed or proposed for enough tasks, its proposals are mostly taken without a tier change, and no kind of task shows it under-routing. Counted from the telemetry log, one decision per task.',
+    ),
+  );
+  if (gate) {
+    const checks = el('div', `pf-gate ${gate.met ? 'met' : 'unmet'}`);
+    checks.appendChild(el('p', 'pf-label pf-gate-verdict', gate.met ? 'Gate met' : 'Gate not met'));
+    for (const c of gate.checks) {
+      const row = el('div', `pf-gate-check ${c.met ? 'met' : 'unmet'}`);
+      row.append(el('span', 'pf-gate-mark', c.met ? '✓' : '✗'), el('span', 'pf-label', c.label), el('span', 'pf-desc pf-gate-value', c.value));
+      checks.appendChild(row);
+      if (c.detail) checks.appendChild(el('p', 'pf-desc pf-gate-detail', c.detail));
+    }
+    host.appendChild(checks);
+    const eff = effectiveMode(stored.mode, gate, stored.autoOverride);
+    if (stored.mode === 'auto' && stored.autoOverride) {
+      host.appendChild(el('p', 'pf-policy-error', `On by override since ${new Date(stored.autoOverride.at).toLocaleString()}. Shown then:`));
+      for (const l of stored.autoOverride.shown) host.appendChild(el('p', 'pf-desc pf-gate-line', l));
+    } else if (eff.note) host.appendChild(el('p', 'pf-policy-error', eff.note));
+  }
+  if (report) renderReport(host, report);
+}
+
+function tallyText(t: { decisions: number; disagreements: number; routerCheaper: number; routerDearer: number; sideways: number; passedFirst: number; neededEscalation: number }): string {
+  if (t.disagreements === 0) return `${t.decisions} decided · no disagreement`;
+  return `${t.decisions} decided · ${t.disagreements} disagreed (router cheaper ${t.routerCheaper}, dearer ${t.routerDearer}, sideways ${t.sideways}) · of those ${t.passedFirst} passed first time, ${t.neededEscalation} needed escalation`;
+}
+
+function renderReport(host: HTMLElement, report: ComparisonReport): void {
+  host.appendChild(el('h3', 'pf-subhead', 'Shadow comparison'));
+  host.appendChild(
+    el('p', 'pf-desc', 'What the router predicted, what ran, and how it went, for every task with a recommendation. In manual mode the prediction is the shadow; in assisted mode it is the proposal.'),
+  );
+  if (report.rows.length === 0) {
+    host.appendChild(el('p', 'pf-desc pf-empty', 'No routed tasks on record yet.'));
+    return;
+  }
+  host.appendChild(el('p', 'pf-desc', tallyText(report.total)));
+  const patterns = el('div', 'pf-report');
+  for (const p of report.patterns) {
+    const row = el('div', 'pf-report-row');
+    row.append(el('span', 'pf-label', p.label), el('span', 'pf-desc pf-report-value', p.count === 0 ? 'none' : `${p.count} · ${p.passedFirst} passed first time · ${p.neededEscalation} needed escalation · ${p.other} other`));
+    patterns.appendChild(row);
+    if (p.count > 0) patterns.appendChild(el('p', 'pf-desc pf-gate-detail', p.reading));
+  }
+  host.appendChild(patterns);
+
+  host.appendChild(el('div', 'pf-policy-group', 'By kind'));
+  const kinds = el('div', 'pf-report');
+  for (const k of report.byKind) {
+    const row = el('div', 'pf-report-row');
+    row.append(el('span', 'pf-label', k.kind), el('span', 'pf-desc pf-report-value', tallyText(k)));
+    kinds.appendChild(row);
+  }
+  host.appendChild(kinds);
+
+  host.appendChild(el('div', 'pf-policy-group', 'By dimension changed'));
+  const dims = el('div', 'pf-report');
+  if (report.byDimension.length === 0) dims.appendChild(el('p', 'pf-desc pf-empty', 'No route was changed from the recommendation.'));
+  for (const d of report.byDimension) {
+    const row = el('div', 'pf-report-row');
+    row.append(el('span', 'pf-label', d.dimension), el('span', 'pf-desc pf-report-value', `${d.count} changed · ${d.passedFirst} passed first time · ${d.neededEscalation} needed escalation`));
+    dims.appendChild(row);
+  }
+  host.appendChild(dims);
 }
 
 function policyControl(spec: PolicyFieldSpec, value: PolicyValue | undefined, view: OrchestrationPrefsView, set: (field: string, v: PolicyValue | undefined) => void): HTMLElement {

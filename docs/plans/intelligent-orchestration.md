@@ -2778,6 +2778,54 @@ from James's own shadow data is possible and stays on the machine.
   meant for the planner's own task (§11.1), and the model can still name it; the result
   over-routes, which is safe.
 
+### 27.5 As built: automatic routing and its gate (#42, 2026-09-28)
+
+- **Where it lives.** `src/shared/orchestration/autoRouting.ts`, pure and in `shared` so
+  Preferences renders what it returns: `evaluateGate` and `comparisonReport` over `routing` and
+  `attempt` telemetry records only, `effectiveMode` for the mode in force. The records come from
+  `core/telemetry/routingEvidenceIndex.ts` (the log read once at start, then each record as it is
+  written, like #51's local metrics). Tests: `test/orchestration/autoRouting.test.ts` (fixtures),
+  and the runner's `auto` cases in `taskRunner.integration.test.ts`.
+- **The unit is a task.** One decision per task: the routing record of its first attempt, never
+  one an escalation step launched (`RoutingRecord.escalationStep`, new, or the attempt record's).
+  A resume or retry is the same judgement again, so it is not more evidence. `auto` decisions and
+  recommendations that were not a route (`needs-human`, `blocked`) are not counted by the gate.
+- **The corpus, at run time.** The corpus runs in `npm test`, not in the app, so its result
+  ships as a value: `policy/corpusStatus.ts` (`{routerVersion, assessorVersion, cards, failing,
+  egregious}`). `routingCorpus.test.ts` recomputes it and fails unless it is exactly equal, so a
+  build whose tests passed carries a true statement. A router or assessor version other than the
+  one it names leaves the corpus check unmet.
+- **The criteria, as code** (`DEFAULT_GATE_CRITERIA`): corpus green with zero egregious; at least
+  30 decisions; at least 70% of assisted proposals run without a tier change — an effort, model
+  or harness change within the tier still counts as kept. **Deviation:** that share is judged only
+  over **at least 10** assisted proposals (`minAssistedDecisions`); 1 of 1 is not 100% of
+  anything. Under-routing: a kind with a task where the router's pick was cheaper (a lower tier,
+  or the same tier with less effort) than what ran, and what ran failed with a route failure
+  (`quality-new`, `quality-repeat`, `empty`, `stuck`, `context`). Infra, capacity, budget, policy
+  and ambiguity failures say nothing about the route and are not counted.
+- **The report.** Per task: predicted (the tier the resolver picked, the required effort, the
+  model), ran, direction (`agreed`, `router-cheaper`, `router-dearer`, `sideways`), the dimensions
+  changed, and the outcome of that attempt (`passed-first`, `needed-escalation`, other). Totals,
+  the two named patterns with outcomes and a one-line reading, by kind and by dimension. Rendered
+  in Preferences → Orchestration → Automatic routing → Shadow comparison. `RoutingRecord.ranEffort`
+  (new) lets a running attempt be listed before its attempt record exists.
+- **`auto` in the runner.** `TaskRunner.startAuto(draft)` records a mission with `mode: 'auto'`,
+  assesses and routes it exactly as `propose`, then launches the recommendation in the same queue:
+  `decidedBy: 'router'`, `agreement: 'matched'`, the router's reasons plus `auto.routed`. Unlike
+  an accepted proposal it **pins nothing**, so escalation (whose `auto` limits allow tier steps,
+  #41) can move the route within the caps. A recommendation that is not a route leaves the task a
+  proposal at `needs-human`, answered as in `assisted`. The runner does not check the gate: the
+  caller does.
+- **Opt-in per mission.** Each mission freezes the mode it was recorded with (§10.2); the global
+  setting `orchestration.routing.mode: 'auto'` is what new launcher tasks get. `aw task` stays a
+  proposal whatever the mode (#80).
+- **The override.** `routingPolicyUpdate` (window and host both) refuses `auto` over an unmet gate
+  with `needsOverride` and the gate's lines; Preferences shows them with *Enable anyway*, which
+  resends with `overrideGate: true`. The host stores `autoOverride: {at, shown}`, re-reading the
+  gate itself. A standing override survives cap edits on `auto`; switching away drops it. The
+  launcher runs `auto` only if `effectiveMode` says so (gate met or override), else `assisted`
+  with the reason flashed and logged.
+
 ---
 
 ## 28. Roadmap
