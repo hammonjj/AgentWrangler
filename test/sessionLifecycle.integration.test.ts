@@ -652,7 +652,7 @@ describe('environment hygiene', () => {
     await view.send('hi');
     await until(() => texts(view).includes('echo: hi'));
     const m = await h.manifestWithAgent(id);
-    const env = h.agentEnv(m.agentPid!);
+    const env = await h.agentEnv(m.agentPid!);
     const token = h.token(m);
 
     expect(env.KEEP_ME_TEST).toBe('kept'); // the env did reach it
