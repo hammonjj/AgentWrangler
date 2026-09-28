@@ -874,9 +874,24 @@ export const ROUTING_KEY = 'orchestration.routing';
 /** What the global scope may set. `mode` is read separately: it picks the entry point, not a limit. */
 export const GLOBAL_POLICY_KEYS = ['pins', 'caps', 'preferences', 'exclusions'] as const;
 
+/** The routing modes a person can pick for new launcher tasks (§10.1). */
+export type LauncherRoutingMode = 'manual' | 'assisted' | 'auto';
+
+/** `auto` switched on while its gate was unmet (#42): when, and the gate's numbers as they were shown. */
+export interface StoredAutoOverride {
+  at: number;
+  shown: string[];
+}
+
 export interface RoutingSettings {
-  /** How new tasks from the launcher are routed. */
-  mode: 'manual' | 'assisted';
+  /**
+   * How new tasks from the launcher are routed. `auto` is what was set: it
+   * runs only while its gate is met or `autoOverride` stands
+   * (`autoRouting.effectiveMode`), and `assisted` otherwise.
+   */
+  mode: LauncherRoutingMode;
+  /** Present when `auto` was enabled over an unmet gate, with the numbers shown. */
+  autoOverride?: StoredAutoOverride;
   /** The global scope's pins, caps, preferences and exclusions. */
   policy: ExecutionPolicy;
   /** Groups that were malformed and so were ignored, each with why. */
@@ -904,12 +919,23 @@ export function parseRoutingSettings(raw: unknown): RoutingSettings {
     if (parsed.ok) Object.assign(policy, parsed.policy);
     else errors.push(...parsed.errors);
   }
-  return { mode: r.mode === 'assisted' ? 'assisted' : 'manual', policy, errors };
+  const mode: LauncherRoutingMode = r.mode === 'assisted' || r.mode === 'auto' ? r.mode : 'manual';
+  const o = r.autoOverride;
+  const autoOverride =
+    mode === 'auto' && isObj(o) && typeof o.at === 'number' && Array.isArray(o.shown) && o.shown.every((s) => typeof s === 'string')
+      ? { at: o.at, shown: o.shown as string[] }
+      : undefined;
+  return { mode, ...(autoOverride ? { autoOverride } : {}), policy, errors };
 }
 
-/** What Preferences writes back to `orchestration.routing`: the nested form, empty groups left out. */
-export function routingSettingsValue(mode: 'manual' | 'assisted', policy: ExecutionPolicy): Record<string, unknown> {
+/**
+ * What Preferences writes back to `orchestration.routing`: the nested form,
+ * empty groups left out. An override is kept only with `auto`: switching
+ * away from `auto` drops it, so turning `auto` on again asks again.
+ */
+export function routingSettingsValue(mode: LauncherRoutingMode, policy: ExecutionPolicy, autoOverride?: StoredAutoOverride): Record<string, unknown> {
   const out: Record<string, unknown> = { mode };
+  if (mode === 'auto' && autoOverride) out.autoOverride = autoOverride;
   for (const g of GLOBAL_POLICY_KEYS) {
     const v = policy[g];
     if (v && Object.keys(v).length > 0) out[g] = v;

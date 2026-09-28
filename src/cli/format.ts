@@ -3,6 +3,7 @@
  * returns text, so the tests pin the output exactly.
  */
 import type {
+  ControlDelegateResult,
   ControlProject,
   ControlSession,
   ControlSessionResult,
@@ -158,6 +159,43 @@ export function formatProposal(r: ControlTaskProposeResult, fromConversation = f
       ? 'Nothing is running yet. The user approves it on the "Task proposal" card at the end of this conversation in Agent Wrangler.'
       : 'Nothing is running yet. Approve it in Agent Wrangler: click the "Task proposal" notification, or Tasks → this task.',
   );
+  return lines.join('\n');
+}
+
+/**
+ * `aw delegate`'s answer (#82): what the planner decided, and, on the last
+ * line, what to tell the user. Nothing runs until they approve it in the app.
+ */
+export function formatDelegation(r: ControlDelegateResult, fromConversation = false): string {
+  const where = fromConversation ? 'on the "Delegated" card at the end of this conversation in Agent Wrangler' : 'in Agent Wrangler (click its notification, or see Missions)';
+  const lines = [`Delegated: ${safe(r.task.title)}`];
+  switch (r.decision) {
+    case 'single':
+      lines.push('Decision: one task');
+      if (r.route) lines.push(`Route: ${safe(r.route)}${r.verdict === 'route' ? '' : ' (needs a decision)'}`);
+      else lines.push('Route: none recommended');
+      if (r.summary) lines.push(`Why: ${safe(r.summary)}`);
+      if (r.note) lines.push(`Note: ${safe(r.note)}`);
+      break;
+    case 'multiple':
+      lines.push(`Decision: a plan of ${r.tasks?.length ?? 0} tasks, run one at a time`);
+      for (const t of r.tasks ?? []) lines.push(`  ${safe(t.key)}  ${safe(t.title)}`);
+      break;
+    case 'planning':
+      lines.push('Decision: not yet; the planner is still reading the repository');
+      break;
+    case 'failed':
+      lines.push(`Decision: none; it could not be planned${r.note ? `: ${safe(r.note)}` : ''}`);
+      break;
+    default:
+      lines.push(`Decision: ${safe(r.decision)}${r.note ? ` (${safe(r.note)})` : ''}`);
+  }
+  lines.push(`Id: ${r.task.missionId}`, '');
+  if (r.decision === 'cancelled') lines.push('It was cancelled; nothing ran.');
+  else if (r.decision === 'failed') lines.push(`Nothing is running. The user can plan it again or run it as one task ${where}.`);
+  else if (r.decision === 'planning') lines.push(`Nothing is running yet. The planner's decision appears ${where}; the user approves it there.`);
+  else if (r.decision === 'multiple') lines.push(`Nothing is running yet. The user reviews and approves the plan ${where}.`);
+  else if (r.decision === 'single') lines.push(`Nothing is running yet. The user approves it ${where}.`);
   return lines.join('\n');
 }
 

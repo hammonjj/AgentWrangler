@@ -7,6 +7,7 @@ import { AttachRenderer, ATTACH_BACKLOG, renderBlock } from '../src/cli/attach';
 import {
   ago,
   clip,
+  formatDelegation,
   formatOffline,
   formatProjects,
   formatProposal,
@@ -374,6 +375,47 @@ describe('aw task (#80)', () => {
     expect(listed).toContain('Fix the parser');
     expect(listed).toContain('5m ago');
     expect(listed).toContain('aw/fix-the-parser');
+  });
+});
+
+describe('aw delegate (#82)', () => {
+  const base = { criteria: [], folder: undefined, harness: undefined, json: false };
+  const task = { missionId: 'm1', title: 'Add a synthetic flag', state: 'planning', repoRoot: '/Users/test/proj', createdAt: NOW };
+
+  it('takes the same options as aw task, and names itself in errors', () => {
+    expect(parseArgs(['delegate', 'add', 'a', 'flag'])).toEqual({ kind: 'delegate', objective: 'add a flag', ...base });
+    expect(parseArgs(['delegate', '-', '--criteria', 'tests pass; docs updated', '--claude'])).toEqual({
+      kind: 'delegate',
+      objective: undefined,
+      ...base,
+      criteria: ['tests pass', 'docs updated'],
+      harness: 'claude',
+    });
+    expect(parseArgs(['delegate'])).toEqual({ error: 'aw delegate: what should be done? Give the objective, or "-" to read it from stdin.' });
+    expect(parseArgs(['delegate', 'x', '--force'])).toEqual({ error: 'aw delegate: unknown option --force' });
+    expect(parseArgs(['delegate', 'x', '--criteria'])).toEqual({ error: 'aw delegate: --criteria needs a value.' });
+    // aw task is still the explicit one-task shortcut.
+    expect(parseArgs(['task', 'x'])).toMatchObject({ kind: 'task', objective: 'x' });
+  });
+
+  it('prints the planner’s decision and what to tell the user', () => {
+    expect(formatDelegation({ task, decision: 'single', verdict: 'route', route: 'Sonnet · medium', summary: 'routine change' }, true)).toBe(
+      [
+        'Delegated: Add a synthetic flag',
+        'Decision: one task',
+        'Route: Sonnet · medium',
+        'Why: routine change',
+        'Id: m1',
+        '',
+        'Nothing is running yet. The user approves it on the "Delegated" card at the end of this conversation in Agent Wrangler.',
+      ].join('\n'),
+    );
+    const plan = formatDelegation({ task, decision: 'multiple', tasks: [{ key: 't1', title: 'Parser' }, { key: 't2', title: 'Docs site' }] }, true);
+    expect(plan).toContain('Decision: a plan of 2 tasks, run one at a time\n  t1  Parser\n  t2  Docs site');
+    expect(plan).toContain('The user reviews and approves the plan on the "Delegated" card');
+    expect(formatDelegation({ task, decision: 'planning' })).toContain("The planner's decision appears in Agent Wrangler");
+    expect(formatDelegation({ task, decision: 'failed', note: 'a cycle' })).toContain('could not be planned: a cycle');
+    expect(formatDelegation({ task, decision: 'cancelled' })).toContain('It was cancelled; nothing ran.');
   });
 });
 

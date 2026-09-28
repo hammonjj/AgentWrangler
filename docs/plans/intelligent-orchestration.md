@@ -1369,6 +1369,36 @@ The existing Budget feature is the real constraint on this machine. Admission re
 and mission caps expressed as "stop starting work when the 5-hour window reaches N%". This keeps
 orchestration from being the thing that pushes the fleet into auto-pause.
 
+### 12.5 As built (#45, 2026-09-28)
+
+- **Step function**: `engine/scheduler.ts`, `schedule(missions, capacity, now) → actions`: `start`
+  (a first attempt, or a pending #41 step as `retryOf`), `verify`, `wait` (reason, detail and
+  `until` for a timed one), `block` / `unblock`, `cancel`, `integrate`, `finish`, `wake`. It has its own
+  small snapshot types, so tables and the fake-clock simulation in `test/orchestration/scheduler.test.ts`
+  do not need whole missions.
+- **Loop**: the task runner builds the snapshot from every mission, runs a step on approval, on every
+  attempt, verification, skip or resume, when an escalation step falls due, and when usage, the fleet
+  pause or a local endpoint changes (`SchedulingDeps.onDidChange`). A mission's actions run in its own
+  queue; `start` goes through the existing `launch`, so the resolver and the `AgentHarness`, and
+  nothing else. Every `launch` also refuses on its own while the fleet is paused or the source's window
+  is at the threshold, so the user's direct starts, retries and resumes are held too.
+- **Defaults**: global 3, per repository 2, per harness and per source none unless set, per local
+  endpoint its free slots, one verification per repository, admission below **85%** of the
+  source's fullest window (the mission's `maxUsageWindowPercent` can lower it; the resolver's own
+  95% is unchanged). The window is the source's own: a full Codex window does not hold a Claude task.
+- **Fleet paused** means `PauseService` has every live agent frozen (as Pause all and auto-pause leave
+  it). Pausing one session by hand does not stop the scheduler.
+- **Mission pause**: Pause (start nothing new) and Pause now (also SIGSTOP the running agents through
+  `PauseService`) in the Missions view; Resume continues them and steps the mission.
+- **One tree until #46**: a planned mission's tasks still share the mission worktree, so the engine
+  marks every mission `sharedTree` and a mission runs one task at a time; a task that is tried and
+  unfinished (waiting on the user or on its retry) holds the tree. Parallelism today is across missions.
+  The step function already handles separate trees (`integrate` for a done task on its own branch;
+  `A → B, A → C, B + C → D` runs B and C together in the simulation): #46 turns `sharedTree` off.
+- **Telemetry**: an attempt's `queuedAt` is when the scheduler first had its task ready and waiting, so
+  `queueMs` includes capacity waits; each wait is logged with its reason. Parallelism benefit
+  (`parallelismBenefit`, §17) is logged when a planned mission reaches review.
+
 ---
 
 ## 13. Git, worktrees and exclusive resources
@@ -1943,6 +1973,9 @@ The table already switches between status sections and user sections; Missions i
   requirements, and **Approve and start**.
 - **Mission review**: the mission branch diff stat, per-task results, verification health, and the
   finish buttons (merge locally, open a PR, keep, discard).
+- **Delegate** (#82): from a conversation, one handoff; the planner decides one task (the
+  proposal card) or a plan (a plan card with Approve and start), both in that conversation.
+  See P8's as-built notes.
 
 ### 18.5 Attention
 
@@ -2778,6 +2811,54 @@ from James's own shadow data is possible and stays on the machine.
   meant for the planner's own task (§11.1), and the model can still name it; the result
   over-routes, which is safe.
 
+### 27.5 As built: automatic routing and its gate (#42, 2026-09-28)
+
+- **Where it lives.** `src/shared/orchestration/autoRouting.ts`, pure and in `shared` so
+  Preferences renders what it returns: `evaluateGate` and `comparisonReport` over `routing` and
+  `attempt` telemetry records only, `effectiveMode` for the mode in force. The records come from
+  `core/telemetry/routingEvidenceIndex.ts` (the log read once at start, then each record as it is
+  written, like #51's local metrics). Tests: `test/orchestration/autoRouting.test.ts` (fixtures),
+  and the runner's `auto` cases in `taskRunner.integration.test.ts`.
+- **The unit is a task.** One decision per task: the routing record of its first attempt, never
+  one an escalation step launched (`RoutingRecord.escalationStep`, new, or the attempt record's).
+  A resume or retry is the same judgement again, so it is not more evidence. `auto` decisions and
+  recommendations that were not a route (`needs-human`, `blocked`) are not counted by the gate.
+- **The corpus, at run time.** The corpus runs in `npm test`, not in the app, so its result
+  ships as a value: `policy/corpusStatus.ts` (`{routerVersion, assessorVersion, cards, failing,
+  egregious}`). `routingCorpus.test.ts` recomputes it and fails unless it is exactly equal, so a
+  build whose tests passed carries a true statement. A router or assessor version other than the
+  one it names leaves the corpus check unmet.
+- **The criteria, as code** (`DEFAULT_GATE_CRITERIA`): corpus green with zero egregious; at least
+  30 decisions; at least 70% of assisted proposals run without a tier change — an effort, model
+  or harness change within the tier still counts as kept. **Deviation:** that share is judged only
+  over **at least 10** assisted proposals (`minAssistedDecisions`); 1 of 1 is not 100% of
+  anything. Under-routing: a kind with a task where the router's pick was cheaper (a lower tier,
+  or the same tier with less effort) than what ran, and what ran failed with a route failure
+  (`quality-new`, `quality-repeat`, `empty`, `stuck`, `context`). Infra, capacity, budget, policy
+  and ambiguity failures say nothing about the route and are not counted.
+- **The report.** Per task: predicted (the tier the resolver picked, the required effort, the
+  model), ran, direction (`agreed`, `router-cheaper`, `router-dearer`, `sideways`), the dimensions
+  changed, and the outcome of that attempt (`passed-first`, `needed-escalation`, other). Totals,
+  the two named patterns with outcomes and a one-line reading, by kind and by dimension. Rendered
+  in Preferences → Orchestration → Automatic routing → Shadow comparison. `RoutingRecord.ranEffort`
+  (new) lets a running attempt be listed before its attempt record exists.
+- **`auto` in the runner.** `TaskRunner.startAuto(draft)` records a mission with `mode: 'auto'`,
+  assesses and routes it exactly as `propose`, then launches the recommendation in the same queue:
+  `decidedBy: 'router'`, `agreement: 'matched'`, the router's reasons plus `auto.routed`. Unlike
+  an accepted proposal it **pins nothing**, so escalation (whose `auto` limits allow tier steps,
+  #41) can move the route within the caps. A recommendation that is not a route leaves the task a
+  proposal at `needs-human`, answered as in `assisted`. The runner does not check the gate: the
+  caller does.
+- **Opt-in per mission.** Each mission freezes the mode it was recorded with (§10.2); the global
+  setting `orchestration.routing.mode: 'auto'` is what new launcher tasks get. `aw task` stays a
+  proposal whatever the mode (#80).
+- **The override.** `routingPolicyUpdate` (window and host both) refuses `auto` over an unmet gate
+  with `needsOverride` and the gate's lines; Preferences shows them with *Enable anyway*, which
+  resends with `overrideGate: true`. The host stores `autoOverride: {at, shown}`, re-reading the
+  gate itself. A standing override survives cap edits on `auto`; switching away drops it. The
+  launcher runs `auto` only if `effectiveMode` says so (gate met or override), else `assisted`
+  with the reason flashed and logged.
+
 ---
 
 ## 28. Roadmap
@@ -3124,6 +3205,41 @@ Issue numbers are in §30.
   made-up repositories, six "should not split" and one where a split may pay.
   `planningCorpus.live.test.ts` (`AW_LIVE_PLANNER=1`) writes each repository to a temp dir and
   runs the real planner.
+
+**As built (#82, 2026-09-28): one handoff, Delegate.** A conversation hands over an outcome;
+the planner, not the caller, decides task or mission. Builds on #80 (`aw task`), #81 (the
+proposal card), #43 and #44.
+- **Entry points.** `aw delegate` (control method `delegate`, mutating, the same checked params
+  and origin rules as `task.propose`) is the primary one. `aw task` stays as the explicit
+  one-task shortcut, and the Missions view's *New mission* as the advanced way to write or plan
+  a mission by hand. Neither changed.
+- **Record** (`TaskRunner.delegate`). A planned mission with `Mission.delegation` (when, and the
+  user's criteria for the whole outcome) and `origin`, its stand-in task carrying those
+  criteria, goes `draft → planning`; the planner is told the criteria (every one must be some
+  task's). With no planner it is one task at once. It refuses up front without the assessor or
+  catalog, since either decision may need a task routed.
+- **`single`** (a delegation only; a mission planned by hand keeps its one-task plan review):
+  the mission becomes exactly what `propose` records — `planned` cleared, mode `assisted`, one
+  task (the planner's, with scope and kind, the user's criteria first) — through a new edge
+  `planning → draft`, which the domain allows only for a delegation that is one unplanned task.
+  It is then assessed and routed by the step `propose` uses (`routeProposal`, which picks up
+  from `pending`, `ready` or `assessing`, so recovery routes a delegation cut off before it
+  was). The `plan` telemetry record says `decomposition: single`.
+- **`multiple`**: plan review, unchanged from #44. **Planning failed**: *Plan again* or *Run as
+  one task* (`delegateAsTask`: the stand-in, `planning-failed → draft`, then routed).
+- **Cards** (`view/proposalView.ts`, pure: `isOpenDelegation`, `delegationViewOf`,
+  `delegationOutcome`). The origin conversation shows a *Delegated* card while it plans
+  (Cancel), when it failed, and for a plan in review (the tasks and their order, risks,
+  warnings, blockers; Approve and start on the launcher's route as the Missions view does,
+  Edit in Missions, Plan again, Cancel). One kept as one task is the #81 proposal card, headed
+  *Delegated*. Notifications say *Delegated* and their click shows the origin conversation.
+  Task and Mission stay the words everywhere work is running.
+- **Unchanged**: nothing runs before approval (`startProposed` or `approvePlan`, both
+  click-only); the origin is where a card is shown and never the worker; routing,
+  verification, escalation, worktrees and execution are as #38–#44 left them.
+- **Tests**: `delegate.integration.test.ts` (both decisions and their approvals, failure → one
+  task, no planner, hand-planned missions and `aw task` untouched), the edge guard in
+  `lifecycles.test.ts`, the planner's input, the socket method and the CLI.
 
 ### P9: Scheduling, integration and contention
 

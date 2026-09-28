@@ -31,8 +31,9 @@ export const missionMachine = new Machine<MissionState>({
   edges: {
     // A single task started directly goes from draft to running (no plan, no review).
     draft: ['planning', 'plan-review', 'running'],
-    planning: ['plan-review', 'planning-failed'],
-    'planning-failed': ['planning', 'plan-review'],
+    // `draft`: a delegation the planner kept as one task becomes a single-task proposal (#82).
+    planning: ['plan-review', 'planning-failed', 'draft'],
+    'planning-failed': ['planning', 'plan-review', 'draft'],
     'plan-review': ['running', 'planning'],
     running: ['paused', 'planning', 'finishing', 'failed'],
     paused: ['running'],
@@ -133,6 +134,12 @@ export interface TransitionOptions {
  */
 export function transitionMission(mission: Mission, to: MissionState, opts: TransitionOptions): Mission {
   missionMachine.check(mission.state, to);
+  if (to === 'draft' && (mission.state === 'planning' || mission.state === 'planning-failed')) {
+    // Only a delegation, only once it is one unplanned task: a mission the user planned stays a plan (#82).
+    if (!mission.delegation || mission.planned || mission.tasks.length !== 1) {
+      throw new IllegalTransition('mission', mission.state, to, 'only a delegation kept as one task goes back to a draft');
+    }
+  }
   if (to === 'running' && mission.state === 'draft') {
     // A planned mission always goes through review, whatever its size and whatever the mode (#43).
     if (mission.tasks.length !== 1 || mission.plannerAttemptId !== undefined || mission.planned) {

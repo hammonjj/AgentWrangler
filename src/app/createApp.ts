@@ -64,10 +64,25 @@ import type { TelemetryRecord, TurnRecord } from '../shared/orchestration/teleme
 import { isEndpointSource } from '../shared/orchestration/localEndpoints';
 import { LocalEndpointService } from '../orchestration/local/localEndpointService';
 import { LocalMetricsIndex } from '../core/telemetry/localMetricsIndex';
+import { RoutingEvidenceIndex } from '../core/telemetry/routingEvidenceIndex';
+import { comparisonReport, effectiveMode, evaluateGate, type ComparisonReport, type GateResult } from '../shared/orchestration/autoRouting';
+import { CORPUS_STATUS } from '../orchestration/policy/corpusStatus';
+import { ROUTER_VERSION } from '../orchestration/policy/router';
+import { ASSESSOR_VERSION } from '../orchestration/policy/assessment';
 import type { Mission } from '../shared/orchestration/types';
-import type { ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../shared/orchestration/taskView';
+import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../shared/orchestration/taskView';
+import { harnessLabel } from '../shared/harness';
+import { modelLabel } from '../shared/modelName';
 import { sessionKeyFor, taskBadges, taskViewOf } from '../orchestration/view/taskViews';
-import { isOpenProposal, proposalChoice, proposalViewOf } from '../orchestration/view/proposalView';
+import {
+  delegationOutcome,
+  delegationViewOf,
+  isOpenDelegation,
+  isOpenProposal,
+  proposalChoice,
+  proposalViewOf,
+  type DelegationOutcome,
+} from '../orchestration/view/proposalView';
 import { TelemetryLog } from '../core/telemetry/telemetryLog';
 import { TELEMETRY_ENABLED_KEY, TELEMETRY_PRICES_KEY, TurnTelemetry } from '../core/telemetry/turnTelemetry';
 import type { PriceTable } from '../core/telemetry/turnUsage';
@@ -112,6 +127,7 @@ import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
 import type { SessionActions } from '../ui/actions';
 import type {
+  ControlDelegateResult as DelegateResult,
   ControlTaskProposeParams as ProposeTaskRequest,
   ControlTaskProposeResult as ProposedTask,
   ControlTaskView as TaskSummary,
@@ -140,6 +156,13 @@ const HOOK_HEALTH_GRACE_MS = 90_000;
  * is "somebody is definitely there", not "nobody is".
  */
 const RECENT_TRANSCRIPT_WRITE_MS = 90_000;
+
+/**
+ * How long `aw delegate` waits for the planner's decision before answering
+ * `planning`. Under the two minutes an agent's shell command gets by default,
+ * so the agent that ran it is not cut off; the card shows the decision anyway.
+ */
+const DELEGATE_WAIT_MS = 100_000;
 
 /**
  * Icons for the session picker. VSCode renders `$(name)` as a codicon; a host
@@ -179,6 +202,10 @@ export interface AgentWranglerApp {
   localEndpoints: LocalEndpointService;
   /** What local models have done (§19.4), from the telemetry log. */
   localMetrics: LocalMetricsIndex;
+  /** Automatic routing's gate and the shadow comparison report (#42), from the telemetry log, computed now. */
+  autoRouting: () => { gate: GateResult; report: ComparisonReport };
+  /** Fires when a routing or attempt record is added: the gate and the report may have moved. */
+  onDidChangeRoutingEvidence: (listener: () => void) => { dispose(): void };
   pause: PauseService;
   usage: UsageSource;
   codexUsage: UsageSource;
@@ -229,6 +256,13 @@ export interface AgentWranglerApp {
    * caller should read (orchestration off, not a repository, no catalog).
    */
   proposeTask(req: ProposeTaskRequest): Promise<ProposedTask>;
+  /**
+   * `aw delegate` (#82): hand an outcome over and let the planner decide one
+   * task or several. Answers once it has decided (or after a bounded wait,
+   * as `planning`); the card in the origin conversation shows the rest.
+   * Launches nothing. Throws `TaskError` for anything the caller should read.
+   */
+  delegate(req: ProposeTaskRequest): Promise<DelegateResult>;
   /** Tasks that are not finished, newest first. Empty while orchestration is off. */
   taskList(): TaskSummary[];
   /**
@@ -549,10 +583,24 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const localMetrics = new LocalMetricsIndex();
   host.subscribe(localMetrics);
   void localMetrics.load(telemetryDir).catch((err) => log(`telemetry: could not read local metrics: ${String(err)}`));
+  // Automatic routing's evidence (§27.3, #42): routing and attempt records.
+  const routingEvidence = new RoutingEvidenceIndex();
+  host.subscribe(routingEvidence);
+  void routingEvidence.load(telemetryDir).catch((err) => log(`telemetry: could not read routing evidence: ${String(err)}`));
+  const autoRouting = (): { gate: GateResult; report: ComparisonReport } => {
+    const input = { records: routingEvidence.records(), tiers: models.catalog.tiers.map((t) => t.name) };
+    return {
+      gate: evaluateGate({ ...input, corpus: CORPUS_STATUS, routerVersion: ROUTER_VERSION, assessorVersion: ASSESSOR_VERSION }),
+      report: comparisonReport(input),
+    };
+  };
   const appendTelemetry = (record: TelemetryRecord): boolean => {
     if (host.settings.get<boolean>(TELEMETRY_ENABLED_KEY, true) === false) return false;
     const written = telemetryLog.append(record);
-    if (written) localMetrics.add(record);
+    if (written) {
+      localMetrics.add(record);
+      routingEvidence.add(record);
+    }
     return written;
   };
   const turnRecords = new Emitter<TurnRecord>();
@@ -582,6 +630,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
     },
     notify: host.notify,
     openFile: (file) => host.shell.openFile(file),
+    // A delegation's notification brings up the conversation that delegated it, where its card is (#82).
+    showOrigin: (origin) => {
+      const s = store.get(originKey(origin));
+      if (s) surface?.show(s.key);
+    },
     launchDefaults,
     startupSettled,
     log,
@@ -602,6 +655,32 @@ export function createApp(host: HostServices): AgentWranglerApp {
       };
     },
     local: { service: localEndpoints, catalog: () => models.catalog },
+    // The scheduler (#45): nothing starts while the fleet is paused (every
+    // live agent frozen, as Pause all and auto-pause leave it), and a mission's
+    // "Pause now" uses the same PauseService. Usage, pause and endpoint changes step it.
+    scheduling: {
+      fleet: {
+        paused: () => {
+          if (pause.count === 0) return false;
+          const live = store.sessions.filter((s) => s.status !== 'ended' && s.pid !== undefined);
+          return live.length > 0 && live.every((s) => pause.isPaused(s.pid));
+        },
+        pauseSession: (id) => {
+          const s = store.sessions.find((x) => x.sessionId === id);
+          const outcome = s ? pause.pause(s.pid) : 'gone';
+          return outcome === 'paused' || outcome === 'already';
+        },
+        resumeSession: (id) => {
+          const s = store.sessions.find((x) => x.sessionId === id);
+          const outcome = s ? pause.resume(s.pid) : 'gone';
+          return outcome === 'resumed' || outcome === 'already';
+        },
+      },
+      onDidChange: (listener) => {
+        const subs = [usage.onDidChange(listener), codexUsage.onDidChange(listener), pause.onDidChange(listener), localEndpoints.onDidChange(listener)];
+        return { dispose: () => subs.forEach((s) => s.dispose()) };
+      },
+    },
   });
   host.subscribe(orchestration);
   localTelemetry = appendTelemetry;
@@ -1297,9 +1376,55 @@ export function createApp(host: HostServices): AgentWranglerApp {
           const started = await tasks.startProposed(missionId, proposalChoice(m.tasks[0].recommendation!, models.catalog, decision));
           dialogs.flash(`Task started on ${started.worktrees.at(-1)?.branch ?? 'its own branch'}`);
         },
+        delegationsFor: (sessionKey: string): DelegationView[] =>
+          tasks
+            .list()
+            .filter((m) => m.origin && originKey(m.origin) === sessionKey.toLowerCase() && isOpenDelegation(m))
+            .map((m) => delegationViewOf(m, { canPlan: tasks.canPlan, route: delegationRoute(m).label }))
+            .reverse(),
+        delegationAction: async (missionId: string, action: DelegationAction): Promise<void> => {
+          const m = tasks.get(missionId);
+          if (!m || !isOpenDelegation(m)) throw new TaskError('That delegation has already been started or cancelled.');
+          switch (action) {
+            case 'approve':
+              // As the Missions view's Approve and start: tasks without a pin run on the launcher's route.
+              await tasks.approvePlan(missionId, delegationRoute(m).route);
+              dialogs.flash('Plan approved: its tasks run one at a time on the mission branch.');
+              return;
+            case 'cancel':
+              await tasks.cancel(missionId);
+              dialogs.flash(`Delegation cancelled: ${m.title}`);
+              return;
+            case 'plan-again': {
+              const note = await dialogs.input({ title: 'Plan again', prompt: 'Anything the planner should do differently? (Optional)' });
+              if (note === undefined) return;
+              await tasks.planAgain(missionId, note);
+              return;
+            }
+            case 'as-task':
+              await tasks.delegateAsTask(missionId);
+              return;
+            case 'open-mission':
+              showMissionRequests.fire(missionId);
+              return;
+          }
+        },
         onDidChange: (listener: () => void) => tasks.onDidChange(listener),
       }
     : undefined;
+
+  /**
+   * What a delegated plan's tasks run on when it is approved from its card
+   * (#82): the launcher's defaults for the harness it prefers, as the
+   * Missions view's Approve and start uses. A task's own pin still wins.
+   */
+  function delegationRoute(m: Mission): { route: TaskRoute; label: string } {
+    const harness = m.policy.preferences?.harness === 'codex' ? 'codex' : 'claude-code';
+    const defaults = launchDefaults.for(harness === 'codex' ? 'codex' : 'claude');
+    const route: TaskRoute = { harness, ...(defaults.model ? { model: defaults.model } : {}), ...(defaults.effort ? { effort: defaults.effort } : {}) };
+    const label = `${defaults.model ? modelLabel(defaults.model) : 'the default model'}${defaults.effort ? ` · ${defaults.effort}` : ''} (${harnessLabel(harness)})`;
+    return { route, label };
+  }
 
   /** The session key of the conversation a proposal came from. */
   function originKey(origin: NonNullable<Mission['origin']>): string {
@@ -1397,6 +1522,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
               if (ok === 'Cancel Mission') await tasks.cancel(missionId);
               return;
             }
+            case 'pause':
+              await tasks.pauseMission(missionId, { now: op.now === true });
+              dialogs.flash(op.now ? 'Mission paused, and its running agents with it.' : 'Mission paused: nothing new starts; what is running carries on.');
+              return;
+            case 'resume':
+              await tasks.resumeMission(missionId);
+              dialogs.flash('Mission resumed.');
+              return;
             case 'finish': {
               if (op.how === 'discard') {
                 const ok = await dialogs.warn('Discard this mission’s result?', { modal: true, detail: 'Its worktrees are removed if they are clean. Its branches are kept until you delete them.' }, 'Discard');
@@ -1547,7 +1680,30 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // The launcher's harness is a preference, not a pin: the router ranks it first within the tier it picks.
     // It is the mission's own layer; the global defaults are frozen in by the runner (#40).
     const policy = { preferences: { harness } };
-    if (routing.mode === 'assisted') {
+    // `auto` only while its gate is met or an override stands (§27.3, #42); otherwise assisted, and say why.
+    const { mode, note } = effectiveMode(routing.mode, routing.mode === 'auto' ? autoRouting().gate : undefined, routing.autoOverride);
+    if (note) log(`task: ${note}`);
+    if (mode === 'auto') {
+      try {
+        dialogs.flash('Assessing the task to route it automatically…');
+        const { mission, recommendation, started } = await runner.startAuto({ folder: cwd, objective, acceptanceCriteria: criteria.split(';'), policy });
+        if (!started) {
+          // The router could not route it within the caps: it waits as a proposal, as in assisted.
+          await reviewProposal(runner, mission.id, recommendation);
+          return;
+        }
+        const handle = runner.handleOf(mission.id);
+        if (handle) surface?.showSession(handle);
+        const target = recommendation.resolution.target;
+        dialogs.flash(`Task routed automatically${target ? ` to ${targetLabel(target)}` : ''} on ${mission.worktrees.at(-1)?.branch ?? 'its own branch'}`);
+      } catch (error) {
+        log(`task: ${String(error)}`);
+        dialogs.error(`Agent Wrangler: ${error instanceof TaskError ? error.message : `could not route the task — ${(error as Error).message}`}`);
+      }
+      return;
+    }
+    if (mode === 'assisted') {
+      if (note) dialogs.flash(note, 8000);
       try {
         dialogs.flash('Assessing the task to propose a route…');
         const { mission, recommendation } = await runner.propose({ folder: cwd, objective, acceptanceCriteria: criteria.split(';'), policy });
@@ -1818,6 +1974,49 @@ export function createApp(host: HostServices): AgentWranglerApp {
       summary: explainRecommendation(recommendation).summary,
       note: recommendation.note,
     };
+  }
+
+  /**
+   * `aw delegate` (#82). The planner decides, not the caller: one task
+   * becomes the proposal `aw task` makes (its card, its assisted route), and
+   * several become a planned mission in plan review, drawn as a card in the
+   * delegating conversation. That conversation is where the card is shown
+   * and nothing more: the work runs in sessions of its own. Waits a bounded
+   * time for the decision so the agent can say what it was; after that the
+   * card says it.
+   */
+  async function delegate(req: ProposeTaskRequest): Promise<DelegateResult> {
+    if (!tasks) throw new TaskError('Delegating is off. Turn on orchestration ("orchestration.enabled": true in settings.json) first.');
+    const runner = tasks;
+    const harness = req.harness === 'codex' ? 'codex' : 'claude-code';
+    const mission = await runner.delegate({
+      folder: req.folder,
+      objective: req.objective,
+      acceptanceCriteria: req.acceptanceCriteria ?? [],
+      policy: { preferences: { harness } },
+      ...(req.origin ? { origin: req.origin } : {}),
+    });
+    const from = mission.origin ? store.get(originKey(mission.origin)) : undefined;
+    dialogs.flash(`Delegated: ${mission.title} (${from ? 'its card is in the conversation' : 'see Tasks and Missions'})`, 6000);
+    log(`mission ${mission.id}: delegated through aw`);
+    const outcome = await new Promise<DelegationOutcome>((resolve) => {
+      const current = () => delegationOutcome(runner.get(mission.id) ?? mission);
+      const first = current();
+      if (first.decision !== 'planning') return resolve(first);
+      const done = (o: DelegationOutcome) => {
+        clearTimeout(timer);
+        sub.dispose();
+        resolve(o);
+      };
+      const timer = setTimeout(() => done(current()), DELEGATE_WAIT_MS);
+      const sub = runner.onDidChange(() => {
+        const o = current();
+        if (o.decision !== 'planning') done(o);
+      });
+    });
+    const now = runner.get(mission.id) ?? mission;
+    const { decision, ...rest } = outcome;
+    return { task: taskSummary(now), decision, ...rest };
   }
 
   /**
@@ -2787,6 +2986,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       return closeSessionNow(s);
     },
     proposeTask,
+    delegate,
     taskList: () => (tasks ? tasks.list().filter((m) => !['completed', 'cancelled'].includes(m.state)).map(taskSummary) : []),
     async stopAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}) {
       const { hosted, local } = runners.counts();
@@ -2812,6 +3012,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     models,
     localEndpoints,
     localMetrics,
+    autoRouting,
+    onDidChangeRoutingEvidence: (listener) => routingEvidence.onDidChange(listener),
     pause,
     usage,
     codexUsage,

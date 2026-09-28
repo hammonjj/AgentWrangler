@@ -240,6 +240,8 @@ export function missionViewOf(m: Mission, ctx: MissionViewContext): MissionView 
     ...(m.finish ? { finish: m.finish } : {}),
     ...(m.finishResult ? { finishResult: m.finishResult } : {}),
     canCancel: !['completed', 'cancelled', 'failed', 'review'].includes(m.state),
+    canPause: m.planned === true && m.state === 'running',
+    canResume: m.state === 'paused',
     ...(plannerViewOf(m) ? { planner: plannerViewOf(m) } : {}),
     canPlanAgain: ctx.canPlan === true && m.planned === true && (m.state === 'planning-failed' || (m.state === 'plan-review' && (m.planning?.length ?? 0) > 0)),
     canWritePlan: m.state === 'planning-failed',

@@ -84,7 +84,7 @@ import {
   type WorktreeAssignment,
 } from '../../shared/orchestration/types';
 import { ulid } from '../domain/ids';
-import { dependenciesSatisfied, taskMachine, transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
+import { taskMachine,transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
 import { applyPlanEdit, executionOrder, nextTaskKey, planIssues, planTask, taskCap, tasksFromDraft, type PlanContext } from '../domain/plan';
 import type { PlannedTask, PlanResult, Planner, ReplanContext } from '../policy/planner';
 import { MissionFinisher } from './missionFinish';
@@ -128,6 +128,18 @@ import { classifyOutcome, type Classification } from '../policy/outcome';
 import { attemptRecord, addTurnUsage, escalationRecord, routingRecord, waitedMs } from './attemptRecord';
 import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from './attemptPolicy';
 import { sessionVerdict, turnFailure, turnMessageIds, type HandleView, type SessionVerdict } from './sessionVerdict';
+import {
+  DEFAULT_SCHEDULER_LIMITS,
+  parallelismBenefit,
+  schedule,
+  type CapacitySnapshot,
+  type MissionsSnapshot,
+  type SchedMission,
+  type SchedTask,
+  type SchedulerAction,
+  type SchedulerLimits,
+  type SourceFacts,
+} from './scheduler';
 
 /** What the user picked: harness, model, effort and (Claude) permission mode (#33 "manual route"). */
 export interface TaskRoute {
@@ -188,6 +200,22 @@ export interface NewMission {
   tasks?: PlanTaskDraft[];
   baseRef?: string;
   /** Caps, preferences and `maxTasks` (default 8, never above 12). `mode` is always `manual` in P8. */
+  policy?: ExecutionPolicy;
+}
+
+/**
+ * Work handed off with Delegate (#82): an outcome, not a choice between a
+ * task and a mission. The planner decides; nothing runs until the user
+ * approves the proposal or the plan.
+ */
+export interface NewDelegation {
+  folder: string;
+  title?: string;
+  objective: string;
+  acceptanceCriteria: string[];
+  /** The conversation that delegated it: where its card is shown. Never the worker. */
+  origin?: Mission['origin'];
+  /** Preferences (the harness to prefer) and caps, as for `propose`. */
   policy?: ExecutionPolicy;
 }
 
@@ -268,6 +296,8 @@ export interface TaskRunnerDeps {
   planner?: Pick<Planner, 'plan' | 'model' | 'effort'>;
   /** Asked to open a diff file once one is written for a notification click. */
   openFile?: (file: string) => void;
+  /** Bring up the conversation a delegation came from, for a notification click (#82). */
+  showOrigin?: (origin: NonNullable<Mission['origin']>) => void;
   now?: () => number;
   random?: (bytes: number) => Uint8Array;
   /** How long an idle, finished-looking session must stay so before the attempt finishes. */
@@ -276,7 +306,26 @@ export interface TaskRunnerDeps {
   previewDelayMs?: number;
   /** §15.3's limits over the defaults for the mission's mode (#41): tests shorten the waits and the wall clock. */
   escalationLimits?: Partial<EscalationLimits>;
+  /** What the scheduler reads beyond the missions (#45, §12.3–12.4). Absent: default limits, never paused. */
+  scheduling?: SchedulingDeps;
   log?: (msg: string) => void;
+}
+
+/** The scheduler's view of the machine (#45). */
+export interface SchedulingDeps {
+  /** Over `DEFAULT_SCHEDULER_LIMITS`: concurrency and the admission threshold. */
+  limits?: () => Partial<SchedulerLimits>;
+  /**
+   * The fleet, as `PauseService` has it: paused (nothing starts), and its
+   * levers for a mission's "Pause now" (SIGSTOP / SIGCONT on the session's agent).
+   */
+  fleet?: {
+    paused(): boolean;
+    pauseSession(sessionId: string): boolean;
+    resumeSession(sessionId: string): boolean;
+  };
+  /** Fires when capacity, a usage window or the fleet pause may have changed. */
+  onDidChange?: (listener: () => void) => Disposable;
 }
 
 const SOURCE: Record<string, ModelSourceId> = { 'claude-code': 'anthropic', codex: 'openai' };
@@ -295,6 +344,7 @@ const END_SESSION_WAIT_MS = 15_000;
 /** Attempt states in which a session is (or is about to be) the attempt's. */
 const LIVE: readonly AttemptState[] = ['launching', 'running', 'waiting-human', 'finishing', 'verifying'];
 const PLANNING_REASON = 'the planner is reading the repository; nothing runs until you approve its plan';
+const DELEGATING_REASON = 'the planner is reading the repository to decide whether this is one task or several; nothing runs until you approve';
 
 interface Watcher {
   missionId: string;
@@ -331,6 +381,19 @@ export class TaskRunner implements Disposable {
   private readonly escalationTimers = new Map<string, { missionId: string; timer: ReturnType<typeof setTimeout> }>();
   /** The planner call out for each mission, to cut off on Cancel. */
   private readonly planAborts = new Map<string, AbortController>();
+  // ---- The scheduler loop (#45) ----
+  /** Tasks the loop is starting now, before their attempt is on record: they hold a slot. */
+  private readonly starting = new Set<string>();
+  /** Missions with a scheduler step waiting in their queue. */
+  private readonly stepQueued = new Set<string>();
+  /** Finished attempts whose checks wait for a verification slot, by attempt id. */
+  private readonly verifyWaiters = new Map<string, { missionId: string; resolve: (go: boolean) => void }>();
+  /** When each task was first seen ready and waiting, for its attempt's queue time. */
+  private readonly queuedSince = new Map<string, number>();
+  /** Actions that failed to apply, not tried again until something outside changes. */
+  private readonly refusedActions = new Set<string>();
+  private wakeTimer?: { at: number; timer: ReturnType<typeof setTimeout> };
+  private kickTimer?: ReturnType<typeof setTimeout>;
   private readonly now: () => number;
   private readonly random: (bytes: number) => Uint8Array;
   private readonly settleMs: number;
@@ -347,6 +410,14 @@ export class TaskRunner implements Disposable {
     this.subs.push(deps.sessions.onDidChange(() => this.pokeAll()));
     if (deps.onTurnRecord) this.subs.push(deps.onTurnRecord((r) => this.onTurnRecord(r)));
     if (deps.local) this.subs.push(deps.local.onDown((source) => this.onLocalDown(source)));
+    if (deps.scheduling?.onDidChange) {
+      this.subs.push(
+        deps.scheduling.onDidChange(() => {
+          this.refusedActions.clear();
+          this.kickSoon();
+        }),
+      );
+    }
   }
 
   // ---- Reading ----
@@ -432,7 +503,31 @@ export class TaskRunner implements Disposable {
       ...req.policy,
       mode: 'manual',
     }, { pins: routePins(req.route) });
-    await this.queue(id, () => this.launch(id, { mode: 'fresh', route: req.route }));
+    await this.queue(id, async () => {
+      const m = this.need(id);
+      const task = this.currentTask(m);
+      // Admitted by the scheduler like any other start (#45): when it has to
+      // wait (the fleet paused, a usage window full, every slot taken), the
+      // task waits in a running mission, saying why, and starts when it can.
+      const wait = this.admissionWait(id, task.id);
+      if (wait) {
+        const now = this.now();
+        this.queuedSince.set(task.id, now);
+        let next: Mission = { ...m, defaultRoute: { harness: req.route.harness, ...(req.route.model?.trim() ? { model: req.route.model.trim() } : {}), ...(req.route.effort?.trim() ? { effort: req.route.effort.trim() } : {}) } };
+        next = transitionMission(next, 'running', { now, reason: 'waiting to start' });
+        next = this.patchTask(next, task.id, (t) => ({ ...t, stateReason: `waiting: ${wait.detail}` }));
+        this.put(next);
+        this.log(`task ${id}: waits to start (${wait.reason}): ${wait.detail}`);
+        if (wait.until !== undefined) this.wakeAt(wait.until);
+        return;
+      }
+      this.starting.add(task.id);
+      try {
+        await this.launch(id, { mode: 'fresh', route: req.route });
+      } finally {
+        this.starting.delete(task.id);
+      }
+    });
     this.scheduleAssessment(id);
     return this.missions.get(id)!;
   }
@@ -445,18 +540,53 @@ export class TaskRunner implements Disposable {
    * must decide (a cap below what the work needs, a plan-first gate, nothing
    * allowed that can run it). `startProposed` launches it; `cancel` drops it.
    */
-  async propose(req: NewTaskDraft): Promise<{ mission: Mission; recommendation: RouteRecommendation }> {
+  propose(req: NewTaskDraft): Promise<{ mission: Mission; recommendation: RouteRecommendation }> {
+    return this.proposeAs(req, 'assisted');
+  }
+
+  /**
+   * `auto` (§10.1, #42): record the task, assess it, route it, and launch the
+   * route the router picked, within the mission's caps — no click. The
+   * decision carries the router's reasons like any other, plus an
+   * `auto.routed` one. When the router cannot route it (a cap below what the
+   * work needs, a plan-first gate, nothing allowed), nothing launches: the
+   * task waits as a proposal with `needs-human`, exactly as in `assisted`.
+   *
+   * Whether `auto` may be used at all is the gate's question (§27.3), asked
+   * by the caller: the runner runs what it is told.
+   */
+  async startAuto(req: NewTaskDraft): Promise<{ mission: Mission; recommendation: RouteRecommendation; started: boolean }> {
+    const { mission, recommendation } = await this.proposeAs(req, 'auto');
+    if (recommendation.verdict !== 'route' || !recommendation.resolution.target) return { mission, recommendation, started: false };
+    const started = await this.queue(mission.id, () => this.launchProposal(mission.id, {}, false));
+    return { mission: started, recommendation, started: true };
+  }
+
+  private async proposeAs(req: NewTaskDraft, mode: 'assisted' | 'auto'): Promise<{ mission: Mission; recommendation: RouteRecommendation }> {
     if (!this.deps.assessor) throw new TaskError('Proposing a route needs the assessor, which is not running.');
     if (!this.deps.routing) throw new TaskError('Proposing a route needs the model catalog, which is not available.');
-    const id = await this.record(req, { ...req.policy, mode: 'assisted' });
+    const id = await this.record(req, { ...req.policy, mode });
+    return this.routeProposal(id, mode);
+  }
+
+  /**
+   * The routing step of `propose`/`startAuto`, for a recorded single-task
+   * mission that is not yet routed: assess it, route it, and leave the
+   * proposal waiting (the caller launches it in `auto`). Picks up wherever the
+   * task is (`pending`, `ready` or `assessing`), so a delegation cut off here
+   * by a restart is routed on recovery (#82).
+   */
+  private async routeProposal(id: string, mode: 'assisted' | 'auto' = 'assisted'): Promise<{ mission: Mission; recommendation: RouteRecommendation }> {
     try {
       return await this.queue(id, async () => {
         let m = this.need(id);
         const tid = m.tasks[0].id;
         const now = this.now();
-        for (const to of ['ready', 'assessing'] as TaskState[]) {
+        const steps: TaskState[] = m.tasks[0].state === 'pending' ? ['ready', 'assessing'] : m.tasks[0].state === 'ready' ? ['assessing'] : [];
+        for (const to of steps) {
           m = this.patchTask(m, tid, (t) => transitionTask(m, t, to, { now, reason: to === 'assessing' ? 'assessing before it is routed' : undefined }));
         }
+        if (m.tasks[0].state !== 'assessing') throw new TaskError('The task is not waiting to be routed.');
         this.put(m);
         await this.assess(id, tid);
         m = this.need(id);
@@ -464,7 +594,8 @@ export class TaskRunner implements Disposable {
         const rec = assessment && this.recommendationFor(m, tid, assessment);
         if (!rec) throw new TaskError('The task could not be routed: no assessment or no catalog.');
         const at = this.now();
-        m = this.patchTask(m, tid, (t) => transitionTask(m, { ...t, recommendation: rec }, 'routed', { now: at, reason: 'route proposed; waiting for you to accept or change it' }));
+        const reason = mode === 'auto' && rec.verdict === 'route' ? 'routed automatically; launching' : 'route proposed; waiting for you to accept or change it';
+        m = this.patchTask(m, tid, (t) => transitionTask(m, { ...t, recommendation: rec }, 'routed', { now: at, reason }));
         if (rec.verdict !== 'route') m = this.patchTask(m, tid, (t) => transitionTask(m, t, 'needs-human', { now: at, reason: rec.note ?? 'a person has to decide the route' }));
         this.put(m);
         this.log(`task ${id}: proposed ${rec.requirement.minTier}/${rec.requirement.effort} → ${rec.resolution.target?.model ?? rec.verdict}`);
@@ -484,21 +615,31 @@ export class TaskRunner implements Disposable {
    * (§10.2: a pin that violates a cap is refused when it is set).
    */
   startProposed(missionId: string, choice: ProposalChoice = {}): Promise<Mission> {
-    return this.queue(missionId, async () => {
-      const m = this.need(missionId);
-      const task = m.tasks[0];
-      const rec = task.recommendation;
-      if (!rec || task.attemptIds.length > 0 || !['routed', 'needs-human'].includes(task.state)) {
-        throw new TaskError('There is no proposal waiting to be started.');
-      }
-      let route = choice.route;
-      const accepted = !route;
-      if (!route) {
-        const t = rec.resolution.target;
-        if (!t || rec.verdict === 'blocked') throw new TaskError(rec.note ?? 'There is no recommended route to accept; pick one.');
-        route = { harness: t.harness, model: t.model, ...(isEndpointSource(t.source) ? { source: t.source } : {}), ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
-      }
-      this.checkRoute(route);
+    return this.queue(missionId, () => this.launchProposal(missionId, choice, true));
+  }
+
+  /**
+   * Launch the proposal on the task (inside the mission's queue). `offered`:
+   * a person saw it and chose (`assisted`, or an `auto` task that fell back to
+   * a proposal). Not offered: the router's own choice in `auto`, which pins
+   * nothing, so escalation stays free to move the route within the caps.
+   */
+  private async launchProposal(missionId: string, choice: ProposalChoice, offered: boolean): Promise<Mission> {
+    const m = this.need(missionId);
+    const task = m.tasks[0];
+    const rec = task.recommendation;
+    if (!rec || task.attemptIds.length > 0 || !['routed', 'needs-human'].includes(task.state)) {
+      throw new TaskError('There is no proposal waiting to be started.');
+    }
+    let route = choice.route;
+    const accepted = !route;
+    if (!route) {
+      const t = rec.resolution.target;
+      if (!t || rec.verdict === 'blocked') throw new TaskError(rec.note ?? 'There is no recommended route to accept; pick one.');
+      route = { harness: t.harness, model: t.model, ...(isEndpointSource(t.source) ? { source: t.source } : {}), ...(t.effortNative !== 'none' ? { effort: t.effortNative } : {}) };
+    }
+    this.checkRoute(route);
+    if (offered) {
       // The route becomes the task's pins, which may break no cap at any
       // scope (§10.2): refused here, naming both, before anything is changed.
       const overrides = { ...task.overrides, pins: routePins(route) };
@@ -506,9 +647,9 @@ export class TaskRunner implements Disposable {
       if (conflicts.length > 0) throw new TaskError(conflictText(conflicts));
       this.put(this.patchTask(m, task.id, (t) => ({ ...t, overrides })));
       if (!accepted) this.writeProposalOverride(m, rec, route);
-      await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation: rec, offered: true, accepted } });
-      return this.need(missionId);
-    });
+    }
+    await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation: rec, offered, accepted } });
+    return this.need(missionId);
   }
 
   /** Record a new single-task mission, not yet started. */
@@ -917,6 +1058,8 @@ export class TaskRunner implements Disposable {
     this.clearEscalations(missionId);
     // The planner is cut off first: its call may be what the queue is waiting behind.
     this.planAborts.get(missionId)?.abort();
+    // So is a verification waiting for a slot (#45).
+    this.releaseVerifiers(missionId);
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
       const run = this.latestRun(m);
@@ -1045,6 +1188,74 @@ export class TaskRunner implements Disposable {
     return m;
   }
 
+  // ---- Delegate (#82) ----
+
+  /**
+   * Delegate an outcome (#82): the one handoff a conversation has. Recorded
+   * as a planned mission and given to the planner, which decides (§11.3,
+   * biased to one task). `single`: it becomes the single-task proposal
+   * `propose` makes, assessed and routed, waiting on its card. `multiple`: it
+   * stays a planned mission, in plan review. Resolves at once, `planning`.
+   * With no planner there is nothing to decide with, and it is one task
+   * straight away. Nothing runs in any case until the user approves.
+   */
+  async delegate(req: NewDelegation): Promise<Mission> {
+    // Either decision may need a single task routed, so refuse up front rather than after the planner.
+    if (!this.deps.assessor) throw new TaskError('Delegating needs the assessor, which is not running.');
+    if (!this.deps.routing) throw new TaskError('Delegating needs the model catalog, which is not available.');
+    const criteria = req.acceptanceCriteria.map((c) => c.trim()).filter(Boolean);
+    const delegation = { at: this.now(), acceptanceCriteria: criteria };
+    const origin = req.origin ? { origin: { ...req.origin } } : {};
+    if (!this.deps.planner) {
+      const id = await this.record({ ...req, acceptanceCriteria: criteria }, { ...req.policy, mode: 'assisted' });
+      this.put({ ...this.need(id), delegation });
+      this.log(`task ${id}: delegated; no planner, so one task`);
+      return (await this.routeProposal(id)).mission;
+    }
+    // The stand-in task until the planner answers carries the user's criteria, so "Run as one task" keeps them.
+    const title = (req.title?.trim() || firstLine(req.objective.trim())).slice(0, 120);
+    let m = await this.recordPlanned({ folder: req.folder, title, objective: req.objective, policy: req.policy, tasks: [{ title, objective: req.objective.trim(), acceptanceCriteria: criteria }] });
+    m = { ...m, ...origin, delegation };
+    const run = this.newRun('plan', undefined);
+    m = transitionMission({ ...m, planning: [run] }, 'planning', { now: this.now(), reason: DELEGATING_REASON });
+    this.put(m);
+    this.log(`mission ${m.id}: delegated in ${m.repoRoot}; the planner is deciding`);
+    this.startPlanner(m.id, run.id);
+    return m;
+  }
+
+  /**
+   * A delegation whose planning failed, run as the one task it was given as
+   * (#82): the objective and the user's criteria, assessed and routed like
+   * `propose`. Still nothing runs until the proposal is accepted.
+   */
+  async delegateAsTask(missionId: string): Promise<Mission> {
+    await this.queue(missionId, async () => {
+      const m = this.need(missionId);
+      if (!m.delegation || m.state !== 'planning-failed') throw new TaskError('Only a delegation that could not be planned can be run as one task.');
+      const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
+      const ctx = this.planContext(loaded?.policy ?? DEFAULT_REPO_POLICY);
+      const task = planTask(TASK_KEY, { title: m.title, objective: m.objective, acceptanceCriteria: m.delegation.acceptanceCriteria, scopePaths: [] }, ctx);
+      // As `record` has it: nobody has said where the work is.
+      this.put(this.asSingleTask(m, { ...task, scope: { paths: [], subsystems: [], confidence: 'low' } }, 'delegated as one task: the plan could not be made'));
+    });
+    return (await this.routeProposal(missionId)).mission;
+  }
+
+  /** A delegation, as the single-task proposal `record` makes: unplanned, `assisted`, one task, back to `draft`. */
+  private asSingleTask(m: Mission, task: Task, reason: string): Mission {
+    const layers = m.policyLayers ?? {};
+    const next: Mission = {
+      ...m,
+      planned: undefined,
+      planApprovedAt: undefined,
+      policy: { ...m.policy, mode: 'assisted' },
+      policyLayers: { ...layers, mission: { ...layers.mission, mode: 'assisted' } },
+      tasks: [{ ...task, key: TASK_KEY, dependsOn: [] }],
+    };
+    return transitionMission(next, 'draft', { now: this.now(), reason });
+  }
+
   /**
    * Ask the planner again: after it failed, or from plan review for a plan
    * nobody has started (a fresh plan), or after a replan (another replan).
@@ -1145,6 +1356,7 @@ export class TaskRunner implements Disposable {
     const cwd = run.kind === 'replan' && tree && (tree.state === 'ready' || tree.state === 'in-use' || tree.state === 'retained') ? tree.path : m.repoRoot;
     const result = await this.deps.planner!.plan({
       objective: m.objective,
+      ...(m.delegation?.acceptanceCriteria.length ? { acceptanceCriteria: m.delegation.acceptanceCriteria } : {}),
       cwd,
       strategies: Object.keys(policy.verification.commands),
       cap,
@@ -1155,23 +1367,51 @@ export class TaskRunner implements Disposable {
     await this.endRun(missionId, runId, result);
   }
 
-  /** The planner answered (or could not): the plan into review, or `planning-failed` with the reason. */
-  private endRun(missionId: string, runId: string, result: PlanResult): Promise<void> {
+  /**
+   * The planner answered (or could not): the plan into review, or
+   * `planning-failed` with the reason. A delegation the planner kept as one
+   * task (#82) becomes a single-task proposal instead, and is then assessed
+   * and routed as `propose` routes one.
+   */
+  private async endRun(missionId: string, runId: string, result: PlanResult): Promise<void> {
+    const single = await this.endRunQueued(missionId, runId, result);
+    if (!single) return;
+    try {
+      const { mission, recommendation: rec } = await this.routeProposal(missionId);
+      const t = rec.verdict !== 'blocked' ? rec.resolution.target : undefined;
+      this.notifyDelegation(
+        mission,
+        t && rec.verdict === 'route'
+          ? `One task, proposed on ${t.model}${t.effortNative !== 'none' ? ` · ${t.effortNative}` : ''}. Nothing runs until you start it.`
+          : 'One task: pick a route for it. Nothing runs until you start it.',
+      );
+    } catch (e) {
+      // `routeProposal` has cancelled it: a proposal that could not be made is not left waiting.
+      const m = this.missions.get(missionId);
+      if (m) this.notifyDelegation(m, `It could not be routed: ${errorText(e)}`);
+      this.log(`mission ${missionId}: delegated task could not be routed: ${errorText(e)}`);
+    }
+  }
+
+  /** `endRun`'s part in the mission's queue. True when a delegation became one task, still to be routed. */
+  private endRunQueued(missionId: string, runId: string, result: PlanResult): Promise<boolean> {
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
       const run = m.planning?.find((r) => r.id === runId);
       // Cancelled, or superseded by a newer run, while it was out.
-      if (!run || run.state !== 'running' || m.state !== 'planning') return;
+      if (!run || run.state !== 'running' || m.state !== 'planning') return false;
       // Cut off by Cancel (which records it) or by the app stopping (recovery asks again): not a failure.
-      if (this.disposed || (!result.ok && result.aborted)) return;
+      if (this.disposed || (!result.ok && result.aborted)) return false;
       const now = this.now();
       const fail = (reason: string, rounds = result.rounds) => {
         m = this.patchRun(m, runId, (r) => ({ ...r, state: 'failed', reason, rounds, model: result.model, endedAt: now }));
         m = transitionMission(m, 'planning-failed', { now, reason });
         this.put(m);
         this.writePlanRecord(m, runId);
-        this.notify(m, 'could not be planned', `${reason}. Plan it again, or write the plan yourself.`);
+        if (m.delegation) this.notifyDelegation(m, `It could not be planned: ${reason}. Plan it again, or run it as one task.`);
+        else this.notify(m, 'could not be planned', `${reason}. Plan it again, or write the plan yourself.`);
         this.log(`mission ${missionId}: planning failed: ${reason}`);
+        return false;
       };
       if (!result.ok) return fail(result.reason);
 
@@ -1179,6 +1419,8 @@ export class TaskRunner implements Disposable {
       const ctx = this.planContext(loaded?.policy ?? DEFAULT_REPO_POLICY);
       let diff: PlanningRun['diff'];
       let tasks: Task[];
+      // Delegate (#82): the planner decided it is one task, so it is the single-task proposal, not a plan.
+      const oneTask = run.kind === 'plan' && !!m.delegation && result.plan.decomposition === 'single' && result.plan.tasks.length === 1;
       if (run.kind === 'replan') {
         // Work of a task that started and did not finish comes off the mission branch, kept on its own (§11.4).
         const aside = m.tasks.filter((t) => t.state !== 'done' && t.attemptIds.length > 0 && !taskMachine.isTerminal(t.state));
@@ -1208,7 +1450,11 @@ export class TaskRunner implements Disposable {
           added: tasks.slice(staying.length).map((t) => t.key),
         };
       } else {
-        tasks = plannedTasks(result.plan.tasks, [], ctx);
+        // The user's own criteria are kept on a single task, whatever the planner wrote.
+        const planned = oneTask
+          ? [{ ...result.plan.tasks[0], acceptanceCriteria: mergeCriteria(m.delegation!.acceptanceCriteria, result.plan.tasks[0].acceptanceCriteria) }]
+          : result.plan.tasks;
+        tasks = plannedTasks(planned, [], ctx);
       }
       const draft: Mission = { ...m, tasks: executionOrder(tasks) };
       const errors = planIssues(draft).filter((i) => i.level === 'error');
@@ -1226,6 +1472,13 @@ export class TaskRunner implements Disposable {
         proposed: result.plan.tasks.length,
         ...(diff ? { diff } : {}),
       }));
+      if (oneTask) {
+        m = this.asSingleTask(m, m.tasks[0], 'the planner kept it as one task; assessing it before it is routed');
+        this.put(m);
+        this.writePlanRecord(m, runId);
+        this.log(`mission ${missionId}: delegated; the planner kept it as one task in ${result.rounds.length} round(s)`);
+        return true;
+      }
       const n = result.plan.tasks.length;
       m = transitionMission(m, 'plan-review', {
         now,
@@ -1234,8 +1487,10 @@ export class TaskRunner implements Disposable {
       this.put(m);
       this.writePlanRecord(m, runId);
       this.schedulePreview(missionId);
-      this.notify(m, run.kind === 'replan' ? 'is replanned' : 'is planned', `${n} task${n === 1 ? '' : 's'} to review. Nothing runs until you approve the plan.`);
+      if (m.delegation && run.kind === 'plan') this.notifyDelegation(m, `A plan of ${n} task${n === 1 ? '' : 's'} to review. Nothing runs until you approve it.`);
+      else this.notify(m, run.kind === 'replan' ? 'is replanned' : 'is planned', `${n} task${n === 1 ? '' : 's'} to review. Nothing runs until you approve the plan.`);
       this.log(`mission ${missionId}: ${run.kind} proposed ${n} task(s) in ${result.rounds.length} round(s)`);
+      return false;
     });
   }
 
@@ -1409,56 +1664,356 @@ export class TaskRunner implements Disposable {
     });
   }
 
-  /**
-   * Start whatever the plan says is next, one task at a time (§29 P8). Runs
-   * inside the mission's queue. Finishes the mission once every task is done
-   * or skipped; waits (tasks `blocked`) when what is left needs a task that
-   * failed, was skipped or was cancelled.
-   */
+  /** A planned mission's next step: the scheduler decides what starts (#45). Runs inside the mission's queue. */
   private async launchNext(missionId: string): Promise<void> {
-    let m = this.need(missionId);
-    if (!isPlanned(m) || m.state !== 'running' || this.disposed) return;
+    const m = this.need(missionId);
     // Nothing runs before approval, however this was reached.
-    if (m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
-    const busy: TaskState[] = ['ready', 'assessing', 'routed', 'queued', 'running', 'verifying', 'integrating', 'needs-human'];
-    // A task waiting out a rate limit is `blocked`, and it is still this mission's task in hand.
-    if (m.tasks.some((t) => busy.includes(t.state) || pendingEscalation(t))) return;
+    if (isPlanned(m) && m.state === 'running' && m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
+    await this.step(missionId);
+  }
+
+  // ---- The scheduler loop (#45, §12.2) ----
+
+  /**
+   * The scheduler's input from every mission: each task's state, route and
+   * live attempt. `asRunning` counts a mission not yet running as if it were,
+   * to ask whether its first task would be admitted.
+   */
+  private schedSnapshot(asRunning?: string): MissionsSnapshot {
+    const missions: SchedMission[] = [];
+    for (const m of this.missions.values()) {
+      const state = m.id === asRunning && m.state === 'draft' ? 'running' : m.state;
+      if (!['running', 'paused', 'cancelled'].includes(state)) continue;
+      // Nothing of a planned mission runs before approval.
+      if (isPlanned(m) && m.planApprovedAt === undefined) continue;
+      const caps = this.safeEffective(m)?.policy.caps ?? {};
+      missions.push({
+        id: m.id,
+        repo: m.repoRoot,
+        state,
+        priority: 0,
+        createdAt: m.createdAt,
+        planned: isPlanned(m),
+        // Until #46's integrator, a plan's tasks share the mission worktree, so run one at a time.
+        sharedTree: true,
+        ...(caps.maxUsageWindowPercent !== undefined ? { maxWindowPercent: caps.maxUsageWindowPercent } : {}),
+        ...(caps.maxConcurrentAgents !== undefined ? { maxConcurrentAgents: caps.maxConcurrentAgents } : {}),
+        tasks: executionOrder(m.tasks).map((t) => this.schedTask(m, t)),
+      });
+    }
+    return { missions };
+  }
+
+  private schedTask(m: Mission, t: Task): SchedTask {
+    const current = this.currentAttempt(m, t.id);
+    const live = current && LIVE.includes(current.state) ? current : undefined;
+    const pending = pendingEscalation(t);
+    const prev = pending ? m.attempts.find((a) => a.id === pending.afterAttemptId) : undefined;
+    let route: TaskRoute;
+    try {
+      route = live ? routeOf(m, live) : pending && prev ? this.withPins(this.escalatedRoute(m, prev, pending), this.effective(m, t).policy.pins) : this.routeFor(m, t.id);
+    } catch {
+      route = this.routeFor(m, t.id);
+    }
+    const decision = live ? m.decisions.find((d) => d.id === live.routingDecisionId) : undefined;
+    const source = decision?.resolution.target.source ?? route.source ?? SOURCE[route.harness] ?? route.harness;
+    let phase: 'agent' | 'verify-queued' | 'verifying' | undefined;
+    if (live) phase = this.verifyWaiters.has(live.id) ? 'verify-queued' : live.state === 'verifying' ? 'verifying' : 'agent';
+    else if (this.starting.has(t.id)) phase = 'agent';
+    return {
+      id: t.id,
+      key: t.key,
+      state: t.state,
+      dependsOn: t.dependsOn,
+      // In the one mission tree, a done task's result is the mission branch.
+      integrated: t.state === 'done',
+      ...(t.invalidated ? { invalidated: true } : {}),
+      harness: live?.assignment.harness ?? route.harness,
+      source,
+      attempts: t.attemptIds.length,
+      ...(phase ? { live: { id: live?.id ?? `starting:${t.id}`, phase } } : {}),
+      ...(pending && !this.starting.has(t.id) ? { retry: { decisionId: pending.id, ...(pending.notBefore !== undefined ? { notBefore: pending.notBefore } : {}) } } : {}),
+    };
+  }
+
+  /** The effective policy, or undefined when it cannot be worked out (a scheduler read must never throw). */
+  private safeEffective(m: Mission): EffectivePolicy | undefined {
+    try {
+      return this.effective(m, m.tasks[0]);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Capacity as the scheduler reads it: the limits, every source's window, backoff and slots, and the fleet pause. */
+  private capacitySnapshot(): CapacitySnapshot {
+    const sched = this.deps.scheduling;
+    const limits: SchedulerLimits = { ...DEFAULT_SCHEDULER_LIMITS, ...(sched?.limits?.() ?? {}) };
+    const sources: CapacitySnapshot['sources'] = {};
+    let snap: ResolverSnapshot | undefined;
+    try {
+      snap = this.deps.routing?.snapshot();
+    } catch {
+      snap = undefined;
+    }
+    for (const [id, status] of Object.entries(snap?.sources ?? {})) {
+      if (!status) continue;
+      const c = status.capacity;
+      const facts: SourceFacts = {};
+      if (isKnown(c.windowPercent)) facts.windowPercent = c.windowPercent.value;
+      if (c.backoffUntil !== undefined) facts.backoffUntil = c.backoffUntil;
+      if (isKnown(c.freeSlots)) facts.freeSlots = c.freeSlots.value;
+      sources[id as ModelSourceId] = facts;
+    }
+    return { limits, sources, fleetPaused: sched?.fleet?.paused() === true };
+  }
+
+  /** Why the scheduler would not start this task now, or undefined when it would. */
+  private admissionWait(missionId: string, taskId: string): Extract<SchedulerAction, { kind: 'wait' }> | undefined {
+    const actions = schedule(this.schedSnapshot(missionId), this.capacitySnapshot(), this.now());
+    if (actions.some((a) => a.kind === 'start' && a.taskId === taskId)) return undefined;
+    return actions.find((a): a is Extract<SchedulerAction, { kind: 'wait' }> => a.kind === 'wait' && a.taskId === taskId);
+  }
+
+  /** The hard holds on any new attempt, however it was asked for: the fleet paused, the source's window full or backed off. */
+  private holdRefusal(route: TaskRoute): string | undefined {
+    const cap = this.capacitySnapshot();
+    if (cap.fleetPaused) return 'Every agent is paused; nothing new starts until they are resumed.';
+    const source = route.source ?? SOURCE[route.harness] ?? route.harness;
+    const f = cap.sources[source];
+    if (f?.backoffUntil !== undefined && f.backoffUntil > this.now()) return `${source} is rate-limited; nothing new starts on it until ${new Date(f.backoffUntil).toISOString()}.`;
+    if (f?.windowPercent !== undefined && f.windowPercent >= cap.limits.admissionPercent) {
+      return `The ${source} usage window is at ${Math.round(f.windowPercent)}%; new work starts below ${cap.limits.admissionPercent}%.`;
+    }
+    return undefined;
+  }
+
+  /** Something outside may have changed: step every mission soon, once. */
+  private kickSoon(): void {
+    if (this.disposed || this.kickTimer) return;
+    this.kickTimer = setTimeout(() => {
+      this.kickTimer = undefined;
+      void this.step().catch((e) => this.log(`scheduler: ${errorText(e)}`));
+    }, 0);
+  }
+
+  /**
+   * One scheduler step (§12.2). The actions for `inMission` are carried out
+   * here, in its queue; any other mission with work to do gets a step of its
+   * own in its queue. Waits only say why on the task.
+   */
+  private async step(inMission?: string): Promise<void> {
+    if (this.disposed) return;
     const now = this.now();
-    const open = executionOrder(m.tasks).filter((t) => t.state === 'pending' || t.state === 'blocked');
-    if (open.length === 0) {
-      if (m.tasks.every((t) => t.state === 'done' || t.state === 'skipped')) {
+    const actions = schedule(this.schedSnapshot(), this.capacitySnapshot(), now).filter((a) => !this.refusedActions.has(actionKey(a)));
+    const mine: SchedulerAction[] = [];
+    const others = new Set<string>();
+    for (const a of actions) {
+      switch (a.kind) {
+        case 'wake':
+          this.wakeAt(a.at);
+          break;
+        case 'wait':
+          this.noteWait(a, now);
+          break;
+        case 'verify':
+          this.verifyWaiters.get(a.attemptId)?.resolve(true);
+          this.verifyWaiters.delete(a.attemptId);
+          break;
+        case 'integrate':
+          // #46 merges task branches into the mission branch; in the one mission tree there is nothing to merge.
+          break;
+        case 'cancel':
+          // A verification waiting for a slot is let go, so the queue it holds can take the cancel.
+          this.verifyWaiters.get(a.attemptId)?.resolve(false);
+          this.verifyWaiters.delete(a.attemptId);
+          if (a.missionId === inMission) mine.push(a);
+          else others.add(a.missionId);
+          break;
+        default:
+          if (a.missionId !== inMission) {
+            others.add(a.missionId);
+            break;
+          }
+          if (a.kind === 'start') this.starting.add(a.taskId);
+          mine.push(a);
+      }
+    }
+    // Queue time is kept only for tasks still waiting or about to start.
+    const inHand = new Set(actions.flatMap((a) => (a.kind === 'wait' || a.kind === 'start' ? [a.taskId] : [])));
+    for (const id of this.queuedSince.keys()) if (!inHand.has(id) && !this.starting.has(id)) this.queuedSince.delete(id);
+    for (const id of others) this.stepLater(id);
+    for (const a of mine) {
+      try {
+        await this.applyAction(a);
+      } catch (e) {
+        this.refusedActions.add(actionKey(a));
+        this.log(`scheduler: ${a.kind} ${'taskId' in a ? a.taskId : ''} in ${inMission} failed: ${errorText(e)}`);
+      } finally {
+        if (a.kind === 'start') this.starting.delete(a.taskId);
+      }
+    }
+  }
+
+  /** A step in the mission's own queue, unless one is waiting there already. */
+  private stepLater(missionId: string): void {
+    if (this.disposed || this.stepQueued.has(missionId)) return;
+    this.stepQueued.add(missionId);
+    void this.queue(missionId, async () => {
+      this.stepQueued.delete(missionId);
+      if (this.missions.has(missionId)) await this.step(missionId);
+    }).catch((e) => this.log(`mission ${missionId}: scheduler step failed: ${errorText(e)}`));
+  }
+
+  private wakeAt(at: number): void {
+    if (this.disposed || (this.wakeTimer && this.wakeTimer.at <= at)) return;
+    if (this.wakeTimer) clearTimeout(this.wakeTimer.timer);
+    const timer = setTimeout(() => {
+      this.wakeTimer = undefined;
+      this.refusedActions.clear();
+      this.kickSoon();
+    }, Math.max(0, at - this.now()));
+    this.wakeTimer = { at, timer };
+  }
+
+  /** A task that may start but has to wait says why, once; its queue time starts now. */
+  private noteWait(a: Extract<SchedulerAction, { kind: 'wait' }>, now: number): void {
+    if (a.reason !== 'verification' && !this.queuedSince.has(a.taskId)) this.queuedSince.set(a.taskId, now);
+    const m = this.missions.get(a.missionId);
+    const t = m?.tasks.find((x) => x.id === a.taskId);
+    if (!m || !t || !['pending', 'queued', 'blocked', 'verifying'].includes(t.state)) return;
+    const reason = `waiting: ${a.detail}`;
+    if (t.stateReason === reason) return;
+    this.log(`mission ${m.id}: ${t.key} waits (${a.reason}): ${a.detail}`);
+    // A pending escalation step keeps its own text; the wait is added to it.
+    const pending = pendingEscalation(t);
+    this.put(this.patchTask(m, t.id, (x) => ({ ...x, stateReason: pending ? `${pendingText(pending, now)}; ${reason}` : reason })));
+  }
+
+  /** Carry out one of the scheduler's actions for a mission, in its queue. */
+  private async applyAction(a: SchedulerAction): Promise<void> {
+    if (a.kind === 'wake' || a.kind === 'wait' || a.kind === 'verify' || a.kind === 'integrate') return;
+    let m = this.need(a.missionId);
+    const now = this.now();
+    switch (a.kind) {
+      case 'start': {
+        if (a.retryOf) {
+          await this.runEscalation(m.id, a.retryOf);
+          return;
+        }
+        const task = m.tasks.find((t) => t.id === a.taskId)!;
+        const route = this.routeFor(m, task.id);
+        const capped = this.capRefusal(m, task.id, route);
+        if (capped) {
+          this.put(this.failBeforeLaunch(m, task.id, capped));
+          this.notify(this.need(m.id), 'needs you', `${task.key}: ${capped}`);
+          return;
+        }
+        try {
+          await this.launch(m.id, { mode: 'fresh', route, taskId: task.id });
+        } catch (e) {
+          // `launch` has already left the task waiting on the user, saying why.
+          this.log(`mission ${m.id}: ${task.key} could not start: ${errorText(e)}`);
+          this.notify(this.need(m.id), 'needs you', `${task.key} could not start: ${errorText(e)}`);
+        }
+        return;
+      }
+      case 'block': {
+        m = this.patchTask(m, a.taskId, (t) => transitionTask(m, t, 'blocked', { now, reason: `blocked: ${a.detail}` }));
+        this.put(m);
+        const key = m.tasks.find((t) => t.id === a.taskId)?.key;
+        this.notify(m, 'needs you', `${key} depends on a task that did not finish (${a.detail}). Recover it, skip what depends on it, or cancel the mission.`);
+        return;
+      }
+      case 'unblock':
+        this.put(this.patchTask(m, a.taskId, (t) => transitionTask(m, t, 'pending', { now, reason: 'its upstream is back' })));
+        return;
+      case 'cancel': {
+        const att = m.attempts.find((x) => x.id === a.attemptId);
+        if (!att || !LIVE.includes(att.state)) return;
+        m = this.endAttempt(m, att.id, 'cancelled', { status: 'cancelled' }, 'cancelled');
+        this.put(m);
+        await this.endSession(m, att);
+        await this.retainTree(this.need(m.id), att);
+        return;
+      }
+      case 'finish': {
         m = transitionMission(m, 'finishing', { now });
         m = transitionMission(m, 'review', { now, reason: 'every task is done: merge, open a pull request, keep or discard the mission branch' });
         this.put(m);
+        const benefit = parallelismBenefit(
+          m.attempts.map((x) => ({ activeMs: attemptRecord(m, x, now)?.activeMs })),
+          now - (m.planApprovedAt ?? m.createdAt),
+        );
+        this.log(`mission ${m.id}: every task done${benefit !== undefined ? `; parallelism benefit ${benefit.toFixed(2)}` : ''}`);
         this.notify(m, 'is ready for review', `${m.tasks.filter((t) => t.state === 'done').length} task(s) done on ${resultBranch(m) ?? 'the mission branch'}.`);
+        return;
       }
-      return;
     }
-    const next = open.find((t) => dependenciesSatisfied(m, t));
-    if (!next) {
-      for (const t of open) {
-        const waiting = t.dependsOn.map((d) => m.tasks.find((x) => x.id === d.taskId)).filter((u) => u && u.state !== 'done').map((u) => `${u!.key} (${u!.state})`);
-        const reason = `waiting on ${waiting.join(', ')}`;
-        m = this.patchTask(m, t.id, (x) => (x.state === 'pending' ? transitionTask(m, x, 'blocked', { now, reason }) : { ...x, stateReason: reason }));
-      }
+  }
+
+  /**
+   * A finished attempt's checks wait here for a verification slot in its
+   * repository (§12.3). False: the mission was cancelled (or the runner
+   * stopped) meanwhile, and nothing should be verified.
+   */
+  private verificationSlot(missionId: string, attemptId: string): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      this.verifyWaiters.set(attemptId, { missionId, resolve });
+      void this.step().catch((e) => this.log(`scheduler: ${errorText(e)}`));
+    });
+  }
+
+  /** Let go every verification of a mission (or all) waiting for a slot: they will not run. */
+  private releaseVerifiers(missionId?: string): void {
+    for (const [id, w] of this.verifyWaiters) {
+      if (missionId !== undefined && w.missionId !== missionId) continue;
+      this.verifyWaiters.delete(id);
+      w.resolve(false);
+    }
+  }
+
+  /**
+   * Mission pause (§12.3): start nothing new; running attempts carry on.
+   * `now` also pauses their sessions with the fleet's `PauseService`
+   * (SIGSTOP on the agent), which Resume undoes.
+   */
+  pauseMission(missionId: string, opts: { now?: boolean } = {}): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (m.state !== 'running') throw new TaskError(`The mission is ${m.state}; only a running mission can be paused.`);
+      m = transitionMission(m, 'paused', { now: this.now(), reason: opts.now ? 'paused now by the user: its agents are stopped' : 'paused by the user: nothing new starts' });
       this.put(m);
-      this.notify(m, 'needs you', 'What is left depends on a task that did not finish. Skip it, or cancel the mission.');
-      return;
-    }
-    const route = this.routeFor(m, next.id);
-    const capped = this.capRefusal(m, next.id, route);
-    if (capped) {
-      this.put(this.failBeforeLaunch(m, next.id, capped));
-      this.notify(this.need(missionId), 'needs you', `${next.key}: ${capped}`);
-      return;
-    }
-    try {
-      await this.launch(missionId, { mode: 'fresh', route, taskId: next.id });
-    } catch (e) {
-      // `launch` has already left the task waiting on the user, saying why.
-      this.log(`mission ${missionId}: ${next.key} could not start: ${errorText(e)}`);
-      this.notify(this.need(missionId), 'needs you', `${next.key} could not start: ${errorText(e)}`);
-    }
+      if (opts.now) {
+        const fleet = this.deps.scheduling?.fleet;
+        if (!fleet) throw new TaskError('Nothing new will start, but the running agents could not be paused: there is no pause service.');
+        for (const a of m.attempts.filter((x) => LIVE.includes(x.state))) {
+          const sid = a.assignment.sessionIds.at(-1);
+          if (sid && !fleet.pauseSession(sid)) this.log(`mission ${missionId}: could not pause session ${sid}`);
+        }
+      }
+      this.log(`mission ${missionId}: paused${opts.now ? ' now' : ''}`);
+      return this.need(missionId);
+    });
+  }
+
+  /** Resume a paused mission: its paused sessions carry on, and the scheduler starts what is ready. */
+  resumeMission(missionId: string): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (m.state !== 'paused') throw new TaskError('The mission is not paused.');
+      m = transitionMission(m, 'running', { now: this.now(), reason: 'resumed by the user' });
+      this.put(m);
+      const fleet = this.deps.scheduling?.fleet;
+      for (const a of m.attempts.filter((x) => LIVE.includes(x.state))) {
+        const sid = a.assignment.sessionIds.at(-1);
+        if (sid) fleet?.resumeSession(sid);
+      }
+      this.log(`mission ${missionId}: resumed`);
+      await this.step(missionId);
+      return this.need(missionId);
+    });
   }
 
   /**
@@ -1776,6 +2331,11 @@ export class TaskRunner implements Disposable {
     // A planned mission stopped between one task finishing and the next starting: start it now.
     if (isPlanned(m) && m.state === 'running') await this.launchNext(id);
     if (m.planned && m.state === 'plan-review') this.schedulePreview(id);
+    // A delegation kept as one task and cut off before it was routed (#82): route it now, after this recovery.
+    const d = this.need(id);
+    if (d.delegation && !d.planned && d.state === 'draft' && ['pending', 'ready', 'assessing'].includes(d.tasks[0]?.state ?? '') && d.tasks[0].attemptIds.length === 0) {
+      void this.routeProposal(id).catch((e) => this.log(`task ${id}: delegated task could not be routed: ${errorText(e)}`));
+    }
     // A planner call cut off by a restart is simply asked again (it is a completion, not a session).
     const now0 = this.need(id);
     if (now0.state === 'planning') {
@@ -1880,6 +2440,9 @@ export class TaskRunner implements Disposable {
       if (continues && route.harness !== continues.assignment.harness) throw new TaskError(`The session runs on ${continues.assignment.harness}; the route is now pinned to ${route.harness}.`);
       const refusal = admissionRefusal(eff, this.admissionFacts(m, route, !!resumeOf, task));
       if (refusal) throw new TaskError(refusal);
+      // However it was asked for, nothing new starts while the fleet is paused or the source is full (#45, §12.4).
+      const held = this.holdRefusal(route);
+      if (held) throw new TaskError(held);
       harness = this.checkRoute(route);
       const policy = this.deps.repoPolicies.forFolder(m.repoRoot);
       if (!policy) throw new TaskError(`${m.repoRoot} is no longer a git repository.`);
@@ -1951,7 +2514,8 @@ export class TaskRunner implements Disposable {
       flags: {},
       sentIds: [promptId],
       turnsSeen: 0,
-      timing: { queuedAt: now },
+      // Queue time (§16.3) runs from when the scheduler first had it ready and waiting.
+      timing: { queuedAt: Math.min(now, this.queuedSince.get(task.id) ?? now) },
       createdAt: now,
       ...(resumeOf ? { resumeOf: resumeOf.id, ...('auto' in opts && opts.auto ? { autoResumed: true } : {}) } : {}),
       ...(continues ? { continues: continues.id } : {}),
@@ -1964,6 +2528,7 @@ export class TaskRunner implements Disposable {
     m = this.patchAttempt(m, attempt.id, (x) => transitionAttempt(m, x, 'launching', { now }));
     // Write-ahead: the attempt, its session id and origin are on disk before anything starts.
     this.put(m);
+    this.queuedSince.delete(task.id);
     this.writeRouting(m, decision);
 
     const policy: LaunchPolicy = attemptLaunchPolicy({ harness: route.harness, primaryRoot: m.repoRoot, repoPolicy: loaded.policy });
@@ -2110,6 +2675,7 @@ export class TaskRunner implements Disposable {
     let reasons: RoutingReason[];
     const esc = routing.escalation;
     if (accepted && routing.failover) reasons = rec!.reasons.map((r, i) => (i === 0 && permissionMode ? { ...r, inputs: { ...r.inputs, permissionMode } } : r));
+    else if (accepted && !routing.offered && mode === 'auto') reasons = [...rec!.reasons, { ruleId: 'auto.routed', text: 'Routed automatically, within the caps (auto mode).', ...inputs }];
     else if (accepted) reasons = [...rec!.reasons, { ruleId: 'assisted.accepted', text: 'Recommendation accepted.', ...inputs }];
     else if (esc) reasons = [{ ruleId: `escalation.${esc.action}`, text: esc.reason, ...inputs }];
     else if (routing.offered && cmp) reasons = [{ ruleId: 'assisted.changed', text: `Changed from the recommendation: ${cmp.changed.join(', ') || 'nothing'}.`, ...inputs }];
@@ -2671,7 +3237,11 @@ export class TaskRunner implements Disposable {
     return { ok: false, reason: res.note ?? 'nothing the policy allows.' };
   }
 
-  /** Run a pending step when it is due. */
+  /**
+   * Run a pending step when it is due. A retry is a new attempt through the
+   * same admission as any other (§12.3): when it is due the scheduler is
+   * asked, and starts it once the fleet, the usage windows and the slots let it.
+   */
   private scheduleEscalation(missionId: string, d: EscalationDecision): void {
     if (this.disposed) return;
     const had = this.escalationTimers.get(d.id);
@@ -2679,7 +3249,7 @@ export class TaskRunner implements Disposable {
     const delay = Math.max(0, (d.notBefore ?? 0) - this.now());
     const timer = setTimeout(() => {
       this.escalationTimers.delete(d.id);
-      void this.queue(missionId, () => this.runEscalation(missionId, d.id)).catch((e) => this.log(`task ${missionId}: escalation step failed: ${errorText(e)}`));
+      this.stepLater(missionId);
     }, delay);
     this.escalationTimers.set(d.id, { missionId, timer });
   }
@@ -3100,6 +3670,11 @@ export class TaskRunner implements Disposable {
       m = this.patchAttempt(m, a.id, (x) => transitionAttempt(m, x, 'verifying', { now: this.now() }));
       this.put(m);
     }
+    // One verification per repository at a time by default (§12.3): the scheduler hands out the slots.
+    if (task.verification.stages.length > 0 && !(await this.verificationSlot(missionId, attemptId))) {
+      this.log(`task ${missionId}: attempt ${a.n} not verified: the mission was stopped while it waited for a slot`);
+      return;
+    }
     const results = await this.verify(missionId, attemptId, wt, stats.headCommit);
     m = this.need(missionId);
     m = this.patchAttempt(m, a.id, (x) => ({ ...x, verification: results }));
@@ -3372,6 +3947,13 @@ export class TaskRunner implements Disposable {
     this.deps.notify?.({ title: `Task ${what}: ${m.title}`, body, onClick });
   }
 
+  /** A delegation's news (#82): its click brings up the conversation it came from, where its card is. */
+  private notifyDelegation(m: Mission, body: string): void {
+    const origin = m.origin;
+    const show = this.deps.showOrigin;
+    this.deps.notify?.({ title: `Delegated: ${m.title}`, body, ...(origin && show ? { onClick: () => show(origin) } : {}) });
+  }
+
   private queue<T>(missionId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.queues.get(missionId) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(fn);
@@ -3391,6 +3973,8 @@ export class TaskRunner implements Disposable {
     this.deps.store.save(next);
     this.missions.set(next.id, next);
     this.emitter.fire();
+    // Something may have freed a slot for work that waits (#45).
+    if (this.verifyWaiters.size > 0 || this.queuedSince.size > 0) this.kickSoon();
   }
 
   private patchTask(m: Mission, taskId: string, f: (t: Task) => Task): Mission {
@@ -3408,6 +3992,9 @@ export class TaskRunner implements Disposable {
   dispose(): void {
     this.disposed = true;
     this.clearEscalations();
+    this.releaseVerifiers();
+    if (this.wakeTimer) clearTimeout(this.wakeTimer.timer);
+    if (this.kickTimer) clearTimeout(this.kickTimer);
     for (const t of this.previewTimers.values()) clearTimeout(t);
     this.previewTimers.clear();
     for (const a of this.planAborts.values()) a.abort();
@@ -3478,6 +4065,11 @@ async function bounded(p: Promise<unknown>, ms: number): Promise<void> {
 }
 
 /** What a task waiting on an escalation step says it is waiting for. */
+/** A scheduler action's identity, to hold back one that failed to apply. */
+function actionKey(a: SchedulerAction): string {
+  return `${a.kind}:${'missionId' in a ? a.missionId : ''}:${'taskId' in a ? a.taskId : ''}:${'attemptId' in a ? a.attemptId : 'retryOf' in a ? (a.retryOf ?? '') : ''}`;
+}
+
 function pendingText(d: EscalationDecision, now: number): string {
   const due = d.notBefore !== undefined && d.notBefore > now ? ` at ${new Date(d.notBefore).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : '';
   const what: Record<string, string> = {
@@ -3692,6 +4284,20 @@ export function planRecord(missionId: string, run: PlanningRun, now: number): Pl
 }
 
 /** A planned mission (#43): reviewed as a plan, run in the mission tree. */
+/** The user's criteria first, then the planner's that say something else (case and spacing ignored). */
+export function mergeCriteria(user: readonly string[], planner: readonly string[]): string[] {
+  const norm = (c: string) => c.replace(/\s+/g, ' ').trim().toLowerCase();
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const c of [...user, ...planner]) {
+    const k = norm(c);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(c.trim());
+  }
+  return out;
+}
+
 export function isPlanned(m: Pick<Mission, 'planned'>): boolean {
   return m.planned === true;
 }

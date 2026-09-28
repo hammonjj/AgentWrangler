@@ -185,11 +185,20 @@ export class PreferencesWindow implements Disposable {
         this.opts.log('preferences: refused routing defaults (orchestration unavailable)');
         return;
       }
-      const update = routingPolicyUpdate(message, orch.view().catalog);
+      // The gate is read fresh here (#42): the window's copy may be stale, and `auto` over an unmet gate needs an explicit override.
+      const view = orch.view();
+      const update = routingPolicyUpdate(message, view.catalog, {
+        gate: view.routing?.gate,
+        stored: view.routing ? { mode: view.routing.mode, autoOverride: view.routing.autoOverride } : undefined,
+        now: Date.now(),
+      });
       if (!update.ok) {
         this.opts.log(`preferences: refused routing defaults: ${update.errors.join('; ')}`);
-        this.post({ type: 'routingResult', ok: false, errors: update.errors });
+        this.post({ type: 'routingResult', ok: false, errors: update.errors, ...(update.needsOverride ? { needsOverride: true } : {}) });
         return;
+      }
+      if ((message as { overrideGate?: unknown }).overrideGate === true && !view.routing?.gate?.met) {
+        this.opts.log('preferences: automatic routing enabled over an unmet gate (override, numbers shown)');
       }
       void orch
         .setRouting(update.value)

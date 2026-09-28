@@ -239,10 +239,24 @@ export interface Mission {
   planning?: PlanningRun[];
   source: { kind: 'user' | 'issue' | 'schedule'; ref?: string; trusted: boolean };
   /**
-   * The conversation that handed this work off (`aw task`, #81): where its
-   * proposal card is shown. Absent for a task started from the Tasks menu.
+   * The conversation that handed this work off (`aw delegate` or `aw task`,
+   * #81, #82): where its proposal or plan card is shown. Context only: it is
+   * never the session that does the work. Absent for a task started from the
+   * Tasks menu.
    */
   origin?: { provider: 'claude' | 'codex'; sessionId: string };
+  /**
+   * Handed off with Delegate (#82): the user gave an outcome, and the planner
+   * decides whether it is one task or several. While it is planning, failed
+   * to plan or is in plan review it is a planned mission; when the planner
+   * keeps it as one task it becomes a single-task proposal (`planned`
+   * cleared), exactly as `aw task` makes. Absent for anything else.
+   */
+  delegation?: {
+    at: Millis;
+    /** The user's criteria for the whole outcome, given to every planner run and kept on a single task. */
+    acceptanceCriteria: string[];
+  };
   tasks: Task[];
   assessments: TaskAssessment[];
   decisions: RoutingDecision[];

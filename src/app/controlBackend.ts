@@ -166,6 +166,15 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       }
     },
 
+    async delegate(params) {
+      try {
+        return await app.delegate(params);
+      } catch (err) {
+        if (err instanceof TaskError) throw new ControlError(RPC_UNSUPPORTED, err.message);
+        throw err;
+      }
+    },
+
     tasks: () => app.taskList(),
   };
 }

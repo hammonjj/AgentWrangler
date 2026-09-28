@@ -14,11 +14,13 @@ export type Command =
   | { kind: 'stop'; ref: string; force: boolean }
   | { kind: 'projects'; json: boolean }
   /**
-   * `objective` undefined: read it from stdin (`aw task -`). `folder`
-   * undefined: the current directory. `harness` undefined: the agent this
-   * shell belongs to, else Claude.
+   * `delegate` (#82) is the handoff: the planner decides one task or several.
+   * `task` is the explicit single-task shortcut (#80). For both: `objective`
+   * undefined: read it from stdin (`aw delegate -`). `folder` undefined: the
+   * current directory. `harness` undefined: the agent this shell belongs to,
+   * else Claude.
    */
-  | { kind: 'task'; objective: string | undefined; criteria: string[]; folder: string | undefined; harness: 'claude' | 'codex' | undefined; json: boolean }
+  | { kind: 'delegate' | 'task'; objective: string | undefined; criteria: string[]; folder: string | undefined; harness: 'claude' | 'codex' | undefined; json: boolean }
   | { kind: 'tasks'; json: boolean };
 
 export const USAGE = `aw — Agent Wrangler from a terminal
@@ -31,22 +33,24 @@ Usage:
   aw send <id> <text…>      send a message to a session Agent Wrangler runs ("-" reads stdin)
   aw stop <id> [--force]    end the process running a session (--force: even mid-turn)
   aw projects               the project folders the launcher offers
-  aw task <objective…>      propose a task: Agent Wrangler routes it and waits for you to
-                            start it in the app ("-" reads the objective from stdin)
+  aw delegate <objective…>  hand work to Agent Wrangler: a read-only planner decides whether
+                            it is one task or several, and it waits for you to approve the
+                            proposal or the plan in the app ("-" reads the objective from stdin)
       --criteria "a; b"     acceptance criteria, separated by semicolons
       --folder <dir>        the repository (default: the current directory)
       --claude | --codex    which agent to prefer (default: the one running this shell)
+  aw task <objective…>      shortcut: always one task, no planner (same options as delegate)
   aw tasks                  tasks that are not finished
 
 <id> is a session id, a unique prefix of one (4+ characters), or a key like claude:<id>.
---json prints the raw result for status, sessions, session, projects, task and tasks.
+--json prints the raw result for status, sessions, session, projects, delegate, task and tasks.
 `;
 
 export function parseArgs(argv: readonly string[]): Command | { error: string } {
   // First, because everything after the id is the message, `--help` included.
   if (argv[0] === 'send') return parseSend(argv.slice(1));
   // First too: its options take values, and the objective is free text.
-  if (argv[0] === 'task') return parseTask(argv.slice(1));
+  if (argv[0] === 'task' || argv[0] === 'delegate') return parseHandoff(argv[0], argv.slice(1));
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const words = argv.filter((a) => !a.startsWith('--') || a === '--');
   if (flags.has('--help') || argv.includes('-h')) return { kind: 'help' };
@@ -107,11 +111,11 @@ function parseSend(tail: readonly string[]): Command | { error: string } {
 }
 
 /**
- * `aw task <objective…> [--criteria "a; b"] [--folder <dir>] [--claude|--codex] [--json]`.
+ * `aw delegate|task <objective…> [--criteria "a; b"] [--folder <dir>] [--claude|--codex] [--json]`.
  * Options may come anywhere; every other word is the objective. `--` ends the
  * options, so an objective may itself contain `--criteria`.
  */
-function parseTask(tail: readonly string[]): Command | { error: string } {
+function parseHandoff(kind: 'delegate' | 'task', tail: readonly string[]): Command | { error: string } {
   const words: string[] = [];
   let criteria: string[] = [];
   let folder: string | undefined;
@@ -125,7 +129,7 @@ function parseTask(tail: readonly string[]): Command | { error: string } {
     }
     if (a === '--criteria' || a === '--folder') {
       const value = tail[i + 1];
-      if (value === undefined || value.startsWith('--')) return { error: `aw task: ${a} needs a value.` };
+      if (value === undefined || value.startsWith('--')) return { error: `aw ${kind}: ${a} needs a value.` };
       i++;
       if (a === '--criteria') criteria = [...criteria, ...value.split(';').map((c) => c.trim()).filter(Boolean)];
       else folder = value;
@@ -133,7 +137,7 @@ function parseTask(tail: readonly string[]): Command | { error: string } {
     }
     if (a === '--claude' || a === '--codex') {
       const wanted = a === '--claude' ? 'claude' : 'codex';
-      if (harness && harness !== wanted) return { error: 'aw task: give --claude or --codex, not both.' };
+      if (harness && harness !== wanted) return { error: `aw ${kind}: give --claude or --codex, not both.` };
       harness = wanted;
       continue;
     }
@@ -142,25 +146,27 @@ function parseTask(tail: readonly string[]): Command | { error: string } {
       continue;
     }
     if (a === '--help' || a === '-h') return { kind: 'help' };
-    if (a.startsWith('--')) return { error: `aw task: unknown option ${a}` };
+    if (a.startsWith('--')) return { error: `aw ${kind}: unknown option ${a}` };
     words.push(a);
   }
-  if (words.length === 0) return { error: 'aw task: what should the task do? Give the objective, or "-" to read it from stdin.' };
+  if (words.length === 0) {
+    return { error: `aw ${kind}: what should ${kind === 'task' ? 'the task do' : 'be done'}? Give the objective, or "-" to read it from stdin.` };
+  }
   const base = { criteria, folder, harness, json } as const;
-  if (words.length === 1 && words[0] === '-') return { kind: 'task', objective: undefined, ...base };
+  if (words.length === 1 && words[0] === '-') return { kind, objective: undefined, ...base };
   const objective = words.join(' ');
-  if (objective.trim().length === 0) return { error: 'aw task: the objective is empty.' };
-  return { kind: 'task', objective, ...base };
+  if (objective.trim().length === 0) return { error: `aw ${kind}: the objective is empty.` };
+  return { kind, objective, ...base };
 }
 
-/** The agent a shell belongs to, for `aw task`'s default harness preference. */
+/** The agent a shell belongs to, for `aw delegate`'s and `aw task`'s default harness preference. */
 export function harnessOf(env: Record<string, string | undefined>): 'claude' | 'codex' | undefined {
   if (env.CODEX_SANDBOX || env.CODEX_SANDBOX_NETWORK_DISABLED || env.CODEX_THREAD_ID) return 'codex';
   if (env.CLAUDECODE || env.CLAUDE_CODE_ENTRYPOINT) return 'claude';
   return undefined;
 }
 
-/** The conversation this shell belongs to, from its agent's environment (#81), for `aw task`'s card. */
+/** The conversation this shell belongs to, from its agent's environment (#81), for the card `aw delegate` or `aw task` leaves there. */
 export function originOf(env: Record<string, string | undefined>): { provider: 'claude' | 'codex'; sessionId: string } | undefined {
   if (env.CODEX_THREAD_ID) return { provider: 'codex', sessionId: env.CODEX_THREAD_ID };
   if (env.CLAUDE_CODE_SESSION_ID) return { provider: 'claude', sessionId: env.CLAUDE_CODE_SESSION_ID };

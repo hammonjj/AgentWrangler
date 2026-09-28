@@ -291,6 +291,7 @@ export const SETTINGS: SettingSpec[] = [
   },
   {
     key: 'autoPause.percent',
+    dependsOn: 'autoPause.enabled',
     label: 'Pause at this percentage',
     group: 'Plan usage',
     type: 'number',
@@ -442,5 +443,48 @@ export function settingGroups(): { group: string; settings: SettingSpec[] }[] {
     else out.push({ group: s.group, settings: [s] });
   }
   return out;
+}
+
+/**
+ * The distinct `dependsOn` keys, in the order Preferences first meets them —
+ * one per collapsible card it needs to build. Pure so it can be tested without
+ * the DOM: this is the list the window's disclosure cards are keyed by.
+ */
+export function dependentParentKeys(settings: SettingSpec[] = SETTINGS): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of settings) {
+    if (s.dependsOn && !seen.has(s.dependsOn)) {
+      seen.add(s.dependsOn);
+      out.push(s.dependsOn);
+    }
+  }
+  return out;
+}
+
+/**
+ * Checks the assumption Preferences relies on to nest a `dependsOn` field
+ * under its switch: the switch is a declared boolean, and it is declared
+ * *before* anything that depends on it. Both matter for the same reason — the
+ * window builds the switch's row first and reveals the card under it, so a
+ * forward reference or a non-boolean parent would either throw or nest a field
+ * under something that is never on or off.
+ */
+export function validateDependencies(settings: SettingSpec[] = SETTINGS): string[] {
+  const errors: string[] = [];
+  const indexOf = new Map<string, number>();
+  settings.forEach((s, i) => indexOf.set(s.key, i));
+  settings.forEach((s, i) => {
+    if (!s.dependsOn) return;
+    const parentIndex = indexOf.get(s.dependsOn);
+    if (parentIndex === undefined) {
+      errors.push(`${s.key} depends on ${s.dependsOn}, which no setting declares`);
+      return;
+    }
+    const parent = settings[parentIndex];
+    if (parent.type !== 'boolean') errors.push(`${s.key} depends on ${s.dependsOn}, which is not a boolean`);
+    if (parentIndex > i) errors.push(`${s.key} depends on ${s.dependsOn}, declared later in the list`);
+  });
+  return errors;
 }
 

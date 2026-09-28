@@ -12,7 +12,7 @@ import type {
   PermissionModeName,
 } from './conversation';
 import type { HookHealth, ProjectDTO, SessionDTO } from './model';
-import type { ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from './orchestration/taskView';
+import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from './orchestration/taskView';
 import type { MissionOp, MissionsSnapshot } from './orchestration/missionView';
 import type { UsageState } from './usage';
 
@@ -197,6 +197,8 @@ export type HostToConversation =
       task?: TaskView;
       /** Task proposals this conversation handed off with `aw task`, drawn as cards at its end (#81). */
       proposals?: TaskProposalView[];
+      /** Work this conversation delegated that is being planned or is a plan to review (#82). */
+      delegations?: DelegationView[];
     }
   | { type: 'append'; blocks: ConvBlock[] }
   /** In-place update of one block: a tool's result, a streaming reply, an ask being settled. */
@@ -210,8 +212,8 @@ export type HostToConversation =
    * attempt's).
    */
   | { type: 'task'; task?: TaskView }
-  /** The proposal cards changed: one arrived, or one was started or cancelled (#81). */
-  | { type: 'proposals'; proposals: TaskProposalView[] }
+  /** The proposal or delegation cards changed: one arrived, was decided, started or cancelled (#81, #82). */
+  | { type: 'proposals'; proposals: TaskProposalView[]; delegations?: DelegationView[] }
   | { type: 'composer'; composer: ComposerState }
   /**
    * The whole of a block the pane only got the start of — the answer to
@@ -299,6 +301,8 @@ export type ConversationToHost =
   | { type: 'taskAction'; missionId: string; action: TaskViewAction; taskId?: string }
   /** A proposal card's Run (on the route shown) or Cancel (#81). Only ever sent by a click. */
   | { type: 'proposalDecision'; missionId: string; decision: ProposalDecision }
+  /** A delegation card's button: approve the plan, plan again, run as one task, open it in Missions, cancel (#82). Only ever sent by a click. */
+  | { type: 'delegationAction'; missionId: string; action: DelegationAction }
   /**
    * A line in the strip's attempts list: show that attempt's conversation in
    * this pane. It is a session key, so it goes through the same path a row

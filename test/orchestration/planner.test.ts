@@ -170,6 +170,13 @@ describe('the input', () => {
     expect(text).toContain('<user_note>\nSynthetic note.\n</user_note>');
   });
 
+  it('a delegation’s criteria are the user’s, for the whole objective (#82)', () => {
+    const text = plannerInput({ objective: 'Synthetic objective.', acceptanceCriteria: ['Synthetic check passes', ' '], strategies: [], cap: 8 });
+    expect(text).toContain('each one must be among some task’s criteria');
+    expect(text).toContain('<acceptance_criteria>\n- Synthetic check passes\n</acceptance_criteria>');
+    expect(plannerInput({ objective: 'Synthetic objective.', strategies: [], cap: 8 })).not.toContain('acceptance_criteria');
+  });
+
   it('the repair input carries the previous plan and every problem', () => {
     const text = repairInput('FIRST', single, { problems: ['dependency cycle: t1 → t2 → t1'], advice: ['t3 is trivial'] });
     expect(text.startsWith('FIRST')).toBe(true);

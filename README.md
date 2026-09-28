@@ -415,6 +415,20 @@ new worktree and branch of the chosen folder's repository:
   - `{"mode": "assisted"}`: *Run a new task…* assesses first and shows the proposed route.
     One click runs it; *Change effort…* or *Change model…* runs yours instead, and the change
     is recorded. Dismissing it leaves the proposal in the Tasks menu.
+  - `{"mode": "auto"}`: *Run a new task…* assesses, routes and starts the task with no click,
+    within your caps; the route chip is marked **A** and *Why this route?* gives the same
+    reasons as any other decision. Work the router cannot route within the caps waits as a
+    proposal instead. `auto` is gated on the record (Preferences → Orchestration → Automatic
+    routing shows each check with its numbers): the routing corpus green with no egregious
+    misroute, at least 30 tasks routed in manual (shadow) or assisted mode, at least 70% of
+    at least 10 assisted proposals run without a tier change, and no kind of task where the
+    router wanted a cheaper route than ran and the route that ran still needed escalation.
+    Choosing *Automatic* before that shows the numbers and asks you to *Enable anyway*; the
+    override and the numbers you saw are saved in `orchestration.routing.autoOverride`, and
+    leaving `auto` drops it. `auto` in `settings.json` with the gate unmet and no override runs
+    as `assisted`, and says why. Below the gate, *Shadow comparison* lists what the router
+    predicted, what ran and how it went — "router wanted cheaper, the route that ran was
+    dearer" and the reverse, with outcomes — by task kind and by the dimension changed.
   - `"maxTier"` and `"maxEffort"` cap every new task. A cap is never exceeded: work that needs
     more than the cap waits for you, saying both why it needs more and what the cap is.
 - **Pins and caps, at four scopes.** You can *pin* a harness, model or effort, *cap* the tier,
@@ -538,30 +552,53 @@ The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy
 | `aw send <id> <text…>` | Send a message to a session the app runs (`-` reads the text from stdin). |
 | `aw stop <id> [--force]` | End the process running a session, as the row menu's *Close session* does. A session mid-turn is left alone unless `--force`. |
 | `aw projects` | The project folders the launcher offers. |
-| `aw task <objective…> [--criteria "a; b"] [--folder <dir>] [--claude\|--codex]` | Propose a task. The app assesses and routes it, then waits for you to start it (see below). `-` reads the objective from stdin. |
+| `aw delegate <objective…> [--criteria "a; b"] [--folder <dir>] [--claude\|--codex]` | Hand work over. A read-only planner decides whether it is one task or several, and the app waits for you to approve the proposal or the plan (see below). `-` reads the objective from stdin. |
+| `aw task <objective…>` (same options) | Shortcut: always one task, no planner. The app assesses and routes it, then waits for you to start it. |
 | `aw tasks` | Tasks that are not finished, with their state and branch. |
 
 `<id>` is a session id, a unique prefix of one (four characters or more), or a key such as `claude:<id>`. `--json` prints the raw result.
 
-**Handing work to a task from a conversation (#80).** Ask the agent you are talking to to
-"run this as a task", and it runs `aw task` with the objective and criteria. The task is
-always proposed, never started: the app assesses it and picks a route (as in `assisted`
-mode, whatever `orchestration.routing.mode` says), then shows a *Task proposal* notification
-and a flash. The proposal is answered **in the conversation that asked for it** (#81): a card
-at the end of that conversation, styled like a question or a plan, with the recommended model
-and effort pre-selected, **Run**, and **Cancel task**. Changing the model or effort before
-Run is recorded as a disagreement with the router; Run on what was offered is an acceptance.
-The notification's click brings that conversation up. Nothing takes focus and nothing is
-accepted by keyboard alone, so an Enter meant for the composer can never start a task. A
-proposal with no known conversation (`aw task` from your own terminal) is reached from the
-notification or the launcher's **Tasks** menu instead. The
-branch is cut from the repository's primary checkout, not from the conversation's worktree.
-Needs `"orchestration.enabled": true`. A Claude Code skill telling agents when to use it is
-in `docs/skills/agentwrangler-task/SKILL.md`; copy it to `~/.claude/skills/`.
+**Delegating work from a conversation (#82).** Ask the agent you are talking to to "delegate
+this" (or "hand this off", "run this as a task"), and it runs `aw delegate` with the objective
+and criteria. You don't choose between a task and a mission: Agent Wrangler gives the outcome
+to the read-only planner (the one *Plan it for me* uses, biased to one task), and the
+planner decides.
+
+- **One task.** It becomes a task proposal, assessed and routed as in `assisted` mode whatever
+  `orchestration.routing.mode` says, and answered **in the conversation that delegated it**
+  (#81): a *Delegated* card at the end of that conversation, styled like a question or a plan,
+  with the recommended model and effort pre-selected, **Run**, and **Cancel**. Changing the
+  model or effort before Run is recorded as a disagreement with the router; Run on what was
+  offered is an acceptance. Your criteria come first on the task, then any the planner added.
+- **Several tasks.** It becomes a planned mission in plan review, and the card shows the plan:
+  each task (expand it for its objective and criteria) and what it comes after, the risks,
+  warnings and anything that stops it starting, **Approve and start**, **Edit in Missions**,
+  **Plan again…** and **Cancel**. Approved from the card, tasks without a pin run on the
+  launcher's model and effort, exactly as *Approve and start* in the Missions view.
+- **While it plans** the card says so and offers **Cancel**. If it **cannot be planned**, the
+  card says why and offers **Run as one task** (the objective and your criteria as given) or
+  **Plan again…**.
+
+Nothing runs until you press a button on the card: nothing takes focus and nothing is accepted
+by keyboard alone, so an Enter meant for the composer can never start work. The notification's
+click brings the conversation up. The delegating conversation is only where the card is shown:
+the work runs in sessions and worktrees of its own, cut from the repository's primary checkout,
+not from the conversation's worktree. Delegation cards and the proposal/plan they turn into
+say *Delegated*; once the work runs it is an ordinary task or mission (task strip, Missions
+view). `aw delegate` waits up to 100 s for the planner and prints its decision; after that it
+prints that the card will show it.
+
+`aw task` is the explicit shortcut when you already know it is one task: the same proposal
+and card (headed *Task proposal*), without the planner. A proposal with no known conversation
+(either command from your own terminal) is reached from the notification, the launcher's
+**Tasks** menu, or the Missions view instead. The Missions view's *New mission* stays as the
+advanced way to write or plan a mission yourself. Both need `"orchestration.enabled": true`.
+A Claude Code skill telling agents when to delegate is in
+`docs/skills/agentwrangler-task/SKILL.md`; copy it to `~/.claude/skills/`.
 
 - **It is a client of the app, never a supervisor.** It talks only to the app's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new at every launch). It never connects to session hosts, and every command goes the same way as the equivalent click. The app shows a short notice when `aw` sends or stops something.
 - **With the app quit**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the app starts) and what the app last recorded. Everything else says the app is not running.
-- **`task` is allowed there**, because it only ever creates a proposal. Nothing runs until you accept it in the app, so an agent calling it can't start work you haven't seen.
+- **`delegate` and `task` are allowed there**, because they only ever create a proposal or a plan. Nothing runs until you accept it in the app, so an agent calling them can't start work you haven't seen.
 - **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12).
 
 ## Remote control (experimental)
@@ -745,6 +782,7 @@ Choose **Install Status Hooks…** from the menu (or click *Install hooks* in th
 | `PermissionRequest` · `Elicitation` · `Notification`/`agent_needs_input` · `PreToolUse` for `AskUserQuestion` / `ExitPlanMode` | **Waiting**, stopped at a prompt (row names the tool, and what for) |
 | `Stop` with a reply that asks something · `StopFailure` | **Waiting** |
 | `Stop` with a reply that just reports | **Done** |
+| `Stop` with a reply that just reports, `background_tasks` not empty | **Busy**, chip *N in background* (never *Possibly stuck*) |
 | `UserPromptSubmit` · `PreToolUse` · `PostToolUse`/`PostToolBatch` | **Busy** (row shows the in-flight tool and its elapsed time) |
 | no events at all past `stuckThresholdSeconds` (default 10 min), nothing in flight | **Possibly stuck** |
 | `SessionEnd`, or pid gone | **Ended** |
@@ -757,6 +795,8 @@ Choose **Install Status Hooks…** from the menu (or click *Install hooks* in th
 **Always allow** is Claude Code's own *don't ask again*, not a second implementation of it. The `PermissionRequest` payload carries `permission_suggestions` — the exact permission updates the dialog's "don't ask again" would apply, e.g. `{type: "addRules", behavior: "allow", destination: "localSettings", rules: [{toolName: "Bash", ruleContent: "npm test:*"}]}`. The button hands that list straight back as `decision.updatedPermissions` on the allow, and Claude Code applies it to the session and saves it where the suggestion says (verified in the 2.1.268 binary: an allow decision's `updatedPermissions` is validated against the same schema as the SDK's, applied via `setSessionToolPermissionContext` and persisted). Only *allow* rules and directory grants are passed through — a `deny` or `ask` suggestion is dropped rather than applied by a button with that label. The button's tooltip names the rule and where it will be saved, the status bar confirms it afterwards, and it does not appear when the payload offered no suggestion.
 
 *Possibly stuck* is deliberately slow to trigger. Hooks fire on tool calls and prompts, not while the model is generating, so a long think or a large `Write` is silent for minutes (measured in one ordinary turn: 121s, 388s, 79s, 104s). The ETA column is what says "running long"; *stuck* means nothing at all for ten minutes.
+
+**Background work is not Done.** A turn can end with work still running: a background subagent, a background shell (`run_in_background`, or a foreground command Claude Code moved to the background when it hit its timeout), a Monitor. When that work finishes, Claude Code queues a `<task-notification>` as a new turn and the agent carries on, so a report like "I'll get back to you when the review finishes" is not the end. Every `Stop` payload says what is still running: `background_tasks`, a list of `{id, type: "subagent" | "shell" | …, status: "running", …}` (checked on Claude Code 2.1.281–2.1.283; `session_crons` alongside it is not counted). While that list is not empty, a reply that would read as **Done** stays **Busy**, with a dashed *N in background* chip and the kinds in its tooltip. It is never *Possibly stuck*, however quiet the wait, and it sends no "is done" toast or Discord done notice. The turn the notification starts fires `UserPromptSubmit` like any other, and its own `Stop` reports the list again, so the row goes to Waiting or Done on that reply, as usual. A reply that asks something stays **Waiting** whatever is running: the human is still the one being waited on. A background shell that never ends (a dev server) keeps its row Busy for as long as it runs.
 
 A **paused** session is silent by construction — its process is stopped, so it writes no transcript and fires no hooks — and both tables above would eventually call it *Possibly stuck*. Pausing is tracked separately from status for exactly that reason: the row moves to the *Paused* section, keeps the status it was stopped at, and is left out of the bell and the toasts until it is resumed.
 
@@ -777,9 +817,12 @@ Sessions with no hook data — anything started before installing them — are d
 | registry entry, no transcript file | *hidden* (nothing typed yet) |
 | last transcript line: assistant `stop_reason: end_turn`, reply asks something | **Waiting** |
 | last transcript line: assistant `stop_reason: end_turn`, reply just reports | **Done** |
+| …the same, with a background launch since this process started and no notification ending it | **Busy**, chip *N in background* |
 | last transcript line: assistant `tool_use` / user / queue-op | **Busy** |
 | busy but transcript silent > `stuckThresholdSeconds` (default 10 min) | **Possibly stuck** |
 | pid gone | **Ended** |
+
+Background work in the transcript (used when no `Stop` of the current process has reported `background_tasks`; same Claude Code versions): a launch is the tool result's `toolUseResult` — `backgroundTaskId` for a shell, `isAsync` + `agentId` for a subagent (the Agent tool can run async without `run_in_background`), `taskId` + `timeoutMs` for a Monitor. Its end is the `queue-operation` enqueue written the moment it finishes, or the user line that enqueue becomes: a `<task-notification>` naming its `<task-id>` with a `<status>` (`completed`, `failed`, `killed`, `stopped`). A notification without a `<status>` is a monitor event, and the monitor is still running. `TaskStop`'s result ends one too. Launches from before the current process started are ignored: Claude Code kills background work when it exits, and a `--resume` appends to the same transcript without closing them. Only what the tail read covers is known, so a launch older than the first read is missed, which errs toward Done.
 
 Inference cannot distinguish a permission prompt from a long tool call from a wedged session — all three look like a silent transcript. That limitation is the reason hooks exist; without them, *Possibly stuck* is a guess.
 

@@ -332,6 +332,13 @@
   }
 }
 
+/* The first paint of a card that opens because its switch is already on: the
+   state is final immediately, nothing slides into view. Applied for one frame
+   and dropped, so every change after that first paint animates as normal. */
+#prefsApp .pf-dependents.pf-no-anim {
+  transition: none;
+}
+
 /*
  * The buttons a feature needs that are not settings, and what they report.
  *
@@ -475,6 +482,66 @@
 
 #prefsApp .pf-policy-status {
   margin: 6px 0 0;
+}
+
+/* Automatic routing (#42): the gate's checks and the shadow comparison, as
+   rows that wrap — the value drops under its label in a narrow window. */
+#prefsApp .pf-gate,
+#prefsApp .pf-report {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#prefsApp .pf-gate-verdict {
+  margin: 0 0 2px;
+  font-weight: 600;
+}
+
+#prefsApp .pf-gate.met .pf-gate-verdict,
+#prefsApp .pf-gate-check.met .pf-gate-mark {
+  color: var(--vscode-testing-iconPassed, #3fb950);
+}
+
+#prefsApp .pf-gate.unmet .pf-gate-verdict,
+#prefsApp .pf-gate-check.unmet .pf-gate-mark {
+  color: var(--vscode-errorForeground, #ed4245);
+}
+
+#prefsApp .pf-gate-check,
+#prefsApp .pf-report-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+}
+
+#prefsApp .pf-gate-mark {
+  flex: 0 0 1.2em;
+}
+
+#prefsApp .pf-gate-value,
+#prefsApp .pf-report-value {
+  flex: 1 1 14em;
+  margin: 0;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .pf-gate-detail,
+#prefsApp .pf-gate-line {
+  margin: 0 0 0 1.8em;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .pf-gate-override {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-errorForeground, #ed4245);
+  border-radius: 4px;
 }
 
 #prefsApp .pf-sources {

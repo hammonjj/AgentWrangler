@@ -52,6 +52,7 @@ function materialFingerprint(s: AgentSession): string {
     s.permissionRequestId ?? '',
     s.alwaysAllow?.rules.join(',') ?? '',
     s.activeTool?.name ?? '',
+    s.backgroundTasks ? `${s.backgroundTasks.subagents}/${s.backgroundTasks.shells}/${s.backgroundTasks.other}` : '',
     // Turn progress, minus elapsed time: the webview ticks that locally, so
     // including it here would make every poll a material change for every row.
     s.progress?.startedAtMs ?? '',

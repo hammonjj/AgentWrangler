@@ -228,6 +228,10 @@ export interface RoutingRecord extends RecordBase {
   verdict: RouteRecommendation['verdict'];
   recommended?: ExecutionTarget;
   ran: ExecutionTarget;
+  /** AW's effort level for the route that ran (#42), so the comparison report does not wait for the attempt to end. */
+  ranEffort?: EffortLevel;
+  /** The escalation step that launched this attempt (#42). Absent: the task's own decision, not the ladder's. */
+  escalationStep?: number;
   agreement: RouteAgreement;
   changed: RouteDimension[];
   candidates: { chosen: number; fallback: number; rejected: number };

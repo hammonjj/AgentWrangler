@@ -79,6 +79,11 @@ function fakeBackend() {
       if (p.objective === 'off') throw new ControlError(RPC_UNSUPPORTED, 'Tasks are off.');
       return { task: { ...taskView }, verdict: 'route', route: 'Sonnet · medium' };
     },
+    delegate: async (p) => {
+      origins.push(p.origin);
+      calls.push(`delegate ${p.folder} ${p.objective} [${(p.acceptanceCriteria ?? []).join('|')}] ${p.harness ?? '-'}`);
+      return { task: { ...taskView }, decision: 'multiple', tasks: [{ key: 't1', title: 'One' }, { key: 't2', title: 'Two' }] };
+    },
     tasks: () => [taskView],
   };
   return { backend, calls, origins, emit: (e: SessionViewEvent) => emit?.(e), close: (r: 'ended') => close?.(r), disposed: () => disposed };
@@ -256,6 +261,26 @@ describe('control socket', () => {
     server!.stopMutations();
     expect(await codeOf(client.request('task.propose', { folder: '/Users/test/proj', objective: 'x' }))).toBe(RPC_UNSUPPORTED);
     expect((await client.request<ControlTasksResult>('tasks')).tasks).toEqual([taskView]);
+    client.close();
+  });
+
+  it('delegates with the same checked params, logs the repository but never the objective, and is a change (#82)', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    const r = await client.request('delegate', {
+      folder: '/Users/test/proj',
+      objective: 'secret outcome',
+      acceptanceCriteria: [' a ', 'b'],
+      origin: { provider: 'codex', sessionId: 'thread-1234' },
+    });
+    expect(r).toEqual({ task: taskView, decision: 'multiple', tasks: [{ key: 't1', title: 'One' }, { key: 't2', title: 'Two' }] });
+    expect(fake.calls).toEqual(['delegate /Users/test/proj secret outcome [a|b] -']);
+    expect(fake.origins).toEqual([{ provider: 'codex', sessionId: 'thread-1234' }]);
+    expect(logs).toEqual([`control socket: delegate proj by aw pid ${process.pid}`]);
+    expect(await codeOf(client.request('delegate', { folder: 'relative/dir', objective: 'x' }))).toBe(RPC_INVALID_PARAMS);
+    server!.stopMutations();
+    expect(await codeOf(client.request('delegate', { folder: '/Users/test/proj', objective: 'x' }))).toBe(RPC_UNSUPPORTED);
     client.close();
   });
 

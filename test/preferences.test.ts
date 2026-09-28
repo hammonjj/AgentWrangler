@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { modelPolicyChange, settingUpdate, type PreferencesToHost } from '../src/shared/preferences';
-import { SETTINGS } from '../src/shared/settings';
+import { dependentParentKeys, SETTINGS, validateDependencies, type SettingSpec } from '../src/shared/settings';
 
 /**
  * The Preferences window writes straight through to the settings file, so what
@@ -73,6 +73,76 @@ describe('settingUpdate', () => {
         value: spec.default,
       });
     }
+  });
+});
+
+/**
+ * Preferences nests a `dependsOn` setting under its switch and collapses the
+ * card the switch governs when it is off (#76). Both rely on the same two
+ * facts about the declaration order in `settings.ts`, which is why they are
+ * checked here rather than trusted by eye: the switch is a boolean, and it is
+ * declared before anything that depends on it.
+ */
+describe('validateDependencies', () => {
+  it('finds nothing wrong with the real settings list', () => {
+    expect(validateDependencies(SETTINGS)).toEqual([]);
+  });
+
+  const boolSpec = (key: string, extra: Partial<SettingSpec> = {}): SettingSpec => ({
+    key,
+    label: key,
+    group: 'Test',
+    type: 'boolean',
+    default: false,
+    description: '',
+    ...extra,
+  });
+  const stringSpec = (key: string, extra: Partial<SettingSpec> = {}): SettingSpec => ({
+    key,
+    label: key,
+    group: 'Test',
+    type: 'string',
+    default: '',
+    description: '',
+    ...extra,
+  });
+
+  it('refuses a dependsOn that names no setting', () => {
+    expect(validateDependencies([stringSpec('child', { dependsOn: 'nothing.such' })])).toEqual([
+      'child depends on nothing.such, which no setting declares',
+    ]);
+  });
+
+  it('refuses a dependsOn on a non-boolean', () => {
+    expect(
+      validateDependencies([stringSpec('parent'), stringSpec('child', { dependsOn: 'parent' })]),
+    ).toEqual(['child depends on parent, which is not a boolean']);
+  });
+
+  it('refuses a dependsOn declared before its switch', () => {
+    expect(
+      validateDependencies([stringSpec('child', { dependsOn: 'parent' }), boolSpec('parent')]),
+    ).toEqual(['child depends on parent, declared later in the list']);
+  });
+
+  it('accepts a boolean switch declared before what depends on it', () => {
+    expect(validateDependencies([boolSpec('parent'), stringSpec('child', { dependsOn: 'parent' })])).toEqual([]);
+  });
+});
+
+describe('dependentParentKeys', () => {
+  it('lists each switch once, in the order it is first depended on', () => {
+    expect(dependentParentKeys(SETTINGS)).toEqual([
+      'experimental.sessionHosts',
+      'autoPause.enabled',
+      'remote.enabled',
+    ]);
+  });
+
+  it('the two example groups from #76 are both switches with a dependent field', () => {
+    const keys = dependentParentKeys(SETTINGS);
+    expect(keys).toContain('remote.enabled');
+    expect(keys).toContain('experimental.sessionHosts');
   });
 });
 

@@ -242,6 +242,44 @@ export interface AgentSession {
    * leaving this unset (`shared/rateLimitClassification.ts`).
    */
   rateLimit?: RateLimitStoppage;
+  /**
+   * For `busy`: the turn is over, but it left work running in the background
+   * (subagents, shells, monitors), and Claude Code will hand the results back
+   * and carry on (#60). This is what keeps such a row out of Done; absent
+   * whenever the session is not being held for it.
+   */
+  backgroundTasks?: BackgroundTaskCounts;
+}
+
+/** Background work a session is waiting on, by kind. */
+export interface BackgroundTaskCounts {
+  subagents: number;
+  shells: number;
+  /** Monitors and any kind a newer Claude Code reports that we don't name. */
+  other: number;
+}
+
+export function backgroundTaskTotal(c: BackgroundTaskCounts): number {
+  return c.subagents + c.shells + c.other;
+}
+
+/**
+ * The row chip for held background work: short enough for a 300 px pane
+ * ("2 in background"), with the breakdown in the tooltip.
+ */
+export function backgroundTasksChip(c: BackgroundTaskCounts): { text: string; title: string } {
+  const parts: string[] = [];
+  const add = (n: number, one: string, many: string): void => {
+    if (n > 0) parts.push(`${n} ${n === 1 ? one : many}`);
+  };
+  add(c.subagents, 'subagent', 'subagents');
+  add(c.shells, 'shell', 'shells');
+  add(c.other, 'other task', 'other tasks');
+  const list = parts.length <= 1 ? (parts[0] ?? '') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  return {
+    text: `${backgroundTaskTotal(c)} in background`,
+    title: `Turn over, waiting on ${list} running in the background. It carries on when they report back.`,
+  };
 }
 
 /**

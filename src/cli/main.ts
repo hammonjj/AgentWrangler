@@ -20,6 +20,7 @@ import {
   type ControlSubscribeParams,
   type ControlSubscribeResult,
   type ControlSessionRef,
+  type ControlDelegateResult,
   type ControlTaskProposeParams,
   type ControlTaskProposeResult,
   type ControlTasksResult,
@@ -28,7 +29,7 @@ import * as path from 'node:path';
 import { agentEnvironment, harnessOf, originOf, parseArgs, USAGE, type Command } from './args';
 import { ATTACH_BACKLOG, AttachRenderer } from './attach';
 import { ControlClient } from './client';
-import { formatOffline, formatProjects, formatProposal, formatSession, formatSessions, formatStatus, formatTasks } from './format';
+import { formatDelegation, formatOffline, formatProjects, formatProposal, formatSession, formatSessions, formatStatus, formatTasks } from './format';
 import { readOfflineView } from './offline';
 
 declare const AW_BUILD_ID: string | undefined;
@@ -152,10 +153,11 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
     }
     case 'attach':
       return attach(cmd.ref, client);
+    case 'delegate':
     case 'task': {
       const objective = cmd.objective ?? (await readStdin());
       if (objective.trim().length === 0) {
-        process.stderr.write('aw task: the objective is empty.\n');
+        process.stderr.write(`aw ${cmd.kind}: the objective is empty.\n`);
         return 2;
       }
       const params: ControlTaskProposeParams = {
@@ -165,6 +167,12 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
         ...((cmd.harness ?? harnessOf(process.env)) ? { harness: cmd.harness ?? harnessOf(process.env) } : {}),
         ...(originOf(process.env) ? { origin: originOf(process.env) } : {}),
       };
+      if (cmd.kind === 'delegate') {
+        // The app answers within ~100 s, with the planner's decision or "still planning".
+        const r = await client.request<ControlDelegateResult>('delegate', params, { timeoutMs: 180_000 });
+        print(r, () => formatDelegation(r, params.origin !== undefined), cmd.json);
+        return 0;
+      }
       // Assessing is one model call, which can take longer than a read.
       const r = await client.request<ControlTaskProposeResult>('task.propose', params, { timeoutMs: 180_000 });
       print(r, () => formatProposal(r, params.origin !== undefined), cmd.json);
