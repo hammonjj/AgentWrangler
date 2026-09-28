@@ -2080,12 +2080,17 @@ and, later, local endpoints.
 
 ---
 
-## 19. Local models: supported by design, not implemented
+## 19. Local models
 
 Nothing in this plan installs or configures local inference. What it does is make sure a local
 model can join later as configuration plus an adapter, with no change to tasks, assessments, rules
 or stores. The #50 spike (2026-09-25, §19.6) tried that against real runtimes and both harnesses.
 The door fits, with the gaps and the recommendation for #51 recorded there.
+
+What has been built since: #51's endpoint registry, probes, health, direct completions, the
+Codex path and stage 1 of qualification (§19.7), with the live check of the Codex path (§19.7.1);
+local planning (§19.8); and the tier-map status line, the harness-pin warning and qualification
+stage 2 (§19.9). The Claude Code path is still not built.
 
 ### 19.1 Two ways a local model does work
 
@@ -2140,7 +2145,9 @@ metrics.
    as **unassigned** (§6.3).
 2. Optionally, the model runs a small **qualification set** of verifiable tasks on scratch
    repositories (a subset of the corpus with real checks), and the result is shown next to the
-   tier choice. The shape #50 proposes is in §19.6.
+   tier choice. The shape #50 proposes is in §19.6. Stage 1 is built as *Qualify* (§19.7) and
+   stage 2 as *Qualify tasks* (§19.9). Beside the tier choice, a status line also says what the
+   model still needs for completions, planning and agentic work.
 3. The user assigns a tier. From then on the resolver can pick it like any other candidate,
    under the same caps, and "prefer local" or "disable local" steer it.
 
@@ -2249,6 +2256,8 @@ not the model):
 3. *Show, don't tier*: results appear next to the tier picker. The model stays unassigned until
    the user picks a tier (§6.3). One four-bug fix is `basic`-level evidence at most.
 
+All three stages are now built: stage 1 in #51 (§19.7), stages 2 and 3 in §19.9.
+
 **Recommendation for #51: go, in two slices, Codex first; the Claude Code path is not in #51.**
 
 - **Slice A, no harness:** the endpoint registry (loopback only by default), per-runtime probes
@@ -2282,7 +2291,7 @@ types are unchanged. What changed is adapters, settings and the catalog's inputs
 | Descriptors | `shared/orchestration/localModels.ts` | `measured` > `probed` > `declared` > unknown, per field. `nativeEffort: []`, `costBasis: 'none'`. Harness `codex` only where `/v1/responses` was probed. |
 | Catalog | `buildCatalog({ local })`, `CapabilityCatalog.setLocal` | Local models are never given a default tier, so they start unassigned. `routable` needs a tier, an enabled model, an endpoint that is on, and a harness. `completions` is the same without the harness. |
 | Service | `orchestration/local/localEndpointService.ts` | Probe at start and every 10 min. Health every 30 s from the runtime's cheapest route: one miss `degraded`, two `down`, then `onDown`. A failed re-probe keeps the last good probe. Slots are a gate for direct calls (`acquire`, whose wait is the queue delay). Attempts count against slots in the resolver snapshot. |
-| Qualification | `qualifyModel` | Stage 1 of §19.6 (10 tool calls, 10 round trips, 20 JSON replies, synthetic), shown beside the tier picker. Results are `measured` and persisted. Stage 2 (scratch-repo tasks) is not built. |
+| Qualification | `qualifyModel` | Stage 1 of §19.6 (10 tool calls, 10 round trips, 20 JSON replies, synthetic), shown beside the tier picker. Results are `measured` and persisted. Stage 2 (scratch-repo tasks) is built too, as *Qualify tasks* (`runTaskQualification`, §19.9). Its results are stored beside stage 1's. |
 | Resolver | `policy/resolver.ts` | An endpoint model needs known, non-`none` tool calling for agentic work. It never gets the assumed hosted window, even when external. Zero free slots is capacity (`blocked`). |
 | Agentic | `CodexHarness` + `codexThreadParams` | A local target is a Codex thread with `modelProvider: aw-<id>` and `config.model_providers.aw-<id> = {base_url: <url>/v1, wire_api: "responses"}`. `model_context_window` comes from the catalog. The key is read per request (`experimental_bearer_token`) and never recorded. The provider is in the launch policy, so every resume re-sends it, and since the live check (below) every `thread/resume` and `thread/fork` also names the `model`. A declared `codexModelCatalog` is recorded but no longer sent as `model_catalog_json` (below, (c)). |
 | Completions | `completion/localCompletion.ts` | `LocalStructuredCompletion`: streamed `chat/completions`, `response_format` only where probed, otherwise the schema goes in the instructions, then validation and one retry. A dropped stream or refused connection is `infra`. `RoutedCompletion` puts the weakest-tier local model ahead of the hosted completion and falls back to it on any failure but an abort. Workspace requests (the reviewer) always go hosted. |
@@ -2347,7 +2356,8 @@ counts that as present, because only 404, 405 and 501 mean absent.
 - The catalog entry used was a clone of a built-in entry with `use_responses_lite: false` and
   `apply_patch_tool_type: "freeform"`, with `slug` and `context_window` changed (§19.6).
 - A 1.5B model is enough for these protocol questions but says nothing about task quality. The
-  qualification of §19.6 (stage 1 is built, as *Qualify*) is still what decides that.
+  qualification of §19.6 is still what decides that. Stage 1 is built as *Qualify*, and stage 2,
+  which runs scratch-repo tasks through this same path, as *Qualify tasks* (§19.9).
 
 **What changes.**
 
@@ -2389,6 +2399,35 @@ The reviewer stays hosted (§11.5, last paragraph).
 
 Open: no live run has measured a local model's plans against the hosted planner's on the same
 objectives. The planning corpus (`test/orchestration/planningCorpus.ts`) is the place to do it.
+
+### 19.9 As built: readiness beside the tier picker, and qualification stage 2 (2026-09-28)
+
+Three kinds of work pick a local model by three different rules, so a model can have a tier and
+still get none of them. Preferences → Orchestration now says, beside each local model's tier
+picker, what it still needs, and it runs §19.6's stage 2.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Status line | `shared/orchestration/localReadiness.ts` (`localModelStatus`), rendered in the tier map | Per kind of work, ready or what is missing. **Completions** (`pickCompletion`): enabled, tier equal to the weakest (`tiers[0]`), endpoint on and not down. **Planning** (§11.5, `pickPlannerEntry`): the same, but tier `standard` or above (`PLANNER_LOCAL_MIN_TIER`, now declared here and re-exported by the service), and a window a repository excerpt fits in (`contextLimits`, computed by the host). **Agentic** (the resolver): `/v1/responses` probed, tool calling known and not `none`, a tier. Tool calling that is only declared counts, as it does in the resolver, and the line says it was not measured. A stage-1 verdict of completion-only, a server without `/v1/responses`, or tool calling known to be `none` is shown as "Completion only: …" with the reason (e.g. "stage-1 qualification: tool calls 0/10 (measured)"), not as a list of needs. |
+| Harness-pin warning | `localHarnessWarning` | When a local model is enabled on an endpoint that is on, and the global routing policy pins (`pins.harness`) or prefers (`preferences.harness`) `claude-code`, or excludes `codex` (`exclusions.harnesses`), Preferences says this rules out the Codex path, so local models cannot get agentic work. It is shown under Routing defaults and Local endpoints, and it adds a need to each local model's agentic status. It does not block saving the policy. |
+| Fixtures | `orchestration/local/qualification-fixtures/<id>/` (`fixture.json` + `repo/`) | Four scratch repos, plain Node with no dependencies: `text-utils`, `cart-total`, `day-ranges`, `lru-cache`. Each has one module with 3–4 seeded bugs, a deterministic check (`node test/check.js`, which prints `ok` and exits 0 only when every case passes), protected tests (`test/**`) and an allowed-paths list (`src/**`). The build copies them to `dist/qualification-fixtures`, which ships in the app. A test checks that each one fails as seeded and passes with a reference fix. They contain synthetic code only. |
+| Runner | `orchestration/local/taskQualifier.ts` (`runTaskQualification`, `taskQualifier`) | Per fixture, k = 3 runs. Each run copies `repo/` into a fresh temp dir, runs `git init` and commits a baseline. It then calls `CodexHarness.launch` with target `{harness: codex, source: local:<id>, model}`, so the thread gets the endpoint's `codexProvider` and `codexThreadParams` as a routed attempt does (§19.7.1: `model` on every call, no `model_catalog_json`). The policy is `attemptLaunchPolicy`'s Codex sandbox (`workspace-write`, `on-request`) and the prompt is `attemptPrompt`'s. The run is followed until it is idle after a turn (settled), ended, failed, asking, or past 10 minutes. A question or an approval request fails the run, since nobody answers during qualification. The session is ended and the temp dir removed, whatever happened. The origin is `{kind: orchestration, missionId: qualification}`, which no mission owns. The app wires it in `createApp` with its own `CodexHarness`, so stage 2 works whether or not orchestration is on. |
+| Checks | `shared/orchestration/localQualification.ts` | Pure, applied by AW after the session ends: `testsPass` (the check exits 0, run as the app's own Node; a timeout or a spawn failure is not a pass), `testsUntouched` (no changed path matches `protected`), `diffInsideAllowed` (every changed path matches `allowed`). Changed paths come from `git status --porcelain=v1 -z --untracked-files=all`, and a rename counts both paths. `judgeRun` combines them, and the failure it reports is the first check that failed. |
+| Results | `LocalEndpointService.qualifyTasks`, stored state `tasks` | Pass count of k × fixtures, per-fixture passes, mean turns (harness turns), mean wall time, and tokens summed from Codex's thread usage (`codexTurnUsage`). They are `measured`, stored beside stage 1's in the service's global state (`agentWrangler.localEndpoints`), and survive a restart. Each run is a `local-call` record with `purpose: 'qualification'`, `qualificationStage: 2`, the fixture id and run number, and counts and timings only. One server slot is held for the whole stage. A model whose stage-1 verdict is completion-only is refused, and nothing is stored. |
+| Not runnable | same | An endpoint whose probe did not find `/v1/responses` (e.g. `mlx_lm.server`) is recorded as `runnable: false`, "not runnable: no /v1/responses". No pass rate is recorded, no run is started and no record is written. |
+| UI | `webview/preferences/orchestration.ts` | *Qualify tasks* sits next to *Qualify* on each endpoint model. It shows progress while running and the result when done. The tier map shows the status line, stage 1's result and stage 2's result under the tier picker. |
+
+**No tier is ever assigned from qualification.** Neither stage writes `orchestration.models`,
+and a test checks that the only setting stage 2 writes is the endpoint registry (§19.6 point 3,
+§6.3).
+
+Open:
+
+- No live stage-2 run has been recorded. On this machine it needs a GGUF model on
+  `llama-server`, because MLX has no `/v1/responses`.
+- Without a Codex catalog entry for the local model, Codex does not offer it `apply_patch`
+  (§19.7.1, "What changes" point 2). A stage-2 run therefore measures the model on
+  fallback metadata, which is also how a routed attempt runs today.
 
 ---
 

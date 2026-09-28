@@ -499,6 +499,30 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
   it a tier. *Qualify* runs §19.6's stage-1 probe against it: 10 tool calls, 10 tool-result round
   trips and 20 JSON replies, all synthetic. That sets tool calling and structured output to
   `measured`. Any miss makes the model completion-only.
+- **Qualify tasks** runs stage 2 (plan §19.9). There are four small scratch repos, plain Node
+  with no dependencies, each with seeded bugs, a check (`node test/check.js`), protected tests and
+  a list of the paths the agent may change. Each runs 3 times as a Codex thread on the endpoint,
+  under the same sandbox and prompt framing as a routed attempt, in a temp dir that is removed
+  afterwards. A run passes when the check exits 0, nothing under `test/` changed, and every
+  changed path is inside the allowed ones. A run that asks for approval fails, since nobody is
+  there to answer it. The result shows the pass rate, turns, wall time and tokens, all
+  `measured`. It is kept with stage 1's and survives a restart, and each run writes a
+  `local-call` record. On a server without `/v1/responses` (`mlx_lm.server`) it says *not
+  runnable: no /v1/responses* and records no pass rate. It takes minutes. Neither stage ever
+  sets a tier.
+- **Status beside the tier picker.** Each local model's row in the tier map says what it can
+  be picked for now, and what it still needs for each kind of work:
+  - Completions need it enabled, at the weakest tier (`basic`), on an endpoint that is on and
+    not down.
+  - Planning needs `standard` or above and a context window a repository excerpt fits in.
+  - Agentic work needs `/v1/responses` on the server, tool calling that is measured (or
+    declared), and a tier.
+
+  A model that stage 1 found completion-only is shown as *Completion only* with the measured
+  count, for example `tool calls 0/10`. Both stages' results appear under the picker.
+- **Harness-pin warning.** If the routing defaults pin or prefer Claude Code, or exclude Codex,
+  while a local model is enabled, Preferences warns that this rules out the Codex path, so local
+  models cannot get agentic work. They still answer completions and plan.
 - **What it does once tiered.** Agentic tasks run as a Codex thread whose model provider is the
   endpoint (Responses wire), under the same sandbox as any attempt. That needs `/v1/responses`
   on the server and measured tool calling. A model at the weakest tier (`basic`) answers
@@ -547,8 +571,9 @@ Extra `mlx_lm.server` flags go after `--`. `--host`, `--port` and `--model` ther
 To register the server, use **Preferences → Orchestration → Local endpoints**: enter URL
 `http://127.0.0.1:18080` and a name, then *Add endpoint*. Once the server says it is listening,
 press *Probe*. Then give the model a tier in the **Tier map**: `basic` for assessments, or
-`standard` or above so missions that prefer local models can plan with it. *Qualify* is
-optional. Or, with the app quit, add the entry the script prints to `orchestration.localEndpoints`:
+`standard` or above so missions that prefer local models can plan with it. The status line
+under the picker says whether that took. *Qualify* is optional. *Qualify tasks* reports *not
+runnable* here, because `mlx_lm.server` has no `/v1/responses`. Or, with the app quit, add the entry the script prints to `orchestration.localEndpoints`:
 
 ```json
 {
