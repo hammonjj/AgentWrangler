@@ -1929,7 +1929,7 @@ subtype, and `latestKindOf` matched only `type/subtype`. Fixed with #16.
 | Session host crashes | I + L + M | SIGKILL host → `lost` → orphan sweep → `interrupted`; live: real claude mid-tool (S1 regression) | 4 |
 | Agent CLI crashes | I | fake agent exits non-zero → exit record, drain, `failed` | 3–4 |
 | Permission request while UI closed | I | pending ask with no client; connect → snapshot has it → `respondAsk` applies | 3 |
-| Discord response while UI closed | U + M | window closed, core up: remote service → host-first routing. **Core fully quit is not supported until Stage 7 (documented)** | 3 |
+| Discord response while UI closed | U + M | window closed, core up: remote service → host-first routing. App fully quit: the remote daemon (Stage 7, #74) follows its own feed and keeps answering | 3, 7 |
 | Multiple clients attach | I | two connections: both get events; second answer `stale`; observer can't command | 3 |
 | Large output | I | 10 MB tool result + 16 MiB image frame limits; `capBlock` in core | 3 |
 | Slow client / backpressure | I | paused reader → queue overflow → `resync` → re-snapshot; agent never stalls (dummy child keeps writing) | 3–4 |
