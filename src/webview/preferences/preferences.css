@@ -634,6 +634,24 @@
   color: var(--vscode-charts-yellow, #d29922);
 }
 
+/* A local model's readiness, beside its tier picker (§19.9). */
+#prefsApp .pf-model-status {
+  margin: 4px 0 0;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+  color: var(--vscode-charts-yellow, #d29922);
+}
+#prefsApp .pf-model-status.ready {
+  color: var(--vscode-charts-green, #3fb950);
+}
+#prefsApp .pf-model-status.completion-only {
+  font-style: italic;
+}
+
+#prefsApp .pf-harness-warning {
+  font-weight: 600;
+}
+
 #prefsApp .pf-model.notroutable .pf-model-name {
   opacity: 0.8;
 }

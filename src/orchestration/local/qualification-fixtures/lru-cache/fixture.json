@@ -1,0 +1,7 @@
+{
+  "title": "Least-recently-used cache",
+  "prompt": "The class in src/cache.js is a least-recently-used cache with a fixed capacity, and it has bugs. Fix them so that `node test/check.js` prints ok and exits 0. Change only files under src/. Do not change, add or delete anything under test/.",
+  "check": ["node", "test/check.js"],
+  "protected": ["test/**"],
+  "allowed": ["src/**"]
+}

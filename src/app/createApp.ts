@@ -63,6 +63,8 @@ import { Emitter } from '../core/events';
 import type { TelemetryRecord, TurnRecord } from '../shared/orchestration/telemetry';
 import { isEndpointSource } from '../shared/orchestration/localEndpoints';
 import { LocalEndpointService } from '../orchestration/local/localEndpointService';
+import { taskQualifier } from '../orchestration/local/taskQualifier';
+import { CodexHarness } from '../orchestration/harness/codexHarness';
 import { LocalMetricsIndex } from '../core/telemetry/localMetricsIndex';
 import { RoutingEvidenceIndex } from '../core/telemetry/routingEvidenceIndex';
 import { comparisonReport, effectiveMode, evaluateGate, type ComparisonReport, type GateResult } from '../shared/orchestration/autoRouting';
@@ -546,6 +548,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }),
   );
   const sessions = new SessionExecutors([runners, codexRunners]);
+  // Qualification stage 2 (§19.6): scratch-repo tasks as Codex threads on the
+  // endpoint, through the same harness adapter a routed attempt uses, whether
+  // or not orchestration is on. The fixtures are copied next to the bundle by
+  // the build (`dist/qualification-fixtures`, from `src/orchestration/local/qualification-fixtures`).
+  localEndpoints.useTaskQualifier(
+    taskQualifier({
+      harness: new CodexHarness({ sessions, models: () => [], localProvider: (s, m) => localEndpoints.codexProvider(s, m) }),
+      fixturesDir: path.join(__dirname, '..', 'qualification-fixtures'),
+      log,
+    }),
+  );
 
   // Take back every session still running in a host, before the providers'
   // first scan: each is ours from the first snapshot, never an external

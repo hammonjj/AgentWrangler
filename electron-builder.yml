@@ -41,6 +41,9 @@ files:
   - dist/remoteDaemon/**
   # The `aw` CLI (#21), run by bin/aw the same way: app binary as Node, from the asar.
   - dist/cli/**
+  # Qualification stage 2's scratch-repo fixtures (plan §19.6), copied out of
+  # the asar into a temp dir for each run.
+  - dist/qualification-fixtures/**
   - build/icon.png
 
 asar: true

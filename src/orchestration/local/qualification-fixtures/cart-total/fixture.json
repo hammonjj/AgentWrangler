@@ -1,0 +1,7 @@
+{
+  "title": "Shopping cart total",
+  "prompt": "The module src/cart.js computes a shopping cart's total and has bugs. Fix them so that `node test/check.js` prints ok and exits 0. Change only files under src/. Do not change, add or delete anything under test/.",
+  "check": ["node", "test/check.js"],
+  "protected": ["test/**"],
+  "allowed": ["src/**"]
+}

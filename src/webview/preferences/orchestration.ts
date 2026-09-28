@@ -19,7 +19,8 @@ import { EFFORT_LEVELS, type ExecutionPolicy } from '../../shared/orchestration/
 import type { SourceStatus } from '../../shared/orchestration/sourceHealth';
 import { harnessLabel, sourceLabel } from '../../shared/harness';
 import { formatTokens } from '../../shared/sessionUsage';
-import { DATA_LEAVES_MACHINE, type LocalEndpointView } from '../../shared/orchestration/localEndpoints';
+import { DATA_LEAVES_MACHINE, isEndpointSource, type LocalEndpointView } from '../../shared/orchestration/localEndpoints';
+import { localHarnessWarning, localModelStatus } from '../../shared/orchestration/localReadiness';
 import { localSummaryText, type LocalModelSummary } from '../../shared/orchestration/localMetrics';
 
 export const ORCHESTRATION_GROUP = 'Orchestration';
@@ -74,7 +75,47 @@ function tierSelect(entry: CatalogEntry, tiers: TierDef[], post: (m: Preferences
   return select;
 }
 
-function renderEntry(entry: CatalogEntry, tiers: TierDef[], post: (m: PreferencesToHost) => void): HTMLElement {
+/** What the tier map needs to know about local models: each endpoint by source, and the harness-pin warning. */
+interface LocalContext {
+  endpoints: Map<string, LocalEndpointView>;
+  harnessWarning?: string;
+}
+
+function localContext(view: OrchestrationPrefsView): LocalContext {
+  const endpoints = new Map((view.local?.endpoints ?? []).map((e) => [e.source as string, e]));
+  const enabled = view.catalog.entries.some((e) => e.enabled && endpoints.get(e.descriptor.source)?.enabled === true);
+  const harnessWarning = localHarnessWarning(view.routing?.policy, enabled);
+  return { endpoints, ...(harnessWarning ? { harnessWarning } : {}) };
+}
+
+/**
+ * Beside a local model's tier picker: what it still needs for completions,
+ * planning and agentic work (`localModelStatus`), then both qualification
+ * stages' results. They inform the choice; nothing sets a tier from them.
+ */
+function renderLocalStatus(row: HTMLElement, entry: CatalogEntry, tiers: TierDef[], local: LocalContext): void {
+  const endpoint = local.endpoints.get(entry.descriptor.source);
+  if (!endpoint) return;
+  const model = endpoint.models.find((m) => m.key === entry.key);
+  const status = localModelStatus({
+    entry,
+    tiers,
+    facts: {
+      endpointOn: endpoint.enabled,
+      health: endpoint.health.state,
+      ...(endpoint.responses !== undefined ? { responses: endpoint.responses } : {}),
+      ...(model?.stage1 ? { stage1: model.stage1 } : {}),
+      ...(model?.plannerWindowFits !== undefined ? { plannerWindowFits: model.plannerWindowFits } : {}),
+    },
+    ...(local.harnessWarning ? { harnessBlocked: local.harnessWarning } : {}),
+  });
+  const ready = status.completions.ready || status.planning.ready || status.agentic.ready;
+  row.appendChild(el('p', `pf-model-status${ready ? ' ready' : ''}${status.agentic.completionOnly ? ' completion-only' : ''}`, status.text));
+  row.appendChild(el('p', 'pf-desc pf-model-fact', `Qualification: ${model?.qualification ?? 'stage 1 not run'}`));
+  row.appendChild(el('p', 'pf-desc pf-model-fact', model?.tasksRunning ?? model?.tasks ?? 'Tasks: stage 2 not run'));
+}
+
+function renderEntry(entry: CatalogEntry, tiers: TierDef[], post: (m: PreferencesToHost) => void, local: LocalContext): HTMLElement {
   const d = entry.descriptor;
   const declared = entry.tierDeclared || entry.enabledDeclared;
   const row = el('div', `pf-model${entry.routable ? '' : ' notroutable'}${declared ? ' changed' : ''}`);
@@ -116,7 +157,9 @@ function renderEntry(entry: CatalogEntry, tiers: TierDef[], post: (m: Preference
     `Cost: ${costText(entry)}`,
   ];
 
-  row.append(head, controls, el('p', 'pf-desc pf-model-meta', where));
+  row.append(head, controls);
+  if (isEndpointSource(d.source)) renderLocalStatus(row, entry, tiers, local);
+  row.appendChild(el('p', 'pf-desc pf-model-meta', where));
   if (entry.external) row.appendChild(el('p', 'pf-endpoint-warning', `External endpoint: ${DATA_LEAVES_MACHINE}`));
   if (entry.completions && !entry.routable) row.appendChild(el('p', 'pf-desc pf-model-fact', 'Serves structured completions directly (no harness).'));
   for (const line of facts) row.appendChild(el('p', 'pf-desc pf-model-fact', line));
@@ -190,8 +233,16 @@ function renderEndpoint(
     q.disabled = !!m.qualifying || !e.enabled;
     q.title = 'Runs 10 tool calls, 10 tool-result round trips and 20 JSON replies against this model (synthetic prompts). Sets tool calling and structured output to measured.';
     row.appendChild(q);
+    const t = button(m.tasksRunning ? 'Running tasks…' : 'Qualify tasks', () => post({ type: 'localEndpoint', change: { op: 'qualifyTasks', id: e.id, model: m.id } }));
+    t.disabled = !!m.tasksRunning || !!m.qualifying || !e.enabled;
+    t.title =
+      e.responses === false
+        ? 'Stage 2 needs /v1/responses, which this server does not serve: it will report not runnable.'
+        : 'Stage 2: small scratch repos with seeded bugs, each run 3 times as a Codex thread on this endpoint, in the attempt sandbox. A run passes when the tests pass, the tests are untouched and the diff stays inside the allowed paths. Takes minutes. Does not set a tier.';
+    row.appendChild(t);
     card.appendChild(row);
     card.appendChild(el('p', 'pf-desc pf-model-fact', m.qualification ?? 'Not qualified: tool calling unknown, so it is not given agentic work.'));
+    if (m.tasksRunning || m.tasks) card.appendChild(el('p', 'pf-desc pf-model-fact', m.tasksRunning ?? m.tasks!));
     const s = summaries.find((x) => x.source === e.source && x.model === m.id);
     if (s) card.appendChild(el('p', 'pf-desc pf-model-fact', localSummaryText(s)));
   }
@@ -203,6 +254,7 @@ function renderLocal(
   host: HTMLElement,
   local: NonNullable<OrchestrationPrefsView['local']>,
   post: (m: PreferencesToHost) => void,
+  harnessWarning: string | undefined,
 ): void {
   host.appendChild(el('h3', 'pf-subhead', 'Local endpoints'));
   host.appendChild(
@@ -227,6 +279,7 @@ function renderLocal(
   }, 'pf-action primary');
   form.append(url, name, add);
   host.appendChild(form);
+  if (harnessWarning) host.appendChild(el('p', 'pf-policy-error pf-harness-warning', harnessWarning));
   if (localResult) host.appendChild(el('pre', `pf-actionresult${localResult.ok ? '' : ' bad'}`, localResult.lines.join('\n')));
   const list = el('div', 'pf-endpoints');
   for (const e of local.endpoints) list.appendChild(renderEndpoint(e, local.summaries, local.secretsAvailable, post));
@@ -358,6 +411,8 @@ function renderRouting(host: HTMLElement, view: OrchestrationPrefsView, post: (m
   }
   host.appendChild(form);
 
+  const harnessWarning = localContext(view).harnessWarning;
+  if (harnessWarning) host.appendChild(el('p', 'pf-policy-error pf-harness-warning', harnessWarning));
   for (const e of routingErrors) host.appendChild(el('p', 'pf-policy-error', e));
   for (const e of stored.ignored) host.appendChild(el('p', 'pf-policy-error', `Ignored in settings.json — ${e}`));
   if (routingStatus) host.appendChild(el('p', 'pf-desc pf-policy-status', routingStatus));
@@ -555,7 +610,8 @@ export function renderOrchestration(host: HTMLElement, view: OrchestrationPrefsV
   for (const s of view.sources) sources.appendChild(renderSource(s));
   host.appendChild(sources);
 
-  if (view.local) renderLocal(host, view.local, post);
+  const local = localContext(view);
+  if (view.local) renderLocal(host, view.local, post, local.harnessWarning);
 
   host.appendChild(el('h3', 'pf-subhead', 'Tier map'));
   if (view.catalog.entries.length === 0) {
@@ -563,7 +619,7 @@ export function renderOrchestration(host: HTMLElement, view: OrchestrationPrefsV
     return;
   }
   const list = el('div', 'pf-models');
-  for (const entry of view.catalog.entries) list.appendChild(renderEntry(entry, view.catalog.tiers, post));
+  for (const entry of view.catalog.entries) list.appendChild(renderEntry(entry, view.catalog.tiers, post, local));
   host.appendChild(list);
   host.appendChild(el('p', 'pf-desc pf-version', `Catalog version ${view.catalog.version}`));
 }

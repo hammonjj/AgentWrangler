@@ -35,6 +35,7 @@ import {
   parseLocalEndpoints,
   type LocalEndpointChange,
   type LocalEndpointConfig,
+  type LocalEndpointModelView,
   type LocalEndpointView,
 } from '../../shared/orchestration/localEndpoints';
 import { localModelReports, shortModelName, type EndpointProbe, type LocalModelReport, type Qualification } from '../../shared/orchestration/localModels';
@@ -45,6 +46,14 @@ import type { ModelSourceId } from '../../shared/orchestration/types';
 import type { CodexModelProvider } from '../../shared/launchPolicy';
 import { LocalStructuredCompletion, type LocalCompletionTarget, type SlotLease } from '../completion/localCompletion';
 import type { StructuredCompletion } from '../completion/structuredCompletion';
+import { PLANNER_LOCAL_MIN_TIER, plannerMinRank } from '../../shared/orchestration/localReadiness';
+import {
+  parseTaskQualification,
+  summariseTaskRuns,
+  taskQualificationText,
+  type TaskQualification,
+  type TaskRun,
+} from '../../shared/orchestration/localQualification';
 import type { FetchFn } from './openaiWire';
 import { checkHealth, probeEndpoint, qualifyModel, type QualifyOptions } from './probe';
 
@@ -58,7 +67,24 @@ interface Stored {
   v: 1;
   probes: Record<string, EndpointProbe>;
   qualifications: Record<string, Record<string, Qualification>>;
+  /** Stage 2 (§19.6), per endpoint then model. Optional: stored state from before stage 2 has none. */
+  tasks?: Record<string, Record<string, TaskQualification>>;
 }
+
+/** Runs stage 2 for one model: `runTaskQualification` over the shipped fixtures, bound to the app's Codex harness. */
+export type TaskQualifier = (req: {
+  source: ModelSourceId;
+  model: string;
+  /** Before the first run: how many there will be (fixtures × k), for the progress line. */
+  onStart: (total: number) => void;
+  onRun: (run: TaskRun) => void;
+}) => Promise<{
+  runs: TaskRun[];
+  /** Runs per fixture. */
+  k: number;
+  /** It stopped early, or could not start. */
+  error?: string;
+}>;
 
 interface EndpointState {
   health: SourceHealth;
@@ -108,6 +134,9 @@ export class LocalEndpointService implements Disposable {
   private readonly states = new Map<string, EndpointState>();
   private readonly probing = new Map<string, Promise<void>>();
   private readonly qualifying = new Set<string>();
+  /** Stage 2 running, per `<id>\0<model>`: runs done of the total. */
+  private readonly qualifyingTasks = new Map<string, { done: number; passed: number; total?: number }>();
+  private taskQualifier?: TaskQualifier;
   private stored: Stored;
   private timer?: ReturnType<typeof setInterval>;
   private sub?: Disposable;
@@ -449,7 +478,8 @@ export class LocalEndpointService implements Disposable {
         if (cfg.hasKey) await this.deps.secrets?.delete(endpointKeyRef(cfg.id)).catch(() => undefined);
         const { [cfg.id]: _p, ...probes } = this.stored.probes;
         const { [cfg.id]: _q, ...qualifications } = this.stored.qualifications;
-        this.stored = { ...this.stored, probes, qualifications };
+        const { [cfg.id]: _t, ...tasks } = this.stored.tasks ?? {};
+        this.stored = { ...this.stored, probes, qualifications, tasks };
         this.save();
         this.states.delete(cfg.id);
         this.changed();
@@ -498,7 +528,118 @@ export class LocalEndpointService implements Disposable {
       }
       case 'qualify':
         return this.qualify(change.id, change.model);
+      case 'qualifyTasks':
+        return this.qualifyTasks(change.id, change.model);
     }
+  }
+
+  /** Stage 2's runner, once the app has a Codex harness to give it. Without one, stage 2 says it is unavailable. */
+  useTaskQualifier(q: TaskQualifier | undefined): void {
+    this.taskQualifier = q;
+  }
+
+  /** Stage 2's stored result for one model. */
+  taskQualification(id: string, model: string): TaskQualification | undefined {
+    return this.stored.tasks?.[id]?.[model];
+  }
+
+  /**
+   * Stage 2 of §19.6's qualification for one model: the scratch-repo fixtures,
+   * k = 3 each, as Codex threads on this endpoint. Results are `measured`,
+   * stored beside stage 1's, and each run is a `local-call` record with
+   * purpose `qualification`. Nothing here, or anywhere, sets a tier from them.
+   *
+   * An endpoint without `/v1/responses` cannot run a harness, so stage 2 is
+   * recorded as not runnable, with no pass rate.
+   */
+  async qualifyTasks(id: string, model: string): Promise<{ ok: boolean; lines: string[] }> {
+    const cfg = this.endpoint(id);
+    const probe = this.stored.probes[id];
+    if (!cfg || !probe?.models.some((m) => m.id === model)) return { ok: false, lines: ['✗  That model is not listed by the endpoint.'] };
+    if (!endpointEnabled(cfg)) return { ok: false, lines: ['✗  Turn the endpoint on first.'] };
+    const flag = `${id}\0${model}`;
+    if (this.qualifyingTasks.has(flag) || this.qualifying.has(flag)) return { ok: false, lines: ['Already running.'] };
+    const responses = isKnown(probe.routes.responses) ? probe.routes.responses.value : undefined;
+    if (responses !== true) {
+      const q: TaskQualification = {
+        model,
+        at: this.now(),
+        runnable: false,
+        reason: responses === false ? 'no /v1/responses' : 'no /v1/responses (the probe could not tell; probe again)',
+      };
+      this.storeTasks(id, model, q);
+      this.changed();
+      return { ok: false, lines: [taskQualificationText(q)] };
+    }
+    const s1 = this.stored.qualifications[id]?.[model];
+    if (s1 && !s1.error && s1.verdict === 'completion-only') {
+      return { ok: false, lines: ['✗  Stage 1 found it completion-only (its tool calls do not parse), so the tasks would not be run.'] };
+    }
+    const run = this.taskQualifier;
+    if (!run) return { ok: false, lines: ['✗  Task qualification is not available: there is no Codex harness to run it through.'] };
+
+    const progress: { done: number; passed: number; total?: number } = { done: 0, passed: 0 };
+    this.qualifyingTasks.set(flag, progress);
+    this.changed();
+    const source = endpointSource(id);
+    let lease: SlotLease | undefined;
+    try {
+      // One slot for the whole stage: one agent at a time on the server, and direct calls wait their turn.
+      lease = await this.acquire(source);
+      const queuedMs = lease.queuedMs;
+      const result = await run({
+        source,
+        model,
+        onRun: (r) => {
+          progress.done++;
+          if (r.pass) progress.passed++;
+          this.recordCall({
+            source,
+            model,
+            purpose: 'qualification',
+            qualificationStage: 2,
+            fixture: r.fixture,
+            run: r.n,
+            ok: r.pass,
+            ...(r.pass ? {} : { failure: r.infra ? 'error' : 'failed-check' }),
+            ...(r.infra ? { infra: true } : {}),
+            ...(r.inputTokens !== undefined ? { inputTokens: r.inputTokens } : {}),
+            ...(r.outputTokens !== undefined ? { outputTokens: r.outputTokens } : {}),
+            durationMs: r.wallMs,
+            attempts: 1,
+            local: {
+              source,
+              ...(isKnown(probe.runtime) ? { runtime: probe.runtime.value } : {}),
+              ...(cfg.device ? { device: cfg.device } : {}),
+              ...(progress.done === 1 && queuedMs ? { queueMs: queuedMs } : {}),
+              ...(isLoopbackUrl(cfg.url) ? {} : { external: true }),
+            },
+          });
+          this.changed();
+        },
+        onStart: (total) => {
+          progress.total = total;
+          this.changed();
+        },
+      }).catch((e: unknown) => ({ runs: [] as TaskRun[], k: 0, error: String((e as Error)?.message ?? e) }));
+      if (result.runs.length === 0) {
+        // Nothing ran: the last result, if any, still stands.
+        return { ok: false, lines: [`✗  Task qualification could not run: ${result.error ?? 'no fixtures'}`] };
+      }
+      const q = summariseTaskRuns(model, this.now(), result.k, result.runs, result.error);
+      this.storeTasks(id, model, q);
+      return { ok: !result.error, lines: [taskQualificationText(q)] };
+    } finally {
+      lease?.release();
+      this.qualifyingTasks.delete(flag);
+      this.changed();
+    }
+  }
+
+  private storeTasks(id: string, model: string, q: TaskQualification): void {
+    const tasks = this.stored.tasks ?? {};
+    this.stored = { ...this.stored, tasks: { ...tasks, [id]: { ...tasks[id], [model]: q } } };
+    this.save();
   }
 
   /** Stage 1 of §19.6's qualification for one model: tool calls, round trips, JSON. Results are `measured` facts. */
@@ -508,7 +649,7 @@ export class LocalEndpointService implements Disposable {
     if (!cfg || !probe?.models.some((m) => m.id === model)) return { ok: false, lines: ['✗  That model is not listed by the endpoint.'] };
     if (!endpointEnabled(cfg)) return { ok: false, lines: ['✗  Turn the endpoint on first.'] };
     const flag = `${id}\0${model}`;
-    if (this.qualifying.has(flag)) return { ok: false, lines: ['Already running.'] };
+    if (this.qualifying.has(flag) || this.qualifyingTasks.has(flag)) return { ok: false, lines: ['Already running.'] };
     this.qualifying.add(flag);
     this.changed();
     const started = this.now();
@@ -573,19 +714,27 @@ export class LocalEndpointService implements Disposable {
         ...(probe && isKnown(probe.runtime) ? { runtime: `${probe.runtime.value} (${probe.runtime.from})` } : {}),
         ...(slots !== undefined ? { slots: `${slots} (${probe && isKnown(probe.slots) ? 'probed' : 'declared'})` } : {}),
         routes: probe ? routesText(probe) : 'not probed',
+        ...(probe && isKnown(probe.routes.responses) ? { responses: probe.routes.responses.value } : {}),
         ...(probe ? { probedAt: probe.at } : {}),
         ...(probe?.error ? { error: probe.error } : {}),
         busy: this.probing.has(e.id),
-        models: (probe?.models ?? []).map((m) => {
+        models: (probe?.models ?? []).map((m): LocalEndpointModelView => {
           const key = `${source}:${m.id}`;
           const q = quals[m.id];
+          const t = this.stored.tasks?.[e.id]?.[m.id];
+          const running = this.qualifyingTasks.get(`${e.id}\0${m.id}`);
           const entry = catalog?.entries.find((x) => x.key === key);
+          const window = entry && isKnown(entry.descriptor.contextWindow) ? entry.descriptor.contextWindow.value : undefined;
           return {
             id: m.id,
             label: entry?.descriptor.label ?? shortModelName(m.id),
             key,
-            ...(q ? { qualification: qualificationText(q) } : {}),
+            ...(q ? { qualification: qualificationText(q), stage1: { verdict: q.verdict, toolCalls: q.toolCalls, ...(q.error ? { error: q.error } : {}) } } : {}),
             ...(this.qualifying.has(`${e.id}\0${m.id}`) ? { qualifying: true } : {}),
+            ...(t ? { tasks: taskQualificationText(t) } : {}),
+            ...(running ? { tasksRunning: `Running tasks: ${running.done}${running.total ? `/${running.total}` : ''} done, ${running.passed} passed` } : {}),
+            // As the planner sees it (§11.5): an unknown window is assumed to fit.
+            plannerWindowFits: window === undefined || contextLimits(window) !== undefined,
           };
         }),
       };
@@ -638,9 +787,10 @@ export class LocalEndpointService implements Disposable {
  * required either, because the plan is checked deterministically, repaired
  * once, falls back to the hosted planner on failure, and is always reviewed by
  * the user before anything runs. With a tier list that has no `standard`, the
- * weakest tier is the one left out.
+ * weakest tier is the one left out. Declared in `shared/orchestration/localReadiness.ts`,
+ * so Preferences' status line applies the same rule.
  */
-export const PLANNER_LOCAL_MIN_TIER = 'standard';
+export { PLANNER_LOCAL_MIN_TIER };
 /** The window assumed for a local model whose window nobody knows: small enough to be safe on any current model. */
 export const ASSUMED_LOCAL_PLANNER_WINDOW = 32_768;
 
@@ -667,8 +817,7 @@ export function pickPlannerEntry(
   isDown: (source: ModelSourceId) => boolean,
   opts: { excludeSources?: readonly ModelSourceId[] } = {},
 ): LocalPlannerPick | undefined {
-  const std = tierRank(catalog.tiers, PLANNER_LOCAL_MIN_TIER);
-  const min = std >= 0 ? std : 1;
+  const min = plannerMinRank(catalog.tiers);
   const excluded = new Set(opts.excludeSources ?? []);
   const picks = catalog.entries
     .map((entry, order) => {
@@ -741,5 +890,15 @@ function parseStored(raw: unknown): Stored {
     }
     qualifications[id] = ok;
   }
-  return { v: 1, probes, qualifications };
+  const tasks: Record<string, Record<string, TaskQualification>> = {};
+  for (const [id, byModel] of Object.entries(s.tasks ?? {})) {
+    if (!byModel || typeof byModel !== 'object') continue;
+    const ok: Record<string, TaskQualification> = {};
+    for (const [model, q] of Object.entries(byModel)) {
+      const parsed = parseTaskQualification(q);
+      if (parsed) ok[model] = parsed;
+    }
+    tasks[id] = ok;
+  }
+  return { v: 1, probes, qualifications, tasks };
 }

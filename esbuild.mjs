@@ -1,5 +1,5 @@
 import esbuild from 'esbuild';
-import { readFileSync } from 'node:fs';
+import { cpSync, readFileSync, rmSync } from 'node:fs';
 
 const watch = process.argv.includes('--watch');
 
@@ -147,6 +147,15 @@ const web = {
 };
 
 const configs = [web, electronMain, electronPreload, sessionHost, remoteDaemon, cli];
+
+/**
+ * Qualification stage 2's scratch-repo fixtures (plan §19.6), which the main
+ * process copies into a temp dir per run. Plain files, not bundled: they are
+ * the repos an agent works in. `createApp` finds them at
+ * `dist/qualification-fixtures`, beside `dist/electron`.
+ */
+rmSync('dist/qualification-fixtures', { recursive: true, force: true });
+cpSync('src/orchestration/local/qualification-fixtures', 'dist/qualification-fixtures', { recursive: true });
 
 if (watch) {
   const contexts = await Promise.all(configs.map((c) => esbuild.context(c)));
