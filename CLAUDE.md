@@ -87,17 +87,22 @@ Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
 
 ## Hard rules
 
-- **Restarting the app is allowed, when it cannot end a conversation.** With session hosts on
+- **Restarting the app is allowed, when it cannot end a conversation.** Quitting and
+  reinstalling no longer end hosted sessions: with session hosts on
   (`"experimental.sessionHosts": true` in `~/Library/Application Support/Agent Wrangler/settings.json`,
   or the default once #15's flip lands), Claude conversations run in hosts that survive a quit
   and reattach on relaunch. Codex threads already survive a quit. Restart with
   `osascript -e 'quit app "Agent Wrangler"'`, wait for the process to exit, then
-  `open -a "Agent Wrangler"`, and say that you did. Don't restart if:
-  - the setting is off. In-process conversations end with the app, and you may be one of them;
+  `open -g -a "Agent Wrangler"` (`-g`: never bring it to the front, it must not steal focus),
+  and say that you did and which tree the installed build came from. Don't restart if:
+  - the setting is off, or any Claude conversation in the app predates it (`aw status` says
+    how many survive a quit). In-process conversations end with the app, and you may be one
+    of them (`AGENTWRANGLER_HOSTED=1` in your environment means you are in a host);
   - another agent is mid-`app:install`;
   - a host shows as unreachable. It would stay unreachable after the restart too.
 
-  If in doubt, say "a restart is needed" and leave it to James.
+  Never use ⌥⌘Q (*Quit and Stop All Agents*): it ends hosted conversations too. If in doubt,
+  say "a restart is needed" and leave it to James.
   A running copy on the old build is the usual cause of "my fix didn't work".
 - **The repo is public** (`hammonjj/AgentWrangler`). No real project paths, session titles,
   prompts, transcript content or hook payloads in code, tests, fixtures, docs or commits.

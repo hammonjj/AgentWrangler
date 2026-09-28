@@ -1,7 +1,7 @@
 # Agent Wrangler — product context for an agent
 
 Briefing document for a product-owner / planning agent that proposes features but does not
-write the code. Everything here is fact as of 2026-09-23. `README.md` is the behavioural
+write the code. Everything here is fact as of 2026-09-23 (session lifecycle: 2026-09-28). `README.md` is the behavioural
 source of truth; `docs/plans/*.md` holds the active and proposed designs. Where this file
 and those disagree, they win.
 
@@ -80,6 +80,17 @@ in the app), *Release* (hands it back to a terminal), *Close session* (ends the 
 parks the conversation), *Resume here* for ended sessions, auto-resume of the last session
 after a reload.
 
+**Lifecycle** — Claude conversations can run in **session hosts** (one small detached process
+each, the *Keep conversations running when Agent Wrangler quits* setting, experimental and off
+by default until its default flip): they survive ⌘Q, a crash and a reinstall, reattach on
+relaunch, move to the new build on their next idle message, and are parked after
+*End idle sessions with no Agent Wrangler connected after* (default 24 h) with the app closed.
+⌥⌘Q (*Quit and Stop All Agents*) ends them; a logout or reboot does too. Codex threads run in
+one background `codex app-server` and survive the same way. A crashed host's orphaned `claude`
+is found and ended before its session resumes. Security is same-user: hosts keep other users
+out and make accidental use hard, but a process running as the user can drive them (README,
+*Quitting and coming back*).
+
 **Budget** — pinned plan-usage cards (5-hour, 7-day, model-scoped week, extra credits) from
 `GET /api/oauth/usage` with the Claude Code login token, polled every 60s and every 20s near
 a limit, shared between windows via a cache file; **Pause all agents** via `SIGSTOP` to every
@@ -102,10 +113,10 @@ explicitly and argue for it.
 
 1. **Never steal attention.** No window jumps, no auto-focus, no auto-restart, no auto-reload.
    The app never restarts itself; it says a restart is needed and leaves it to the user.
-   Quitting ends the in-process sessions it runs. Conversations in session hosts (the
-   *Keep conversations running when Agent Wrangler quits* setting, the default once its soak
-   is done) survive a quit, a crash and a reinstall, so for them a restart costs a moment's
-   reconnect, not the conversation.
+   A restart is cheap, not forbidden: conversations in session hosts and Codex threads survive
+   a quit, a crash and a reinstall, so for them it costs a moment's reconnect. Only Claude
+   conversations run in the app process end with it, and even they are parked (resumable),
+   never lost. Principle 3 is why.
 2. **Do not write into other tools' files.** Claude Code owns `~/.claude.json`,
    `~/.claude/sessions/*`, and the transcripts. Nicknames, removed projects and sections live
    on our side precisely because rewriting someone else's state to tidy our UI is not a trade
