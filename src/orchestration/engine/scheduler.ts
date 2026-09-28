@@ -216,6 +216,18 @@ interface Candidate {
   order: number;
   retryOf?: string;
   notBefore?: Millis;
+  /** In a shared tree: the task whose work is in it now, if another. */
+  heldBy?: string;
+}
+
+/**
+ * The task whose work a shared tree holds: one running, or one tried and not
+ * yet finished (waiting on the user, or on its retry). Nothing else starts
+ * on top of it.
+ */
+function treeHolder(m: SchedMission): SchedTask | undefined {
+  if (!m.sharedTree) return undefined;
+  return m.tasks.find((t) => t.live) ?? m.tasks.find((t) => t.attempts > 0 && !ENDED.includes(t.state));
 }
 
 /** Critical path, then mission priority, then mission age, then plan order; ids break any tie. */
@@ -279,21 +291,25 @@ export function schedule(state: MissionsSnapshot, capacity: CapacitySnapshot, no
   for (const m of missions) {
     if (!ACTIVE_MISSION.includes(m.state)) continue;
     const paths = criticalPaths(m);
+    const holder = treeHolder(m);
     let open = false;
     m.tasks.forEach((t, order) => {
       const path = paths.get(t.id) ?? 1;
+      const heldBy = holder && holder.id !== t.id ? holder.key : undefined;
       if (t.live?.phase === 'verify-queued') verifyQueue.push({ m, t, path, order });
       if (!ENDED.includes(t.state)) open = true;
       if (t.live || ENDED.includes(t.state)) return;
       if (t.retry) {
-        candidates.push({ m, t, path, order, retryOf: t.retry.decisionId, notBefore: t.retry.notBefore });
+        candidates.push({ m, t, path, order, retryOf: t.retry.decisionId, notBefore: t.retry.notBefore, heldBy });
         return;
       }
       // Tried before and no step pending: the user decides what happens next (retry, resume, accept, skip).
       if (t.attempts > 0) return;
+      // Routed and waiting for the user's word (`assisted`), or handed to them: theirs too.
+      if (!STARTABLE.includes(t.state) && t.state !== 'blocked') return;
       const broken = brokenUpstreams(m, t);
       if (broken.length > 0) {
-        if (t.state !== 'blocked') {
+        if (t.state === 'pending' || t.state === 'queued') {
           const detail = `upstream ${broken.map((u) => `${u.key} ${u.state === 'done' ? 'invalidated' : u.state}`).join(', ')}`;
           out.push({ kind: 'block', missionId: m.id, taskId: t.id, upstream: broken.map((u) => u.id), detail });
         }
@@ -305,7 +321,7 @@ export function schedule(state: MissionsSnapshot, capacity: CapacitySnapshot, no
       }
       if (!STARTABLE.includes(t.state)) return;
       if (!dependenciesMet(m, t)) return;
-      candidates.push({ m, t, path, order });
+      candidates.push({ m, t, path, order, heldBy });
     });
     // Done tasks on their own branches go onto the mission branch (#46 carries it out).
     if (!m.sharedTree) {
@@ -362,6 +378,7 @@ function refusal(
   const limits = capacity.limits;
   if (capacity.fleetPaused) return { reason: 'fleet-paused', detail: 'every agent is paused; nothing starts until they are resumed' };
   if (m.state !== 'running') return { reason: 'mission-paused', detail: 'the mission is paused; nothing new starts until it is resumed' };
+  if (c.heldBy) return { reason: 'shared-tree', detail: `${c.heldBy} holds the mission worktree until it is finished` };
   if (m.sharedTree && liveMissions.has(m.id)) return { reason: 'shared-tree', detail: 'another task of this mission is using its worktree' };
   if (c.notBefore !== undefined && c.notBefore > now) return { reason: 'retry-delay', detail: 'its retry waits out a backoff', until: c.notBefore };
   const src = capacity.sources[t.source];

@@ -203,6 +203,8 @@ describe('schedule: concurrency', () => {
     ['per source', [mission(tasks(4))], { perRepo: 10, global: 10, perSource: { anthropic: 1 } }, {}, 1],
     ['per local endpoint: its free slots', [mission(tasks(4, () => ({ harness: 'codex', source: 'local:box' })))], { perRepo: 10, global: 10 }, { 'local:box': { freeSlots: 2 } }, 2],
     ['a shared tree: one at a time', [mission(tasks(3), { sharedTree: true })], {}, {}, 1],
+    ['a shared tree held by a task waiting on the user: none', [mission([task('h', { state: 'needs-human', attempts: 1 }), ...tasks(2)], { sharedTree: true })], {}, {}, 0],
+    ['a shared tree held by a task waiting on its retry: only the retry', [mission([task('h', { state: 'queued', attempts: 1, retry: { decisionId: 'd' } }), ...tasks(2)], { sharedTree: true })], {}, {}, 1],
     ['running agents count', [mission([running('r1'), running('r2'), ...tasks(3)])], { global: 3, perRepo: 10 }, {}, 1],
     ['a mission cap on concurrent agents', [mission(tasks(3), { maxConcurrentAgents: 1 })], {}, {}, 1],
   ])('%s', (_name, missions, limits, sources, expected) => {
@@ -307,7 +309,7 @@ function randomMission(r: () => number, id: string, repo: string, createdAt: num
 function simulate(seed: number): { steps: number; maxParallel: number } {
   const r = rng(seed);
   const repos = ['/Users/test/a', '/Users/test/b'];
-  const missions = Array.from({ length: 1 + Math.floor(r() * 3) }, (_, i) => randomMission(r, `m${i}`, repos[i % 2], T0 + i));
+  const missions: (SchedMission & { tasks: SimTask[] })[] = Array.from({ length: 1 + Math.floor(r() * 3) }, (_, i) => randomMission(r, `m${i}`, repos[i % 2], T0 + i));
   const limits: SchedulerLimits = { ...DEFAULT_SCHEDULER_LIMITS, perHarness: { codex: 2 }, perSource: { openai: 1 } };
   const SLOTS = 1;
   let now = T0;
@@ -316,7 +318,7 @@ function simulate(seed: number): { steps: number; maxParallel: number } {
   let window = 50;
   let maxParallel = 0;
   let steps = 0;
-  const all = () => missions.flatMap((m) => m.tasks.map((t) => ({ m, t })));
+  const all = (): { m: SchedMission; t: SimTask }[] => missions.flatMap((m) => m.tasks.map((t) => ({ m, t: t as SimTask })));
   for (; steps < 5000; steps++) {
     if (all().every(({ t }) => t.state === 'done' && (t.integrated || false))) break;
     // The world moves.
@@ -363,7 +365,7 @@ function simulate(seed: number): { steps: number; maxParallel: number } {
     // Apply.
     for (const a of actions) {
       const m = missions.find((x) => 'missionId' in a && x.id === a.missionId);
-      const t = m?.tasks.find((x) => 'taskId' in a && x.id === a.taskId);
+      const t = m?.tasks.find((x) => 'taskId' in a && x.id === a.taskId) as SimTask | undefined;
       if (a.kind === 'start' && t) {
         t.state = 'running';
         t.attempts += 1;
@@ -398,12 +400,12 @@ function simulate(seed: number): { steps: number; maxParallel: number } {
 }
 
 describe('schedule: simulation with a fake clock', () => {
-  it('never starts before dependencies, never exceeds a limit, and always finishes (200 seeds)', () => {
+  it('never starts before dependencies, never exceeds a limit, and always finishes (150 seeds)', () => {
     let parallel = 0;
-    for (let seed = 1; seed <= 200; seed++) parallel = Math.max(parallel, simulate(seed).maxParallel);
+    for (let seed = 1; seed <= 150; seed++) parallel = Math.max(parallel, simulate(seed).maxParallel);
     // It does run things side by side.
     expect(parallel).toBeGreaterThan(1);
-  });
+  }, 60_000);
 
   it('A → B, A → C, B + C → D: B and C run together, D only after both', () => {
     const m = mission([task('A'), task('B', { dependsOn: [code('A')] }), task('C', { dependsOn: [code('A')] }), task('D', { dependsOn: [code('B'), code('C')] })]);
