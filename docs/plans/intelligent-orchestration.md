@@ -1312,6 +1312,94 @@ Replanning is explicit, by the user, or proposed by escalation when a task fails
 (done tasks, failed tasks and their evidence) and produces a *diff* to the plan, which goes
 through the same review. Done tasks are never replanned away.
 
+### 11.5 Local planning (as built, 2026-09-28)
+
+The hosted planner is a workspace completion: `Read`/`Grep`/`Glob` in the checkout, up to 40
+turns. A local model served over `chat/completions` has no tools, so it cannot read anything.
+The local path therefore turns the reading around: **Agent Wrangler reads the repository and
+puts an excerpt in the prompt**, and the local model plans from that.
+
+**When it is tried.** Only when the mission's effective policy prefers local models
+(`preferences.preferLocal`, or strategy `prefer-local`) and does not rule them out
+(`exclusions.disableLocal`, `caps.location: hosted-only`), and only if a suitable local model is
+picked at that moment. Sources in `exclusions.sources` are never picked. Otherwise the planner is
+exactly the hosted one, with the same request as before.
+
+**The excerpt** (`policy/repoContext.ts`, `gatherRepoContext`). It is deterministic: the same
+tree and objective always give the same text. It has three parts:
+
+1. A **file tree** from `git ls-files --cached --others --exclude-standard`, so `.gitignore`
+   holds. Where git cannot list the tree, it walks the directory instead, honouring the root
+   `.gitignore`. Either way it leaves out dependency folders (`node_modules`, `vendor`, …),
+   build output (`dist`, `build`, `out`, `target`, …), caches, lock files, minified files,
+   source maps and binaries (by extension, and by a NUL byte in the first 8 KB).
+2. **Top-level manifests and READMEs** (`README*`, `CLAUDE.md`, `AGENTS.md`, `package.json`,
+   `tsconfig.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, …).
+3. **The files most likely in scope**, ranked by terms from the objective, its acceptance
+   criteria, the user's note and a replan's task text. A path the text names scores highest.
+   Path segments and identifiers come next: camelCase and snake_case identifiers weigh more
+   than plain words, and stopwords are dropped. A replan's done-task scopes add a little. The
+   400 best files by path are then scanned (64 KB each) for the identifiers themselves, so a
+   file whose name says nothing but whose text defines `fooBar` still ranks. Score ties break by
+   path.
+
+**Caps.** The defaults are 160,000 characters in total, 12,000 per ranked file, 4,000 per
+manifest and 24,000 for the tree. `contextLimits(window)` shrinks them to fit the model: the
+total is `(window − 16,384) × 3` characters, never above the default, and the other caps scale
+with it. The 16,384 reserved tokens cover the answer, the instructions, the schema and the repair
+round's echo of the previous plan. Three characters per token is the cautious end for code. A
+window that would leave under 12,000 characters is not used. Every cut is marked where it
+happens: `[file truncated]`, `[tree truncated: N more files not listed — src/ 812, …]`, and
+`[context truncated: N more relevant files not included — …]`. The block never exceeds its
+total.
+
+**The request.** A no-workspace completion to the picked model, in the same `PLAN_SCHEMA`. The
+input is the excerpt as a `<repository_context>` block, then the hosted planner's input
+unchanged. The block opens by saying it is data, not instructions, and no file can close it early
+(`</repository_context>` inside a file is escaped). The instructions (`LOCAL_PLANNER_INSTRUCTIONS`)
+are the hosted ones with two lines changed. The first says the excerpt is provided, the model
+cannot read files, and it should name paths from the tree. The last counts the excerpt among the
+data to ignore instructions from. The rules on when to split are shared text. `checkPlan`,
+`checkPlannerAnswer` and the single repair round are the same code on both paths
+(`Planner.rounds`), so a local plan is held to exactly what a hosted one is.
+
+**Tier rule: `standard` or above** (`PLANNER_LOCAL_MIN_TIER`). Completions go to the weakest
+tier because assessment is a small, bounded judgement. A plan is not, so `basic` is excluded.
+`expert` is not required, because four things stand behind a local plan: the deterministic
+checks, the repair round, the hosted fallback, and plan review, which is mandatory. With a
+tier list that has no `standard`, the weakest tier is the one excluded.
+
+**Picking the model** (`pickPlannerEntry`, `LocalEndpointService.pickPlanner`). A candidate must
+be a catalog entry with `completions` (an endpoint's model, the endpoint on), enabled, of a tier
+at or above the minimum, on an endpoint that is not `down`, and with a window the excerpt fits.
+Candidates are ranked by highest tier first, then constrained decoding (`structuredOutput:
+schema`), then the largest known window, then catalog order. A model whose window nobody knows
+is assumed to have 32,768 tokens (`ASSUMED_LOCAL_PLANNER_WINDOW`) and ranks after the known
+ones. Declaring the window on the endpoint (`models.<id>.contextWindow`) lifts that.
+
+**Fallback.** On any local failure except an abort, the hosted workspace planner runs, and its
+request is unchanged. The failures are: no model picked, a window too small, the excerpt could
+not be gathered, invalid output after the completion's own retry, a plan still invalid after the
+repair round, an infra error, or a timeout. The result carries `fellBack: { from?, because }`,
+and so does the `PlanningRun`, where plan review shows it. `rounds` are the rounds of the path
+that produced the plan. The local rounds are in the `local-call` records. An abort (Cancel, or
+the app stopping) ends the run as aborted, with no fallback. With no hosted completion, a local
+failure is the run's failure. With neither a hosted completion nor a local model, planning fails
+as before ("no way to reach a planner model is configured").
+
+**Records.** Each local planner call writes a `local-call` record with `purpose: 'planner'`:
+source, model, ok or failure, tokens, duration, attempts and the local metrics. On a fallback
+the last call is marked `fellBackToHosted`. The record holds counts and timings only: no
+objective, no excerpt, no plan. A run a local model answered has `source` set, and review reads
+"Planned by <model> (local)".
+
+**The reviewer stays hosted.** The same mechanism would fit only in part. The reviewer judges a
+diff against acceptance criteria, and its verdict decides whether a task counts as *verified*.
+An excerpt of the diff plus the touched files is cheap to gather. But a reviewer that misses
+context passes work that should fail, and nothing downstream catches that the way plan review
+catches a bad plan. That is a different bar from the planner's, so it needs its own measurement
+first. Local review is not built.
+
 ---
 
 ## 12. Dependency graph and scheduler
@@ -2211,6 +2299,28 @@ Open, and not settled by tests (they use fakes):
 
 The first live run against `llama-server` with a GGUF model should settle all three. It is also
 the measurement §19.6 slice B asks for.
+
+### 19.8 As built: local planning (2026-09-28)
+
+The planner was hosted-only, because it read the repository with tools and a local completion
+has none. It now has a local path: Agent Wrangler gathers the repository context itself, and
+sends it to a local model as a no-workspace completion. §11.5 has the design. The pieces are:
+
+| Piece | Where | What it does |
+|---|---|---|
+| Gatherer | `policy/repoContext.ts` (`gatherRepoContext`, `contextLimits`) | A deterministic excerpt: file tree (`git ls-files`, else a walk honouring `.gitignore`), manifests and READMEs, then files ranked by the objective's paths and identifiers. Dependency folders, build output, lock files and binaries are left out. `fs` and `exec` are injected. |
+| Caps | `DEFAULT_REPO_CONTEXT_LIMITS`, `contextLimits(window)` | 160k characters in total, 12k per file, 4k per manifest and 24k for the tree, scaled down to `(window − 16,384 tokens) × 3` characters. Under 12k characters, the model is not used. Each cut is marked (`[file truncated]`, `[tree truncated: …]`, `[context truncated: …]`). |
+| Gate | `TaskRunner.plannerLocality` → `PlanRequest.preferLocal` | `preferences.preferLocal` or strategy `prefer-local` in the effective policy, and neither `exclusions.disableLocal` nor `caps.location: hosted-only`. `exclusions.sources` are passed through to the picker. |
+| Tier rule and picker | `pickPlannerEntry`, `LocalEndpointService.pickPlanner` | A `completions` entry that is enabled, of tier `standard` or above (`PLANNER_LOCAL_MIN_TIER`), on an endpoint that is not down, with a window the excerpt fits. Unknown windows are assumed to be 32,768 tokens. Ranked by highest tier, then `structuredOutput: schema`, then the largest known window. |
+| Request | `Planner.planLocally` | No `workspace`. The input is the `<repository_context>` block, marked as data, then the usual planner input. The instructions are `LOCAL_PLANNER_INSTRUCTIONS`. The checks and the single repair round are shared with the hosted path (`Planner.rounds`). |
+| Fallback | `Planner.plan` | Any local failure but an abort runs the hosted workspace planner, unchanged. The failures: no model, a window too small, gathering failed, invalid output twice, still invalid after the repair, infra, or timeout. `PlanResult.fellBack` and `PlanningRun.fellBack` record `{ from?, because }`. With no hosted completion, the local failure stands. With neither path, planning fails as before. |
+| Records | `index.ts` `recordLocalCall(…, 'planner')` | One `local-call` record per local planner call, with `purpose: 'planner'` and counts and timings only. On a fallback, the last call is marked `fellBackToHosted`. `PlanningRun.source` marks a plan that a local model answered, and review says "(local)". |
+| Wiring | `createOrchestration` | The hosted planner now gets the hosted completion directly, not `RoutedCompletion`. Behaviour is the same, since workspace requests always went hosted. A `Planner` is built when there is a hosted completion or a local service with `pickPlanner`. The gatherer runs git through `deps.exec`. |
+
+The reviewer stays hosted (§11.5, last paragraph).
+
+Open: no live run has measured a local model's plans against the hosted planner's on the same
+objectives. The planning corpus (`test/orchestration/planningCorpus.ts`) is the place to do it.
 
 ---
 

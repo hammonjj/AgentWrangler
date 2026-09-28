@@ -503,8 +503,14 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
   endpoint (Responses wire), under the same sandbox as any attempt. That needs `/v1/responses`
   on the server and measured tool calling. A model at the weakest tier (`basic`) answers
   structured completions (assessment) directly over `chat/completions`, ahead of Haiku, and falls
-  back to Haiku if it fails. The reviewer, which reads files, always uses the hosted model.
-  Server slots count as concurrency.
+  back to Haiku if it fails. The **planner** runs on a local model when a mission prefers local
+  models (*Prefer local models*, or strategy *prefer-local*) and one tiered `standard` or above
+  is up. It has no tools, so Agent Wrangler reads the repository for it and puts an excerpt in
+  the prompt, sized to the model's context window: the file tree from `git ls-files`, the
+  manifests and READMEs, and the files the objective names or mentions. The plan gets the same
+  checks and repair round as a hosted one. If the local model fails for any reason but Cancel,
+  the hosted planner plans instead, and review says so. The reviewer, which reads files, always
+  uses the hosted model. Server slots count as concurrency.
 - **Losing the server.** An attempt whose endpoint goes down, or whose turn fails while the
   endpoint does not answer, ends as `infra` / `local-server-lost`. If the router picked the
   route, or the mission has `autoRecover`, it fails over to another model **in the same tier**.
