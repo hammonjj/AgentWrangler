@@ -43,6 +43,8 @@ import type {
 import { backgroundTaskCount } from '../../shared/sessionProtocol';
 import { parsePermissionSuggestions, permissionDetail, suggestionLabels } from '../permissionDetail';
 import type { ConversationHistory } from '../transcriptHistory';
+import type { RateLimitStoppage } from '../../shared/rateLimitClassification';
+import { claudeRateLimitFromLatest } from '../rateLimit';
 import { createRunnerState, noteBlock, reduceRunnerMessage, type RunnerBlocksState } from './runnerBlocks';
 import { parseQuestions, permissionResult, planResult, questionResult } from './askResults';
 
@@ -238,6 +240,11 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
   /** Background tasks the session last reported (A8): a turn that ended with any running is not the end of the work. */
   get backgroundTasks(): number {
     return backgroundTaskCount(this.exec.snapshot().latest);
+  }
+
+  /** Classified rate-limit stoppage from this session's cached `rate_limit_event`/`result` (#75). */
+  get rateLimit(): RateLimitStoppage | undefined {
+    return claudeRateLimitFromLatest(this.exec.snapshot().latest);
   }
 
   /** Runs in a session host rather than in this process. */

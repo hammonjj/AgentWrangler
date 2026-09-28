@@ -81,6 +81,21 @@ body,
   display: none;
 }
 
+/* The classified rate-limit stoppage (#75): same treatment as the table pane's
+   row chip (`.chip.ratelimit` in dashboard.css), for the currently open session. */
+#convApp #convRateLimit {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border: 1px solid var(--aw-blocked);
+  border-radius: 9px;
+  font-size: 0.78em;
+  color: var(--aw-blocked);
+  white-space: nowrap;
+}
+#convApp #convRateLimit[hidden] {
+  display: none;
+}
+
 .pill {
   flex: 0 0 auto;
   padding: 1px 9px;

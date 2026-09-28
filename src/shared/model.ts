@@ -5,6 +5,7 @@
 import type { SessionUsage } from './sessionUsage';
 import type { SessionProvider } from './harness';
 import type { TaskBadge } from './orchestration/taskView';
+import type { RateLimitStoppage } from './rateLimitClassification';
 
 /**
  * `waiting` and `done` both mean the agent has finished its turn and is idle at
@@ -232,6 +233,15 @@ export interface AgentSession {
   activeTool?: { name: string; sinceMs: number };
   /** For `busy`: how far into the current turn we are. Requires hooks. */
   progress?: TurnProgress;
+  /**
+   * A classified rate-limit stoppage this session is currently under, when one
+   * is known — which provider, which window (Claude five-hour/weekly, Codex
+   * primary/secondary), the reported reset time if any, and raw evidence.
+   * Absent means no stoppage is known, not that none exists: sources that
+   * cannot say which window was hit report `category: 'unknown'` rather than
+   * leaving this unset (`shared/rateLimitClassification.ts`).
+   */
+  rateLimit?: RateLimitStoppage;
   /**
    * For `busy`: the turn is over, but it left work running in the background
    * (subagents, shells, monitors), and Claude Code will hand the results back

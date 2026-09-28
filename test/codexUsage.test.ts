@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseCodexRateLimits } from '../src/codex/usage';
+import { codexRateLimitStoppages, parseCodexRateLimits } from '../src/codex/usage';
 
 describe('parseCodexRateLimits', () => {
   it('maps primary and secondary App Server windows to usage cards', () => {
@@ -33,5 +33,37 @@ describe('parseCodexRateLimits', () => {
       },
     }, 123);
     expect(parsed?.windows.map((window) => window.label)).toEqual(['Codex · 5hr', 'Review · 1 day']);
+  });
+});
+
+describe('codexRateLimitStoppages', () => {
+  it('reports nothing when every window is under its limit', () => {
+    const stoppages = codexRateLimitStoppages({
+      rateLimits: { limitId: 'codex', primary: { usedPercent: 80 }, secondary: { usedPercent: 30 } },
+    });
+    expect(stoppages).toEqual([]);
+  });
+
+  it('classifies a primary window at 100% as a stoppage, with its reset time', () => {
+    const stoppages = codexRateLimitStoppages({
+      rateLimits: { limitId: 'codex', limitName: 'Codex', primary: { usedPercent: 100, resetsAt: 1_800_000_000 } },
+    });
+    expect(stoppages).toHaveLength(1);
+    expect(stoppages[0]).toMatchObject({ provider: 'codex', category: 'codex-primary', reason: 'Codex', resetAtMs: 1_800_000_000_000 });
+  });
+
+  it('classifies a secondary window over 100% as a stoppage too', () => {
+    const stoppages = codexRateLimitStoppages({
+      rateLimits: { secondary: { usedPercent: 100 } },
+    });
+    expect(stoppages).toHaveLength(1);
+    expect(stoppages[0]).toMatchObject({ provider: 'codex', category: 'codex-secondary' });
+  });
+
+  it('does not fabricate a stoppage from a merely high percent', () => {
+    const stoppages = codexRateLimitStoppages({
+      rateLimits: { primary: { usedPercent: 99 } },
+    });
+    expect(stoppages).toEqual([]);
   });
 });
