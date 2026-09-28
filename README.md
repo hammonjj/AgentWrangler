@@ -782,6 +782,7 @@ Choose **Install Status Hooks…** from the menu (or click *Install hooks* in th
 | `PermissionRequest` · `Elicitation` · `Notification`/`agent_needs_input` · `PreToolUse` for `AskUserQuestion` / `ExitPlanMode` | **Waiting**, stopped at a prompt (row names the tool, and what for) |
 | `Stop` with a reply that asks something · `StopFailure` | **Waiting** |
 | `Stop` with a reply that just reports | **Done** |
+| `Stop` with a reply that just reports, `background_tasks` not empty | **Busy**, chip *N in background* (never *Possibly stuck*) |
 | `UserPromptSubmit` · `PreToolUse` · `PostToolUse`/`PostToolBatch` | **Busy** (row shows the in-flight tool and its elapsed time) |
 | no events at all past `stuckThresholdSeconds` (default 10 min), nothing in flight | **Possibly stuck** |
 | `SessionEnd`, or pid gone | **Ended** |
@@ -794,6 +795,8 @@ Choose **Install Status Hooks…** from the menu (or click *Install hooks* in th
 **Always allow** is Claude Code's own *don't ask again*, not a second implementation of it. The `PermissionRequest` payload carries `permission_suggestions` — the exact permission updates the dialog's "don't ask again" would apply, e.g. `{type: "addRules", behavior: "allow", destination: "localSettings", rules: [{toolName: "Bash", ruleContent: "npm test:*"}]}`. The button hands that list straight back as `decision.updatedPermissions` on the allow, and Claude Code applies it to the session and saves it where the suggestion says (verified in the 2.1.268 binary: an allow decision's `updatedPermissions` is validated against the same schema as the SDK's, applied via `setSessionToolPermissionContext` and persisted). Only *allow* rules and directory grants are passed through — a `deny` or `ask` suggestion is dropped rather than applied by a button with that label. The button's tooltip names the rule and where it will be saved, the status bar confirms it afterwards, and it does not appear when the payload offered no suggestion.
 
 *Possibly stuck* is deliberately slow to trigger. Hooks fire on tool calls and prompts, not while the model is generating, so a long think or a large `Write` is silent for minutes (measured in one ordinary turn: 121s, 388s, 79s, 104s). The ETA column is what says "running long"; *stuck* means nothing at all for ten minutes.
+
+**Background work is not Done.** A turn can end with work still running: a background subagent, a background shell (`run_in_background`, or a foreground command Claude Code moved to the background when it hit its timeout), a Monitor. When that work finishes, Claude Code queues a `<task-notification>` as a new turn and the agent carries on, so a report like "I'll get back to you when the review finishes" is not the end. Every `Stop` payload says what is still running: `background_tasks`, a list of `{id, type: "subagent" | "shell" | …, status: "running", …}` (checked on Claude Code 2.1.281–2.1.283; `session_crons` alongside it is not counted). While that list is not empty, a reply that would read as **Done** stays **Busy**, with a dashed *N in background* chip and the kinds in its tooltip. It is never *Possibly stuck*, however quiet the wait, and it sends no "is done" toast or Discord done notice. The turn the notification starts fires `UserPromptSubmit` like any other, and its own `Stop` reports the list again, so the row goes to Waiting or Done on that reply, as usual. A reply that asks something stays **Waiting** whatever is running: the human is still the one being waited on. A background shell that never ends (a dev server) keeps its row Busy for as long as it runs.
 
 A **paused** session is silent by construction — its process is stopped, so it writes no transcript and fires no hooks — and both tables above would eventually call it *Possibly stuck*. Pausing is tracked separately from status for exactly that reason: the row moves to the *Paused* section, keeps the status it was stopped at, and is left out of the bell and the toasts until it is resumed.
 
@@ -814,9 +817,12 @@ Sessions with no hook data — anything started before installing them — are d
 | registry entry, no transcript file | *hidden* (nothing typed yet) |
 | last transcript line: assistant `stop_reason: end_turn`, reply asks something | **Waiting** |
 | last transcript line: assistant `stop_reason: end_turn`, reply just reports | **Done** |
+| …the same, with a background launch since this process started and no notification ending it | **Busy**, chip *N in background* |
 | last transcript line: assistant `tool_use` / user / queue-op | **Busy** |
 | busy but transcript silent > `stuckThresholdSeconds` (default 10 min) | **Possibly stuck** |
 | pid gone | **Ended** |
+
+Background work in the transcript (used when no `Stop` of the current process has reported `background_tasks`; same Claude Code versions): a launch is the tool result's `toolUseResult` — `backgroundTaskId` for a shell, `isAsync` + `agentId` for a subagent (the Agent tool can run async without `run_in_background`), `taskId` + `timeoutMs` for a Monitor. Its end is the `queue-operation` enqueue written the moment it finishes, or the user line that enqueue becomes: a `<task-notification>` naming its `<task-id>` with a `<status>` (`completed`, `failed`, `killed`, `stopped`). A notification without a `<status>` is a monitor event, and the monitor is still running. `TaskStop`'s result ends one too. Launches from before the current process started are ignored: Claude Code kills background work when it exits, and a `--resume` appends to the same transcript without closing them. Only what the tail read covers is known, so a launch older than the first read is missed, which errs toward Done.
 
 Inference cannot distinguish a permission prompt from a long tool call from a wedged session — all three look like a silent transcript. That limitation is the reason hooks exist; without them, *Possibly stuck* is a guess.
 

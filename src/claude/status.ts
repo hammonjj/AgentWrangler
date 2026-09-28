@@ -78,6 +78,17 @@ export function blockClearedByClaude(blockedSinceMs: number | undefined, live: L
   return live.statusUpdatedAtMs > blockedSinceMs;
 }
 
+/**
+ * A turn that ended with background work still running is not Done (#60):
+ * Claude Code hands the results back as a new turn and the agent carries on.
+ * The row stays Busy, never Possibly stuck (nothing here reads the clock; a
+ * quiet ten-minute wait on a subagent is not a stall). A reply that asks
+ * something stays Waiting: the human is still the one being waited on.
+ */
+export function holdForBackground(status: SessionStatus, backgroundTasks: number): SessionStatus {
+  return status === 'done' && backgroundTasks > 0 ? 'busy' : status;
+}
+
 /** A finished turn is `waiting` if its reply asks for something, else `done`. */
 export function turnOver(replyText: string | undefined): SessionStatus {
   return finishedTurnStatus(replyText);

@@ -12,6 +12,7 @@
  * unit-testable against synthetic lines.
  */
 import type { PermissionAsk, SessionStatus, TodoProgress } from '../shared/model';
+import { parseHookBackgroundTasks, type BackgroundTaskRef } from './backgroundTasks';
 import { parsePermissionSuggestions, permissionDetail, type PermissionSuggestion } from './permissionDetail';
 
 /**
@@ -76,6 +77,12 @@ export interface HookEvent {
    * hands it to the hook. What decides Waiting-on-you vs Done.
    */
   lastAssistantMessage?: string;
+  /**
+   * `Stop` / `StopFailure` only: the work Claude Code says is still running in
+   * the background as the turn ends (#60). Undefined when the payload has no
+   * such field (older Claude Code), which is not the same as none.
+   */
+  backgroundTasks?: BackgroundTaskRef[];
   /** `PermissionRequest` / interactive `PreToolUse`: what the ask is for. */
   detail?: PermissionAsk;
   /**
@@ -131,6 +138,13 @@ export interface HookSessionState {
   lastReply?: string;
   /** The last turn ended in `StopFailure`: an error the human should see, never "done". */
   turnFailed?: boolean;
+  /**
+   * What the last `Stop` said was still running in the background. Replaced by
+   * every `Stop`, dropped by `SessionStart`/`SessionEnd` (a new process has
+   * none of the old one's tasks). Undefined when no `Stop` of this process
+   * reported the field; the provider then reads the transcript instead.
+   */
+  backgroundTasks?: BackgroundTaskRef[];
   /** Tool in flight: PreToolUse seen with no matching completion yet. */
   activeTool?: { name: string; sinceMs: number };
   /** Receipt time of the most recent event — drives genuine-stall detection. */
@@ -233,6 +247,10 @@ export function parseHookLine(line: string, receivedAtMs: number): HookEvent | u
     reason: str(obj.reason),
     source: str(obj.source),
     lastAssistantMessage: hookEventName === 'Stop' ? str(obj.last_assistant_message) : undefined,
+    backgroundTasks:
+      hookEventName === 'Stop' || hookEventName === 'StopFailure'
+        ? parseHookBackgroundTasks(obj.background_tasks)
+        : undefined,
     detail: wantsDetail ? permissionDetail(toolName, obj.tool_input, cwd) : undefined,
     suggestions:
       hookEventName === 'PermissionRequest' ? parsePermissionSuggestions(obj.permission_suggestions) : undefined,
@@ -320,6 +338,7 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
         fresh: true,
         lastReply: undefined,
         turnFailed: false,
+        backgroundTasks: undefined,
       };
 
     case 'SessionEnd':
@@ -331,6 +350,7 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
         status: 'ended',
         activeTool: undefined,
         finished: true,
+        backgroundTasks: undefined,
       };
 
     case 'UserPromptSubmit':
@@ -465,6 +485,7 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
         fresh: false,
         lastReply: e.lastAssistantMessage,
         turnFailed: e.hookEventName === 'StopFailure',
+        backgroundTasks: e.backgroundTasks,
         lastTurnMs,
       };
     }
