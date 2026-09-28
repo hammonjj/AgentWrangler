@@ -58,6 +58,8 @@ export interface OrchestrationDeps {
   telemetry?: { append(record: TelemetryRecord): boolean };
   notify?: (notice: { title: string; body: string; onClick?: () => void }) => void;
   openFile?: (file: string) => void;
+  /** Bring up the conversation a delegation came from (#82), for a notification's click. */
+  showOrigin?: (origin: { provider: 'claude' | 'codex'; sessionId: string }) => void;
   /** The catalog's tier for a model, if it has one. */
   tierOf?: (source: ModelSourceId, model: string) => string | undefined;
   /** How worktree git commands run (tests inject one). */
@@ -220,6 +222,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     onTurnRecord: deps.onTurnRecord,
     notify: deps.notify,
     openFile: deps.openFile,
+    showOrigin: deps.showOrigin,
     diffsDir: path.join(deps.dataDir, 'orchestration', 'diffs'),
     logsDir: path.join(deps.dataDir, 'orchestration', 'logs'),
     settleMs: deps.settleMs,

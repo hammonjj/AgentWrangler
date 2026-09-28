@@ -540,9 +540,55 @@ export interface TaskProposalView {
   /** Pre-selected in the card: the recommendation, when there is one. */
   recommended?: { optionId: string; effort?: EffortLevel };
   options: ProposalModelOption[];
+  /** Delegated (`aw delegate`, #82) and kept as one task by the planner, rather than asked for as a task. */
+  delegated?: boolean;
 }
 
 /** What the card sends back. `route` absent: accept the recommendation as offered. */
 export type ProposalDecision =
   | { kind: 'run'; route?: { harness: HarnessId; model: string; effort?: string } }
   | { kind: 'cancel' };
+
+// ---------------------------------------------------------------------------
+// Delegation card (#82)
+// ---------------------------------------------------------------------------
+
+/** One task of a delegated plan, as its card lists it. */
+export interface DelegationTaskView {
+  key: string;
+  title: string;
+  objective: string;
+  acceptanceCriteria: string[];
+  /** Keys of the tasks it comes after. */
+  after: string[];
+}
+
+/**
+ * Work delegated from a conversation (`aw delegate`) that the planner has not
+ * turned into one task: still planning, failed to plan, or a plan of several
+ * tasks waiting for review. Drawn as a card in that conversation. A
+ * delegation kept as one task is a `TaskProposalView` instead.
+ */
+export interface DelegationView {
+  missionId: string;
+  title: string;
+  objective: string;
+  acceptanceCriteria: string[];
+  state: 'planning' | 'failed' | 'review';
+  /** Why it is where it is: the planner's failure, or the mission's own reason. */
+  reason?: string;
+  tasks: DelegationTaskView[];
+  risks: string[];
+  /** Plan review's warnings: never stop anything. */
+  warnings: string[];
+  /** What stops Approve until it is fixed in the Missions view. */
+  blockers: string[];
+  canApprove: boolean;
+  canPlanAgain: boolean;
+  canRunAsTask: boolean;
+  /** What tasks without a pin of their own run on, when approved here ("Sonnet 5 · medium"). */
+  route?: string;
+}
+
+/** A delegation card's buttons. Only ever sent by a click. */
+export type DelegationAction = 'approve' | 'cancel' | 'plan-again' | 'as-task' | 'open-mission';

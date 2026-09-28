@@ -768,6 +768,17 @@ body,
   margin: 4px 0;
   padding-left: 18px;
 }
+/* A delegated plan's tasks (#82): one collapsed line each, wrapping at any width. */
+#convApp .delegation .delegtasks {
+  margin: 4px 0;
+  padding-left: 22px;
+}
+#convApp .delegation .delegtasks > li {
+  overflow-wrap: anywhere;
+}
+#convApp .delegation .delegtasks .propdetails {
+  margin: 2px 0;
+}
 #convApp .proposal .proppicks {
   display: flex;
   flex-wrap: wrap;

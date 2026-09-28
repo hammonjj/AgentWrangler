@@ -191,6 +191,22 @@ export interface NewMission {
   policy?: ExecutionPolicy;
 }
 
+/**
+ * Work handed off with Delegate (#82): an outcome, not a choice between a
+ * task and a mission. The planner decides; nothing runs until the user
+ * approves the proposal or the plan.
+ */
+export interface NewDelegation {
+  folder: string;
+  title?: string;
+  objective: string;
+  acceptanceCriteria: string[];
+  /** The conversation that delegated it: where its card is shown. Never the worker. */
+  origin?: Mission['origin'];
+  /** Preferences (the harness to prefer) and caps, as for `propose`. */
+  policy?: ExecutionPolicy;
+}
+
 /** What the user did with an `assisted` proposal: took it (no route), or changed it (their route). */
 export interface ProposalChoice {
   route?: TaskRoute;
@@ -268,6 +284,8 @@ export interface TaskRunnerDeps {
   planner?: Pick<Planner, 'plan' | 'model' | 'effort'>;
   /** Asked to open a diff file once one is written for a notification click. */
   openFile?: (file: string) => void;
+  /** Bring up the conversation a delegation came from, for a notification click (#82). */
+  showOrigin?: (origin: NonNullable<Mission['origin']>) => void;
   now?: () => number;
   random?: (bytes: number) => Uint8Array;
   /** How long an idle, finished-looking session must stay so before the attempt finishes. */
@@ -295,6 +313,7 @@ const END_SESSION_WAIT_MS = 15_000;
 /** Attempt states in which a session is (or is about to be) the attempt's. */
 const LIVE: readonly AttemptState[] = ['launching', 'running', 'waiting-human', 'finishing', 'verifying'];
 const PLANNING_REASON = 'the planner is reading the repository; nothing runs until you approve its plan';
+const DELEGATING_REASON = 'the planner is reading the repository to decide whether this is one task or several; nothing runs until you approve';
 
 interface Watcher {
   missionId: string;
@@ -449,14 +468,26 @@ export class TaskRunner implements Disposable {
     if (!this.deps.assessor) throw new TaskError('Proposing a route needs the assessor, which is not running.');
     if (!this.deps.routing) throw new TaskError('Proposing a route needs the model catalog, which is not available.');
     const id = await this.record(req, { ...req.policy, mode: 'assisted' });
+    return this.routeProposal(id);
+  }
+
+  /**
+   * The `assisted` step of `propose`, for a recorded single-task mission that
+   * is not yet routed: assess it, route it, and leave the proposal waiting.
+   * Picks up wherever the task is (`pending`, `ready` or `assessing`), so a
+   * delegation cut off here by a restart is routed on recovery (#82).
+   */
+  private async routeProposal(id: string): Promise<{ mission: Mission; recommendation: RouteRecommendation }> {
     try {
       return await this.queue(id, async () => {
         let m = this.need(id);
         const tid = m.tasks[0].id;
         const now = this.now();
-        for (const to of ['ready', 'assessing'] as TaskState[]) {
+        const steps: TaskState[] = m.tasks[0].state === 'pending' ? ['ready', 'assessing'] : m.tasks[0].state === 'ready' ? ['assessing'] : [];
+        for (const to of steps) {
           m = this.patchTask(m, tid, (t) => transitionTask(m, t, to, { now, reason: to === 'assessing' ? 'assessing before it is routed' : undefined }));
         }
+        if (m.tasks[0].state !== 'assessing') throw new TaskError('The task is not waiting to be routed.');
         this.put(m);
         await this.assess(id, tid);
         m = this.need(id);
@@ -1045,6 +1076,74 @@ export class TaskRunner implements Disposable {
     return m;
   }
 
+  // ---- Delegate (#82) ----
+
+  /**
+   * Delegate an outcome (#82): the one handoff a conversation has. Recorded
+   * as a planned mission and given to the planner, which decides (§11.3,
+   * biased to one task). `single`: it becomes the single-task proposal
+   * `propose` makes, assessed and routed, waiting on its card. `multiple`: it
+   * stays a planned mission, in plan review. Resolves at once, `planning`.
+   * With no planner there is nothing to decide with, and it is one task
+   * straight away. Nothing runs in any case until the user approves.
+   */
+  async delegate(req: NewDelegation): Promise<Mission> {
+    // Either decision may need a single task routed, so refuse up front rather than after the planner.
+    if (!this.deps.assessor) throw new TaskError('Delegating needs the assessor, which is not running.');
+    if (!this.deps.routing) throw new TaskError('Delegating needs the model catalog, which is not available.');
+    const criteria = req.acceptanceCriteria.map((c) => c.trim()).filter(Boolean);
+    const delegation = { at: this.now(), acceptanceCriteria: criteria };
+    const origin = req.origin ? { origin: { ...req.origin } } : {};
+    if (!this.deps.planner) {
+      const id = await this.record({ ...req, acceptanceCriteria: criteria }, { ...req.policy, mode: 'assisted' });
+      this.put({ ...this.need(id), delegation });
+      this.log(`task ${id}: delegated; no planner, so one task`);
+      return (await this.routeProposal(id)).mission;
+    }
+    // The stand-in task until the planner answers carries the user's criteria, so "Run as one task" keeps them.
+    const title = (req.title?.trim() || firstLine(req.objective.trim())).slice(0, 120);
+    let m = await this.recordPlanned({ folder: req.folder, title, objective: req.objective, policy: req.policy, tasks: [{ title, objective: req.objective.trim(), acceptanceCriteria: criteria }] });
+    m = { ...m, ...origin, delegation };
+    const run = this.newRun('plan', undefined);
+    m = transitionMission({ ...m, planning: [run] }, 'planning', { now: this.now(), reason: DELEGATING_REASON });
+    this.put(m);
+    this.log(`mission ${m.id}: delegated in ${m.repoRoot}; the planner is deciding`);
+    this.startPlanner(m.id, run.id);
+    return m;
+  }
+
+  /**
+   * A delegation whose planning failed, run as the one task it was given as
+   * (#82): the objective and the user's criteria, assessed and routed like
+   * `propose`. Still nothing runs until the proposal is accepted.
+   */
+  async delegateAsTask(missionId: string): Promise<Mission> {
+    await this.queue(missionId, async () => {
+      const m = this.need(missionId);
+      if (!m.delegation || m.state !== 'planning-failed') throw new TaskError('Only a delegation that could not be planned can be run as one task.');
+      const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
+      const ctx = this.planContext(loaded?.policy ?? DEFAULT_REPO_POLICY);
+      const task = planTask(TASK_KEY, { title: m.title, objective: m.objective, acceptanceCriteria: m.delegation.acceptanceCriteria, scopePaths: [] }, ctx);
+      // As `record` has it: nobody has said where the work is.
+      this.put(this.asSingleTask(m, { ...task, scope: { paths: [], subsystems: [], confidence: 'low' } }, 'delegated as one task: the plan could not be made'));
+    });
+    return (await this.routeProposal(missionId)).mission;
+  }
+
+  /** A delegation, as the single-task proposal `record` makes: unplanned, `assisted`, one task, back to `draft`. */
+  private asSingleTask(m: Mission, task: Task, reason: string): Mission {
+    const layers = m.policyLayers ?? {};
+    const next: Mission = {
+      ...m,
+      planned: undefined,
+      planApprovedAt: undefined,
+      policy: { ...m.policy, mode: 'assisted' },
+      policyLayers: { ...layers, mission: { ...layers.mission, mode: 'assisted' } },
+      tasks: [{ ...task, key: TASK_KEY, dependsOn: [] }],
+    };
+    return transitionMission(next, 'draft', { now: this.now(), reason });
+  }
+
   /**
    * Ask the planner again: after it failed, or from plan review for a plan
    * nobody has started (a fresh plan), or after a replan (another replan).
@@ -1145,6 +1244,7 @@ export class TaskRunner implements Disposable {
     const cwd = run.kind === 'replan' && tree && (tree.state === 'ready' || tree.state === 'in-use' || tree.state === 'retained') ? tree.path : m.repoRoot;
     const result = await this.deps.planner!.plan({
       objective: m.objective,
+      ...(m.delegation?.acceptanceCriteria.length ? { acceptanceCriteria: m.delegation.acceptanceCriteria } : {}),
       cwd,
       strategies: Object.keys(policy.verification.commands),
       cap,
@@ -1155,23 +1255,51 @@ export class TaskRunner implements Disposable {
     await this.endRun(missionId, runId, result);
   }
 
-  /** The planner answered (or could not): the plan into review, or `planning-failed` with the reason. */
-  private endRun(missionId: string, runId: string, result: PlanResult): Promise<void> {
+  /**
+   * The planner answered (or could not): the plan into review, or
+   * `planning-failed` with the reason. A delegation the planner kept as one
+   * task (#82) becomes a single-task proposal instead, and is then assessed
+   * and routed as `propose` routes one.
+   */
+  private async endRun(missionId: string, runId: string, result: PlanResult): Promise<void> {
+    const single = await this.endRunQueued(missionId, runId, result);
+    if (!single) return;
+    try {
+      const { mission, recommendation: rec } = await this.routeProposal(missionId);
+      const t = rec.verdict !== 'blocked' ? rec.resolution.target : undefined;
+      this.notifyDelegation(
+        mission,
+        t && rec.verdict === 'route'
+          ? `One task, proposed on ${t.model}${t.effortNative !== 'none' ? ` · ${t.effortNative}` : ''}. Nothing runs until you start it.`
+          : 'One task: pick a route for it. Nothing runs until you start it.',
+      );
+    } catch (e) {
+      // `routeProposal` has cancelled it: a proposal that could not be made is not left waiting.
+      const m = this.missions.get(missionId);
+      if (m) this.notifyDelegation(m, `It could not be routed: ${errorText(e)}`);
+      this.log(`mission ${missionId}: delegated task could not be routed: ${errorText(e)}`);
+    }
+  }
+
+  /** `endRun`'s part in the mission's queue. True when a delegation became one task, still to be routed. */
+  private endRunQueued(missionId: string, runId: string, result: PlanResult): Promise<boolean> {
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
       const run = m.planning?.find((r) => r.id === runId);
       // Cancelled, or superseded by a newer run, while it was out.
-      if (!run || run.state !== 'running' || m.state !== 'planning') return;
+      if (!run || run.state !== 'running' || m.state !== 'planning') return false;
       // Cut off by Cancel (which records it) or by the app stopping (recovery asks again): not a failure.
-      if (this.disposed || (!result.ok && result.aborted)) return;
+      if (this.disposed || (!result.ok && result.aborted)) return false;
       const now = this.now();
       const fail = (reason: string, rounds = result.rounds) => {
         m = this.patchRun(m, runId, (r) => ({ ...r, state: 'failed', reason, rounds, model: result.model, endedAt: now }));
         m = transitionMission(m, 'planning-failed', { now, reason });
         this.put(m);
         this.writePlanRecord(m, runId);
-        this.notify(m, 'could not be planned', `${reason}. Plan it again, or write the plan yourself.`);
+        if (m.delegation) this.notifyDelegation(m, `It could not be planned: ${reason}. Plan it again, or run it as one task.`);
+        else this.notify(m, 'could not be planned', `${reason}. Plan it again, or write the plan yourself.`);
         this.log(`mission ${missionId}: planning failed: ${reason}`);
+        return false;
       };
       if (!result.ok) return fail(result.reason);
 
@@ -1179,6 +1307,8 @@ export class TaskRunner implements Disposable {
       const ctx = this.planContext(loaded?.policy ?? DEFAULT_REPO_POLICY);
       let diff: PlanningRun['diff'];
       let tasks: Task[];
+      // Delegate (#82): the planner decided it is one task, so it is the single-task proposal, not a plan.
+      const oneTask = run.kind === 'plan' && !!m.delegation && result.plan.decomposition === 'single' && result.plan.tasks.length === 1;
       if (run.kind === 'replan') {
         // Work of a task that started and did not finish comes off the mission branch, kept on its own (§11.4).
         const aside = m.tasks.filter((t) => t.state !== 'done' && t.attemptIds.length > 0 && !taskMachine.isTerminal(t.state));
@@ -1208,7 +1338,11 @@ export class TaskRunner implements Disposable {
           added: tasks.slice(staying.length).map((t) => t.key),
         };
       } else {
-        tasks = plannedTasks(result.plan.tasks, [], ctx);
+        // The user's own criteria are kept on a single task, whatever the planner wrote.
+        const planned = oneTask
+          ? [{ ...result.plan.tasks[0], acceptanceCriteria: mergeCriteria(m.delegation!.acceptanceCriteria, result.plan.tasks[0].acceptanceCriteria) }]
+          : result.plan.tasks;
+        tasks = plannedTasks(planned, [], ctx);
       }
       const draft: Mission = { ...m, tasks: executionOrder(tasks) };
       const errors = planIssues(draft).filter((i) => i.level === 'error');
@@ -1226,6 +1360,13 @@ export class TaskRunner implements Disposable {
         proposed: result.plan.tasks.length,
         ...(diff ? { diff } : {}),
       }));
+      if (oneTask) {
+        m = this.asSingleTask(m, m.tasks[0], 'the planner kept it as one task; assessing it before it is routed');
+        this.put(m);
+        this.writePlanRecord(m, runId);
+        this.log(`mission ${missionId}: delegated; the planner kept it as one task in ${result.rounds.length} round(s)`);
+        return true;
+      }
       const n = result.plan.tasks.length;
       m = transitionMission(m, 'plan-review', {
         now,
@@ -1234,8 +1375,10 @@ export class TaskRunner implements Disposable {
       this.put(m);
       this.writePlanRecord(m, runId);
       this.schedulePreview(missionId);
-      this.notify(m, run.kind === 'replan' ? 'is replanned' : 'is planned', `${n} task${n === 1 ? '' : 's'} to review. Nothing runs until you approve the plan.`);
+      if (m.delegation && run.kind === 'plan') this.notifyDelegation(m, `A plan of ${n} task${n === 1 ? '' : 's'} to review. Nothing runs until you approve it.`);
+      else this.notify(m, run.kind === 'replan' ? 'is replanned' : 'is planned', `${n} task${n === 1 ? '' : 's'} to review. Nothing runs until you approve the plan.`);
       this.log(`mission ${missionId}: ${run.kind} proposed ${n} task(s) in ${result.rounds.length} round(s)`);
+      return false;
     });
   }
 
@@ -1776,6 +1919,11 @@ export class TaskRunner implements Disposable {
     // A planned mission stopped between one task finishing and the next starting: start it now.
     if (isPlanned(m) && m.state === 'running') await this.launchNext(id);
     if (m.planned && m.state === 'plan-review') this.schedulePreview(id);
+    // A delegation kept as one task and cut off before it was routed (#82): route it now, after this recovery.
+    const d = this.need(id);
+    if (d.delegation && !d.planned && d.state === 'draft' && ['pending', 'ready', 'assessing'].includes(d.tasks[0]?.state ?? '') && d.tasks[0].attemptIds.length === 0) {
+      void this.routeProposal(id).catch((e) => this.log(`task ${id}: delegated task could not be routed: ${errorText(e)}`));
+    }
     // A planner call cut off by a restart is simply asked again (it is a completion, not a session).
     const now0 = this.need(id);
     if (now0.state === 'planning') {
@@ -3372,6 +3520,13 @@ export class TaskRunner implements Disposable {
     this.deps.notify?.({ title: `Task ${what}: ${m.title}`, body, onClick });
   }
 
+  /** A delegation's news (#82): its click brings up the conversation it came from, where its card is. */
+  private notifyDelegation(m: Mission, body: string): void {
+    const origin = m.origin;
+    const show = this.deps.showOrigin;
+    this.deps.notify?.({ title: `Delegated: ${m.title}`, body, ...(origin && show ? { onClick: () => show(origin) } : {}) });
+  }
+
   private queue<T>(missionId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.queues.get(missionId) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(fn);
@@ -3692,6 +3847,20 @@ export function planRecord(missionId: string, run: PlanningRun, now: number): Pl
 }
 
 /** A planned mission (#43): reviewed as a plan, run in the mission tree. */
+/** The user's criteria first, then the planner's that say something else (case and spacing ignored). */
+export function mergeCriteria(user: readonly string[], planner: readonly string[]): string[] {
+  const norm = (c: string) => c.replace(/\s+/g, ' ').trim().toLowerCase();
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const c of [...user, ...planner]) {
+    const k = norm(c);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(c.trim());
+  }
+  return out;
+}
+
 export function isPlanned(m: Pick<Mission, 'planned'>): boolean {
   return m.planned === true;
 }

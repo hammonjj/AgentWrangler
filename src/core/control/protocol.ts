@@ -51,11 +51,11 @@ export const RPC_AMBIGUOUS = -32005;
 /** The session exists, but not in a way that allows this (e.g. `send` to one AW does not run). */
 export const RPC_UNSUPPORTED = -32006;
 
-export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'tasks'] as const;
+export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks'] as const;
 export type ControlMethod = (typeof CONTROL_METHODS)[number];
 /** Methods that change something. Logged by the core (method and session, never content). */
-export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose'];
-/** The longest objective `task.propose` accepts. A task, not a document. */
+export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate'];
+/** The longest objective `task.propose` and `delegate` accept. An outcome, not a document. */
 export const MAX_TASK_OBJECTIVE_CHARS = 20_000;
 
 // ---- the wire's own enumerations (they may grow; see the header) ----
@@ -277,6 +277,32 @@ export interface ControlTaskProposeResult {
 
 export interface ControlTasksResult {
   tasks: ControlTaskView[];
+}
+
+/**
+ * `delegate` (#82): hand an outcome to Agent Wrangler without choosing a task
+ * or a mission. The planner decides; the proposal (one task) or the plan
+ * (several) waits on a card in the origin conversation. Like `task.propose`
+ * it only ever proposes, and the origin is only where the card is shown.
+ */
+export type ControlDelegateParams = ControlTaskProposeParams;
+
+export interface ControlDelegateResult {
+  task: ControlTaskView;
+  /**
+   * `single`: one task, proposed. `multiple`: a plan, waiting for review.
+   * `planning`: the planner had not decided when the call returned; the card
+   * will show what it decides. `failed`: it could not be planned (`note` says
+   * why). May grow.
+   */
+  decision: string;
+  /** For `single`: as `task.propose` has them. */
+  verdict?: string;
+  route?: string;
+  summary?: string;
+  /** For `multiple`: the plan's tasks, in the order they would run. */
+  tasks?: { key: string; title: string }[];
+  note?: string;
 }
 
 /**
