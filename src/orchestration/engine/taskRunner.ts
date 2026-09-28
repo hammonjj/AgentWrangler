@@ -84,7 +84,7 @@ import {
   type WorktreeAssignment,
 } from '../../shared/orchestration/types';
 import { ulid } from '../domain/ids';
-import { dependenciesSatisfied, taskMachine, transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
+import { taskMachine,transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
 import { applyPlanEdit, executionOrder, nextTaskKey, planIssues, planTask, taskCap, tasksFromDraft, type PlanContext } from '../domain/plan';
 import type { PlannedTask, PlanResult, Planner, ReplanContext } from '../policy/planner';
 import { MissionFinisher } from './missionFinish';
@@ -128,6 +128,18 @@ import { classifyOutcome, type Classification } from '../policy/outcome';
 import { attemptRecord, addTurnUsage, escalationRecord, routingRecord, waitedMs } from './attemptRecord';
 import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from './attemptPolicy';
 import { sessionVerdict, turnFailure, turnMessageIds, type HandleView, type SessionVerdict } from './sessionVerdict';
+import {
+  DEFAULT_SCHEDULER_LIMITS,
+  parallelismBenefit,
+  schedule,
+  type CapacitySnapshot,
+  type MissionsSnapshot,
+  type SchedMission,
+  type SchedTask,
+  type SchedulerAction,
+  type SchedulerLimits,
+  type SourceFacts,
+} from './scheduler';
 
 /** What the user picked: harness, model, effort and (Claude) permission mode (#33 "manual route"). */
 export interface TaskRoute {
@@ -294,7 +306,26 @@ export interface TaskRunnerDeps {
   previewDelayMs?: number;
   /** §15.3's limits over the defaults for the mission's mode (#41): tests shorten the waits and the wall clock. */
   escalationLimits?: Partial<EscalationLimits>;
+  /** What the scheduler reads beyond the missions (#45, §12.3–12.4). Absent: default limits, never paused. */
+  scheduling?: SchedulingDeps;
   log?: (msg: string) => void;
+}
+
+/** The scheduler's view of the machine (#45). */
+export interface SchedulingDeps {
+  /** Over `DEFAULT_SCHEDULER_LIMITS`: concurrency and the admission threshold. */
+  limits?: () => Partial<SchedulerLimits>;
+  /**
+   * The fleet, as `PauseService` has it: paused (nothing starts), and its
+   * levers for a mission's "Pause now" (SIGSTOP / SIGCONT on the session's agent).
+   */
+  fleet?: {
+    paused(): boolean;
+    pauseSession(sessionId: string): boolean;
+    resumeSession(sessionId: string): boolean;
+  };
+  /** Fires when capacity, a usage window or the fleet pause may have changed. */
+  onDidChange?: (listener: () => void) => Disposable;
 }
 
 const SOURCE: Record<string, ModelSourceId> = { 'claude-code': 'anthropic', codex: 'openai' };
@@ -350,6 +381,19 @@ export class TaskRunner implements Disposable {
   private readonly escalationTimers = new Map<string, { missionId: string; timer: ReturnType<typeof setTimeout> }>();
   /** The planner call out for each mission, to cut off on Cancel. */
   private readonly planAborts = new Map<string, AbortController>();
+  // ---- The scheduler loop (#45) ----
+  /** Tasks the loop is starting now, before their attempt is on record: they hold a slot. */
+  private readonly starting = new Set<string>();
+  /** Missions with a scheduler step waiting in their queue. */
+  private readonly stepQueued = new Set<string>();
+  /** Finished attempts whose checks wait for a verification slot, by attempt id. */
+  private readonly verifyWaiters = new Map<string, { missionId: string; resolve: (go: boolean) => void }>();
+  /** When each task was first seen ready and waiting, for its attempt's queue time. */
+  private readonly queuedSince = new Map<string, number>();
+  /** Actions that failed to apply, not tried again until something outside changes. */
+  private readonly refusedActions = new Set<string>();
+  private wakeTimer?: { at: number; timer: ReturnType<typeof setTimeout> };
+  private kickTimer?: ReturnType<typeof setTimeout>;
   private readonly now: () => number;
   private readonly random: (bytes: number) => Uint8Array;
   private readonly settleMs: number;
@@ -366,6 +410,14 @@ export class TaskRunner implements Disposable {
     this.subs.push(deps.sessions.onDidChange(() => this.pokeAll()));
     if (deps.onTurnRecord) this.subs.push(deps.onTurnRecord((r) => this.onTurnRecord(r)));
     if (deps.local) this.subs.push(deps.local.onDown((source) => this.onLocalDown(source)));
+    if (deps.scheduling?.onDidChange) {
+      this.subs.push(
+        deps.scheduling.onDidChange(() => {
+          this.refusedActions.clear();
+          this.kickSoon();
+        }),
+      );
+    }
   }
 
   // ---- Reading ----
@@ -451,7 +503,31 @@ export class TaskRunner implements Disposable {
       ...req.policy,
       mode: 'manual',
     }, { pins: routePins(req.route) });
-    await this.queue(id, () => this.launch(id, { mode: 'fresh', route: req.route }));
+    await this.queue(id, async () => {
+      const m = this.need(id);
+      const task = this.currentTask(m);
+      // Admitted by the scheduler like any other start (#45): when it has to
+      // wait (the fleet paused, a usage window full, every slot taken), the
+      // task waits in a running mission, saying why, and starts when it can.
+      const wait = this.admissionWait(id, task.id);
+      if (wait) {
+        const now = this.now();
+        this.queuedSince.set(task.id, now);
+        let next: Mission = { ...m, defaultRoute: { harness: req.route.harness, ...(req.route.model?.trim() ? { model: req.route.model.trim() } : {}), ...(req.route.effort?.trim() ? { effort: req.route.effort.trim() } : {}) } };
+        next = transitionMission(next, 'running', { now, reason: 'waiting to start' });
+        next = this.patchTask(next, task.id, (t) => ({ ...t, stateReason: `waiting: ${wait.detail}` }));
+        this.put(next);
+        this.log(`task ${id}: waits to start (${wait.reason}): ${wait.detail}`);
+        if (wait.until !== undefined) this.wakeAt(wait.until);
+        return;
+      }
+      this.starting.add(task.id);
+      try {
+        await this.launch(id, { mode: 'fresh', route: req.route });
+      } finally {
+        this.starting.delete(task.id);
+      }
+    });
     this.scheduleAssessment(id);
     return this.missions.get(id)!;
   }
@@ -982,6 +1058,8 @@ export class TaskRunner implements Disposable {
     this.clearEscalations(missionId);
     // The planner is cut off first: its call may be what the queue is waiting behind.
     this.planAborts.get(missionId)?.abort();
+    // So is a verification waiting for a slot (#45).
+    this.releaseVerifiers(missionId);
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
       const run = this.latestRun(m);
@@ -1586,56 +1664,356 @@ export class TaskRunner implements Disposable {
     });
   }
 
-  /**
-   * Start whatever the plan says is next, one task at a time (§29 P8). Runs
-   * inside the mission's queue. Finishes the mission once every task is done
-   * or skipped; waits (tasks `blocked`) when what is left needs a task that
-   * failed, was skipped or was cancelled.
-   */
+  /** A planned mission's next step: the scheduler decides what starts (#45). Runs inside the mission's queue. */
   private async launchNext(missionId: string): Promise<void> {
-    let m = this.need(missionId);
-    if (!isPlanned(m) || m.state !== 'running' || this.disposed) return;
+    const m = this.need(missionId);
     // Nothing runs before approval, however this was reached.
-    if (m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
-    const busy: TaskState[] = ['ready', 'assessing', 'routed', 'queued', 'running', 'verifying', 'integrating', 'needs-human'];
-    // A task waiting out a rate limit is `blocked`, and it is still this mission's task in hand.
-    if (m.tasks.some((t) => busy.includes(t.state) || pendingEscalation(t))) return;
+    if (isPlanned(m) && m.state === 'running' && m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
+    await this.step(missionId);
+  }
+
+  // ---- The scheduler loop (#45, §12.2) ----
+
+  /**
+   * The scheduler's input from every mission: each task's state, route and
+   * live attempt. `asRunning` counts a mission not yet running as if it were,
+   * to ask whether its first task would be admitted.
+   */
+  private schedSnapshot(asRunning?: string): MissionsSnapshot {
+    const missions: SchedMission[] = [];
+    for (const m of this.missions.values()) {
+      const state = m.id === asRunning && m.state === 'draft' ? 'running' : m.state;
+      if (!['running', 'paused', 'cancelled'].includes(state)) continue;
+      // Nothing of a planned mission runs before approval.
+      if (isPlanned(m) && m.planApprovedAt === undefined) continue;
+      const caps = this.safeEffective(m)?.policy.caps ?? {};
+      missions.push({
+        id: m.id,
+        repo: m.repoRoot,
+        state,
+        priority: 0,
+        createdAt: m.createdAt,
+        planned: isPlanned(m),
+        // Until #46's integrator, a plan's tasks share the mission worktree, so run one at a time.
+        sharedTree: true,
+        ...(caps.maxUsageWindowPercent !== undefined ? { maxWindowPercent: caps.maxUsageWindowPercent } : {}),
+        ...(caps.maxConcurrentAgents !== undefined ? { maxConcurrentAgents: caps.maxConcurrentAgents } : {}),
+        tasks: executionOrder(m.tasks).map((t) => this.schedTask(m, t)),
+      });
+    }
+    return { missions };
+  }
+
+  private schedTask(m: Mission, t: Task): SchedTask {
+    const current = this.currentAttempt(m, t.id);
+    const live = current && LIVE.includes(current.state) ? current : undefined;
+    const pending = pendingEscalation(t);
+    const prev = pending ? m.attempts.find((a) => a.id === pending.afterAttemptId) : undefined;
+    let route: TaskRoute;
+    try {
+      route = live ? routeOf(m, live) : pending && prev ? this.withPins(this.escalatedRoute(m, prev, pending), this.effective(m, t).policy.pins) : this.routeFor(m, t.id);
+    } catch {
+      route = this.routeFor(m, t.id);
+    }
+    const decision = live ? m.decisions.find((d) => d.id === live.routingDecisionId) : undefined;
+    const source = decision?.resolution.target.source ?? route.source ?? SOURCE[route.harness] ?? route.harness;
+    let phase: 'agent' | 'verify-queued' | 'verifying' | undefined;
+    if (live) phase = this.verifyWaiters.has(live.id) ? 'verify-queued' : live.state === 'verifying' ? 'verifying' : 'agent';
+    else if (this.starting.has(t.id)) phase = 'agent';
+    return {
+      id: t.id,
+      key: t.key,
+      state: t.state,
+      dependsOn: t.dependsOn,
+      // In the one mission tree, a done task's result is the mission branch.
+      integrated: t.state === 'done',
+      ...(t.invalidated ? { invalidated: true } : {}),
+      harness: live?.assignment.harness ?? route.harness,
+      source,
+      attempts: t.attemptIds.length,
+      ...(phase ? { live: { id: live?.id ?? `starting:${t.id}`, phase } } : {}),
+      ...(pending && !this.starting.has(t.id) ? { retry: { decisionId: pending.id, ...(pending.notBefore !== undefined ? { notBefore: pending.notBefore } : {}) } } : {}),
+    };
+  }
+
+  /** The effective policy, or undefined when it cannot be worked out (a scheduler read must never throw). */
+  private safeEffective(m: Mission): EffectivePolicy | undefined {
+    try {
+      return this.effective(m, m.tasks[0]);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Capacity as the scheduler reads it: the limits, every source's window, backoff and slots, and the fleet pause. */
+  private capacitySnapshot(): CapacitySnapshot {
+    const sched = this.deps.scheduling;
+    const limits: SchedulerLimits = { ...DEFAULT_SCHEDULER_LIMITS, ...(sched?.limits?.() ?? {}) };
+    const sources: CapacitySnapshot['sources'] = {};
+    let snap: ResolverSnapshot | undefined;
+    try {
+      snap = this.deps.routing?.snapshot();
+    } catch {
+      snap = undefined;
+    }
+    for (const [id, status] of Object.entries(snap?.sources ?? {})) {
+      if (!status) continue;
+      const c = status.capacity;
+      const facts: SourceFacts = {};
+      if (isKnown(c.windowPercent)) facts.windowPercent = c.windowPercent.value;
+      if (c.backoffUntil !== undefined) facts.backoffUntil = c.backoffUntil;
+      if (isKnown(c.freeSlots)) facts.freeSlots = c.freeSlots.value;
+      sources[id as ModelSourceId] = facts;
+    }
+    return { limits, sources, fleetPaused: sched?.fleet?.paused() === true };
+  }
+
+  /** Why the scheduler would not start this task now, or undefined when it would. */
+  private admissionWait(missionId: string, taskId: string): Extract<SchedulerAction, { kind: 'wait' }> | undefined {
+    const actions = schedule(this.schedSnapshot(missionId), this.capacitySnapshot(), this.now());
+    if (actions.some((a) => a.kind === 'start' && a.taskId === taskId)) return undefined;
+    return actions.find((a): a is Extract<SchedulerAction, { kind: 'wait' }> => a.kind === 'wait' && a.taskId === taskId);
+  }
+
+  /** The hard holds on any new attempt, however it was asked for: the fleet paused, the source's window full or backed off. */
+  private holdRefusal(route: TaskRoute): string | undefined {
+    const cap = this.capacitySnapshot();
+    if (cap.fleetPaused) return 'Every agent is paused; nothing new starts until they are resumed.';
+    const source = route.source ?? SOURCE[route.harness] ?? route.harness;
+    const f = cap.sources[source];
+    if (f?.backoffUntil !== undefined && f.backoffUntil > this.now()) return `${source} is rate-limited; nothing new starts on it until ${new Date(f.backoffUntil).toISOString()}.`;
+    if (f?.windowPercent !== undefined && f.windowPercent >= cap.limits.admissionPercent) {
+      return `The ${source} usage window is at ${Math.round(f.windowPercent)}%; new work starts below ${cap.limits.admissionPercent}%.`;
+    }
+    return undefined;
+  }
+
+  /** Something outside may have changed: step every mission soon, once. */
+  private kickSoon(): void {
+    if (this.disposed || this.kickTimer) return;
+    this.kickTimer = setTimeout(() => {
+      this.kickTimer = undefined;
+      void this.step().catch((e) => this.log(`scheduler: ${errorText(e)}`));
+    }, 0);
+  }
+
+  /**
+   * One scheduler step (§12.2). The actions for `inMission` are carried out
+   * here, in its queue; any other mission with work to do gets a step of its
+   * own in its queue. Waits only say why on the task.
+   */
+  private async step(inMission?: string): Promise<void> {
+    if (this.disposed) return;
     const now = this.now();
-    const open = executionOrder(m.tasks).filter((t) => t.state === 'pending' || t.state === 'blocked');
-    if (open.length === 0) {
-      if (m.tasks.every((t) => t.state === 'done' || t.state === 'skipped')) {
+    const actions = schedule(this.schedSnapshot(), this.capacitySnapshot(), now).filter((a) => !this.refusedActions.has(actionKey(a)));
+    const mine: SchedulerAction[] = [];
+    const others = new Set<string>();
+    for (const a of actions) {
+      switch (a.kind) {
+        case 'wake':
+          this.wakeAt(a.at);
+          break;
+        case 'wait':
+          this.noteWait(a, now);
+          break;
+        case 'verify':
+          this.verifyWaiters.get(a.attemptId)?.resolve(true);
+          this.verifyWaiters.delete(a.attemptId);
+          break;
+        case 'integrate':
+          // #46 merges task branches into the mission branch; in the one mission tree there is nothing to merge.
+          break;
+        case 'cancel':
+          // A verification waiting for a slot is let go, so the queue it holds can take the cancel.
+          this.verifyWaiters.get(a.attemptId)?.resolve(false);
+          this.verifyWaiters.delete(a.attemptId);
+          if (a.missionId === inMission) mine.push(a);
+          else others.add(a.missionId);
+          break;
+        default:
+          if (a.missionId !== inMission) {
+            others.add(a.missionId);
+            break;
+          }
+          if (a.kind === 'start') this.starting.add(a.taskId);
+          mine.push(a);
+      }
+    }
+    // Queue time is kept only for tasks still waiting or about to start.
+    const inHand = new Set(actions.flatMap((a) => (a.kind === 'wait' || a.kind === 'start' ? [a.taskId] : [])));
+    for (const id of this.queuedSince.keys()) if (!inHand.has(id) && !this.starting.has(id)) this.queuedSince.delete(id);
+    for (const id of others) this.stepLater(id);
+    for (const a of mine) {
+      try {
+        await this.applyAction(a);
+      } catch (e) {
+        this.refusedActions.add(actionKey(a));
+        this.log(`scheduler: ${a.kind} ${'taskId' in a ? a.taskId : ''} in ${inMission} failed: ${errorText(e)}`);
+      } finally {
+        if (a.kind === 'start') this.starting.delete(a.taskId);
+      }
+    }
+  }
+
+  /** A step in the mission's own queue, unless one is waiting there already. */
+  private stepLater(missionId: string): void {
+    if (this.disposed || this.stepQueued.has(missionId)) return;
+    this.stepQueued.add(missionId);
+    void this.queue(missionId, async () => {
+      this.stepQueued.delete(missionId);
+      if (this.missions.has(missionId)) await this.step(missionId);
+    }).catch((e) => this.log(`mission ${missionId}: scheduler step failed: ${errorText(e)}`));
+  }
+
+  private wakeAt(at: number): void {
+    if (this.disposed || (this.wakeTimer && this.wakeTimer.at <= at)) return;
+    if (this.wakeTimer) clearTimeout(this.wakeTimer.timer);
+    const timer = setTimeout(() => {
+      this.wakeTimer = undefined;
+      this.refusedActions.clear();
+      this.kickSoon();
+    }, Math.max(0, at - this.now()));
+    this.wakeTimer = { at, timer };
+  }
+
+  /** A task that may start but has to wait says why, once; its queue time starts now. */
+  private noteWait(a: Extract<SchedulerAction, { kind: 'wait' }>, now: number): void {
+    if (a.reason !== 'verification' && !this.queuedSince.has(a.taskId)) this.queuedSince.set(a.taskId, now);
+    const m = this.missions.get(a.missionId);
+    const t = m?.tasks.find((x) => x.id === a.taskId);
+    if (!m || !t || !['pending', 'queued', 'blocked', 'verifying'].includes(t.state)) return;
+    const reason = `waiting: ${a.detail}`;
+    if (t.stateReason === reason) return;
+    this.log(`mission ${m.id}: ${t.key} waits (${a.reason}): ${a.detail}`);
+    // A pending escalation step keeps its own text; the wait is added to it.
+    const pending = pendingEscalation(t);
+    this.put(this.patchTask(m, t.id, (x) => ({ ...x, stateReason: pending ? `${pendingText(pending, now)}; ${reason}` : reason })));
+  }
+
+  /** Carry out one of the scheduler's actions for a mission, in its queue. */
+  private async applyAction(a: SchedulerAction): Promise<void> {
+    if (a.kind === 'wake' || a.kind === 'wait' || a.kind === 'verify' || a.kind === 'integrate') return;
+    let m = this.need(a.missionId);
+    const now = this.now();
+    switch (a.kind) {
+      case 'start': {
+        if (a.retryOf) {
+          await this.runEscalation(m.id, a.retryOf);
+          return;
+        }
+        const task = m.tasks.find((t) => t.id === a.taskId)!;
+        const route = this.routeFor(m, task.id);
+        const capped = this.capRefusal(m, task.id, route);
+        if (capped) {
+          this.put(this.failBeforeLaunch(m, task.id, capped));
+          this.notify(this.need(m.id), 'needs you', `${task.key}: ${capped}`);
+          return;
+        }
+        try {
+          await this.launch(m.id, { mode: 'fresh', route, taskId: task.id });
+        } catch (e) {
+          // `launch` has already left the task waiting on the user, saying why.
+          this.log(`mission ${m.id}: ${task.key} could not start: ${errorText(e)}`);
+          this.notify(this.need(m.id), 'needs you', `${task.key} could not start: ${errorText(e)}`);
+        }
+        return;
+      }
+      case 'block': {
+        m = this.patchTask(m, a.taskId, (t) => transitionTask(m, t, 'blocked', { now, reason: `blocked: ${a.detail}` }));
+        this.put(m);
+        const key = m.tasks.find((t) => t.id === a.taskId)?.key;
+        this.notify(m, 'needs you', `${key} depends on a task that did not finish (${a.detail}). Recover it, skip what depends on it, or cancel the mission.`);
+        return;
+      }
+      case 'unblock':
+        this.put(this.patchTask(m, a.taskId, (t) => transitionTask(m, t, 'pending', { now, reason: 'its upstream is back' })));
+        return;
+      case 'cancel': {
+        const att = m.attempts.find((x) => x.id === a.attemptId);
+        if (!att || !LIVE.includes(att.state)) return;
+        m = this.endAttempt(m, att.id, 'cancelled', { status: 'cancelled' }, 'cancelled');
+        this.put(m);
+        await this.endSession(m, att);
+        await this.retainTree(this.need(m.id), att);
+        return;
+      }
+      case 'finish': {
         m = transitionMission(m, 'finishing', { now });
         m = transitionMission(m, 'review', { now, reason: 'every task is done: merge, open a pull request, keep or discard the mission branch' });
         this.put(m);
+        const benefit = parallelismBenefit(
+          m.attempts.map((x) => ({ activeMs: attemptRecord(m, x, now)?.activeMs })),
+          now - (m.planApprovedAt ?? m.createdAt),
+        );
+        this.log(`mission ${m.id}: every task done${benefit !== undefined ? `; parallelism benefit ${benefit.toFixed(2)}` : ''}`);
         this.notify(m, 'is ready for review', `${m.tasks.filter((t) => t.state === 'done').length} task(s) done on ${resultBranch(m) ?? 'the mission branch'}.`);
+        return;
       }
-      return;
     }
-    const next = open.find((t) => dependenciesSatisfied(m, t));
-    if (!next) {
-      for (const t of open) {
-        const waiting = t.dependsOn.map((d) => m.tasks.find((x) => x.id === d.taskId)).filter((u) => u && u.state !== 'done').map((u) => `${u!.key} (${u!.state})`);
-        const reason = `waiting on ${waiting.join(', ')}`;
-        m = this.patchTask(m, t.id, (x) => (x.state === 'pending' ? transitionTask(m, x, 'blocked', { now, reason }) : { ...x, stateReason: reason }));
-      }
+  }
+
+  /**
+   * A finished attempt's checks wait here for a verification slot in its
+   * repository (§12.3). False: the mission was cancelled (or the runner
+   * stopped) meanwhile, and nothing should be verified.
+   */
+  private verificationSlot(missionId: string, attemptId: string): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      this.verifyWaiters.set(attemptId, { missionId, resolve });
+      void this.step().catch((e) => this.log(`scheduler: ${errorText(e)}`));
+    });
+  }
+
+  /** Let go every verification of a mission (or all) waiting for a slot: they will not run. */
+  private releaseVerifiers(missionId?: string): void {
+    for (const [id, w] of this.verifyWaiters) {
+      if (missionId !== undefined && w.missionId !== missionId) continue;
+      this.verifyWaiters.delete(id);
+      w.resolve(false);
+    }
+  }
+
+  /**
+   * Mission pause (§12.3): start nothing new; running attempts carry on.
+   * `now` also pauses their sessions with the fleet's `PauseService`
+   * (SIGSTOP on the agent), which Resume undoes.
+   */
+  pauseMission(missionId: string, opts: { now?: boolean } = {}): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (m.state !== 'running') throw new TaskError(`The mission is ${m.state}; only a running mission can be paused.`);
+      m = transitionMission(m, 'paused', { now: this.now(), reason: opts.now ? 'paused now by the user: its agents are stopped' : 'paused by the user: nothing new starts' });
       this.put(m);
-      this.notify(m, 'needs you', 'What is left depends on a task that did not finish. Skip it, or cancel the mission.');
-      return;
-    }
-    const route = this.routeFor(m, next.id);
-    const capped = this.capRefusal(m, next.id, route);
-    if (capped) {
-      this.put(this.failBeforeLaunch(m, next.id, capped));
-      this.notify(this.need(missionId), 'needs you', `${next.key}: ${capped}`);
-      return;
-    }
-    try {
-      await this.launch(missionId, { mode: 'fresh', route, taskId: next.id });
-    } catch (e) {
-      // `launch` has already left the task waiting on the user, saying why.
-      this.log(`mission ${missionId}: ${next.key} could not start: ${errorText(e)}`);
-      this.notify(this.need(missionId), 'needs you', `${next.key} could not start: ${errorText(e)}`);
-    }
+      if (opts.now) {
+        const fleet = this.deps.scheduling?.fleet;
+        if (!fleet) throw new TaskError('Nothing new will start, but the running agents could not be paused: there is no pause service.');
+        for (const a of m.attempts.filter((x) => LIVE.includes(x.state))) {
+          const sid = a.assignment.sessionIds.at(-1);
+          if (sid && !fleet.pauseSession(sid)) this.log(`mission ${missionId}: could not pause session ${sid}`);
+        }
+      }
+      this.log(`mission ${missionId}: paused${opts.now ? ' now' : ''}`);
+      return this.need(missionId);
+    });
+  }
+
+  /** Resume a paused mission: its paused sessions carry on, and the scheduler starts what is ready. */
+  resumeMission(missionId: string): Promise<Mission> {
+    return this.queue(missionId, async () => {
+      let m = this.need(missionId);
+      if (m.state !== 'paused') throw new TaskError('The mission is not paused.');
+      m = transitionMission(m, 'running', { now: this.now(), reason: 'resumed by the user' });
+      this.put(m);
+      const fleet = this.deps.scheduling?.fleet;
+      for (const a of m.attempts.filter((x) => LIVE.includes(x.state))) {
+        const sid = a.assignment.sessionIds.at(-1);
+        if (sid) fleet?.resumeSession(sid);
+      }
+      this.log(`mission ${missionId}: resumed`);
+      await this.step(missionId);
+      return this.need(missionId);
+    });
   }
 
   /**
@@ -2062,6 +2440,9 @@ export class TaskRunner implements Disposable {
       if (continues && route.harness !== continues.assignment.harness) throw new TaskError(`The session runs on ${continues.assignment.harness}; the route is now pinned to ${route.harness}.`);
       const refusal = admissionRefusal(eff, this.admissionFacts(m, route, !!resumeOf, task));
       if (refusal) throw new TaskError(refusal);
+      // However it was asked for, nothing new starts while the fleet is paused or the source is full (#45, §12.4).
+      const held = this.holdRefusal(route);
+      if (held) throw new TaskError(held);
       harness = this.checkRoute(route);
       const policy = this.deps.repoPolicies.forFolder(m.repoRoot);
       if (!policy) throw new TaskError(`${m.repoRoot} is no longer a git repository.`);
@@ -2133,7 +2514,8 @@ export class TaskRunner implements Disposable {
       flags: {},
       sentIds: [promptId],
       turnsSeen: 0,
-      timing: { queuedAt: now },
+      // Queue time (§16.3) runs from when the scheduler first had it ready and waiting.
+      timing: { queuedAt: Math.min(now, this.queuedSince.get(task.id) ?? now) },
       createdAt: now,
       ...(resumeOf ? { resumeOf: resumeOf.id, ...('auto' in opts && opts.auto ? { autoResumed: true } : {}) } : {}),
       ...(continues ? { continues: continues.id } : {}),
@@ -2146,6 +2528,7 @@ export class TaskRunner implements Disposable {
     m = this.patchAttempt(m, attempt.id, (x) => transitionAttempt(m, x, 'launching', { now }));
     // Write-ahead: the attempt, its session id and origin are on disk before anything starts.
     this.put(m);
+    this.queuedSince.delete(task.id);
     this.writeRouting(m, decision);
 
     const policy: LaunchPolicy = attemptLaunchPolicy({ harness: route.harness, primaryRoot: m.repoRoot, repoPolicy: loaded.policy });
@@ -2854,7 +3237,11 @@ export class TaskRunner implements Disposable {
     return { ok: false, reason: res.note ?? 'nothing the policy allows.' };
   }
 
-  /** Run a pending step when it is due. */
+  /**
+   * Run a pending step when it is due. A retry is a new attempt through the
+   * same admission as any other (§12.3): when it is due the scheduler is
+   * asked, and starts it once the fleet, the usage windows and the slots let it.
+   */
   private scheduleEscalation(missionId: string, d: EscalationDecision): void {
     if (this.disposed) return;
     const had = this.escalationTimers.get(d.id);
@@ -2862,7 +3249,7 @@ export class TaskRunner implements Disposable {
     const delay = Math.max(0, (d.notBefore ?? 0) - this.now());
     const timer = setTimeout(() => {
       this.escalationTimers.delete(d.id);
-      void this.queue(missionId, () => this.runEscalation(missionId, d.id)).catch((e) => this.log(`task ${missionId}: escalation step failed: ${errorText(e)}`));
+      this.stepLater(missionId);
     }, delay);
     this.escalationTimers.set(d.id, { missionId, timer });
   }
@@ -3283,6 +3670,11 @@ export class TaskRunner implements Disposable {
       m = this.patchAttempt(m, a.id, (x) => transitionAttempt(m, x, 'verifying', { now: this.now() }));
       this.put(m);
     }
+    // One verification per repository at a time by default (§12.3): the scheduler hands out the slots.
+    if (task.verification.stages.length > 0 && !(await this.verificationSlot(missionId, attemptId))) {
+      this.log(`task ${missionId}: attempt ${a.n} not verified: the mission was stopped while it waited for a slot`);
+      return;
+    }
     const results = await this.verify(missionId, attemptId, wt, stats.headCommit);
     m = this.need(missionId);
     m = this.patchAttempt(m, a.id, (x) => ({ ...x, verification: results }));
@@ -3581,6 +3973,8 @@ export class TaskRunner implements Disposable {
     this.deps.store.save(next);
     this.missions.set(next.id, next);
     this.emitter.fire();
+    // Something may have freed a slot for work that waits (#45).
+    if (this.verifyWaiters.size > 0 || this.queuedSince.size > 0) this.kickSoon();
   }
 
   private patchTask(m: Mission, taskId: string, f: (t: Task) => Task): Mission {
@@ -3598,6 +3992,9 @@ export class TaskRunner implements Disposable {
   dispose(): void {
     this.disposed = true;
     this.clearEscalations();
+    this.releaseVerifiers();
+    if (this.wakeTimer) clearTimeout(this.wakeTimer.timer);
+    if (this.kickTimer) clearTimeout(this.kickTimer);
     for (const t of this.previewTimers.values()) clearTimeout(t);
     this.previewTimers.clear();
     for (const a of this.planAborts.values()) a.abort();
@@ -3668,6 +4065,11 @@ async function bounded(p: Promise<unknown>, ms: number): Promise<void> {
 }
 
 /** What a task waiting on an escalation step says it is waiting for. */
+/** A scheduler action's identity, to hold back one that failed to apply. */
+function actionKey(a: SchedulerAction): string {
+  return `${a.kind}:${'missionId' in a ? a.missionId : ''}:${'taskId' in a ? a.taskId : ''}:${'attemptId' in a ? a.attemptId : 'retryOf' in a ? (a.retryOf ?? '') : ''}`;
+}
+
 function pendingText(d: EscalationDecision, now: number): string {
   const due = d.notBefore !== undefined && d.notBefore > now ? ` at ${new Date(d.notBefore).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : '';
   const what: Record<string, string> = {

@@ -252,6 +252,11 @@ function footerHtml(v: MissionView): string {
       `<button class="mbtn" data-mission-op="replan" title="Ask the planner for the rest of the plan. Done tasks stay; unfinished work is set aside on a branch of its own; the new plan is reviewed before anything runs.">Replan…</button>`,
     );
   }
+  if (v.canPause) {
+    parts.push(`<button class="mbtn" data-mission-op="pause" title="Start nothing new; what is running carries on">Pause</button>`);
+    parts.push(`<button class="mbtn" data-mission-op="pause-now" title="Start nothing new, and pause the running agents too">Pause now</button>`);
+  }
+  if (v.canResume) parts.push(`<button class="mbtn primary" data-mission-op="resume" title="Resume paused agents and start what is ready">Resume</button>`);
   if (v.canCancel) parts.push(`<button class="mbtn danger" data-mission-op="cancel">Cancel mission</button>`);
   return parts.length > 0 ? `<div class="mfoot">${parts.join('')}</div>` : '';
 }
@@ -285,6 +290,8 @@ export function clickIntent(target: HTMLElement, snap: MissionsSnapshot | undefi
   const missionOp = target.closest<HTMLElement>('[data-mission-op]')?.dataset.missionOp;
   if (missionOp === 'approve') return { kind: 'op', missionId, op: { kind: 'approve' } };
   if (missionOp === 'cancel') return { kind: 'op', missionId, op: { kind: 'cancel' } };
+  if (missionOp === 'pause' || missionOp === 'pause-now') return { kind: 'op', missionId, op: { kind: 'pause', ...(missionOp === 'pause-now' ? { now: true } : {}) } };
+  if (missionOp === 'resume') return { kind: 'op', missionId, op: { kind: 'resume' } };
   if (missionOp === 'plan-again' || missionOp === 'write-plan' || missionOp === 'replan') return { kind: 'op', missionId, op: { kind: missionOp } };
   const finish = target.closest<HTMLElement>('[data-finish]')?.dataset.finish;
   if (finish) return { kind: 'op', missionId, op: { kind: 'finish', how: finish as 'merge-local' } };

@@ -1369,6 +1369,36 @@ The existing Budget feature is the real constraint on this machine. Admission re
 and mission caps expressed as "stop starting work when the 5-hour window reaches N%". This keeps
 orchestration from being the thing that pushes the fleet into auto-pause.
 
+### 12.5 As built (#45, 2026-09-28)
+
+- **Step function**: `engine/scheduler.ts`, `schedule(missions, capacity, now) → actions`: `start`
+  (a first attempt, or a pending #41 step as `retryOf`), `verify`, `wait` (reason, detail and
+  `until` for a timed one), `block` / `unblock`, `cancel`, `integrate`, `finish`, `wake`. It has its own
+  small snapshot types, so tables and the fake-clock simulation in `test/orchestration/scheduler.test.ts`
+  do not need whole missions.
+- **Loop**: the task runner builds the snapshot from every mission, runs a step on approval, on every
+  attempt, verification, skip or resume, when an escalation step falls due, and when usage, the fleet
+  pause or a local endpoint changes (`SchedulingDeps.onDidChange`). A mission's actions run in its own
+  queue; `start` goes through the existing `launch`, so the resolver and the `AgentHarness`, and
+  nothing else. Every `launch` also refuses on its own while the fleet is paused or the source's window
+  is at the threshold, so the user's direct starts, retries and resumes are held too.
+- **Defaults**: global 3, per repository 2, per harness and per source none unless set, per local
+  endpoint its free slots, one verification per repository, admission below **85%** of the
+  source's fullest window (the mission's `maxUsageWindowPercent` can lower it; the resolver's own
+  95% is unchanged). The window is the source's own: a full Codex window does not hold a Claude task.
+- **Fleet paused** means `PauseService` has every live agent frozen (as Pause all and auto-pause leave
+  it). Pausing one session by hand does not stop the scheduler.
+- **Mission pause**: Pause (start nothing new) and Pause now (also SIGSTOP the running agents through
+  `PauseService`) in the Missions view; Resume continues them and steps the mission.
+- **One tree until #46**: a planned mission's tasks still share the mission worktree, so the engine
+  marks every mission `sharedTree` and a mission runs one task at a time; a task that is tried and
+  unfinished (waiting on the user or on its retry) holds the tree. Parallelism today is across missions.
+  The step function already handles separate trees (`integrate` for a done task on its own branch;
+  `A → B, A → C, B + C → D` runs B and C together in the simulation): #46 turns `sharedTree` off.
+- **Telemetry**: an attempt's `queuedAt` is when the scheduler first had its task ready and waiting, so
+  `queueMs` includes capacity waits; each wait is logged with its reason. Parallelism benefit
+  (`parallelismBenefit`, §17) is logged when a planned mission reaches review.
+
 ---
 
 ## 13. Git, worktrees and exclusive resources

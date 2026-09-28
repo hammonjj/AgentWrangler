@@ -21,7 +21,7 @@ import { ClaudeStructuredCompletion, type CompletionQueryFn, type CompletionResu
 import { RoutedCompletion } from './completion/localCompletion';
 import type { LocalEndpointService } from './local/localEndpointService';
 import type { CapabilityCatalogView } from '../shared/orchestration/catalog';
-import { TaskRunner } from './engine/taskRunner';
+import { TaskRunner, type SchedulingDeps } from './engine/taskRunner';
 import { ClaudeCodeHarness } from './harness/claudeCodeHarness';
 import { CodexHarness } from './harness/codexHarness';
 import type { AgentHarness } from './harness/types';
@@ -92,6 +92,12 @@ export interface OrchestrationDeps {
     >;
     catalog: () => CapabilityCatalogView;
   };
+  /**
+   * What the scheduler reads beyond the missions (#45): the fleet pause and
+   * its levers (`PauseService`), limits, and a signal when capacity or a usage
+   * window moves. Absent: default limits, never paused.
+   */
+  scheduling?: SchedulingDeps;
 }
 
 /**
@@ -226,6 +232,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     diffsDir: path.join(deps.dataDir, 'orchestration', 'diffs'),
     logsDir: path.join(deps.dataDir, 'orchestration', 'logs'),
     settleMs: deps.settleMs,
+    ...(deps.scheduling ? { scheduling: deps.scheduling } : {}),
     log,
   });
   // Recovery (§23.3) waits for #4: hosts adopted, Codex threads rejoined.

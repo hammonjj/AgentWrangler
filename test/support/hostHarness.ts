@@ -172,9 +172,24 @@ export class HostHarness {
     }
   }
 
-  /** The environment the fake agent was started with (it writes it to its cwd). */
-  agentEnv(agentPid: number, cwd = this.root): Record<string, string> {
-    return JSON.parse(fs.readFileSync(path.join(cwd, `agent-env-${agentPid}.json`), 'utf8')) as Record<string, string>;
+  /**
+   * The environment the fake agent was started with. It writes it to its cwd
+   * as its first act, but it is a `node -e` child of its own: on a loaded
+   * machine the host can echo a reply before the child has got that far.
+   */
+  async agentEnv(agentPid: number, cwd = this.root): Promise<Record<string, string>> {
+    const file = path.join(cwd, `agent-env-${agentPid}.json`);
+    let env: Record<string, string> | undefined;
+    // Parsed, not just present: a read can land mid-write.
+    await until(() => {
+      try {
+        env = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, string>;
+        return true;
+      } catch {
+        return false;
+      }
+    }, 10_000, `the agent ${agentPid} to write its environment`);
+    return env!;
   }
 
   /** A process to clean up that no manifest names (a test core, an orphan). */

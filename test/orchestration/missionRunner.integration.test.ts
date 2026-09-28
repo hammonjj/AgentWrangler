@@ -26,7 +26,7 @@ import type { TaskFinalRecord, TelemetryRecord } from '../../src/shared/orchestr
 import type { Mission, Task } from '../../src/shared/orchestration/types';
 import type { PlanTaskDraft } from '../../src/shared/orchestration/plan';
 import type { Exec } from '../../src/orchestration/worktrees/exec';
-import { snapshot } from './routingFixtures';
+import { snapshot, status } from './routingFixtures';
 
 const savedEnv: Record<string, string | undefined> = {};
 let gitConfig: string;
@@ -447,7 +447,7 @@ describe('planned missions', () => {
     await until(() => byKey(r.runner.get(m.id)!, 't3').state === 'done', 20_000, 't3 to run');
     let cur = r.runner.get(m.id)!;
     expect(byKey(cur, 't1').state).toBe('skipped');
-    expect(byKey(cur, 't2')).toMatchObject({ state: 'blocked', stateReason: 'waiting on t1 (skipped)' });
+    expect(byKey(cur, 't2')).toMatchObject({ state: 'blocked', stateReason: 'blocked: upstream t1 skipped' });
     // t3 started from the base: t1's rejected work is not under it…
     const a3 = cur.attempts.find((a) => a.taskId === byKey(cur, 't3').id)!;
     expect(a3.startCommit).toBe(cur.base.commit);
@@ -514,5 +514,117 @@ describe('planned missions', () => {
     expect(calls[0]).toEqual(expect.arrayContaining(['pr', 'create', '--head', branch, '--base', 'main', '--title', 'PR mission']));
     // Nothing but the mission branch went to the remote.
     expect(git(remote, 'for-each-ref', '--format=%(refname)').split('\n')).toEqual([`refs/heads/${branch}`]);
+  });
+});
+
+/** The fleet as `PauseService` would give it, and a change signal the test fires. */
+function fakeFleet() {
+  let listeners: (() => void)[] = [];
+  const f = {
+    pausedNow: false,
+    paused: [] as string[],
+    resumed: [] as string[],
+    fire: () => listeners.forEach((l) => l()),
+    deps: {
+      fleet: {
+        paused: () => f.pausedNow,
+        pauseSession: (id: string) => (f.paused.push(id), true),
+        resumeSession: (id: string) => (f.resumed.push(id), true),
+      },
+      onDidChange: (l: () => void) => {
+        listeners.push(l);
+        return { dispose: () => (listeners = listeners.filter((x) => x !== l)) };
+      },
+    },
+  };
+  return f;
+}
+
+describe('scheduling (#45)', () => {
+  const TWO: PlanTaskDraft[] = [
+    { title: 'First', objective: 'Synthetic a.', acceptanceCriteria: ['a'] },
+    { title: 'Second', objective: 'Synthetic b.', acceptanceCriteria: ['b'], dependsOn: [{ key: 't1', kind: 'code' }] },
+  ];
+
+  it('nothing starts while the fleet is paused, and the waiting work starts when it resumes', async () => {
+    const f = fakeFleet();
+    f.pausedNow = true;
+    const r = rig({ scheduling: f.deps });
+    const m = await r.runner.createMission({ folder: repo, title: 'Paused fleet', objective: 'Synthetic.', tasks: TWO });
+    script(r, m, { t1: [edit({ 'a.txt': 'a\n' })], t2: [edit({ 'b.txt': 'b\n' })] });
+    await r.runner.approvePlan(m.id, ROUTE);
+    let cur = r.runner.get(m.id)!;
+    expect(cur.attempts).toEqual([]);
+    expect(byKey(cur, 't1')).toMatchObject({ state: 'pending', stateReason: expect.stringContaining('every agent is paused') });
+    // A single task started directly waits the same way, in a running mission.
+    const single = await r.runner.start({ folder: repo, title: 'Single', objective: 'Synthetic.', acceptanceCriteria: ['s'], route: ROUTE });
+    expect(single).toMatchObject({ state: 'running', attempts: [] });
+    expect(single.tasks[0].stateReason).toContain('every agent is paused');
+    r.scenario.tasks![single.tasks[0].id] = [edit({ 's.txt': 's\n' })];
+    await new Promise((res) => setTimeout(res, 100));
+    expect(r.runner.get(m.id)!.attempts).toEqual([]);
+    f.pausedNow = false;
+    f.fire();
+    await until(() => r.runner.get(m.id)?.state === 'review', 20_000, 'the mission to finish');
+    await until(() => (r.runner.get(single.id)?.attempts.length ?? 0) > 0, 10_000, 'the single task to start');
+    cur = r.runner.get(m.id)!;
+    // Queue time counts the wait.
+    const a1 = cur.attempts.find((a) => a.taskId === byKey(cur, 't1').id)!;
+    expect(a1.timing?.queuedAt).toBeLessThanOrEqual(a1.createdAt - 100);
+  });
+
+  it('a usage window at the admission threshold (85%) holds new work; below it, work starts', async () => {
+    const f = fakeFleet();
+    let percent = 85;
+    const r = rig({ scheduling: f.deps, routing: { snapshot: () => snapshot({ sources: { anthropic: status('anthropic', 'reachable', percent), openai: status('openai', 'reachable', 20) }, now: Date.now() }) } });
+    const m = await r.runner.createMission({ folder: repo, title: 'Budget', objective: 'Synthetic.', tasks: TWO.slice(0, 1) });
+    script(r, m, { t1: [edit({ 'a.txt': 'a\n' })] });
+    await r.runner.approvePlan(m.id, ROUTE);
+    expect(r.runner.get(m.id)!.attempts).toEqual([]);
+    expect(byKey(r.runner.get(m.id)!, 't1').stateReason).toContain('usage window is at 85%');
+    percent = 40;
+    f.fire();
+    await until(() => r.runner.get(m.id)?.state === 'review', 20_000, 'the mission to finish');
+  });
+
+  it('mission pause stops new starts; Pause now pauses the running session; Resume carries on', async () => {
+    const f = fakeFleet();
+    const r = rig({ scheduling: f.deps });
+    const m = await r.runner.createMission({ folder: repo, title: 'Pause mission', objective: 'Synthetic.', tasks: TWO });
+    script(r, m, { t1: [{ behaviour: 'edit', files: { 'a.txt': 'a\n' }, delayMs: 300 }], t2: [edit({ 'b.txt': 'b\n' })] });
+    await r.runner.approvePlan(m.id, ROUTE);
+    const paused = await r.runner.pauseMission(m.id, { now: true });
+    expect(paused.state).toBe('paused');
+    const a1 = paused.attempts[0];
+    expect(f.paused).toEqual([a1.assignment.sessionIds.at(-1)]);
+    // The running task carries on and finishes; nothing new starts.
+    await until(() => byKey(r.runner.get(m.id)!, 't1').state === 'done', 20_000, 't1 to finish');
+    await new Promise((res) => setTimeout(res, 100));
+    let cur = r.runner.get(m.id)!;
+    expect(byKey(cur, 't2').attemptIds).toEqual([]);
+    expect(byKey(cur, 't2').stateReason).toContain('the mission is paused');
+    await r.runner.resumeMission(m.id);
+    await until(() => r.runner.get(m.id)?.state === 'review', 20_000, 'the mission to finish');
+    cur = r.runner.get(m.id)!;
+    expect(cur.tasks.map((t) => t.state)).toEqual(['done', 'done']);
+  });
+
+  it('cancel ends the running attempt gracefully and keeps its worktree and branch', async () => {
+    const r = rig({ scheduling: fakeFleet().deps });
+    const m = await r.runner.createMission({ folder: repo, title: 'Cancel mission', objective: 'Synthetic.', tasks: TWO });
+    script(r, m, { t1: [{ behaviour: 'timeout' }] });
+    await r.runner.approvePlan(m.id, ROUTE);
+    await until(() => r.runner.get(m.id)!.attempts[0]?.state === 'running', 10_000, 't1 to run');
+    await r.runner.cancel(m.id);
+    const cur = r.runner.get(m.id)!;
+    expect(cur.state).toBe('cancelled');
+    expect(cur.attempts[0].state).toBe('cancelled');
+    expect(cur.tasks.map((t) => t.state)).toEqual(['cancelled', 'cancelled']);
+    const tree = cur.worktrees[0];
+    expect(tree.state).toBe('retained');
+    expect(fs.existsSync(tree.path)).toBe(true);
+    expect(git(repo, 'rev-parse', '--verify', tree.branch)).toMatch(/^[0-9a-f]{40}$/);
+    // Every start went through the harness: one attempt, one launch.
+    expect(r.harness.launches).toHaveLength(1);
   });
 });
