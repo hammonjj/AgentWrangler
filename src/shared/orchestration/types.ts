@@ -300,6 +300,10 @@ export interface PlanningRun {
   model: string;
   effort?: string;
   rounds: PlanningRound[];
+  /** The local source whose model answered (§11.5). Absent: the hosted planner, which read the repository itself. */
+  source?: ModelSourceId;
+  /** A local planner was wanted and the hosted one answered: the local model tried (none when none was suitable) and why. */
+  fellBack?: { from?: string; because: string };
   /** What the planner said about its own plan, once it proposed one. */
   decomposition?: 'single' | 'multiple';
   risks?: string[];

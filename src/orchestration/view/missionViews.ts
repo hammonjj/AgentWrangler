@@ -137,7 +137,7 @@ export function plannerViewOf(m: Mission): MissionPlannerView | undefined {
       ? `${run.kind === 'replan' ? 'Replanning' : 'Planning'} with ${run.model}…`
       : run.state === 'proposed'
         ? [
-            `${verb} by ${run.model}`,
+            `${verb} by ${run.model}${run.source ? ' (local)' : ''}`,
             `${run.proposed ?? 0} ${run.kind === 'replan' ? 'new ' : ''}task${run.proposed === 1 ? '' : 's'}`,
             `${run.rounds.length} round${run.rounds.length === 1 ? '' : 's'}`,
             ...(cost !== undefined ? [formatUsd(cost)] : []),
@@ -146,7 +146,10 @@ export function plannerViewOf(m: Mission): MissionPlannerView | undefined {
           ? `${run.kind === 'replan' ? 'Replanning' : 'Planning'} failed`
           : `${run.kind === 'replan' ? 'Replanning' : 'Planning'} cancelled`;
   const title = [
-    `Read-only planner (${run.model}${run.effort ? `, ${run.effort} effort` : ''}): it can read the repository, never change it.`,
+    run.source
+      ? `Local planner (${run.model}): no tools; it planned from an excerpt of the repository Agent Wrangler gathered.`
+      : `Read-only planner (${run.model}${run.effort ? `, ${run.effort} effort` : ''}): it can read the repository, never change it.`,
+    ...(run.fellBack ? [`The local planner${run.fellBack.from ? ` (${run.fellBack.from})` : ''} was not used: ${run.fellBack.because}.`] : []),
     ...run.rounds.map((r) => `Round ${r.n}: ${r.ok ? 'accepted' : `${r.problems.length} problem${r.problems.length === 1 ? '' : 's'}`}`),
     ...(run.state === 'proposed' ? [`${run.editsInReview} edit${run.editsInReview === 1 ? '' : 's'} in review so far`] : []),
   ].join('\n');

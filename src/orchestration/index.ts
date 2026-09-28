@@ -26,7 +26,9 @@ import { ClaudeCodeHarness } from './harness/claudeCodeHarness';
 import { CodexHarness } from './harness/codexHarness';
 import type { AgentHarness } from './harness/types';
 import { Assessor } from './policy/assessor';
-import { Planner } from './policy/planner';
+import { Planner, type LocalPlannerDeps } from './policy/planner';
+import { gatherRepoContext } from './policy/repoContext';
+import { nodeExec } from './worktrees/exec';
 import { RepoPolicyStore, repoPoliciesDir, worktreeRootPath } from './policy/repoPolicyStore';
 import { MissionStore } from './store/missionStore';
 import { Reviewer } from './verify/reviewer';
@@ -89,7 +91,8 @@ export interface OrchestrationDeps {
     service: Pick<
       LocalEndpointService,
       'codexProvider' | 'checkNow' | 'onDown' | 'pickCompletion' | 'completionFor' | 'recordCall' | 'runFacts'
-    >;
+    > &
+      Partial<Pick<LocalEndpointService, 'pickPlanner'>>;
     catalog: () => CapabilityCatalogView;
   };
   /**
@@ -129,12 +132,17 @@ export interface Orchestration extends Disposable {
 }
 
 /** A `local-call` record for a completion a local endpoint served (or failed to). Counts and timings only. */
-function recordLocalCall(service: Pick<LocalEndpointService, 'recordCall'>, r: CompletionResult<unknown>, fellBack: boolean): void {
+function recordLocalCall(
+  service: Pick<LocalEndpointService, 'recordCall'>,
+  r: CompletionResult<unknown>,
+  fellBack: boolean,
+  purpose: 'completion' | 'planner' = 'completion',
+): void {
   if (!r.local) return;
   service.recordCall({
     source: r.local.source,
     model: r.model,
-    purpose: 'completion',
+    purpose,
     ok: r.ok,
     ...(r.ok ? {} : { failure: r.reason }),
     ...(r.infra ? { infra: true } : {}),
@@ -187,8 +195,32 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
   // Without a completion there is no reviewer, and `review` stages say so (#36).
   // The reviewer reads the worktree, which only the hosted completion can (a local one has no tools).
   const reviewer = hosted && completion ? new Reviewer({ completion }) : undefined;
-  // The planner reads the repository too (#44): hosted only, like the reviewer.
-  const planner = hosted && completion ? new Planner({ completion }) : undefined;
+  // The hosted planner reads the repository itself (#44), so it gets the hosted
+  // completion directly, never one routed to the weakest local tier. A local
+  // planner (§11.5) is asked first when a mission prefers local models: AW
+  // gathers the excerpt, and the call has no workspace.
+  const exec = deps.exec ?? nodeExec;
+  const pickPlanner = local?.service.pickPlanner?.bind(local.service);
+  const localPlanner: LocalPlannerDeps | undefined =
+    local && pickPlanner
+      ? {
+          pick: (opts) => {
+            const p = pickPlanner(local.catalog(), opts);
+            if (!p) return undefined;
+            return {
+              completion: local.service.completionFor(p.entry),
+              model: p.entry.descriptor.modelId,
+              source: p.entry.descriptor.source,
+              tier: p.entry.tier!,
+              contextWindow: p.contextWindow,
+            };
+          },
+          gather: (req, limits) => gatherRepoContext(req, limits, { exec }),
+          onCall: (r, fellBack) => recordLocalCall(local.service, r, fellBack, 'planner'),
+          log,
+        }
+      : undefined;
+  const planner = hosted || localPlanner ? new Planner({ ...(hosted ? { completion: hosted } : {}), ...(localPlanner ? { local: localPlanner } : {}) }) : undefined;
   const tasks = new TaskRunner({
     store,
     harnesses,

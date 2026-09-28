@@ -21,7 +21,8 @@
  */
 import { Emitter, type Disposable, type Listener } from '../../core/events';
 import type { KeyValueStorage } from '../../core/archive';
-import { isKnown, UNKNOWN, known, type CapabilityCatalogView, type CatalogEntry } from '../../shared/orchestration/catalog';
+import { isKnown, UNKNOWN, known, tierRank, type CapabilityCatalogView, type CatalogEntry } from '../../shared/orchestration/catalog';
+import { contextLimits } from '../policy/repoContext';
 import {
   addEndpoint,
   DATA_LEAVES_MACHINE,
@@ -404,6 +405,11 @@ export class LocalEndpointService implements Disposable {
     return candidates.sort((a, b) => rank(a) - rank(b))[0];
   }
 
+  /** The local model the planner uses now, if any (§11.5): `pickPlannerEntry` over this service's health. */
+  pickPlanner(catalog: CapabilityCatalogView, opts: { excludeSources?: readonly ModelSourceId[] } = {}): LocalPlannerPick | undefined {
+    return pickPlannerEntry(catalog, (s) => this.status(s).health.state === 'down', opts);
+  }
+
   /** Record a direct call's outcome in telemetry. */
   recordCall(record: Omit<LocalCallRecord, 'v' | 'type' | 'at' | 'id'> & { id?: string }): void {
     const at = this.now();
@@ -622,6 +628,76 @@ export class LocalEndpointService implements Disposable {
   private changed(): void {
     this.emitter.fire();
   }
+}
+
+/**
+ * The tier a local model must have to plan (§11.5): `standard` or above.
+ * Completions go to the weakest tier because assessment is a small,
+ * well-bounded judgement. A plan is not: it has to read an excerpt of a
+ * repository and scope work, so a `basic` model is not asked. `expert` is not
+ * required either, because the plan is checked deterministically, repaired
+ * once, falls back to the hosted planner on failure, and is always reviewed by
+ * the user before anything runs. With a tier list that has no `standard`, the
+ * weakest tier is the one left out.
+ */
+export const PLANNER_LOCAL_MIN_TIER = 'standard';
+/** The window assumed for a local model whose window nobody knows: small enough to be safe on any current model. */
+export const ASSUMED_LOCAL_PLANNER_WINDOW = 32_768;
+
+/** The local planner's model, and the window its budget is sized to. */
+export interface LocalPlannerPick {
+  entry: CatalogEntry;
+  contextWindow: number;
+  /** The window is the catalog's (`probed`, `declared` or `measured`), not the assumption. */
+  windowKnown: boolean;
+}
+
+/**
+ * Pick the local model the planner uses (§11.5), or none. A candidate serves
+ * completions (an endpoint's model, the endpoint on: loopback, or an external
+ * one the user turned on), is enabled, has a tier
+ * of at least `PLANNER_LOCAL_MIN_TIER`, is not on an endpoint that is down,
+ * and has a window a repository excerpt fits in (`contextLimits`). Among
+ * those: the highest tier, then constrained decoding, then the largest known
+ * window (an unknown one ranks last, at `ASSUMED_LOCAL_PLANNER_WINDOW`), then
+ * catalog order. Pure.
+ */
+export function pickPlannerEntry(
+  catalog: CapabilityCatalogView,
+  isDown: (source: ModelSourceId) => boolean,
+  opts: { excludeSources?: readonly ModelSourceId[] } = {},
+): LocalPlannerPick | undefined {
+  const std = tierRank(catalog.tiers, PLANNER_LOCAL_MIN_TIER);
+  const min = std >= 0 ? std : 1;
+  const excluded = new Set(opts.excludeSources ?? []);
+  const picks = catalog.entries
+    .map((entry, order) => {
+      const d = entry.descriptor;
+      const windowKnown = isKnown(d.contextWindow);
+      const contextWindow = isKnown(d.contextWindow) ? d.contextWindow.value : ASSUMED_LOCAL_PLANNER_WINDOW;
+      return { entry, order, windowKnown, contextWindow, rank: tierRank(catalog.tiers, entry.tier) };
+    })
+    .filter(
+      (c) =>
+        c.entry.completions === true &&
+        c.entry.enabled &&
+        c.entry.tier !== undefined &&
+        c.rank >= min &&
+        !excluded.has(c.entry.descriptor.source) &&
+        !isDown(c.entry.descriptor.source) &&
+        contextLimits(c.contextWindow) !== undefined,
+    );
+  const schema = (e: CatalogEntry) => (isKnown(e.descriptor.structuredOutput) && e.descriptor.structuredOutput.value === 'schema' ? 0 : 1);
+  picks.sort(
+    (a, b) =>
+      b.rank - a.rank ||
+      schema(a.entry) - schema(b.entry) ||
+      Number(b.windowKnown) - Number(a.windowKnown) ||
+      b.contextWindow - a.contextWindow ||
+      a.order - b.order,
+  );
+  const p = picks[0];
+  return p ? { entry: p.entry, contextWindow: p.contextWindow, windowKnown: p.windowKnown } : undefined;
 }
 
 function reachableReason(p: EndpointProbe): string {

@@ -192,7 +192,8 @@ export interface LocalCallRecord extends RecordBase {
   type: 'local-call';
   source: ModelSourceId;
   model: string;
-  purpose: 'completion' | 'qualification';
+  /** `planner`: a local planner round (§11.5). */
+  purpose: 'completion' | 'planner' | 'qualification';
   ok: boolean;
   /** `invalid-output`, `error`, `timeout`, `aborted`; `infra` marks a server that went away. */
   failure?: string;
