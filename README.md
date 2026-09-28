@@ -522,6 +522,59 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
   endpoint card shows runs, `$0 API cost`, verified first time, succeeded, escalated, tok/s, TTFT
   and runtime per model. A cost a harness invents for a local model is not recorded.
 
+### Serving an MLX model
+
+`scripts/local-models/serve-mlx.sh` serves an MLX (4-bit) model directory with `mlx_lm.server`,
+bound to `127.0.0.1` only, and prints how to register it. It installs nothing and never writes
+`settings.json`.
+
+```bash
+# Once: mlx-lm in a venv of your choosing (the script prints these if it cannot find the server)
+python3 -m venv ~/venvs/mlx
+~/venvs/mlx/bin/pip install mlx-lm
+
+# Every time: serve the model directory on a port (default 18080)
+MLX_VENV=~/venvs/mlx scripts/local-models/serve-mlx.sh ~/models/<model-dir> 18080 --name "<name>"
+
+# Just print the endpoint entry and the steps, without starting the server
+MLX_VENV=~/venvs/mlx scripts/local-models/serve-mlx.sh ~/models/<model-dir> 18080 --print-only
+```
+
+`<model-dir>` holds `config.json` and `*.safetensors` (an `mlx-community/*-4bit` download).
+Extra `mlx_lm.server` flags go after `--`. `--host`, `--port` and `--model` there are refused.
+`--write-entry <file>` also writes the entry to a file, but never to `settings.json`.
+
+To register the server, use **Preferences → Orchestration → Local endpoints**: enter URL
+`http://127.0.0.1:18080` and a name, then *Add endpoint*. Once the server says it is listening,
+press *Probe*. Then give the model a tier in the **Tier map**: `basic` for assessments, or
+`standard` or above so missions that prefer local models can plan with it. *Qualify* is
+optional. Or, with the app quit, add the entry the script prints to `orchestration.localEndpoints`:
+
+```json
+{
+  "id": "<the name in lower case, [a-z0-9-]>",
+  "name": "<name>",
+  "url": "http://127.0.0.1:18080",
+  "runtime": "mlx",
+  "models": { "<model id: the model dir as the server was given it>": { "contextWindow": 32768 } }
+}
+```
+
+`contextWindow` is declared from the weights' `config.json` (`max_position_embeddings`),
+because `mlx_lm.server` does not report one.
+
+What an MLX model can and cannot do in Agent Wrangler:
+
+- **Completion-only.** `mlx_lm.server` serves `chat/completions` but not `/v1/responses` or
+  `/v1/messages` (both 404), so no harness can run on it and it never gets agentic coding
+  tasks. It answers assessments at `basic`, and plans missions that prefer local models
+  (above) at `standard` or higher. Agent Wrangler does not ship a protocol translator to get
+  around this (plan §19.6 point 2).
+- **Not through llama.cpp.** `llama-server` loads GGUF files only and cannot load MLX weights.
+  An agentic local model needs a GGUF model on `llama-server`, which serves `/v1/responses`
+  natively. That path is verified against Codex in plan §19.7, and
+  `scripts/local-models/codex-live-check.ts` re-runs the check.
+
 ## Repository policies (orchestration)
 
 Orchestration (off by default, `orchestration.enabled`) reads what it must not guess about a

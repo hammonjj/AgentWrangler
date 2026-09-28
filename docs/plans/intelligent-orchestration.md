@@ -2123,7 +2123,7 @@ stays unknown:
 | max concurrency | declared (`OLLAMA_NUM_PARALLEL` not queryable) | `total_slots` | declared | declared | declared (it batches, but does not say how many) |
 | health | listing responds | `/health` | listing responds | `state` | `mlx_lm.server`: `/health` |
 | throughput | `eval_count` / `eval_duration` | `timings.predicted_per_second` | response usage | — | client-measured only |
-| harness endpoints | (research: unverified) | `/v1/responses` and `/v1/messages` (present in 0.4.0; not exercised) | — | — | `mlx_lm.server`: neither (404) |
+| harness endpoints | (research: unverified) | `/v1/responses` and `/v1/messages` (present in 0.4.0; `/v1/responses` exercised with Codex, §19.7.1) | — | — | `mlx_lm.server`: neither (404) |
 
 "Declared" means the user states it in Preferences, and the descriptor records `from: declared`.
 The resolver trusts `reported`/`probed` over `declared`, and treats `unknown` as "cannot satisfy
@@ -2284,21 +2284,89 @@ types are unchanged. What changed is adapters, settings and the catalog's inputs
 | Service | `orchestration/local/localEndpointService.ts` | Probe at start and every 10 min. Health every 30 s from the runtime's cheapest route: one miss `degraded`, two `down`, then `onDown`. A failed re-probe keeps the last good probe. Slots are a gate for direct calls (`acquire`, whose wait is the queue delay). Attempts count against slots in the resolver snapshot. |
 | Qualification | `qualifyModel` | Stage 1 of §19.6 (10 tool calls, 10 round trips, 20 JSON replies, synthetic), shown beside the tier picker. Results are `measured` and persisted. Stage 2 (scratch-repo tasks) is not built. |
 | Resolver | `policy/resolver.ts` | An endpoint model needs known, non-`none` tool calling for agentic work. It never gets the assumed hosted window, even when external. Zero free slots is capacity (`blocked`). |
-| Agentic | `CodexHarness` + `codexThreadParams` | A local target is a Codex thread with `modelProvider: aw-<id>` and `config.model_providers.aw-<id> = {base_url: <url>/v1, wire_api: "responses"}`. `model_context_window` comes from the catalog, and `model_catalog_json` from a declared file if there is one. The key is read per request (`experimental_bearer_token`) and never recorded. The provider is in the launch policy, so every resume re-sends it. |
+| Agentic | `CodexHarness` + `codexThreadParams` | A local target is a Codex thread with `modelProvider: aw-<id>` and `config.model_providers.aw-<id> = {base_url: <url>/v1, wire_api: "responses"}`. `model_context_window` comes from the catalog. The key is read per request (`experimental_bearer_token`) and never recorded. The provider is in the launch policy, so every resume re-sends it, and since the live check (below) every `thread/resume` and `thread/fork` also names the `model`. A declared `codexModelCatalog` is recorded but no longer sent as `model_catalog_json` (below, (c)). |
 | Completions | `completion/localCompletion.ts` | `LocalStructuredCompletion`: streamed `chat/completions`, `response_format` only where probed, otherwise the schema goes in the instructions, then validation and one retry. A dropped stream or refused connection is `infra`. `RoutedCompletion` puts the weakest-tier local model ahead of the hosted completion and falls back to it on any failure but an abort. Workspace requests (the reviewer) always go hosted. |
 | Failure | `TaskRunner` | `onDown`, or an `infra` turn failure while the endpoint does not answer, ends the attempt `infra` / `local-server-lost`. Failover re-resolves the same requirement pinned to the tier that ran, with the failed source excluded. It is allowed when the router decided the route or the mission has `autoRecover`, and within `maxAttempts` (default 3). The new decision is `decidedBy: 'router'` with rule `failover.infra`. |
 | Metrics | `AttemptRecord.local`, `LocalCallRecord`, `shared/orchestration/localMetrics.ts` | Runtime, device, context window and queue delay. Tokens/s is output over active time (`tokPerSecFrom: 'attempt'`); TTFT is absent through a harness, and server- or client-measured for direct calls. The API-equivalent cost avoided is labelled an estimate: the same requirement resolved with every endpoint excluded, priced at that model's `telemetry.prices` entry. Harness cost is stripped from local attempts (§19.6 point 3). `summariseLocal` gives executions, success, verified-first-time, escalation-from-local and averages. |
 
-Open, and not settled by tests (they use fakes):
+#51 left three questions open, because its tests use fakes:
 
-- The app-server's acceptance of `modelProvider` and a free-form `model_providers` table on
-  `thread/start` and `thread/resume`. It is in the pinned schema per §19.6, but #51 did not run it
-  live.
-- `experimental_bearer_token` on a per-thread provider.
-- Whether `model_catalog_json` adds to Codex's catalog or replaces it.
+- (a) Does the app-server accept `modelProvider` and a free-form `model_providers` table on
+  `thread/start` and `thread/resume`? They are in the pinned schema per §19.6, but #51 did not
+  run them live.
+- (b) Does `experimental_bearer_token` work on a per-thread provider?
+- (c) Does `model_catalog_json` add to Codex's catalog, or replace it?
 
-The first live run against `llama-server` with a GGUF model should settle all three. It is also
-the measurement §19.6 slice B asks for.
+The live check below settles all three.
+
+#### 19.7.1 Live check: Codex on `llama-server`'s `/v1/responses` (2026-09-28)
+
+**Setup.** Apple M5 Pro, 24 GB. Codex CLI 0.155.0-alpha.16.3, the one the app resolves
+(`resolveCodexBinary`), running `codex app-server --stdio` with `CODEX_HOME` set to a fresh
+temp dir. `llama-server` 0.4.0 (build 10809) from Homebrew, bound to `127.0.0.1` with an
+`--api-key`. The model was Qwen2.5-1.5B-Instruct Q4_K_M, the official Qwen GGUF, downloaded
+into a temp dir. Its SHA-256 starts `6a1a2eb6`. The thread's cwd was an empty temp dir, with
+`sandbox: read-only` and `approvalPolicy: never`. Every prompt was synthetic ("Reply with the
+single word OK"). All of it was deleted afterwards.
+
+The check is `scripts/local-models/codex-live-check.ts`. It drives the app's own code:
+`CodexHarness.launch` → `CodexRunnerService` → `codexThreadParams`, on a real app-server, with
+a provider shaped like `LocalEndpointService.codexProvider`'s. It prints the exact params sent,
+with the key redacted, and a PASS/FAIL/INFO line per check. It refuses to run unless
+`CODEX_HOME` is under the temp dir and the URL is loopback.
+
+```bash
+mkdir -p /tmp/aw-lp && cd /tmp/aw-lp
+curl -L -o model.gguf https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+/opt/homebrew/bin/llama-server -m /tmp/aw-lp/model.gguf --host 127.0.0.1 --port 18431 \
+  --jinja -c 32768 --api-key sk-aw-live-check
+# in the repo, in another shell:
+CODEX_HOME=$(mktemp -d) AW_LIVE_KEY=sk-aw-live-check \
+  npx vite-node scripts/local-models/codex-live-check.ts -- \
+  --url http://127.0.0.1:18431 --model local-qwen --cwd /tmp/aw-lp/scratch --context 32768
+```
+
+`llama-server` serves one model and answers to any model name, so `local-qwen` is only a label.
+With `--api-key` set, an unauthenticated POST to `/v1/responses` returns 401. AW's probe
+counts that as present, because only 404, 405 and 501 mean absent.
+
+**Findings.**
+
+| Question | Answer | Evidence |
+|---|---|---|
+| (a) `thread/start` with `modelProvider` + `config.model_providers.<id>` | **Accepted.** | The turn completed, answered by the local server (`CODEX_HOME` had no auth, so nothing hosted could have answered). Params sent: `modelProvider: "aw-live"`, `config.model_providers.aw-live = {name, base_url: "http://127.0.0.1:18431/v1", wire_api: "responses", experimental_bearer_token}`, `model_context_window: 32768`. |
+| (a) `thread/resume` on a new app-server process | **Accepted, but only with `model`.** Fixed in `codexThreadParams`. | Without `model`, Codex warns "…recorded with model `local-qwen` but is resuming with `<its default hosted model>`". It then builds that model's request, which sends tools in a shape llama-server cannot read, against the local provider. The server refuses it: `400 Cannot determine type of 'item'`, and the turn fails. With `model` (now sent on every `thread/resume` and `thread/fork` of a local thread), the resumed turn completed on the same thread id. |
+| (b) `experimental_bearer_token` per thread | **Works.** | The right key completed. A wrong key and no key both got `401 Unauthorized: Invalid API Key` from `llama-server`, after Codex's 5 stream reconnects. So the token is sent per thread, and a thread without one sends none. |
+| (c) `model_catalog_json` | **It replaces the catalog, and only at server level. A thread's config ignores it.** AW no longer sends it. | `codex debug models`: 11 built-in models; with `-c model_catalog_json=<one-entry file>`, 1. In `CODEX_HOME/config.toml`, the app-server's `model/list` shows only the local entry, and the "model metadata not found" warning goes. In `thread/start`'s `config`, the warning stays and `model/list` is unchanged. |
+
+**Other observations.**
+
+- With no catalog entry, Codex warns "Model metadata for `<model>` not found. Defaulting to
+  fallback metadata". The turn still works. §19.6 said what fallback metadata loses:
+  `apply_patch` is not offered.
+- The catalog entry used was a clone of a built-in entry with `use_responses_lite: false` and
+  `apply_patch_tool_type: "freeform"`, with `slug` and `context_window` changed (§19.6).
+- A 1.5B model is enough for these protocol questions but says nothing about task quality. The
+  qualification of §19.6 (stage 1 is built, as *Qualify*) is still what decides that.
+
+**What changes.**
+
+1. `codexThreadParams(policy, effort, key, model)` sends `model` whenever the policy has a
+   model provider. `thread/start`, `thread/resume` (including a reattach after a reconnect)
+   and `thread/fork` pass it. Hosted threads are unchanged: a resume still takes its model from
+   the rollout. Tested in `test/orchestration/localRouting.test.ts` against a fake app-server.
+2. `model_catalog_json` is no longer sent per thread, because it did nothing there. Sending it
+   server-wide would hide every hosted model on the shared app-server. So a local model runs on
+   fallback metadata, without `apply_patch`. To give it `apply_patch`, AW would have to write a
+   **merged** catalog (the built-in list from `codex debug models`, plus one entry per local
+   model) and start the app-server with it. That is not built. It would also have to be
+   regenerated whenever Codex updates its catalog.
+3. No protocol translator is involved or added (§19.6 point 2). MLX stays completion-only.
+
+**To re-run later**, for example after a Codex update: start `llama-server` as above and run
+the script. Exit 0 means (a) and (b) hold. The (c) lines are INFO: "IGNORED" for the
+thread-config catalog, and a count for the server-level list, where 1 means it replaces and
+more than 1 means it adds.
 
 ### 19.8 As built: local planning (2026-09-28)
 
