@@ -52,6 +52,8 @@ export interface SessionDecorations {
   pendingPlan?(sessionId: string | undefined): AgentSession['pendingPlan'];
   /** The permission a session host is holding for this session, if any (see `withHostedPermission`). */
   pendingPermission?(sessionId: string | undefined): HostedPermission | undefined;
+  /** A classified rate-limit stoppage this window's runner reports for the session, if any (#75). */
+  rateLimit?(sessionId: string | undefined): AgentSession['rateLimit'];
 }
 
 /** A permission ask held by a session host: what the row and the remote need to offer it. */
@@ -113,16 +115,18 @@ export function decorateSession(input: AgentSession, d: SessionDecorations): Age
   const runnerOwned = d.runnerOwned?.(s.sessionId) || undefined;
   const pendingQuestion = d.pendingQuestion?.(s.sessionId);
   const pendingPlan = d.pendingPlan?.(s.sessionId);
+  const rateLimit = d.rateLimit?.(s.sessionId) ?? s.rateLimit;
   if (
     archived === undefined &&
     paused === undefined &&
     runnerOwned === undefined &&
     pendingQuestion === undefined &&
-    pendingPlan === undefined
+    pendingPlan === undefined &&
+    rateLimit === s.rateLimit
   ) {
     return s;
   }
-  return { ...s, archived, paused, runnerOwned, pendingQuestion, pendingPlan };
+  return { ...s, archived, paused, runnerOwned, pendingQuestion, pendingPlan, rateLimit };
 }
 
 /**

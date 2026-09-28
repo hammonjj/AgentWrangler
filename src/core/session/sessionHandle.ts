@@ -22,6 +22,7 @@ import type { Disposable } from '../events';
 import type { ConversationHistory } from '../../claude/transcriptHistory';
 import type { BlockPatch, ComposerState, ConvBlock, ImageAttachment, PermissionModeName } from '../../shared/conversation';
 import type { AgentSession } from '../../shared/model';
+import type { RateLimitStoppage } from '../../shared/rateLimitClassification';
 import type { SessionProvider } from '../../shared/harness';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
 
@@ -153,6 +154,13 @@ export interface SessionHandle {
    * plan §7.5, ask A8). Undefined: this kind of session does not report it.
    */
   readonly backgroundTasks?: number;
+  /**
+   * A classified rate-limit stoppage this session is currently under, from its
+   * own raw evidence (`claude/rateLimit.ts`, `codex/usage.ts`). Undefined:
+   * this kind of session does not report it, or nothing currently says it is
+   * rate limited.
+   */
+  readonly rateLimit?: RateLimitStoppage;
   /**
    * The row this session shows as before the store has one of its own, when
    * the handle can describe itself (Codex). Undefined means the caller builds it.

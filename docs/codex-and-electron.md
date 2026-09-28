@@ -10,6 +10,8 @@ Wrangler-owned Codex conversations use `codex app-server --stdio`. `CodexAppServ
 
 Codex plan limits come from App Server's `account/rateLimits/read` method and use the existing cached polling service. The dashboard shows the matching provider's cards when filtered and labels both providers in the combined view. Claude's process-level auto-pause remains Claude-specific because an external Codex rollout does not identify a safe process to suspend.
 
+Auto-pause is provider-scoped (#75): each provider's `UsageService` decides only whether *that* provider's sessions get paused, and `setPausedAll` filters its candidates by `provider` accordingly, so a Claude plan limit can never freeze a Codex session and a Codex plan limit can never freeze a Claude one. Codex's own auto-pause is wired up to the same decision as Claude's, but in practice it never has anything to pause today: `CodexProvider` never sets `pid` on a Codex `AgentSession`, because Wrangler-owned Codex conversations all run inside one shared `codex app-server --stdio` process rather than one process per session — SIGSTOPping it would freeze every Codex conversation at once, not just the one whose limit tripped, and an external Codex rollout is observational only and was never a candidate for a signal. The wiring is left in place, correctly scoped, for the day a Codex session gets a process of its own that a pause could safely target.
+
 ## Main conversations and subagents
 
 Codex rows default to main conversations only. The column menu's **Show internal/subagent sessions** checkbox (also `agentWrangler.showCodexSubagents` in settings) exposes child and internal sessions for diagnostics. This is a display filter, not a change to Codex execution or history.

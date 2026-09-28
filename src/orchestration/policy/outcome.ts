@@ -24,6 +24,7 @@
  */
 import type { OutcomeCategory, RouteGate } from '../../shared/orchestration/types';
 import type { VerificationVerdict } from '../../shared/orchestration/verification';
+import { classifyClaudeRateLimit, classifyCodexRateLimit, type RateLimitStoppage } from '../../shared/rateLimitClassification';
 
 /** What the classifier concluded. `retryable: false`: trying again unchanged cannot help (a refused login). */
 export interface Classification {
@@ -32,6 +33,13 @@ export interface Classification {
   retryable?: boolean;
   /** One line for the strip; never agent-written text. */
   detail: string;
+  /**
+   * A `capacity` classification's classified rate-limit stoppage (#75): which
+   * provider, which window when known, the reported reset time if any, and
+   * raw evidence. Absent for every other category — this never replaces
+   * `category`/`signature`, which the escalation policy already keys on.
+   */
+  rateLimit?: RateLimitStoppage;
 }
 
 export interface OutcomeEvidence {
@@ -125,7 +133,11 @@ function classifyClaudeResult(r: Record<string, unknown>): Classification | unde
   // The result text is the CLI's own error line here, not the agent's prose.
   const text = typeof r.result === 'string' ? r.result.slice(0, 500) : '';
   if (status === 429 || /rate.?limit|usage.?limit/i.test(reason)) {
-    return { category: 'capacity', signature: `api-${status ?? 'rate-limit'}`, detail: 'rate limited' };
+    // A bare API-level 429 (or a rate-limit terminal reason with no status)
+    // names no window: `classifyClaudeRateLimit`'s `generic-429` always comes
+    // back `unknown`, never a guessed five-hour or weekly reset.
+    const rateLimit = status === 429 ? classifyClaudeRateLimit({ kind: 'generic-429', raw: r }) : undefined;
+    return { category: 'capacity', signature: `api-${status ?? 'rate-limit'}`, detail: 'rate limited', rateLimit };
   }
   if (subtype.startsWith('error_max_turns') || reason === 'max_turns') {
     return { category: 'budget', signature: 'max-turns', detail: 'it reached its turn limit' };
@@ -150,7 +162,14 @@ function classifyCodexError(error: unknown): Classification {
   const info = error && typeof error === 'object' ? (error as { codexErrorInfo?: unknown }).codexErrorInfo : undefined;
   const code = typeof info === 'string' ? info : info && typeof info === 'object' ? Object.keys(info as object)[0] ?? '' : '';
   if (/contextWindowExceeded/i.test(code)) return { category: 'context', signature: 'context-overflow', detail: 'its context overflowed' };
-  if (/usageLimitExceeded/i.test(code)) return { category: 'capacity', signature: 'usage-limit', detail: 'rate limited' };
+  if (/usageLimitExceeded/i.test(code)) {
+    return {
+      category: 'capacity',
+      signature: 'usage-limit',
+      detail: 'rate limited',
+      rateLimit: classifyCodexRateLimit({ kind: 'codex-error-code', code, raw: error }),
+    };
+  }
   if (/unauthori[sz]ed/i.test(code)) return { category: 'infra', signature: 'codex-unauthorized', retryable: false, detail: 'the provider refused the request' };
   const signature = code ? `codex-${code.replace(/[^A-Za-z0-9]+/g, '-').toLowerCase()}` : 'codex-turn-failed';
   return { category: 'infra', signature, detail: `its last turn failed (${signature})` };

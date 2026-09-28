@@ -9,7 +9,7 @@ import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { TaskBadge } from '../shared/orchestration/taskView';
 import type { MissionOp, MissionsSnapshot } from '../shared/orchestration/missionView';
-import { displayTitle, GLOBAL_PROJECT_DIR, type HookHealth, type ProjectDTO } from '../shared/model';
+import { displayTitle, GLOBAL_PROJECT_DIR, type AgentSession, type HookHealth, type ProjectDTO } from '../shared/model';
 import { checkoutRootFor } from '../core/checkout';
 import { occupantsOf, occupiesCheckout, sharedCheckouts, type CheckoutEntry } from '../core/sharedCheckout';
 import type { QuestionView } from '../shared/conversation';
@@ -58,6 +58,8 @@ export interface RunnerOwnership {
   decidePlan?(sessionId: string | undefined, requestId: string, approve: boolean, feedback?: string): Promise<boolean>;
   /** The permission a session host holds for this session: the row's Allow/Deny answer it. */
   pendingPermission?(sessionId: string | undefined): HostedPermission | undefined;
+  /** A classified rate-limit stoppage this runner-owned session currently reports, if any (#75). */
+  rateLimit?(sessionId: string | undefined): AgentSession['rateLimit'];
   onDidChange(listener: () => void): Disposable;
 }
 
@@ -227,12 +229,14 @@ export class DashboardHost {
       // extension host, so the process table would call them panel sessions.
       const runnerOwned = this.runners.owns(s.sessionId);
       const pendingQuestion = this.runners.pendingQuestion?.(s.sessionId);
+      const rateLimit = this.runners.rateLimit?.(s.sessionId) ?? s.rateLimit;
       return {
         ...s,
         archived: this.archive.isArchived(s.key),
         paused: this.pause.isPaused(s.pid) || undefined,
         runnerOwned: runnerOwned || undefined,
         pendingQuestion,
+        rateLimit,
         // Only while nothing else runs it: a session a terminal picked back up
         // is not interrupted. A Codex row reads its status from the rollout, so
         // a cut-off thread shows as idle (waiting/done), not ended.

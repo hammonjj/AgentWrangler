@@ -1,6 +1,7 @@
 import type { UsageError, UsageSnapshot, UsageWindow } from '../shared/usage';
 import type { UsageReader } from '../core/usageService';
 import type { CodexAppServer } from './appServer';
+import { classifyCodexRateLimit, type RateLimitStoppage } from '../shared/rateLimitClassification';
 
 interface CodexRateLimitWindow {
   usedPercent?: number;
@@ -46,6 +47,29 @@ function toWindow(
   };
 }
 
+/**
+ * A window a snapshot actually reported as over its limit, classified (#75).
+ *
+ * `usedPercent >= 100` is the only "hit" signal the App Server response gives
+ * us here — there is no explicit active-rate-limit flag in this payload — so
+ * a window sitting at 80% is not a stoppage, only a card getting full.
+ */
+function windowStoppage(
+  snapshot: CodexRateLimitSnapshot,
+  bucket: 'primary' | 'secondary',
+): RateLimitStoppage | undefined {
+  const raw = snapshot[bucket];
+  if (!raw || typeof raw.usedPercent !== 'number' || raw.usedPercent < 100) return undefined;
+  return classifyCodexRateLimit({
+    kind: 'codex-window',
+    windowKind: bucket,
+    limitId: snapshot.limitId ?? undefined,
+    limitName: snapshot.limitName ?? undefined,
+    resetsAtMs: typeof raw.resetsAt === 'number' ? raw.resetsAt * 1000 : undefined,
+    raw: snapshot,
+  });
+}
+
 /** Convert the stable App Server quota response into the dashboard's shared card model. */
 export function parseCodexRateLimits(body: unknown, nowMs: number): UsageSnapshot | undefined {
   if (!body || typeof body !== 'object') return undefined;
@@ -62,6 +86,18 @@ export function parseCodexRateLimits(body: unknown, nowMs: number): UsageSnapsho
   // counterpart at all, so this is settled rather than unreported — there is
   // nothing for the service to carry forward from a previous read.
   return windows.length > 0 ? { fetchedAtMs: nowMs, windows, spendKnown: true } : undefined;
+}
+
+/** Every window in the response that is actually over its limit, classified. */
+export function codexRateLimitStoppages(body: unknown): RateLimitStoppage[] {
+  if (!body || typeof body !== 'object') return [];
+  const response = body as CodexRateLimitsResponse;
+  const mapped = response.rateLimitsByLimitId && Object.keys(response.rateLimitsByLimitId).length > 0
+    ? Object.values(response.rateLimitsByLimitId).filter((value): value is CodexRateLimitSnapshot => !!value)
+    : response.rateLimits ? [response.rateLimits] : [];
+  return mapped.flatMap((snapshot) => [windowStoppage(snapshot, 'primary'), windowStoppage(snapshot, 'secondary')]).filter(
+    (stoppage): stoppage is RateLimitStoppage => !!stoppage,
+  );
 }
 
 /** App Server-backed reader used by the normal cached/polled UsageService. */

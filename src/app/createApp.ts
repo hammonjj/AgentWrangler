@@ -669,6 +669,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         ? { requestId: ask.requestId, toolName: ask.toolName, ask: { summary: ask.summary, body: ask.body, isCommand: ask.isCommand } }
         : undefined;
     },
+    rateLimit: (id: string | undefined) => sessions.get(id)?.rateLimit,
     onDidChange: (listener: () => void) => sessions.onDidChange(listener),
   };
 
@@ -974,11 +975,22 @@ export function createApp(host: HostServices): AgentWranglerApp {
    */
   let announceRemote: ((notice: RemoteNotice) => void) | undefined;
 
-  const setPausedAll = (wanted: boolean, why?: string): boolean => {
+  /**
+   * `provider`: scope the pause/resume to one provider's sessions, so a
+   * Claude plan limit does not freeze Codex sessions and vice versa (#75).
+   * Undefined — the human's own Pause All button — still means everything.
+   */
+  const setPausedAll = (wanted: boolean, why?: string, provider?: AgentSession['provider']): boolean => {
     let acted = false;
     if (wanted) {
       const candidates = store.sessions
-        .filter((s) => s.status !== 'ended' && s.pid !== undefined && !pause.isPaused(s.pid))
+        .filter(
+          (s) =>
+            s.status !== 'ended' &&
+            s.pid !== undefined &&
+            !pause.isPaused(s.pid) &&
+            (provider === undefined || s.provider === provider),
+        )
         .map((s) => s.pid);
       if (candidates.length === 0) {
         // Only worth saying when a human pressed the button. Auto-pause reaching
@@ -1094,7 +1106,44 @@ export function createApp(host: HostServices): AgentWranglerApp {
         autoPauseArmed = decision.armed;
         return;
       }
-      if (setPausedAll(true, `plan usage reached ${percent}%`)) autoPauseArmed = false;
+      // Scoped to Claude: a Claude plan limit must not freeze Codex sessions.
+      if (setPausedAll(true, `plan usage reached ${percent}%`, 'claude')) autoPauseArmed = false;
+    }),
+  );
+
+  /**
+   * Codex's own auto-pause arming, kept separate from Claude's `autoPauseArmed`
+   * so the two windows can never clear each other: a Claude five-hour reset
+   * re-arming Claude's flag says nothing about whether Codex is still over its
+   * own limit, and vice versa.
+   *
+   * `setPausedAll(true, …, 'codex')` is scoped correctly, but today it always
+   * finds zero candidates: Codex sessions carry no `pid` (`CodexProvider`
+   * never sets one — Wrangler-owned Codex conversations all run inside one
+   * shared `codex app-server --stdio` process, and an external Codex rollout
+   * is observational only), so there is no single process a Codex-only pause
+   * could safely SIGSTOP without freezing every other Codex conversation too
+   * (`docs/codex-and-electron.md` §"Codex integration and Electron boundary").
+   * This still fixes the conflation bug — a Codex limit no longer reaches
+   * Claude sessions, and a Claude limit no longer reaches Codex ones — and is
+   * ready to actually stop something the day Codex sessions get a suspendable
+   * process of their own.
+   */
+  let codexAutoPauseArmed = true;
+  host.subscribe(
+    codexUsage.onDidChange(() => {
+      const cfg = getConfig();
+      const percent = maxUsagePercent(codexUsage.usage.last);
+      const decision = autoPauseDecision(
+        percent,
+        { enabled: cfg.autoPauseEnabled, percent: cfg.autoPausePercent },
+        codexAutoPauseArmed,
+      );
+      if (!decision.fire) {
+        codexAutoPauseArmed = decision.armed;
+        return;
+      }
+      if (setPausedAll(true, `Codex plan usage reached ${percent}%`, 'codex')) codexAutoPauseArmed = false;
     }),
   );
 
@@ -2288,6 +2337,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       runnerOwned: (id) => runnerOwnership.owns(id),
       pendingQuestion: (id) => runnerOwnership.pendingQuestion?.(id),
       pendingPlan: (id) => runnerOwnership.pendingPlan?.(id),
+      rateLimit: (id) => runnerOwnership.rateLimit?.(id),
       pendingPermission: (id) => runnerOwnership.pendingPermission?.(id),
     },
     [archive, pause, runnerOwnership],
