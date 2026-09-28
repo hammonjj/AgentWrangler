@@ -60,8 +60,10 @@ export interface LocalEndpointConfig {
   /** Display only (§19.2 "hardware"): "M5 Pro, 24 GB". */
   device?: string;
   /**
-   * A Codex model catalog file to pass as `model_catalog_json` (§19.6: without
-   * an entry Codex does not offer `apply_patch` to an unknown model). Optional.
+   * A Codex model catalog file (§19.6: without an entry Codex does not offer
+   * `apply_patch` to an unknown model). Optional, and **not sent yet**: Codex
+   * ignores `model_catalog_json` in a thread's config, and server-wide it
+   * replaces the built-in catalog (measured, §19.7 (c)).
    */
   codexModelCatalog?: string;
   /** Per model id. */

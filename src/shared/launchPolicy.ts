@@ -70,7 +70,11 @@ export interface CodexModelProvider {
   contextWindow?: number;
   maxOutputTokens?: number;
   keyRef?: string;
-  /** An absolute path, passed as `model_catalog_json`. */
+  /**
+   * An absolute path to a Codex model catalog. Recorded, but not sent: Codex
+   * ignores `model_catalog_json` per thread, and server-wide it replaces the
+   * built-in catalog (plan §19.7 (c)).
+   */
   modelCatalog?: string;
 }
 
