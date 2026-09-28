@@ -734,7 +734,7 @@ documented rather than arbitrated.
 
 ## How status is detected
 
-Two sources, in priority order. Hooks are ground truth; the transcript is a fallback.
+Two sources for status itself, in priority order — hooks are ground truth, the transcript is a fallback — plus a third for classifying *why* a session is rate limited.
 
 ### 1. Hooks (exact, opt-in)
 
@@ -784,6 +784,16 @@ Sessions with no hook data — anything started before installing them — are d
 Inference cannot distinguish a permission prompt from a long tool call from a wedged session — all three look like a silent transcript. That limitation is the reason hooks exist; without them, *Possibly stuck* is a guess.
 
 Transcripts and hook logs are both read incrementally (bounded tail reads with a per-file byte offset) — large files are never loaded whole.
+
+### 3. Rate-limit classification (#75)
+
+A row's rate-limit stoppage (the `ratelimit` chip, on the row and in the conversation header) is classified, not the single generic "rate limited" state this used to be: which provider, which window when known (Claude's five-hour session limit vs. its weekly limit; Codex's primary vs. secondary window), the reported reset time when the source gave one, and the raw evidence for troubleshooting (`shared/rateLimitClassification.ts`). A source that cannot say which window it hit reports `unknown` rather than guessing — in particular, a bare API-level 429 with no accompanying event is never read as the weekly limit, since nothing about a 429 says which window it was.
+
+**Claude.** A running session's own host caches the newest `rate_limit_event` message it has seen (`shared/sessionProtocol.ts`'s `latest`) — an SDK message **undocumented by Anthropic**, observed as `{ rate_limit_info: { rateLimitType: "five_hour" | "weekly" | …, resetsAt } }`. That is the only signal that distinguishes the five-hour limit from the weekly one, and it wins when present. Failing that, a bare `result` line with `is_error: true, api_error_status: 429` and no `rate_limit_event` classifies as `unknown` (`claude/rateLimit.ts`). A session Agent Wrangler only observes (registry + transcript, no host) instead reads the same 429 off the transcript tail's `result` line, when its Claude Code build writes one to the transcript file at all — most do not, so this is an additive fallback, not the primary path.
+
+**Codex.** App Server's `account/rateLimits/read` reports `primary`/`secondary` windows as a percent used; there is no explicit "this window is actively limiting you" flag in that response, so a window is only reported as a stoppage once it reaches 100% used (`codex/usage.ts`) — this "100% = hit" reading is Agent Wrangler's own inference from the shape of the response, not something Codex's API documents as a signal.
+
+Auto-pause (`autoPause.enabled`/`autoPause.percent`) is scoped per provider: a Claude plan limit pauses only Claude sessions and a Codex plan limit only Codex ones, so the two can never pause or clear each other. Codex's own auto-pause has nothing to act on today — see `docs/codex-and-electron.md` for why.
 
 ## Settings
 

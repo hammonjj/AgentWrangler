@@ -36,6 +36,7 @@ import {
   type TaskView,
 } from '../../shared/orchestration/taskView';
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
+import { resetsInText } from '../../shared/usage';
 import { paneApi } from '../common/paneApi';
 
 // See `common/paneApi.ts`: one acquire, one message envelope and one state slot
@@ -79,6 +80,7 @@ app.innerHTML = `
   <span id="ttl"></span>
   <span id="meta"></span>
   <span id="convUsage" hidden></span>
+  <span id="convRateLimit" hidden></span>
   <span id="spacer"></span>
   <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
   <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
@@ -130,6 +132,7 @@ const meta = document.getElementById('meta')!;
 // Not `#usage`: that is the table pane's plan-usage strip, in the same
 // document. Sharing the id made this line overwrite the plan cards.
 const usageEl = document.getElementById('convUsage')!;
+const rateLimitEl = document.getElementById('convRateLimit')!;
 const banner = document.getElementById('banner')!;
 const taskStrip = document.getElementById('taskStrip')!;
 const scroller = document.getElementById('scroll')!;
@@ -1010,6 +1013,20 @@ function setMeta(session: SessionDTO): void {
   usageEl.hidden = !session.usage;
   usageEl.textContent = session.usage ? usageHeaderText(session.usage, (id) => modelLabel(id) ?? id) : '';
   usageEl.title = session.usage ? usageTitle(session.usage) : '';
+
+  // A classified rate-limit stoppage (#75): which window, and its reported
+  // reset time when the source gave one. Shown even mid-turn — the session
+  // can still be `busy` on the evidence's last known state.
+  const rl = session.rateLimit;
+  rateLimitEl.hidden = !rl;
+  if (rl) {
+    rateLimitEl.className = `chip ratelimit ${rl.category}`;
+    rateLimitEl.textContent = rl.reason;
+    rateLimitEl.title =
+      rl.resetAtMs !== undefined
+        ? `${rl.reason} — resets ${resetsInText(Date.now(), rl.resetAtMs).toLowerCase()}.`
+        : `${rl.reason}.`;
+  }
 }
 
 function setCaps(next: ConversationCapabilities): void {

@@ -321,6 +321,22 @@ function pausedChip(s: SessionDTO): string {
  * Another live agent is in this checkout: one index, one working tree, so a
  * commit by either can carry the other's edits. Warning only.
  */
+/**
+ * The classified rate-limit stoppage (#75), when the session has one: which
+ * window, and the reported reset time if any. Deliberately not folded into
+ * `statusChip`'s "needs X" wording — this is provider/window detail, not a
+ * blocked-on-you state, and stays visible for a `busy`/`stuck` row too, since
+ * a session can be mid-turn while its last known evidence says it is rate
+ * limited.
+ */
+function rateLimitChip(s: SessionDTO): string {
+  const rl = s.rateLimit;
+  if (!rl) return '';
+  const reset = rl.resetAtMs !== undefined ? ` — resets ${resetsInText(Date.now(), rl.resetAtMs).toLowerCase()}` : '';
+  const title = `${rl.reason}${reset}.`;
+  return `<span class="chip ratelimit ${esc(rl.category)}" title="${esc(title)}">${esc(rl.reason)}</span>`;
+}
+
 function sharedChip(s: SessionDTO): string {
   const shared = s.sharedCheckout;
   if (!shared) return '';
@@ -688,7 +704,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${statusChip(s)}</span></div>
+    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${rateLimitChip(s)}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()

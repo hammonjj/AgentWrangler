@@ -1006,6 +1006,15 @@ button.pbtn:disabled {
   color: var(--aw-paused);
 }
 
+/* A classified rate-limit stoppage (#75). Same outline as `blk` — it is a
+   stoppage the same way a permission prompt is — but its own class so it can
+   be styled apart from "needs a decision" if that ever diverges. */
+.chip.ratelimit {
+  border-color: var(--aw-blocked);
+  color: var(--aw-blocked);
+  white-space: nowrap;
+}
+
 /* The agent's own checklist — the one place a real percentage exists, so it is
    the one place that gets a bar. The fill sits behind the ratio text. */
 .chip.todo {
