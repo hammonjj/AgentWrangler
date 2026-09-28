@@ -43,8 +43,10 @@ ad-hoc build, grants made before the switch are stale. Clear them once with
 again. This setup only covers one machine. Distributing the app needs an Apple Developer ID
 certificate and notarization (#57).
 
-Nothing restarts on its own. A running copy keeps the old build until you quit and reopen it —
-and quitting ends the conversations Agent Wrangler is running, so it is left to you.
+Nothing restarts on its own. A running copy keeps the old build until you quit and reopen it.
+What a quit costs depends on where each conversation runs (see *Quitting and coming back*):
+Claude conversations in session hosts and Codex threads keep running through it, and only
+in-process Claude conversations end (resumably).
 
 **Closing the window is not quitting.** Agent Wrangler carries on as a menu-bar app: the Dock
 icon goes, and the menu-bar item (a ring with a dot) shows how many agents need you beside it.
@@ -58,34 +60,49 @@ after a full quit too (see *Remote control*).
 item only, and nothing relaunches the app after a quit or a crash. While an agent the app runs
 is working or asking permission, it holds an App Nap assertion, which also defers idle sleep.
 
-**Quitting and coming back.** Agent Wrangler runs its conversations itself, so quitting ends
-them — gracefully, waiting up to ten seconds for each to finish its turn. Nothing is lost:
-each conversation is its transcript. On the next start, every session that was running shows
-an **interrupted** chip, and right-click → **Resume here** carries it on with the model, mode
-and effort it was started with. The newest one resumes by itself (the *Resume the last
-conversation on startup* setting).
+**Quitting and coming back.** A conversation runs in one of three places, and that decides
+what survives what:
 
-- **⌘Q** asks first when conversations are running ("Quit and stop N agents?").
+| Conversation runs in | ⌘Q, Dock → Quit, `osascript`, `app:install`, app crash | ⌥⌘Q (Quit and Stop All Agents) | Logout, reboot |
+|---|---|---|---|
+| A **session host** (Claude, with *Keep conversations running when Agent Wrangler quits* on) | Keeps running; reattaches on relaunch | Ended | Ended |
+| The **app process** (Claude, with the setting off, or started before it was on) | Ended | Ended | Ended |
+| The **Codex background server** (on by default) | Keeps running | Keeps running | Ended |
+
+*Ended* is never lost: each conversation is its transcript. An ended conversation is stopped
+gracefully (up to ten seconds to finish its turn), shows an **interrupted** chip on the next
+start, and right-click → **Resume here** carries it on with the model, mode and effort it was
+started with. The newest one resumes by itself (the *Resume the last conversation on startup*
+setting).
+
+- **⌘Q** asks first only when it would end something ("Quit and stop N agents?", counting
+  in-process conversations). When conversations in hosts are left running, a notification says
+  how many.
 - Any other quit never asks: Dock → Quit, a script's `osascript` quit, logout, `kill` (SIGTERM).
 - `npm run app:install` run from a terminal quits the app the same way before replacing it. Run
-  by an agent inside Agent Wrangler, it replaces the bundle and leaves the running copy alone:
-  quitting would end that agent too. Restart when convenient to pick up the build.
+  by an agent Agent Wrangler runs (in-process or in a host), it replaces the bundle and leaves
+  the running copy alone, since quitting could end that agent; restart when convenient to pick
+  up the build. Hosted conversations and Codex threads come through that restart.
 
-**Keeping Claude conversations running when the app quits (experimental).** Settings → Conversations →
-*Keep conversations running when Agent Wrangler quits*. With it on, each new Claude conversation
-runs in its own small background process (a *session host*), so quitting, reinstalling or a
-crash of Agent Wrangler no longer ends it: the turn in flight carries on, a permission prompt
-waits, and Agent Wrangler reconnects to it when it opens again.
+**Session hosts: keeping Claude conversations running when the app quits (experimental).**
+Settings → Conversations → *Keep conversations running when Agent Wrangler quits*. With it on,
+each new Claude conversation runs in its own small background process (a *session host*), so
+quitting, reinstalling or a crash of Agent Wrangler no longer ends it: the turn in flight
+carries on, a permission prompt waits, and Agent Wrangler reconnects to it when it opens again.
+It is off by default until the soak is done and the default flips (#15); the rest of this
+section applies once it is on.
 
-- **⌘Q** quits and leaves those conversations running (a notification says how many).
-  **Quit and Stop All Agents (⌥⌘Q)** ends them too.
-- Claude conversations started before the setting was on still end with the app, as described
-  above. Codex has its own background server (below).
+- Claude conversations started before the setting was on still run in the app process and end
+  with it, as in the table. Codex has its own background server (below).
 - A host's files live in `~/Library/Application Support/Agent Wrangler/`: `run/` (a manifest,
   a token and a socket per host, readable by you only), `logs/host-*.log`, and `runtimes/`, a
   clone of the app that hosts run from so a reinstall never pulls the program out from under
-  them. A token opens its host's socket, so both are readable by your user only; a process
-  running as you could use them.
+  them. A token opens its host's socket, so both are readable by your user only.
+- **Security limits, plainly.** Hosts keep other users on the Mac out, and make accidental or
+  prompt-injected use hard. They do **not** stop a process running as you: it can read a
+  token and drive that host's conversation (send to it, answer its questions, change its
+  permission mode), just as it could already edit the hook script or `settings.json`. That
+  includes an agent with a free shell. See `docs/plans/session-lifecycle-architecture.md` §12.
 - **A hosted conversation's permission prompts are answered only through its host**: from the
   pane, the row's Allow/Deny, or Discord. The host sets `AGENTWRANGLER_HOSTED=1` for `claude`,
   and the permission hook then logs the prompt (so the row shows it waiting) without waiting
@@ -110,7 +127,9 @@ waits, and Agent Wrangler reconnects to it when it opens again.
   being connected, so it never keeps an idle conversation from being parked. (A host started
   by a build older than #74 does not know the flag, and counts it until it next moves to a
   new build.)
-- Still experimental until a week of daily use has shown the recovery paths behave (#15).
+- A logout or reboot ends hosts too (macOS ends every process of yours). Each host ends its
+  conversation gracefully, and it comes back as **interrupted**, resumable as above.
+- Still experimental, and off by default, until the soak is done and the default flips (#15).
 
 **Codex conversations survive a quit.** Agent Wrangler runs every Codex thread in one
 background `codex app-server` of its own, detached from the app, so quitting, a crash or a

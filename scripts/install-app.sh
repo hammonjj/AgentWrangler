@@ -47,9 +47,10 @@ inside_session_host() {
 if running_at_all && { ! running || inside_session_host; }; then
   # Run by an agent Agent Wrangler is running (in-process or in a session host).
   # Quitting the app would end its in-process sessions, perhaps this agent's
-  # own, and CLAUDE.md forbids restarting it. The bundle is replaced in place instead: a running copy keeps working
-  # from the files it already has open (spike S2), and picks up the new build
-  # when James restarts it.
+  # own, so this script never quits it (CLAUDE.md says when an agent may
+  # restart it by hand). The bundle is replaced in place instead: a running copy
+  # keeps working from the files it already has open (spike S2), and picks up
+  # the new build when it is restarted.
   rm -rf "$DEST"
   cp -R "$APP" "$DEST"
   echo "Installed $DEST (the running copy was left running: a restart is needed to use this build)"
