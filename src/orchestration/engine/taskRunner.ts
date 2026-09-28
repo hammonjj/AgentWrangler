@@ -1362,9 +1362,28 @@ export class TaskRunner implements Disposable {
       cap,
       ...(run.kind === 'replan' ? { replan: replanContext(m) } : {}),
       ...(run.note ? { note: run.note } : {}),
+      ...this.plannerLocality(m),
       signal,
     });
     await this.endRun(missionId, runId, result);
+  }
+
+  /**
+   * Whether the mission's effective policy asks for a local planner (§11.5):
+   * `preferences.preferLocal` or strategy `prefer-local`, and local models not
+   * ruled out (`exclusions.disableLocal`, `caps.location: hosted-only`).
+   */
+  private plannerLocality(m: Mission): { preferLocal?: true; excludeSources?: ModelSourceId[] } {
+    let p: ExecutionPolicy;
+    try {
+      p = resolveEffectivePolicy(missionLayers(m), this.policyContext()).policy;
+    } catch (e) {
+      this.log(`mission ${m.id}: could not resolve its policy for the planner: ${errorText(e)}`);
+      return {};
+    }
+    const prefer = p.preferences?.preferLocal === true || p.preferences?.strategy === 'prefer-local';
+    if (!prefer || p.exclusions?.disableLocal || p.caps?.location === 'hosted-only') return {};
+    return { preferLocal: true, ...(p.exclusions?.sources?.length ? { excludeSources: [...p.exclusions.sources] } : {}) };
   }
 
   /**
@@ -1403,8 +1422,10 @@ export class TaskRunner implements Disposable {
       // Cut off by Cancel (which records it) or by the app stopping (recovery asks again): not a failure.
       if (this.disposed || (!result.ok && result.aborted)) return false;
       const now = this.now();
+      // Where the answer came from (§11.5): a local source, or a fallback from one.
+      const origin = { ...(result.source ? { source: result.source } : {}), ...(result.fellBack ? { fellBack: result.fellBack } : {}) };
       const fail = (reason: string, rounds = result.rounds) => {
-        m = this.patchRun(m, runId, (r) => ({ ...r, state: 'failed', reason, rounds, model: result.model, endedAt: now }));
+        m = this.patchRun(m, runId, (r) => ({ ...r, state: 'failed', reason, rounds, model: result.model, ...origin, endedAt: now }));
         m = transitionMission(m, 'planning-failed', { now, reason });
         this.put(m);
         this.writePlanRecord(m, runId);
@@ -1465,6 +1486,7 @@ export class TaskRunner implements Disposable {
         state: 'proposed',
         rounds: result.rounds,
         model: result.model,
+        ...origin,
         endedAt: now,
         decomposition: result.plan.decomposition,
         risks: result.plan.risks,

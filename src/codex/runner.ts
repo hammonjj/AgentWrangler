@@ -77,18 +77,36 @@ export function codexProviderParams(
       },
       ...(p.contextWindow ? { model_context_window: p.contextWindow } : {}),
       ...(p.maxOutputTokens ? { model_max_output_tokens: p.maxOutputTokens } : {}),
-      ...(p.modelCatalog ? { model_catalog_json: p.modelCatalog } : {}),
+      // No `model_catalog_json`: measured (plan §19.7 (c)), Codex 0.155 ignores
+      // it in a thread's config, and at server level it replaces the built-in
+      // catalog, which would hide every hosted model on AW's shared server.
     },
   };
 }
 
-/** Everything a policy and an effort put on `thread/start` / `thread/resume`, with one merged `config`. */
-export function codexThreadParams(policy: LaunchPolicy | undefined, effort: string | undefined, key?: string): Record<string, unknown> {
+/**
+ * Everything a policy and an effort put on `thread/start` / `thread/resume` /
+ * `thread/fork`, with one merged `config`.
+ *
+ * `model` is sent only for a thread on a local provider, and there on every
+ * call, resume included. Measured (plan §19.7): a `thread/resume` without
+ * `model` on a new app-server process runs the thread on Codex's default
+ * hosted model, against the local provider, and the server refuses the
+ * request that model's tool shape produces. A hosted thread keeps its model
+ * from the rollout, as before.
+ */
+export function codexThreadParams(
+  policy: LaunchPolicy | undefined,
+  effort: string | undefined,
+  key?: string,
+  model?: string,
+): Record<string, unknown> {
   const provider = codexProviderParams(policy, key);
   const config = { ...provider.config, ...(effort ? { model_reasoning_effort: effort } : {}) };
   return {
     ...(Object.keys(config).length > 0 ? { config } : {}),
     ...(provider.modelProvider ? { modelProvider: provider.modelProvider } : {}),
+    ...(provider.modelProvider && model ? { model } : {}),
     ...codexPolicyParams(policy),
   };
 }
@@ -761,7 +779,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     const result = await this.server.request<any>('thread/start', {
       cwd,
       ...(model ? { model } : {}),
-      ...codexThreadParams(launch.policy, effort, await this.providerKey(launch.policy)),
+      ...codexThreadParams(launch.policy, effort, await this.providerKey(launch.policy), model),
     });
     const threadId = result?.thread?.id;
     if (typeof threadId !== 'string') throw new Error('Codex App Server returned no thread id');
@@ -790,7 +808,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     options = { ...options, policy: resumePolicy(this.record.registry, threadId, options.policy) };
     const result = await this.server.request<any>('thread/resume', {
       threadId,
-      ...codexThreadParams(options.policy, options.effort, await this.providerKey(options.policy)),
+      ...codexThreadParams(options.policy, options.effort, await this.providerKey(options.policy), model),
     });
     const resumedId = result?.thread?.id ?? threadId;
     const runner = new CodexRunner(
@@ -902,7 +920,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
       // A new connection (or a new server) must not get a looser thread than the one it lost.
       result = await this.server.request<any>('thread/resume', {
         threadId: runner.threadId,
-        ...codexThreadParams(runner.policy, undefined, await this.providerKey(runner.policy)),
+        ...codexThreadParams(runner.policy, undefined, await this.providerKey(runner.policy), runner.composer.model),
       });
     } catch (error) {
       const kind = classifyResumeError(error);
@@ -946,7 +964,7 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
   }
   /** A new thread with this one's history. A policy the original had comes with it. */
   async fork(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string, policy?: LaunchPolicy): Promise<CodexRunner> {
-    const result = await this.server.request<any>('thread/fork', { threadId, ...codexThreadParams(policy, undefined, await this.providerKey(policy)) });
+    const result = await this.server.request<any>('thread/fork', { threadId, ...codexThreadParams(policy, undefined, await this.providerKey(policy), model) });
     const forkedId = result?.thread?.id;
     if (typeof forkedId !== 'string') throw new Error('Codex App Server returned no forked thread id');
     const runner = new CodexRunner(

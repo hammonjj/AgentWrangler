@@ -1,0 +1,7 @@
+{
+  "title": "Inclusive day ranges",
+  "prompt": "The module src/range.js works on inclusive ranges of day numbers ({ start, end }, both ends included) and has bugs. Fix them so that `node test/check.js` prints ok and exits 0. Change only files under src/. Do not change, add or delete anything under test/.",
+  "check": ["node", "test/check.js"],
+  "protected": ["test/**"],
+  "allowed": ["src/**"]
+}

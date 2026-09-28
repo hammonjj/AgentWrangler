@@ -195,4 +195,44 @@ describe('a local target as a Codex thread', () => {
     expect(JSON.stringify(service.get('thread-1')?.policy)).not.toContain('sk-test');
     service.dispose();
   });
+
+  // Measured live (plan §19.7): a resume without `model` runs the local thread on
+  // Codex's default hosted model, and the local server refuses the request.
+  it('a local thread names its model on thread/start, thread/resume and thread/fork; a hosted one does not on resume', async () => {
+    const calls: { method: string; params: any }[] = [];
+    const server = {
+      onNotification: new Emitter<any>().event,
+      onRequest: new Emitter<any>().event,
+      request: async (method: string, params: any) => {
+        calls.push({ method, params });
+        if (method === 'thread/start') return { thread: { id: 'thread-1' }, model: params.model };
+        if (method === 'thread/resume') return { thread: { id: params.threadId, model: params.model ?? 'hosted-default' } };
+        if (method === 'thread/fork') return { thread: { id: 'thread-4' } };
+        return {};
+      },
+      respond: () => undefined,
+    };
+    const service = new CodexRunnerService(server as any);
+    const local = { codex: { modelProvider: PROVIDER } };
+    await service.start('/Users/test/proj', 'coder', { policy: local });
+    await service.resume('thread-2', '/Users/test/proj', [], 'coder', { policy: local });
+    await service.fork('thread-2', '/Users/test/proj', [], 'coder', local);
+    await service.resume('thread-3', '/Users/test/proj', [], 'gpt-hosted', {});
+    const byThread = (m: string, id?: string) => calls.find((c) => c.method === m && (!id || c.params.threadId === id))!.params;
+    expect(byThread('thread/start')).toMatchObject({ model: 'coder', modelProvider: 'aw-box' });
+    expect(byThread('thread/resume', 'thread-2')).toMatchObject({ model: 'coder', modelProvider: 'aw-box' });
+    expect(byThread('thread/fork')).toMatchObject({ model: 'coder', modelProvider: 'aw-box' });
+    expect(byThread('thread/resume', 'thread-3')).not.toHaveProperty('model');
+    // The resumed local thread's turns go to its own model, not the server's default.
+    expect(service.get('thread-2')?.session.model).toBe('coder');
+    service.dispose();
+  });
+
+  it('codexThreadParams: model only with a provider, and never model_catalog_json (ignored per thread, replaces server-wide)', () => {
+    const withCatalog = { codex: { modelProvider: { ...PROVIDER, modelCatalog: '/Users/test/catalog.json' } } };
+    const params = codexThreadParams(withCatalog, undefined, undefined, 'coder');
+    expect(params).toMatchObject({ model: 'coder', modelProvider: 'aw-box' });
+    expect(JSON.stringify(params)).not.toContain('model_catalog_json');
+    expect(codexThreadParams(undefined, 'high', undefined, 'gpt-hosted')).toEqual({ config: { model_reasoning_effort: 'high' } });
+  });
 });

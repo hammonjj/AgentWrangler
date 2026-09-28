@@ -60,8 +60,10 @@ export interface LocalEndpointConfig {
   /** Display only (§19.2 "hardware"): "M5 Pro, 24 GB". */
   device?: string;
   /**
-   * A Codex model catalog file to pass as `model_catalog_json` (§19.6: without
-   * an entry Codex does not offer `apply_patch` to an unknown model). Optional.
+   * A Codex model catalog file (§19.6: without an entry Codex does not offer
+   * `apply_patch` to an unknown model). Optional, and **not sent yet**: Codex
+   * ignores `model_catalog_json` in a thread's config, and server-wide it
+   * replaces the built-in catalog (measured, §19.7 (c)).
    */
   codexModelCatalog?: string;
   /** Per model id. */
@@ -85,8 +87,29 @@ export interface LocalEndpointView {
   routes: string;
   probedAt?: number;
   error?: string;
-  models: { id: string; label: string; key: string; qualification?: string; qualifying?: boolean }[];
+  /** `/v1/responses` as probed. Undefined: not probed, or the probe could not say. */
+  responses?: boolean;
+  models: LocalEndpointModelView[];
   busy?: boolean;
+}
+
+/** One model an endpoint lists, as Preferences shows it: beside the endpoint and beside its tier picker. */
+export interface LocalEndpointModelView {
+  id: string;
+  label: string;
+  /** The catalog key, to find its tier-map entry. */
+  key: string;
+  /** Stage 1's line (`qualificationText`). */
+  qualification?: string;
+  qualifying?: boolean;
+  /** Stage 1's verdict and tool-call count, for the status line. */
+  stage1?: { verdict: 'agentic' | 'completion-only'; toolCalls: { ok: number; runs: number }; error?: string };
+  /** Stage 2's line (`taskQualificationText`). */
+  tasks?: string;
+  /** Stage 2 is running: how far it has got. */
+  tasksRunning?: string;
+  /** The window fits a repository excerpt for the local planner (§11.5). */
+  plannerWindowFits?: boolean;
 }
 
 export function endpointSource(id: string): ModelSourceId {
@@ -236,7 +259,9 @@ export type LocalEndpointChange =
   | { op: 'setKey'; id: string }
   | { op: 'clearKey'; id: string }
   | { op: 'probe'; id: string }
-  | { op: 'qualify'; id: string; model: string };
+  | { op: 'qualify'; id: string; model: string }
+  /** Stage 2 (§19.6): scratch-repo tasks through Codex on the endpoint. */
+  | { op: 'qualifyTasks'; id: string; model: string };
 
 /** A `localEndpoint` message's change, or nothing if it is not well formed. */
 export function localEndpointChange(raw: unknown): LocalEndpointChange | undefined {
@@ -257,6 +282,8 @@ export function localEndpointChange(raw: unknown): LocalEndpointChange | undefin
       return id && typeof c.enabled === 'boolean' ? { op: 'enable', id, enabled: c.enabled } : undefined;
     case 'qualify':
       return id && typeof c.model === 'string' && c.model !== '' ? { op: 'qualify', id, model: c.model } : undefined;
+    case 'qualifyTasks':
+      return id && typeof c.model === 'string' && c.model !== '' ? { op: 'qualifyTasks', id, model: c.model } : undefined;
     default:
       return undefined;
   }

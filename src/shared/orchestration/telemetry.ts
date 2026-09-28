@@ -192,7 +192,13 @@ export interface LocalCallRecord extends RecordBase {
   type: 'local-call';
   source: ModelSourceId;
   model: string;
-  purpose: 'completion' | 'qualification';
+  /** `planner`: a local planner round (§11.5). */
+  purpose: 'completion' | 'planner' | 'qualification';
+  /** For `qualification`: stage 1 (the probe) or 2 (one scratch-repo task run, §19.6). Absent on records from before stage 2: stage 1. */
+  qualificationStage?: 1 | 2;
+  /** Stage 2: the fixture id and run number. Fixture ids are AW's own, never a project's. */
+  fixture?: string;
+  run?: number;
   ok: boolean;
   /** `invalid-output`, `error`, `timeout`, `aborted`; `infra` marks a server that went away. */
   failure?: string;

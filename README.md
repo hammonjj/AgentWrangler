@@ -499,12 +499,42 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
   it a tier. *Qualify* runs §19.6's stage-1 probe against it: 10 tool calls, 10 tool-result round
   trips and 20 JSON replies, all synthetic. That sets tool calling and structured output to
   `measured`. Any miss makes the model completion-only.
+- **Qualify tasks** runs stage 2 (plan §19.9). There are four small scratch repos, plain Node
+  with no dependencies, each with seeded bugs, a check (`node test/check.js`), protected tests and
+  a list of the paths the agent may change. Each runs 3 times as a Codex thread on the endpoint,
+  under the same sandbox and prompt framing as a routed attempt, in a temp dir that is removed
+  afterwards. A run passes when the check exits 0, nothing under `test/` changed, and every
+  changed path is inside the allowed ones. A run that asks for approval fails, since nobody is
+  there to answer it. The result shows the pass rate, turns, wall time and tokens, all
+  `measured`. It is kept with stage 1's and survives a restart, and each run writes a
+  `local-call` record. On a server without `/v1/responses` (`mlx_lm.server`) it says *not
+  runnable: no /v1/responses* and records no pass rate. It takes minutes. Neither stage ever
+  sets a tier.
+- **Status beside the tier picker.** Each local model's row in the tier map says what it can
+  be picked for now, and what it still needs for each kind of work:
+  - Completions need it enabled, at the weakest tier (`basic`), on an endpoint that is on and
+    not down.
+  - Planning needs `standard` or above and a context window a repository excerpt fits in.
+  - Agentic work needs `/v1/responses` on the server, tool calling that is measured (or
+    declared), and a tier.
+
+  A model that stage 1 found completion-only is shown as *Completion only* with the measured
+  count, for example `tool calls 0/10`. Both stages' results appear under the picker.
+- **Harness-pin warning.** If the routing defaults pin or prefer Claude Code, or exclude Codex,
+  while a local model is enabled, Preferences warns that this rules out the Codex path, so local
+  models cannot get agentic work. They still answer completions and plan.
 - **What it does once tiered.** Agentic tasks run as a Codex thread whose model provider is the
   endpoint (Responses wire), under the same sandbox as any attempt. That needs `/v1/responses`
   on the server and measured tool calling. A model at the weakest tier (`basic`) answers
   structured completions (assessment) directly over `chat/completions`, ahead of Haiku, and falls
-  back to Haiku if it fails. The reviewer, which reads files, always uses the hosted model.
-  Server slots count as concurrency.
+  back to Haiku if it fails. The **planner** runs on a local model when a mission prefers local
+  models (*Prefer local models*, or strategy *prefer-local*) and one tiered `standard` or above
+  is up. It has no tools, so Agent Wrangler reads the repository for it and puts an excerpt in
+  the prompt, sized to the model's context window: the file tree from `git ls-files`, the
+  manifests and READMEs, and the files the objective names or mentions. The plan gets the same
+  checks and repair round as a hosted one. If the local model fails for any reason but Cancel,
+  the hosted planner plans instead, and review says so. The reviewer, which reads files, always
+  uses the hosted model. Server slots count as concurrency.
 - **Losing the server.** An attempt whose endpoint goes down, or whose turn fails while the
   endpoint does not answer, ends as `infra` / `local-server-lost`. If the router picked the
   route, or the mission has `autoRecover`, it fails over to another model **in the same tier**.
@@ -515,6 +545,60 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
   would have cost at its `telemetry.prices` entry. Direct calls write `local-call` records. The
   endpoint card shows runs, `$0 API cost`, verified first time, succeeded, escalated, tok/s, TTFT
   and runtime per model. A cost a harness invents for a local model is not recorded.
+
+### Serving an MLX model
+
+`scripts/local-models/serve-mlx.sh` serves an MLX (4-bit) model directory with `mlx_lm.server`,
+bound to `127.0.0.1` only, and prints how to register it. It installs nothing and never writes
+`settings.json`.
+
+```bash
+# Once: mlx-lm in a venv of your choosing (the script prints these if it cannot find the server)
+python3 -m venv ~/venvs/mlx
+~/venvs/mlx/bin/pip install mlx-lm
+
+# Every time: serve the model directory on a port (default 18080)
+MLX_VENV=~/venvs/mlx scripts/local-models/serve-mlx.sh ~/models/<model-dir> 18080 --name "<name>"
+
+# Just print the endpoint entry and the steps, without starting the server
+MLX_VENV=~/venvs/mlx scripts/local-models/serve-mlx.sh ~/models/<model-dir> 18080 --print-only
+```
+
+`<model-dir>` holds `config.json` and `*.safetensors` (an `mlx-community/*-4bit` download).
+Extra `mlx_lm.server` flags go after `--`. `--host`, `--port` and `--model` there are refused.
+`--write-entry <file>` also writes the entry to a file, but never to `settings.json`.
+
+To register the server, use **Preferences → Orchestration → Local endpoints**: enter URL
+`http://127.0.0.1:18080` and a name, then *Add endpoint*. Once the server says it is listening,
+press *Probe*. Then give the model a tier in the **Tier map**: `basic` for assessments, or
+`standard` or above so missions that prefer local models can plan with it. The status line
+under the picker says whether that took. *Qualify* is optional. *Qualify tasks* reports *not
+runnable* here, because `mlx_lm.server` has no `/v1/responses`. Or, with the app quit, add the entry the script prints to `orchestration.localEndpoints`:
+
+```json
+{
+  "id": "<the name in lower case, [a-z0-9-]>",
+  "name": "<name>",
+  "url": "http://127.0.0.1:18080",
+  "runtime": "mlx",
+  "models": { "<model id: the model dir as the server was given it>": { "contextWindow": 32768 } }
+}
+```
+
+`contextWindow` is declared from the weights' `config.json` (`max_position_embeddings`),
+because `mlx_lm.server` does not report one.
+
+What an MLX model can and cannot do in Agent Wrangler:
+
+- **Completion-only.** `mlx_lm.server` serves `chat/completions` but not `/v1/responses` or
+  `/v1/messages` (both 404), so no harness can run on it and it never gets agentic coding
+  tasks. It answers assessments at `basic`, and plans missions that prefer local models
+  (above) at `standard` or higher. Agent Wrangler does not ship a protocol translator to get
+  around this (plan §19.6 point 2).
+- **Not through llama.cpp.** `llama-server` loads GGUF files only and cannot load MLX weights.
+  An agentic local model needs a GGUF model on `llama-server`, which serves `/v1/responses`
+  natively. That path is verified against Codex in plan §19.7, and
+  `scripts/local-models/codex-live-check.ts` re-runs the check.
 
 ## Repository policies (orchestration)
 

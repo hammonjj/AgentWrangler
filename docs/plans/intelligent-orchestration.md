@@ -1312,6 +1312,94 @@ Replanning is explicit, by the user, or proposed by escalation when a task fails
 (done tasks, failed tasks and their evidence) and produces a *diff* to the plan, which goes
 through the same review. Done tasks are never replanned away.
 
+### 11.5 Local planning (as built, 2026-09-28)
+
+The hosted planner is a workspace completion: `Read`/`Grep`/`Glob` in the checkout, up to 40
+turns. A local model served over `chat/completions` has no tools, so it cannot read anything.
+The local path therefore turns the reading around: **Agent Wrangler reads the repository and
+puts an excerpt in the prompt**, and the local model plans from that.
+
+**When it is tried.** Only when the mission's effective policy prefers local models
+(`preferences.preferLocal`, or strategy `prefer-local`) and does not rule them out
+(`exclusions.disableLocal`, `caps.location: hosted-only`), and only if a suitable local model is
+picked at that moment. Sources in `exclusions.sources` are never picked. Otherwise the planner is
+exactly the hosted one, with the same request as before.
+
+**The excerpt** (`policy/repoContext.ts`, `gatherRepoContext`). It is deterministic: the same
+tree and objective always give the same text. It has three parts:
+
+1. A **file tree** from `git ls-files --cached --others --exclude-standard`, so `.gitignore`
+   holds. Where git cannot list the tree, it walks the directory instead, honouring the root
+   `.gitignore`. Either way it leaves out dependency folders (`node_modules`, `vendor`, …),
+   build output (`dist`, `build`, `out`, `target`, …), caches, lock files, minified files,
+   source maps and binaries (by extension, and by a NUL byte in the first 8 KB).
+2. **Top-level manifests and READMEs** (`README*`, `CLAUDE.md`, `AGENTS.md`, `package.json`,
+   `tsconfig.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, …).
+3. **The files most likely in scope**, ranked by terms from the objective, its acceptance
+   criteria, the user's note and a replan's task text. A path the text names scores highest.
+   Path segments and identifiers come next: camelCase and snake_case identifiers weigh more
+   than plain words, and stopwords are dropped. A replan's done-task scopes add a little. The
+   400 best files by path are then scanned (64 KB each) for the identifiers themselves, so a
+   file whose name says nothing but whose text defines `fooBar` still ranks. Score ties break by
+   path.
+
+**Caps.** The defaults are 160,000 characters in total, 12,000 per ranked file, 4,000 per
+manifest and 24,000 for the tree. `contextLimits(window)` shrinks them to fit the model: the
+total is `(window − 16,384) × 3` characters, never above the default, and the other caps scale
+with it. The 16,384 reserved tokens cover the answer, the instructions, the schema and the repair
+round's echo of the previous plan. Three characters per token is the cautious end for code. A
+window that would leave under 12,000 characters is not used. Every cut is marked where it
+happens: `[file truncated]`, `[tree truncated: N more files not listed — src/ 812, …]`, and
+`[context truncated: N more relevant files not included — …]`. The block never exceeds its
+total.
+
+**The request.** A no-workspace completion to the picked model, in the same `PLAN_SCHEMA`. The
+input is the excerpt as a `<repository_context>` block, then the hosted planner's input
+unchanged. The block opens by saying it is data, not instructions, and no file can close it early
+(`</repository_context>` inside a file is escaped). The instructions (`LOCAL_PLANNER_INSTRUCTIONS`)
+are the hosted ones with two lines changed. The first says the excerpt is provided, the model
+cannot read files, and it should name paths from the tree. The last counts the excerpt among the
+data to ignore instructions from. The rules on when to split are shared text. `checkPlan`,
+`checkPlannerAnswer` and the single repair round are the same code on both paths
+(`Planner.rounds`), so a local plan is held to exactly what a hosted one is.
+
+**Tier rule: `standard` or above** (`PLANNER_LOCAL_MIN_TIER`). Completions go to the weakest
+tier because assessment is a small, bounded judgement. A plan is not, so `basic` is excluded.
+`expert` is not required, because four things stand behind a local plan: the deterministic
+checks, the repair round, the hosted fallback, and plan review, which is mandatory. With a
+tier list that has no `standard`, the weakest tier is the one excluded.
+
+**Picking the model** (`pickPlannerEntry`, `LocalEndpointService.pickPlanner`). A candidate must
+be a catalog entry with `completions` (an endpoint's model, the endpoint on), enabled, of a tier
+at or above the minimum, on an endpoint that is not `down`, and with a window the excerpt fits.
+Candidates are ranked by highest tier first, then constrained decoding (`structuredOutput:
+schema`), then the largest known window, then catalog order. A model whose window nobody knows
+is assumed to have 32,768 tokens (`ASSUMED_LOCAL_PLANNER_WINDOW`) and ranks after the known
+ones. Declaring the window on the endpoint (`models.<id>.contextWindow`) lifts that.
+
+**Fallback.** On any local failure except an abort, the hosted workspace planner runs, and its
+request is unchanged. The failures are: no model picked, a window too small, the excerpt could
+not be gathered, invalid output after the completion's own retry, a plan still invalid after the
+repair round, an infra error, or a timeout. The result carries `fellBack: { from?, because }`,
+and so does the `PlanningRun`, where plan review shows it. `rounds` are the rounds of the path
+that produced the plan. The local rounds are in the `local-call` records. An abort (Cancel, or
+the app stopping) ends the run as aborted, with no fallback. With no hosted completion, a local
+failure is the run's failure. With neither a hosted completion nor a local model, planning fails
+as before ("no way to reach a planner model is configured").
+
+**Records.** Each local planner call writes a `local-call` record with `purpose: 'planner'`:
+source, model, ok or failure, tokens, duration, attempts and the local metrics. On a fallback
+the last call is marked `fellBackToHosted`. The record holds counts and timings only: no
+objective, no excerpt, no plan. A run a local model answered has `source` set, and review reads
+"Planned by <model> (local)".
+
+**The reviewer stays hosted.** The same mechanism would fit only in part. The reviewer judges a
+diff against acceptance criteria, and its verdict decides whether a task counts as *verified*.
+An excerpt of the diff plus the touched files is cheap to gather. But a reviewer that misses
+context passes work that should fail, and nothing downstream catches that the way plan review
+catches a bad plan. That is a different bar from the planner's, so it needs its own measurement
+first. Local review is not built.
+
 ---
 
 ## 12. Dependency graph and scheduler
@@ -1992,12 +2080,17 @@ and, later, local endpoints.
 
 ---
 
-## 19. Local models: supported by design, not implemented
+## 19. Local models
 
 Nothing in this plan installs or configures local inference. What it does is make sure a local
 model can join later as configuration plus an adapter, with no change to tasks, assessments, rules
 or stores. The #50 spike (2026-09-25, §19.6) tried that against real runtimes and both harnesses.
 The door fits, with the gaps and the recommendation for #51 recorded there.
+
+What has been built since: #51's endpoint registry, probes, health, direct completions, the
+Codex path and stage 1 of qualification (§19.7), with the live check of the Codex path (§19.7.1);
+local planning (§19.8); and the tier-map status line, the harness-pin warning and qualification
+stage 2 (§19.9). The Claude Code path is still not built.
 
 ### 19.1 Two ways a local model does work
 
@@ -2035,7 +2128,7 @@ stays unknown:
 | max concurrency | declared (`OLLAMA_NUM_PARALLEL` not queryable) | `total_slots` | declared | declared | declared (it batches, but does not say how many) |
 | health | listing responds | `/health` | listing responds | `state` | `mlx_lm.server`: `/health` |
 | throughput | `eval_count` / `eval_duration` | `timings.predicted_per_second` | response usage | — | client-measured only |
-| harness endpoints | (research: unverified) | `/v1/responses` and `/v1/messages` (present in 0.4.0; not exercised) | — | — | `mlx_lm.server`: neither (404) |
+| harness endpoints | (research: unverified) | `/v1/responses` and `/v1/messages` (present in 0.4.0; `/v1/responses` exercised with Codex, §19.7.1) | — | — | `mlx_lm.server`: neither (404) |
 
 "Declared" means the user states it in Preferences, and the descriptor records `from: declared`.
 The resolver trusts `reported`/`probed` over `declared`, and treats `unknown` as "cannot satisfy
@@ -2052,7 +2145,9 @@ metrics.
    as **unassigned** (§6.3).
 2. Optionally, the model runs a small **qualification set** of verifiable tasks on scratch
    repositories (a subset of the corpus with real checks), and the result is shown next to the
-   tier choice. The shape #50 proposes is in §19.6.
+   tier choice. The shape #50 proposes is in §19.6. Stage 1 is built as *Qualify* (§19.7) and
+   stage 2 as *Qualify tasks* (§19.9). Beside the tier choice, a status line also says what the
+   model still needs for completions, planning and agentic work.
 3. The user assigns a tier. From then on the resolver can pick it like any other candidate,
    under the same caps, and "prefer local" or "disable local" steer it.
 
@@ -2161,6 +2256,8 @@ not the model):
 3. *Show, don't tier*: results appear next to the tier picker. The model stays unassigned until
    the user picks a tier (§6.3). One four-bug fix is `basic`-level evidence at most.
 
+All three stages are now built: stage 1 in #51 (§19.7), stages 2 and 3 in §19.9.
+
 **Recommendation for #51: go, in two slices, Codex first; the Claude Code path is not in #51.**
 
 - **Slice A, no harness:** the endpoint registry (loopback only by default), per-runtime probes
@@ -2194,23 +2291,143 @@ types are unchanged. What changed is adapters, settings and the catalog's inputs
 | Descriptors | `shared/orchestration/localModels.ts` | `measured` > `probed` > `declared` > unknown, per field. `nativeEffort: []`, `costBasis: 'none'`. Harness `codex` only where `/v1/responses` was probed. |
 | Catalog | `buildCatalog({ local })`, `CapabilityCatalog.setLocal` | Local models are never given a default tier, so they start unassigned. `routable` needs a tier, an enabled model, an endpoint that is on, and a harness. `completions` is the same without the harness. |
 | Service | `orchestration/local/localEndpointService.ts` | Probe at start and every 10 min. Health every 30 s from the runtime's cheapest route: one miss `degraded`, two `down`, then `onDown`. A failed re-probe keeps the last good probe. Slots are a gate for direct calls (`acquire`, whose wait is the queue delay). Attempts count against slots in the resolver snapshot. |
-| Qualification | `qualifyModel` | Stage 1 of §19.6 (10 tool calls, 10 round trips, 20 JSON replies, synthetic), shown beside the tier picker. Results are `measured` and persisted. Stage 2 (scratch-repo tasks) is not built. |
+| Qualification | `qualifyModel` | Stage 1 of §19.6 (10 tool calls, 10 round trips, 20 JSON replies, synthetic), shown beside the tier picker. Results are `measured` and persisted. Stage 2 (scratch-repo tasks) is built too, as *Qualify tasks* (`runTaskQualification`, §19.9). Its results are stored beside stage 1's. |
 | Resolver | `policy/resolver.ts` | An endpoint model needs known, non-`none` tool calling for agentic work. It never gets the assumed hosted window, even when external. Zero free slots is capacity (`blocked`). |
-| Agentic | `CodexHarness` + `codexThreadParams` | A local target is a Codex thread with `modelProvider: aw-<id>` and `config.model_providers.aw-<id> = {base_url: <url>/v1, wire_api: "responses"}`. `model_context_window` comes from the catalog, and `model_catalog_json` from a declared file if there is one. The key is read per request (`experimental_bearer_token`) and never recorded. The provider is in the launch policy, so every resume re-sends it. |
+| Agentic | `CodexHarness` + `codexThreadParams` | A local target is a Codex thread with `modelProvider: aw-<id>` and `config.model_providers.aw-<id> = {base_url: <url>/v1, wire_api: "responses"}`. `model_context_window` comes from the catalog. The key is read per request (`experimental_bearer_token`) and never recorded. The provider is in the launch policy, so every resume re-sends it, and since the live check (below) every `thread/resume` and `thread/fork` also names the `model`. A declared `codexModelCatalog` is recorded but no longer sent as `model_catalog_json` (below, (c)). |
 | Completions | `completion/localCompletion.ts` | `LocalStructuredCompletion`: streamed `chat/completions`, `response_format` only where probed, otherwise the schema goes in the instructions, then validation and one retry. A dropped stream or refused connection is `infra`. `RoutedCompletion` puts the weakest-tier local model ahead of the hosted completion and falls back to it on any failure but an abort. Workspace requests (the reviewer) always go hosted. |
 | Failure | `TaskRunner` | `onDown`, or an `infra` turn failure while the endpoint does not answer, ends the attempt `infra` / `local-server-lost`. Failover re-resolves the same requirement pinned to the tier that ran, with the failed source excluded. It is allowed when the router decided the route or the mission has `autoRecover`, and within `maxAttempts` (default 3). The new decision is `decidedBy: 'router'` with rule `failover.infra`. |
 | Metrics | `AttemptRecord.local`, `LocalCallRecord`, `shared/orchestration/localMetrics.ts` | Runtime, device, context window and queue delay. Tokens/s is output over active time (`tokPerSecFrom: 'attempt'`); TTFT is absent through a harness, and server- or client-measured for direct calls. The API-equivalent cost avoided is labelled an estimate: the same requirement resolved with every endpoint excluded, priced at that model's `telemetry.prices` entry. Harness cost is stripped from local attempts (§19.6 point 3). `summariseLocal` gives executions, success, verified-first-time, escalation-from-local and averages. |
 
-Open, and not settled by tests (they use fakes):
+#51 left three questions open, because its tests use fakes:
 
-- The app-server's acceptance of `modelProvider` and a free-form `model_providers` table on
-  `thread/start` and `thread/resume`. It is in the pinned schema per §19.6, but #51 did not run it
-  live.
-- `experimental_bearer_token` on a per-thread provider.
-- Whether `model_catalog_json` adds to Codex's catalog or replaces it.
+- (a) Does the app-server accept `modelProvider` and a free-form `model_providers` table on
+  `thread/start` and `thread/resume`? They are in the pinned schema per §19.6, but #51 did not
+  run them live.
+- (b) Does `experimental_bearer_token` work on a per-thread provider?
+- (c) Does `model_catalog_json` add to Codex's catalog, or replace it?
 
-The first live run against `llama-server` with a GGUF model should settle all three. It is also
-the measurement §19.6 slice B asks for.
+The live check below settles all three.
+
+#### 19.7.1 Live check: Codex on `llama-server`'s `/v1/responses` (2026-09-28)
+
+**Setup.** Apple M5 Pro, 24 GB. Codex CLI 0.155.0-alpha.16.3, the one the app resolves
+(`resolveCodexBinary`), running `codex app-server --stdio` with `CODEX_HOME` set to a fresh
+temp dir. `llama-server` 0.4.0 (build 10809) from Homebrew, bound to `127.0.0.1` with an
+`--api-key`. The model was Qwen2.5-1.5B-Instruct Q4_K_M, the official Qwen GGUF, downloaded
+into a temp dir. Its SHA-256 starts `6a1a2eb6`. The thread's cwd was an empty temp dir, with
+`sandbox: read-only` and `approvalPolicy: never`. Every prompt was synthetic ("Reply with the
+single word OK"). All of it was deleted afterwards.
+
+The check is `scripts/local-models/codex-live-check.ts`. It drives the app's own code:
+`CodexHarness.launch` → `CodexRunnerService` → `codexThreadParams`, on a real app-server, with
+a provider shaped like `LocalEndpointService.codexProvider`'s. It prints the exact params sent,
+with the key redacted, and a PASS/FAIL/INFO line per check. It refuses to run unless
+`CODEX_HOME` is under the temp dir and the URL is loopback.
+
+```bash
+mkdir -p /tmp/aw-lp && cd /tmp/aw-lp
+curl -L -o model.gguf https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+/opt/homebrew/bin/llama-server -m /tmp/aw-lp/model.gguf --host 127.0.0.1 --port 18431 \
+  --jinja -c 32768 --api-key sk-aw-live-check
+# in the repo, in another shell:
+CODEX_HOME=$(mktemp -d) AW_LIVE_KEY=sk-aw-live-check \
+  npx vite-node scripts/local-models/codex-live-check.ts -- \
+  --url http://127.0.0.1:18431 --model local-qwen --cwd /tmp/aw-lp/scratch --context 32768
+```
+
+`llama-server` serves one model and answers to any model name, so `local-qwen` is only a label.
+With `--api-key` set, an unauthenticated POST to `/v1/responses` returns 401. AW's probe
+counts that as present, because only 404, 405 and 501 mean absent.
+
+**Findings.**
+
+| Question | Answer | Evidence |
+|---|---|---|
+| (a) `thread/start` with `modelProvider` + `config.model_providers.<id>` | **Accepted.** | The turn completed, answered by the local server (`CODEX_HOME` had no auth, so nothing hosted could have answered). Params sent: `modelProvider: "aw-live"`, `config.model_providers.aw-live = {name, base_url: "http://127.0.0.1:18431/v1", wire_api: "responses", experimental_bearer_token}`, `model_context_window: 32768`. |
+| (a) `thread/resume` on a new app-server process | **Accepted, but only with `model`.** Fixed in `codexThreadParams`. | Without `model`, Codex warns "…recorded with model `local-qwen` but is resuming with `<its default hosted model>`". It then builds that model's request, which sends tools in a shape llama-server cannot read, against the local provider. The server refuses it: `400 Cannot determine type of 'item'`, and the turn fails. With `model` (now sent on every `thread/resume` and `thread/fork` of a local thread), the resumed turn completed on the same thread id. |
+| (b) `experimental_bearer_token` per thread | **Works.** | The right key completed. A wrong key and no key both got `401 Unauthorized: Invalid API Key` from `llama-server`, after Codex's 5 stream reconnects. So the token is sent per thread, and a thread without one sends none. |
+| (c) `model_catalog_json` | **It replaces the catalog, and only at server level. A thread's config ignores it.** AW no longer sends it. | `codex debug models`: 11 built-in models; with `-c model_catalog_json=<one-entry file>`, 1. In `CODEX_HOME/config.toml`, the app-server's `model/list` shows only the local entry, and the "model metadata not found" warning goes. In `thread/start`'s `config`, the warning stays and `model/list` is unchanged. |
+
+**Other observations.**
+
+- With no catalog entry, Codex warns "Model metadata for `<model>` not found. Defaulting to
+  fallback metadata". The turn still works. §19.6 said what fallback metadata loses:
+  `apply_patch` is not offered.
+- The catalog entry used was a clone of a built-in entry with `use_responses_lite: false` and
+  `apply_patch_tool_type: "freeform"`, with `slug` and `context_window` changed (§19.6).
+- A 1.5B model is enough for these protocol questions but says nothing about task quality. The
+  qualification of §19.6 is still what decides that. Stage 1 is built as *Qualify*, and stage 2,
+  which runs scratch-repo tasks through this same path, as *Qualify tasks* (§19.9).
+
+**What changes.**
+
+1. `codexThreadParams(policy, effort, key, model)` sends `model` whenever the policy has a
+   model provider. `thread/start`, `thread/resume` (including a reattach after a reconnect)
+   and `thread/fork` pass it. Hosted threads are unchanged: a resume still takes its model from
+   the rollout. Tested in `test/orchestration/localRouting.test.ts` against a fake app-server.
+2. `model_catalog_json` is no longer sent per thread, because it did nothing there. Sending it
+   server-wide would hide every hosted model on the shared app-server. So a local model runs on
+   fallback metadata, without `apply_patch`. To give it `apply_patch`, AW would have to write a
+   **merged** catalog (the built-in list from `codex debug models`, plus one entry per local
+   model) and start the app-server with it. That is not built. It would also have to be
+   regenerated whenever Codex updates its catalog.
+3. No protocol translator is involved or added (§19.6 point 2). MLX stays completion-only.
+
+**To re-run later**, for example after a Codex update: start `llama-server` as above and run
+the script. Exit 0 means (a) and (b) hold. The (c) lines are INFO: "IGNORED" for the
+thread-config catalog, and a count for the server-level list, where 1 means it replaces and
+more than 1 means it adds.
+
+### 19.8 As built: local planning (2026-09-28)
+
+The planner was hosted-only, because it read the repository with tools and a local completion
+has none. It now has a local path: Agent Wrangler gathers the repository context itself, and
+sends it to a local model as a no-workspace completion. §11.5 has the design. The pieces are:
+
+| Piece | Where | What it does |
+|---|---|---|
+| Gatherer | `policy/repoContext.ts` (`gatherRepoContext`, `contextLimits`) | A deterministic excerpt: file tree (`git ls-files`, else a walk honouring `.gitignore`), manifests and READMEs, then files ranked by the objective's paths and identifiers. Dependency folders, build output, lock files and binaries are left out. `fs` and `exec` are injected. |
+| Caps | `DEFAULT_REPO_CONTEXT_LIMITS`, `contextLimits(window)` | 160k characters in total, 12k per file, 4k per manifest and 24k for the tree, scaled down to `(window − 16,384 tokens) × 3` characters. Under 12k characters, the model is not used. Each cut is marked (`[file truncated]`, `[tree truncated: …]`, `[context truncated: …]`). |
+| Gate | `TaskRunner.plannerLocality` → `PlanRequest.preferLocal` | `preferences.preferLocal` or strategy `prefer-local` in the effective policy, and neither `exclusions.disableLocal` nor `caps.location: hosted-only`. `exclusions.sources` are passed through to the picker. |
+| Tier rule and picker | `pickPlannerEntry`, `LocalEndpointService.pickPlanner` | A `completions` entry that is enabled, of tier `standard` or above (`PLANNER_LOCAL_MIN_TIER`), on an endpoint that is not down, with a window the excerpt fits. Unknown windows are assumed to be 32,768 tokens. Ranked by highest tier, then `structuredOutput: schema`, then the largest known window. |
+| Request | `Planner.planLocally` | No `workspace`. The input is the `<repository_context>` block, marked as data, then the usual planner input. The instructions are `LOCAL_PLANNER_INSTRUCTIONS`. The checks and the single repair round are shared with the hosted path (`Planner.rounds`). |
+| Fallback | `Planner.plan` | Any local failure but an abort runs the hosted workspace planner, unchanged. The failures: no model, a window too small, gathering failed, invalid output twice, still invalid after the repair, infra, or timeout. `PlanResult.fellBack` and `PlanningRun.fellBack` record `{ from?, because }`. With no hosted completion, the local failure stands. With neither path, planning fails as before. |
+| Records | `index.ts` `recordLocalCall(…, 'planner')` | One `local-call` record per local planner call, with `purpose: 'planner'` and counts and timings only. On a fallback, the last call is marked `fellBackToHosted`. `PlanningRun.source` marks a plan that a local model answered, and review says "(local)". |
+| Wiring | `createOrchestration` | The hosted planner now gets the hosted completion directly, not `RoutedCompletion`. Behaviour is the same, since workspace requests always went hosted. A `Planner` is built when there is a hosted completion or a local service with `pickPlanner`. The gatherer runs git through `deps.exec`. |
+
+The reviewer stays hosted (§11.5, last paragraph).
+
+Open: no live run has measured a local model's plans against the hosted planner's on the same
+objectives. The planning corpus (`test/orchestration/planningCorpus.ts`) is the place to do it.
+
+### 19.9 As built: readiness beside the tier picker, and qualification stage 2 (2026-09-28)
+
+Three kinds of work pick a local model by three different rules, so a model can have a tier and
+still get none of them. Preferences → Orchestration now says, beside each local model's tier
+picker, what it still needs, and it runs §19.6's stage 2.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Status line | `shared/orchestration/localReadiness.ts` (`localModelStatus`), rendered in the tier map | Per kind of work, ready or what is missing. **Completions** (`pickCompletion`): enabled, tier equal to the weakest (`tiers[0]`), endpoint on and not down. **Planning** (§11.5, `pickPlannerEntry`): the same, but tier `standard` or above (`PLANNER_LOCAL_MIN_TIER`, now declared here and re-exported by the service), and a window a repository excerpt fits in (`contextLimits`, computed by the host). **Agentic** (the resolver): `/v1/responses` probed, tool calling known and not `none`, a tier. Tool calling that is only declared counts, as it does in the resolver, and the line says it was not measured. A stage-1 verdict of completion-only, a server without `/v1/responses`, or tool calling known to be `none` is shown as "Completion only: …" with the reason (e.g. "stage-1 qualification: tool calls 0/10 (measured)"), not as a list of needs. |
+| Harness-pin warning | `localHarnessWarning` | When a local model is enabled on an endpoint that is on, and the global routing policy pins (`pins.harness`) or prefers (`preferences.harness`) `claude-code`, or excludes `codex` (`exclusions.harnesses`), Preferences says this rules out the Codex path, so local models cannot get agentic work. It is shown under Routing defaults and Local endpoints, and it adds a need to each local model's agentic status. It does not block saving the policy. |
+| Fixtures | `orchestration/local/qualification-fixtures/<id>/` (`fixture.json` + `repo/`) | Four scratch repos, plain Node with no dependencies: `text-utils`, `cart-total`, `day-ranges`, `lru-cache`. Each has one module with 3–4 seeded bugs, a deterministic check (`node test/check.js`, which prints `ok` and exits 0 only when every case passes), protected tests (`test/**`) and an allowed-paths list (`src/**`). The build copies them to `dist/qualification-fixtures`, which ships in the app. A test checks that each one fails as seeded and passes with a reference fix. They contain synthetic code only. |
+| Runner | `orchestration/local/taskQualifier.ts` (`runTaskQualification`, `taskQualifier`) | Per fixture, k = 3 runs. Each run copies `repo/` into a fresh temp dir, runs `git init` and commits a baseline. It then calls `CodexHarness.launch` with target `{harness: codex, source: local:<id>, model}`, so the thread gets the endpoint's `codexProvider` and `codexThreadParams` as a routed attempt does (§19.7.1: `model` on every call, no `model_catalog_json`). The policy is `attemptLaunchPolicy`'s Codex sandbox (`workspace-write`, `on-request`) and the prompt is `attemptPrompt`'s. The run is followed until it is idle after a turn (settled), ended, failed, asking, or past 10 minutes. A question or an approval request fails the run, since nobody answers during qualification. The session is ended and the temp dir removed, whatever happened. The origin is `{kind: orchestration, missionId: qualification}`, which no mission owns. The app wires it in `createApp` with its own `CodexHarness`, so stage 2 works whether or not orchestration is on. |
+| Checks | `shared/orchestration/localQualification.ts` | Pure, applied by AW after the session ends: `testsPass` (the check exits 0, run as the app's own Node; a timeout or a spawn failure is not a pass), `testsUntouched` (no changed path matches `protected`), `diffInsideAllowed` (every changed path matches `allowed`). Changed paths come from `git status --porcelain=v1 -z --untracked-files=all`, and a rename counts both paths. `judgeRun` combines them, and the failure it reports is the first check that failed. |
+| Results | `LocalEndpointService.qualifyTasks`, stored state `tasks` | Pass count of k × fixtures, per-fixture passes, mean turns (harness turns), mean wall time, and tokens summed from Codex's thread usage (`codexTurnUsage`). They are `measured`, stored beside stage 1's in the service's global state (`agentWrangler.localEndpoints`), and survive a restart. Each run is a `local-call` record with `purpose: 'qualification'`, `qualificationStage: 2`, the fixture id and run number, and counts and timings only. One server slot is held for the whole stage. A model whose stage-1 verdict is completion-only is refused, and nothing is stored. |
+| Not runnable | same | An endpoint whose probe did not find `/v1/responses` (e.g. `mlx_lm.server`) is recorded as `runnable: false`, "not runnable: no /v1/responses". No pass rate is recorded, no run is started and no record is written. |
+| UI | `webview/preferences/orchestration.ts` | *Qualify tasks* sits next to *Qualify* on each endpoint model. It shows progress while running and the result when done. The tier map shows the status line, stage 1's result and stage 2's result under the tier picker. |
+
+**No tier is ever assigned from qualification.** Neither stage writes `orchestration.models`,
+and a test checks that the only setting stage 2 writes is the endpoint registry (§19.6 point 3,
+§6.3).
+
+Open:
+
+- No live stage-2 run has been recorded. On this machine it needs a GGUF model on
+  `llama-server`, because MLX has no `/v1/responses`.
+- Without a Codex catalog entry for the local model, Codex does not offer it `apply_patch`
+  (§19.7.1, "What changes" point 2). A stage-2 run therefore measures the model on
+  fallback metadata, which is also how a routed attempt runs today.
 
 ---
 
