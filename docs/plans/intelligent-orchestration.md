@@ -1943,6 +1943,9 @@ The table already switches between status sections and user sections; Missions i
   requirements, and **Approve and start**.
 - **Mission review**: the mission branch diff stat, per-task results, verification health, and the
   finish buttons (merge locally, open a PR, keep, discard).
+- **Delegate** (#82): from a conversation, one handoff; the planner decides one task (the
+  proposal card) or a plan (a plan card with Approve and start), both in that conversation.
+  See P8's as-built notes.
 
 ### 18.5 Attention
 
@@ -3124,6 +3127,41 @@ Issue numbers are in §30.
   made-up repositories, six "should not split" and one where a split may pay.
   `planningCorpus.live.test.ts` (`AW_LIVE_PLANNER=1`) writes each repository to a temp dir and
   runs the real planner.
+
+**As built (#82, 2026-09-28): one handoff, Delegate.** A conversation hands over an outcome;
+the planner, not the caller, decides task or mission. Builds on #80 (`aw task`), #81 (the
+proposal card), #43 and #44.
+- **Entry points.** `aw delegate` (control method `delegate`, mutating, the same checked params
+  and origin rules as `task.propose`) is the primary one. `aw task` stays as the explicit
+  one-task shortcut, and the Missions view's *New mission* as the advanced way to write or plan
+  a mission by hand. Neither changed.
+- **Record** (`TaskRunner.delegate`). A planned mission with `Mission.delegation` (when, and the
+  user's criteria for the whole outcome) and `origin`, its stand-in task carrying those
+  criteria, goes `draft → planning`; the planner is told the criteria (every one must be some
+  task's). With no planner it is one task at once. It refuses up front without the assessor or
+  catalog, since either decision may need a task routed.
+- **`single`** (a delegation only; a mission planned by hand keeps its one-task plan review):
+  the mission becomes exactly what `propose` records — `planned` cleared, mode `assisted`, one
+  task (the planner's, with scope and kind, the user's criteria first) — through a new edge
+  `planning → draft`, which the domain allows only for a delegation that is one unplanned task.
+  It is then assessed and routed by the step `propose` uses (`routeProposal`, which picks up
+  from `pending`, `ready` or `assessing`, so recovery routes a delegation cut off before it
+  was). The `plan` telemetry record says `decomposition: single`.
+- **`multiple`**: plan review, unchanged from #44. **Planning failed**: *Plan again* or *Run as
+  one task* (`delegateAsTask`: the stand-in, `planning-failed → draft`, then routed).
+- **Cards** (`view/proposalView.ts`, pure: `isOpenDelegation`, `delegationViewOf`,
+  `delegationOutcome`). The origin conversation shows a *Delegated* card while it plans
+  (Cancel), when it failed, and for a plan in review (the tasks and their order, risks,
+  warnings, blockers; Approve and start on the launcher's route as the Missions view does,
+  Edit in Missions, Plan again, Cancel). One kept as one task is the #81 proposal card, headed
+  *Delegated*. Notifications say *Delegated* and their click shows the origin conversation.
+  Task and Mission stay the words everywhere work is running.
+- **Unchanged**: nothing runs before approval (`startProposed` or `approvePlan`, both
+  click-only); the origin is where a card is shown and never the worker; routing,
+  verification, escalation, worktrees and execution are as #38–#44 left them.
+- **Tests**: `delegate.integration.test.ts` (both decisions and their approvals, failure → one
+  task, no planner, hand-planned missions and `aw task` untouched), the edge guard in
+  `lifecycles.test.ts`, the planner's input, the socket method and the CLI.
 
 ### P9: Scheduling, integration and contention
 

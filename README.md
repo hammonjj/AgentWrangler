@@ -538,30 +538,53 @@ The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy
 | `aw send <id> <text…>` | Send a message to a session the app runs (`-` reads the text from stdin). |
 | `aw stop <id> [--force]` | End the process running a session, as the row menu's *Close session* does. A session mid-turn is left alone unless `--force`. |
 | `aw projects` | The project folders the launcher offers. |
-| `aw task <objective…> [--criteria "a; b"] [--folder <dir>] [--claude\|--codex]` | Propose a task. The app assesses and routes it, then waits for you to start it (see below). `-` reads the objective from stdin. |
+| `aw delegate <objective…> [--criteria "a; b"] [--folder <dir>] [--claude\|--codex]` | Hand work over. A read-only planner decides whether it is one task or several, and the app waits for you to approve the proposal or the plan (see below). `-` reads the objective from stdin. |
+| `aw task <objective…>` (same options) | Shortcut: always one task, no planner. The app assesses and routes it, then waits for you to start it. |
 | `aw tasks` | Tasks that are not finished, with their state and branch. |
 
 `<id>` is a session id, a unique prefix of one (four characters or more), or a key such as `claude:<id>`. `--json` prints the raw result.
 
-**Handing work to a task from a conversation (#80).** Ask the agent you are talking to to
-"run this as a task", and it runs `aw task` with the objective and criteria. The task is
-always proposed, never started: the app assesses it and picks a route (as in `assisted`
-mode, whatever `orchestration.routing.mode` says), then shows a *Task proposal* notification
-and a flash. The proposal is answered **in the conversation that asked for it** (#81): a card
-at the end of that conversation, styled like a question or a plan, with the recommended model
-and effort pre-selected, **Run**, and **Cancel task**. Changing the model or effort before
-Run is recorded as a disagreement with the router; Run on what was offered is an acceptance.
-The notification's click brings that conversation up. Nothing takes focus and nothing is
-accepted by keyboard alone, so an Enter meant for the composer can never start a task. A
-proposal with no known conversation (`aw task` from your own terminal) is reached from the
-notification or the launcher's **Tasks** menu instead. The
-branch is cut from the repository's primary checkout, not from the conversation's worktree.
-Needs `"orchestration.enabled": true`. A Claude Code skill telling agents when to use it is
-in `docs/skills/agentwrangler-task/SKILL.md`; copy it to `~/.claude/skills/`.
+**Delegating work from a conversation (#82).** Ask the agent you are talking to to "delegate
+this" (or "hand this off", "run this as a task"), and it runs `aw delegate` with the objective
+and criteria. You don't choose between a task and a mission: Agent Wrangler gives the outcome
+to the read-only planner (the one *Plan it for me* uses, biased to one task), and the
+planner decides.
+
+- **One task.** It becomes a task proposal, assessed and routed as in `assisted` mode whatever
+  `orchestration.routing.mode` says, and answered **in the conversation that delegated it**
+  (#81): a *Delegated* card at the end of that conversation, styled like a question or a plan,
+  with the recommended model and effort pre-selected, **Run**, and **Cancel**. Changing the
+  model or effort before Run is recorded as a disagreement with the router; Run on what was
+  offered is an acceptance. Your criteria come first on the task, then any the planner added.
+- **Several tasks.** It becomes a planned mission in plan review, and the card shows the plan:
+  each task (expand it for its objective and criteria) and what it comes after, the risks,
+  warnings and anything that stops it starting, **Approve and start**, **Edit in Missions**,
+  **Plan again…** and **Cancel**. Approved from the card, tasks without a pin run on the
+  launcher's model and effort, exactly as *Approve and start* in the Missions view.
+- **While it plans** the card says so and offers **Cancel**. If it **cannot be planned**, the
+  card says why and offers **Run as one task** (the objective and your criteria as given) or
+  **Plan again…**.
+
+Nothing runs until you press a button on the card: nothing takes focus and nothing is accepted
+by keyboard alone, so an Enter meant for the composer can never start work. The notification's
+click brings the conversation up. The delegating conversation is only where the card is shown:
+the work runs in sessions and worktrees of its own, cut from the repository's primary checkout,
+not from the conversation's worktree. Delegation cards and the proposal/plan they turn into
+say *Delegated*; once the work runs it is an ordinary task or mission (task strip, Missions
+view). `aw delegate` waits up to 100 s for the planner and prints its decision; after that it
+prints that the card will show it.
+
+`aw task` is the explicit shortcut when you already know it is one task: the same proposal
+and card (headed *Task proposal*), without the planner. A proposal with no known conversation
+(either command from your own terminal) is reached from the notification, the launcher's
+**Tasks** menu, or the Missions view instead. The Missions view's *New mission* stays as the
+advanced way to write or plan a mission yourself. Both need `"orchestration.enabled": true`.
+A Claude Code skill telling agents when to delegate is in
+`docs/skills/agentwrangler-task/SKILL.md`; copy it to `~/.claude/skills/`.
 
 - **It is a client of the app, never a supervisor.** It talks only to the app's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new at every launch). It never connects to session hosts, and every command goes the same way as the equivalent click. The app shows a short notice when `aw` sends or stops something.
 - **With the app quit**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the app starts) and what the app last recorded. Everything else says the app is not running.
-- **`task` is allowed there**, because it only ever creates a proposal. Nothing runs until you accept it in the app, so an agent calling it can't start work you haven't seen.
+- **`delegate` and `task` are allowed there**, because they only ever create a proposal or a plan. Nothing runs until you accept it in the app, so an agent calling them can't start work you haven't seen.
 - **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12).
 
 ## Remote control (experimental)
