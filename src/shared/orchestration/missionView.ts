@@ -144,6 +144,9 @@ export interface MissionView {
   finish?: MissionFinish;
   finishResult?: { mergeCommit?: string; pullRequestUrl?: string; note?: string };
   canCancel: boolean;
+  /** Mission pause (#45, §12.3): a running mission can be paused (start nothing new), or paused now (its agents too). */
+  canPause: boolean;
+  canResume: boolean;
   /** The planner's latest run, for a mission it planned. */
   planner?: MissionPlannerView;
   /** Ask the planner (again): after it failed, or for a plan it proposed that nobody has started. */
@@ -168,6 +171,9 @@ export type MissionOp =
   | { kind: 'edit'; edit: PlanEdit }
   | { kind: 'approve' }
   | { kind: 'cancel' }
+  /** Start nothing new; `now` also pauses the running agents (#45). */
+  | { kind: 'pause'; now?: boolean }
+  | { kind: 'resume' }
   | { kind: 'finish'; how: MissionFinish }
   | { kind: 'task'; taskId: string; action: TaskViewAction }
   | { kind: 'open'; taskId: string }

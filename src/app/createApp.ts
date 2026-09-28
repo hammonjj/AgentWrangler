@@ -602,6 +602,32 @@ export function createApp(host: HostServices): AgentWranglerApp {
       };
     },
     local: { service: localEndpoints, catalog: () => models.catalog },
+    // The scheduler (#45): nothing starts while the fleet is paused (every
+    // live agent frozen, as Pause all and auto-pause leave it), and a mission's
+    // "Pause now" uses the same PauseService. Usage, pause and endpoint changes step it.
+    scheduling: {
+      fleet: {
+        paused: () => {
+          if (pause.count === 0) return false;
+          const live = store.sessions.filter((s) => s.status !== 'ended' && s.pid !== undefined);
+          return live.length > 0 && live.every((s) => pause.isPaused(s.pid));
+        },
+        pauseSession: (id) => {
+          const s = store.sessions.find((x) => x.sessionId === id);
+          const outcome = s ? pause.pause(s.pid) : 'gone';
+          return outcome === 'paused' || outcome === 'already';
+        },
+        resumeSession: (id) => {
+          const s = store.sessions.find((x) => x.sessionId === id);
+          const outcome = s ? pause.resume(s.pid) : 'gone';
+          return outcome === 'resumed' || outcome === 'already';
+        },
+      },
+      onDidChange: (listener) => {
+        const subs = [usage.onDidChange(listener), codexUsage.onDidChange(listener), pause.onDidChange(listener), localEndpoints.onDidChange(listener)];
+        return { dispose: () => subs.forEach((s) => s.dispose()) };
+      },
+    },
   });
   host.subscribe(orchestration);
   localTelemetry = appendTelemetry;
@@ -1348,6 +1374,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
               if (ok === 'Cancel Mission') await tasks.cancel(missionId);
               return;
             }
+            case 'pause':
+              await tasks.pauseMission(missionId, { now: op.now === true });
+              dialogs.flash(op.now ? 'Mission paused, and its running agents with it.' : 'Mission paused: nothing new starts; what is running carries on.');
+              return;
+            case 'resume':
+              await tasks.resumeMission(missionId);
+              dialogs.flash('Mission resumed.');
+              return;
             case 'finish': {
               if (op.how === 'discard') {
                 const ok = await dialogs.warn('Discard this mission’s result?', { modal: true, detail: 'Its worktrees are removed if they are clean. Its branches are kept until you delete them.' }, 'Discard');
