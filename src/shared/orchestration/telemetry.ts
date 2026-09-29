@@ -371,6 +371,27 @@ export interface PlanReviewRecord extends RecordBase {
   reviewMs: number;
 }
 
+/**
+ * A task branch merged into the mission branch (§16.2, #46):
+ * merged, conflict, reverted, or mission-verification outcome.
+ */
+export interface IntegrationRecord extends RecordBase {
+  type: 'integration';
+  missionId: string;
+  taskId: string;
+  taskBranch: string;
+  missionBranch: string;
+  outcome: 'merged' | 'conflict' | 'reverted' | 'error';
+  /** The merge commit, or the revert commit, or undefined on error. */
+  commit?: string;
+  /** Conflicting files when outcome is 'conflict'. */
+  conflictingFiles?: string[];
+  /** When reverted, the verification failure that caused it. */
+  verificationFailure?: { stage: string; summary: string };
+  errorSummary?: string;
+  durationMs?: number;
+}
+
 export type TelemetryRecord =
   | TurnRecord
   | AttemptRecord
@@ -381,4 +402,5 @@ export type TelemetryRecord =
   | TaskFinalRecord
   | EscalationRecord
   | PlanRecord
-  | PlanReviewRecord;
+  | PlanReviewRecord
+  | IntegrationRecord;
