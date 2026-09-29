@@ -159,15 +159,6 @@ export const SETTINGS: SettingSpec[] = [
       'Run each new Claude conversation in its own small background process, so quitting, reinstalling or a crash of Agent Wrangler no longer ends it: it keeps working, and Agent Wrangler reconnects when it opens again. ⌘Q then leaves those conversations running; Quit and Stop All Agents (⌥⌘Q) ends them. Applies to conversations started after it is switched on.',
   },
   {
-    key: 'orchestration.enabled',
-    label: 'Run tasks in worktrees of their own (experimental)',
-    group: 'Conversations',
-    type: 'boolean',
-    default: false,
-    description:
-      'Adds a Tasks button beside + New. A task is an objective and its acceptance criteria, run by one agent on the launcher’s model and effort in a new git worktree and branch beside the repository, never in the checkout you work in. It survives quitting and reinstalling Agent Wrangler, and ends with a branch and a diff for you to review. Claude tasks need the setting above. Takes effect after a restart.',
-  },
-  {
     key: 'lifecycle.orphanIdleHours',
     label: 'End idle sessions with no Agent Wrangler connected after (hours)',
     group: 'Conversations',
@@ -178,6 +169,25 @@ export const SETTINGS: SettingSpec[] = [
     dependsOn: 'experimental.sessionHosts',
     description:
       'A conversation left running in the background while Agent Wrangler is quit is ended after this many hours with nothing connected to it, but only if it is idle: never one that is working, waiting on a question or permission, or running background tasks. It can be resumed afterwards with nothing lost. Time the machine spends asleep does not count. 0 = never.',
+  },
+  {
+    key: 'orchestration.enabled',
+    label: 'Run tasks in worktrees of their own (experimental)',
+    group: 'Conversations',
+    type: 'boolean',
+    default: false,
+    description:
+      'Adds a Tasks button beside + New. A task is an objective and its acceptance criteria, run by one agent on the launcher’s model and effort in a new git worktree and branch beside the repository, never in the checkout you work in. It survives quitting and reinstalling Agent Wrangler, and ends with a branch and a diff for you to review. Claude tasks need Keep conversations running when Agent Wrangler quits. Takes effect after a restart.',
+  },
+  {
+    key: 'orchestration.parallelTasks',
+    dependsOn: 'orchestration.enabled',
+    label: 'Run a mission’s independent tasks at the same time (experimental)',
+    group: 'Conversations',
+    type: 'boolean',
+    default: false,
+    description:
+      'A plan approved while this is on runs the tasks that do not depend on each other at once, two per repository by default, each in a worktree of its own. Each task’s branch is merged into the mission branch when its checks pass, one at a time, and the mission check runs after every merge. Off runs every task in turn in one worktree. A mission keeps the mode it was approved with, replans included.',
   },
 
   // ---- Agents and status ----
