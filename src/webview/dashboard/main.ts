@@ -330,7 +330,7 @@ function pausedChip(s: SessionDTO): string {
  */
 function rateLimitChip(s: SessionDTO): string {
   const rl = s.rateLimit;
-  if (!rl) return '';
+  if (!rl || rl.category === 'claude-five-hour') return '';
   const reset = rl.resetAtMs !== undefined ? ` — resets ${resetsInText(Date.now(), rl.resetAtMs).toLowerCase()}` : '';
   const title = `${rl.reason}${reset}.`;
   return `<span class="chip ratelimit ${esc(rl.category)}" title="${esc(title)}">${esc(rl.reason)}</span>`;
