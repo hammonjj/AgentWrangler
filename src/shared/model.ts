@@ -80,9 +80,20 @@ export interface SubagentSummary {
   done: number;
 }
 
+/** Per-subagent data: id, label, status, and optional agent type and last activity. */
+export interface SubagentInfo {
+  id: string;
+  label: string;
+  agentType?: string;
+  status: 'working' | 'attention' | 'done';
+  lastActivityAt?: number;
+}
+
 export interface AgentSession {
   /** Estimated descendant worker status within the discovery window; excludes guardians. */
   subagents?: SubagentSummary;
+  /** List of subagents with per-agent details: id, label, status, and optional agent type. */
+  subagentList?: SubagentInfo[];
   /** What this session has used, from its telemetry records (#28). Absent when it has none. */
   usage?: SessionUsage;
   /**

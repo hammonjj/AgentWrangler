@@ -22,9 +22,14 @@ function notable(status: AgentSession['status']): boolean {
 }
 
 function materialFingerprint(s: AgentSession): string {
+  // Serialize subagent list, excluding timestamps that move on every poll
+  const subagentListStr = s.subagentList
+    ? JSON.stringify(s.subagentList.map((sa) => ({ id: sa.id, label: sa.label, status: sa.status, agentType: sa.agentType })))
+    : 'null';
   return [
     s.status,
     JSON.stringify(s.subagents ?? null),
+    subagentListStr,
     s.title,
     // A rename changes nothing a provider scan would see, so it has to be
     // material here or the new name would wait for the session to do something.

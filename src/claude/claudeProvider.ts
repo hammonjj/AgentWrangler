@@ -232,6 +232,7 @@ export class ClaudeProvider implements AgentProvider {
       activeTool: status === 'busy' ? hook?.activeTool : undefined,
       progress: status === 'busy' && hook ? this.buildProgress(hook, now) : undefined,
       provider: this.id,
+      subagentList: s?.subagentList,
       sessionId: r.sessionId,
       key: `${this.id}:${r.sessionId.toLowerCase()}`,
       name: r.name,
@@ -310,8 +311,14 @@ export class ClaudeProvider implements AgentProvider {
   private buildEnded(t: IndexedTranscript): AgentSession {
     const s = t.summary;
     const wt = worktreeFor(s.cwd);
+    // For ended sessions, mark any still-open subagents as done
+    let subagentList = s.subagentList;
+    if (subagentList && subagentList.some((sa) => sa.status === 'working')) {
+      subagentList = subagentList.map((sa) => sa.status === 'working' ? { ...sa, status: 'done' as const } : sa);
+    }
     return {
       provider: this.id,
+      subagentList,
       sessionId: t.sessionId,
       key: `${this.id}:${t.sessionId}`,
       title: this.title(s, undefined, t.sessionId),
