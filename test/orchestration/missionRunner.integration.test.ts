@@ -22,7 +22,7 @@ import { MissionStore } from '../../src/orchestration/store/missionStore';
 import { WorktreeManager, canonicalPath } from '../../src/orchestration/worktrees/worktreeManager';
 import { missionViewOf } from '../../src/orchestration/view/missionViews';
 import type { SimAttempt, SimScenario } from '../../src/shared/orchestration/simulation';
-import type { AttemptRecord, TaskFinalRecord, TelemetryRecord } from '../../src/shared/orchestration/telemetry';
+import type { AttemptRecord, IntegrationRecord, TaskFinalRecord, TelemetryRecord } from '../../src/shared/orchestration/telemetry';
 import type { ExecutionAttempt, Mission, Task } from '../../src/shared/orchestration/types';
 import type { PlanTaskDraft } from '../../src/shared/orchestration/plan';
 import type { Exec } from '../../src/orchestration/worktrees/exec';
@@ -514,6 +514,203 @@ describe('planned missions', () => {
     expect(calls[0]).toEqual(expect.arrayContaining(['pr', 'create', '--head', branch, '--base', 'main', '--title', 'PR mission']));
     // Nothing but the mission branch went to the remote.
     expect(git(remote, 'for-each-ref', '--format=%(refname)').split('\n')).toEqual([`refs/heads/${branch}`]);
+  });
+});
+
+describe('parallel missions (#46)', () => {
+  /** t1 and t2 are independent; t3 needs both. */
+  const DIAMOND: PlanTaskDraft[] = [
+    { title: 'Left', objective: 'Synthetic left.', acceptanceCriteria: ['left'] },
+    { title: 'Right', objective: 'Synthetic right.', acceptanceCriteria: ['right'] },
+    { title: 'Join', objective: 'Synthetic join.', acceptanceCriteria: ['join'], dependsOn: [{ key: 't1', kind: 'code' }, { key: 't2', kind: 'code' }] },
+  ];
+  const PAIR = DIAMOND.slice(0, 2);
+  const slow = (files: Record<string, string | null>, followUps?: SimAttempt['followUps']): SimAttempt => ({ behaviour: 'edit', files, delayMs: 300, ...(followUps ? { followUps } : {}) });
+  const integrations = (r: Rig) => r.telemetry.filter((x): x is IntegrationRecord => x.type === 'integration');
+  const missionBranch = (m: Mission) => (m.integration !== 'none' ? m.integration.branch : '');
+  const treeOf = (m: Mission) => m.worktrees.find((w) => w.purpose === 'integration')!;
+
+  function setPolicy(extra: Record<string, unknown>): void {
+    const saved = new RepoPolicyStore(path.join(dataDir, 'repos')).save(identityFor(repo), {
+      worktrees: { setup: [{ link: 'node_modules' }] },
+      verification: { check: { run: ['/bin/sh', 'check.sh'] } },
+      review: { when: 'never' },
+      ...extra,
+    });
+    expect(saved.ok).toBe(true);
+  }
+
+  it('independent tasks run at once in trees of their own, and are merged one at a time with the mission branch verified after each', async () => {
+    const r = rig({ parallelTasks: () => true });
+    const m0 = await r.runner.createMission({ folder: repo, title: 'Diamond', objective: 'Synthetic.', tasks: DIAMOND });
+    script(r, m0, {
+      t1: [slow({ 'left.txt': 'l\n' })],
+      t2: [slow({ 'right.txt': 'r\n' })],
+      t3: [edit({ 'join.txt': 'j\n' })],
+    });
+    const approved = await r.runner.approvePlan(m0.id, ROUTE);
+    expect(approved.parallel).toBe(true);
+    await until(() => r.runner.get(m0.id)?.state === 'review', 20_000, 'review');
+    const m = r.runner.get(m0.id)!;
+    const [a1, a2, a3] = ['t1', 't2', 't3'].map((k) => m.attempts.find((a) => a.id === byKey(m, k).attemptIds[0])!);
+
+    // t1 and t2 ran at the same time, each in its own tree cut from the mission branch head (the base, then).
+    expect(a1.createdAt).toBeLessThan(a2.endedAt!);
+    expect(a2.createdAt).toBeLessThan(a1.endedAt!);
+    const cwd = (a: ExecutionAttempt) => m.worktrees.find((w) => w.id === a.worktreeId)!;
+    expect(new Set([cwd(a1).path, cwd(a2).path, cwd(a3).path]).size).toBe(3);
+    expect([cwd(a1).purpose, cwd(a2).purpose]).toEqual(['task', 'task']);
+    expect(a1.startCommit).toBe(m.base.commit);
+    expect(a2.startCommit).toBe(m.base.commit);
+    // t3 started once both were on the mission branch, from its head then.
+    const merges = git(repo, 'rev-list', '--merges', '--first-parent', '--reverse', `${m.base.commit}..${missionBranch(m)}`).split('\n');
+    expect(merges).toHaveLength(3);
+    expect(a3.startCommit).toBe(merges[1]);
+    const subjects = git(repo, 'log', '--format=%s', '--first-parent', `${m.base.commit}..${missionBranch(m)}`).split('\n');
+    expect(subjects[0]).toBe('aw: merge t3: Join');
+    expect(subjects.slice(1).sort()).toEqual(['aw: merge t1: Left', 'aw: merge t2: Right']);
+
+    // Every task is done by merging; each merge was followed by the mission check, which passed.
+    for (const t of m.tasks) expect(t).toMatchObject({ state: 'done', integration: { outcome: 'merged' } });
+    const recs = integrations(r);
+    expect(recs.filter((x) => x.event === 'merged')).toHaveLength(3);
+    expect(recs.filter((x) => x.event === 'mission-verification').map((x) => x.verification)).toEqual(['passed', 'passed', 'passed']);
+    expect(fs.existsSync(path.join(dataDir, 'orchestration', 'logs', `${a1.id}-mission`, 'check.log'))).toBe(true);
+    expect(m.pendingMerge).toBeUndefined();
+    // The base and the primary checkout were never touched.
+    expect(git(repo, 'rev-parse', 'main')).toBe(m.base.commit);
+    expect(git(repo, 'status', '--porcelain')).toBe('');
+
+    // Finish: the gated local merge moves main to the checked merge of the mission branch.
+    const head = git(repo, 'rev-parse', missionBranch(m));
+    const done = await r.runner.finishMission(m.id, 'merge-local');
+    expect(done).toMatchObject({ state: 'completed', finishResult: { note: expect.stringContaining('check passed') } });
+    expect(git(repo, 'rev-parse', 'main')).toBe(done.finishResult!.mergeCommit);
+    expect(git(repo, 'log', '-1', '--format=%P', 'main').split(' ')).toEqual([m.base.commit, head]);
+    // Every tree was merged into main, so every tree is tidied away.
+    expect(done.worktrees.every((w) => w.state === 'removed')).toBe(true);
+    for (const f of ['left.txt', 'right.txt', 'join.txt']) expect(fs.existsSync(path.join(repo, f))).toBe(true);
+  });
+
+  it('a conflict becomes a conflict-resolution attempt in the task’s own tree, which resolves it and is merged', async () => {
+    const r = rig({ parallelTasks: () => true });
+    const m0 = await r.runner.createMission({ folder: repo, title: 'Clash', objective: 'Synthetic.', tasks: PAIR });
+    script(r, m0, {
+      t1: [slow({ 'README.md': 'left\n' }), edit({ 'README.md': 'resolved\n' })],
+      t2: [slow({ 'README.md': 'right\n' }), edit({ 'README.md': 'resolved\n' })],
+    });
+    await r.runner.approvePlan(m0.id, ROUTE);
+    await until(() => r.runner.get(m0.id)?.state === 'review', 20_000, 'review');
+    const m = r.runner.get(m0.id)!;
+    const resolving = m.attempts.filter((a) => a.resolvesConflict);
+    expect(resolving).toHaveLength(1);
+    const loser = m.tasks.find((t) => t.id === resolving[0].taskId)!;
+    expect(resolving[0].resolvesConflict!.files).toEqual(['README.md']);
+    // In the task's own tree, not a new one, with a prompt that says what conflicted.
+    expect(resolving[0].worktreeId).toBe(m.attempts.find((a) => a.id === loser.attemptIds[0])!.worktreeId);
+    const prompt = r.harness.launches.find((l) => l.request.origin.attemptId === resolving[0].id)!.request.prompt;
+    expect(prompt).toContain('Resolve a merge conflict');
+    expect(prompt).toContain('- README.md');
+    expect(loser).toMatchObject({ state: 'done', integration: { outcome: 'merged' } });
+    expect(git(repo, 'show', `${missionBranch(m)}:README.md`)).toBe('resolved');
+    const conflict = integrations(r).find((x) => x.event === 'conflict')!;
+    expect(conflict).toMatchObject({ taskId: loser.id, conflictingFiles: 1, conflictAction: 'resolve' });
+    expect(JSON.stringify(integrations(r))).not.toContain('README');
+  });
+
+  it('with onConflict: needs-human, a conflict hands the task to the user with the conflicting files', async () => {
+    setPolicy({ integration: { onConflict: 'needs-human' } });
+    const r = rig({ parallelTasks: () => true });
+    const m0 = await r.runner.createMission({ folder: repo, title: 'Clash by hand', objective: 'Synthetic.', tasks: PAIR });
+    script(r, m0, { t1: [slow({ 'README.md': 'left\n' })], t2: [slow({ 'README.md': 'right\n' })] });
+    await r.runner.approvePlan(m0.id, ROUTE);
+    await until(() => r.runner.get(m0.id)!.tasks.some((t) => t.integration?.outcome === 'conflict' && t.state === 'needs-human'), 20_000, 'a conflict');
+    const m = r.runner.get(m0.id)!;
+    const loser = m.tasks.find((t) => t.integration?.outcome === 'conflict')!;
+    expect(loser.integration!.conflictingFiles).toEqual(['README.md']);
+    expect(loser.stateReason).toMatch(/conflicts in README\.md/);
+    expect(r.harness.launches).toHaveLength(2);
+    expect(m.attempts.some((a) => a.resolvesConflict)).toBe(false);
+    expect(r.runner.actions(m.id, loser.id)).toEqual(expect.arrayContaining(['accept', 'retry']));
+    expect(integrations(r).find((x) => x.event === 'conflict')).toMatchObject({ conflictAction: 'needs-human' });
+  });
+
+  it('two changes that pass alone and break together: the second merge is reverted and its task comes back with the evidence', async () => {
+    // The repository's check fails only when both files are there.
+    fs.writeFileSync(path.join(repo, 'check.sh'), '#!/bin/sh\nif [ -f check.flag ] || { [ -f left.txt ] && [ -f right.txt ]; }; then echo " FAIL  test/pair.test.ts"; exit 1; fi\nexit 0\n', { mode: 0o755 });
+    git(repo, 'commit', '-q', '-am', 'pair check');
+    const r = rig({ parallelTasks: () => true });
+    const m0 = await r.runner.createMission({ folder: repo, title: 'Semantic', objective: 'Synthetic.', tasks: PAIR });
+    script(r, m0, {
+      t1: [slow({ 'left.txt': 'l\n' }, [{ behaviour: 'edit', files: { 'left.txt': null, 'left-alt.txt': 'l\n' } }])],
+      t2: [slow({ 'right.txt': 'r\n' }, [{ behaviour: 'edit', files: { 'right.txt': null, 'right-alt.txt': 'r\n' } }])],
+    });
+    await r.runner.approvePlan(m0.id, ROUTE);
+    await until(() => r.runner.get(m0.id)!.tasks.some((t) => t.integration?.outcome === 'reverted'), 20_000, 'a revert');
+    const at = r.runner.get(m0.id)!;
+    const broke = at.tasks.find((t) => t.integration?.outcome === 'reverted')!;
+    // The evidence travels with the task.
+    expect(broke.integration!.evidence).toMatchObject({ stage: 'command:check', failing: ['test/pair.test.ts'] });
+    const branch = missionBranch(at);
+    // A revert commit, not a rewrite: the merge is still in the history.
+    expect(git(repo, 'rev-parse', `${broke.integration!.revertCommit}^`)).toBe(broke.integration!.mergeCommit);
+    expect(git(repo, 'merge-base', '--is-ancestor', broke.integration!.mergeCommit!, branch)).toBe('');
+    // The failure went to escalation, which carried the session on with the evidence.
+    await until(() => r.runner.get(m0.id)?.state === 'review', 20_000, 'review');
+    const m = r.runner.get(m0.id)!;
+    const again = m.attempts.find((a) => a.id === byKey(m, broke.key).attemptIds[1])!;
+    expect(again).toMatchObject({ escalation: { action: 'continue-with-feedback' } });
+    expect(byKey(m, broke.key).escalations[0].evidence).toMatchObject({ category: 'quality-new' });
+    expect(integrations(r).map((x) => x.event)).toEqual(expect.arrayContaining(['reverted', 'mission-verification']));
+    expect(integrations(r).find((x) => x.event === 'mission-verification' && x.verification === 'failed')).toMatchObject({ stage: 'command:check', taskId: broke.id });
+    // Its whole change came back when it was merged again, fixed: nothing of it was lost to the revert.
+    const files = git(repo, 'ls-tree', '--name-only', branch).split('\n');
+    expect(files.filter((f) => /^(left|right)(-alt)?\.txt$/.test(f)).sort()).toHaveLength(2);
+    expect(files.includes('left.txt') && files.includes('right.txt')).toBe(false);
+    expect(execFileSync('/bin/sh', ['check.sh'], { cwd: treeOf(m).path }).toString()).toBe('');
+  });
+
+  it('a quit mid-merge leaves a record that startup recovery completes: the merge is aborted and made again', async () => {
+    const real = (await import('../../src/orchestration/worktrees/exec')).nodeExec;
+    let merges = 0;
+    let crashed = false;
+    // The core "dies" during the second merge into the mission branch: git has started it, nothing more happens.
+    const exec: Exec = async (file, args, opts) => {
+      if (file === 'git' && args.includes('merge') && args.includes('--no-ff') && opts.cwd.endsWith('_integration') && !args.includes('--no-commit')) {
+        merges++;
+        if (merges === 2) {
+          const branch = args.at(-1)!;
+          await real('git', ['merge', '--no-ff', '--no-commit', branch], opts);
+          crashed = true;
+          return new Promise(() => undefined);
+        }
+      }
+      return real(file, args, opts);
+    };
+    const r1 = rig({ parallelTasks: () => true, exec });
+    const m0 = await r1.runner.createMission({ folder: repo, title: 'Crash', objective: 'Synthetic.', tasks: PAIR });
+    script(r1, m0, { t1: [slow({ 'left.txt': 'l\n' })], t2: [slow({ 'right.txt': 'r\n' })] });
+    await r1.runner.approvePlan(m0.id, ROUTE);
+    await until(() => crashed, 20_000, 'the second merge to start');
+    const before = r1.runner.get(m0.id)!;
+    expect(before.pendingMerge).toMatchObject({ preMergeHead: expect.stringMatching(/^[0-9a-f]{40}$/) });
+    const tree = treeOf(before).path;
+    expect(git(tree, 'rev-parse', '--verify', 'MERGE_HEAD')).toMatch(/^[0-9a-f]{40}$/);
+    r1.runner.dispose();
+
+    // A new core over the same store, as after a relaunch.
+    const r2 = rig({ parallelTasks: () => true });
+    await r2.runner.recover();
+    await until(() => r2.runner.get(m0.id)?.state === 'review', 20_000, 'review after recovery');
+    const m = r2.runner.get(m0.id)!;
+    expect(m.pendingMerge).toBeUndefined();
+    expect(m.tasks.every((t) => t.state === 'done' && t.integration?.outcome === 'merged')).toBe(true);
+    const log = git(repo, 'rev-list', '--merges', '--first-parent', `${m.base.commit}..${missionBranch(m)}`).split('\n');
+    expect(log).toHaveLength(2);
+    // The redone merge sits on the recorded pre-merge head.
+    expect(git(repo, 'rev-parse', `${log[0]}^1`)).toBe(before.pendingMerge!.preMergeHead);
+    expect(git(tree, 'status', '--porcelain', '--untracked-files=no')).toBe('');
+    expect(integrations(r2).find((x) => x.event === 'merged')).toMatchObject({ recovered: true });
   });
 });
 

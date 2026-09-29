@@ -49,7 +49,7 @@ import type { PermissionModeName } from '../../shared/conversation';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
 import { DEFAULT_CONFLICT_ATTEMPTS, DEFAULT_REPO_POLICY } from '../../shared/orchestration/repoPolicy';
 import type { IntegrationRecord, PlanRecord, TaskFinalRecord, TelemetryRecord, TurnRecord } from '../../shared/orchestration/telemetry';
-import { Integrator, mergeMissionIntoTask, type IntegrationOutcome } from '../integration/integrator';
+import { Integrator, mergeMissionIntoTask, reapplyAfterRevert, type IntegrationOutcome } from '../integration/integrator';
 import { checkSummary, gateCommands, missionCommands, missionVerifier, runMissionCheck } from '../integration/missionCheck';
 import { TELEMETRY_SCHEMA_VERSION } from '../../shared/orchestration/telemetry';
 import type { PlanEdit, PlanTaskDraft } from '../../shared/orchestration/plan';
@@ -2499,7 +2499,16 @@ export class TaskRunner implements Disposable {
         record('reverted', { stage: ev.stage });
         await noteMission();
         this.log(`mission ${missionId}: ${summary}`);
-        if (!a) return;
+        if (!a || !wt) return;
+        // The task's branch takes the mission branch and its own work back on top, so the next
+        // attempt sees the combination that failed and a later merge carries all of the work.
+        const again = await reapplyAfterRevert(this.deps.exec ?? nodeExec, wt.path, branch, r.revertCommit, task.key);
+        if (!again.ok) {
+          m = this.need(missionId);
+          this.put(this.patchTask(m, taskId, (t) => ({ ...t, stateReason: `${summary}. ${capitalise(again.error)}; retry it fresh` })));
+          this.notify(this.need(missionId), 'needs you', `${task.key}: ${summary}.`, 'open-diff');
+          return;
+        }
         // Back to the runner with the evidence: escalation (#41) decides what happens next.
         const cls = classifyOutcome({
           gates: this.decisionOf(m, a.id)?.requirement.gates ?? [],
@@ -4712,6 +4721,20 @@ function escalationMessage(task: Task, prev: ExecutionAttempt, d: EscalationDeci
   switch (d.evidence.category) {
     case 'quality-new':
     case 'quality-repeat': {
+      const merged = task.integration?.outcome === 'reverted' && task.integration.attemptId === prev.id ? task.integration : undefined;
+      if (merged) {
+        // Its own checks passed; the mission's failed once it was merged with the other tasks' work (#46).
+        const branch = 'the mission branch';
+        lines.push(`${carry ? 'Your' : 'An earlier attempt’s'} work passed this task's own checks, but once it was merged into ${branch} with the other tasks' work, the mission's checks failed: ${merged.evidence?.summary ?? 'mission verification failed'}. The merge was reverted.`);
+        const failing = merged.evidence?.failing ?? [];
+        if (failing.length > 0) lines.push('Failing:', ...failing.slice(0, 20).map((f) => `- ${f}`));
+        lines.push(
+          carry
+            ? `Agent Wrangler has merged ${branch} into your branch and re-applied your work on top, so this worktree now holds the combination that failed. Fix it so that both this task and the work already there pass, then say so and stop.`
+            : `This attempt starts from ${branch} as it is now, with the other tasks' work in it: make this task's change work with it.`,
+        );
+        break;
+      }
       const summary = summariseVerification(task.verification, prev.verification);
       const failed = prev.verification.find((v) => v.outcome === 'failed' && task.verification.stages.some((s) => s.strategy === v.strategy && s.required));
       lines.push(`Agent Wrangler ran this task's checks on ${carry ? 'your' : 'an earlier attempt’s'} work, and they failed: ${summary.summary}.`);

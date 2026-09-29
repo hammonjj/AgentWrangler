@@ -255,6 +255,40 @@ export async function mergeMissionIntoTask(
   return { outcome: 'error', error: (merge.stderr.trim() || merge.stdout.trim()).split('\n').slice(0, 3).join(' ') || `exit ${merge.code}` };
 }
 
+/**
+ * After mission verification reverted a task's merge: bring the task's
+ * branch up to the mission branch and re-apply its work there, in the task's
+ * own worktree. Git treats a reverted merge's commits as merged, so merging
+ * the same branch again later would bring back only what was added since and
+ * silently drop the reverted work. Merging the mission branch in (revert
+ * included) and then reverting the revert on the task branch leaves it
+ * holding its whole change on top of the mission head: the combination that
+ * failed, for the next attempt to fix, and a branch whose next merge carries
+ * all of it. Only the task's branch is written, never the mission branch.
+ */
+export async function reapplyAfterRevert(
+  exec: Exec,
+  treePath: string,
+  missionBranch: string,
+  revertCommit: string,
+  taskKey: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const git = (args: string[]) => exec('git', args, { cwd: treePath, timeoutMs: MERGE_TIMEOUT_MS });
+  const status = await git(['status', '--porcelain=v1', '--untracked-files=no']);
+  if (status.code !== 0 || status.stdout.trim() !== '') return { ok: false, error: 'the task’s worktree has uncommitted changes' };
+  const merge = await git([...NO_HOOKS, 'merge', '--no-ff', '--no-edit', '-m', `aw: merge ${missionBranch} into ${taskKey} after its merge was reverted`, '--end-of-options', missionBranch]);
+  if (merge.code !== 0) {
+    if ((await git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])).code === 0) await git(['merge', '--abort']);
+    return { ok: false, error: `could not merge ${missionBranch} into the task’s branch: ${merge.stderr.trim().split('\n')[0] || `exit ${merge.code}`}` };
+  }
+  const reapply = await git([...NO_HOOKS, 'revert', '--no-edit', revertCommit]);
+  if (reapply.code !== 0) {
+    if ((await git(['rev-parse', '--verify', '--quiet', 'REVERT_HEAD'])).code === 0) await git(['revert', '--abort']);
+    return { ok: false, error: `could not re-apply the task’s work on its branch: ${reapply.stderr.trim().split('\n')[0] || `exit ${reapply.code}`}` };
+  }
+  return { ok: true };
+}
+
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
