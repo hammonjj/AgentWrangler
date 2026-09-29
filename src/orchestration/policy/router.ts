@@ -47,7 +47,7 @@ import {
  * so a decision made by an older router is never mistaken for one this build
  * would make, and a replay test can say which rules it is replaying.
  */
-export const ROUTER_VERSION = 'rtr-1';
+export const ROUTER_VERSION = 'rtr-2';
 
 // ---------------------------------------------------------------------------
 // Inputs and outputs
@@ -169,12 +169,16 @@ interface TierRule {
 export const TIER_RULES: readonly TierRule[] = [
   {
     id: 'tier.band',
-    apply: (_f, s, t) => (s.score <= 0 ? t.basic : s.score <= 2 ? t.standard : t.expert),
+    // rtr-2: involved work in one subsystem (score 3) is standard, not expert.
+    // Expert is for score 4+ — involved and wide and high-risk — or hard work.
+    apply: (f, s, t) =>
+      s.score <= 0 ? t.basic : s.score <= 3 && f.complexity < rank(COMPLEXITY_LEVELS, 'hard') ? t.standard : t.expert,
     text: (f, s, name, next) => {
       const parts = [`complexity ${f.values.complexity} (${f.complexity})`];
       if (f.breadth >= rank(BREADTH_LEVELS, 'subsystem')) parts.push(`breadth ${f.values.breadth} (+1)`);
       if (f.risk >= rank(RISK_LEVELS, 'high')) parts.push(`risk ${f.values.risk} (+1)`);
-      return `Score ${s.score} from ${parts.join(' + ')} → ${name(next)}.`;
+      const hard = s.score <= 3 && f.complexity === rank(COMPLEXITY_LEVELS, 'hard') ? ' (hard work is always expert)' : '';
+      return `Score ${s.score} from ${parts.join(' + ')} → ${name(next)}${hard}.`;
     },
     inputs: (f) => ({ complexity: f.values.complexity, breadth: f.values.breadth, risk: f.values.risk }),
   },

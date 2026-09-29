@@ -91,6 +91,16 @@ describe('router: rules', () => {
     expect(r.reasons[0].inputs).toEqual({ complexity: 'hard', breadth: 'subsystem', risk: 'high' });
   });
 
+  it('band (rtr-2): involved work in one subsystem is standard; score 4+ or hard work is expert', () => {
+    const tier = (l: Omit<Levels, 'verifiability'>) => route({ verifiability: 'partial', ...l }).requirement.minTier;
+    expect(tier({ complexity: 'involved', breadth: 'subsystem', risk: 'low' })).toBe('standard');
+    expect(tier({ complexity: 'involved', breadth: 'cross-cutting', risk: 'moderate' })).toBe('standard');
+    expect(tier({ complexity: 'involved', breadth: 'subsystem', risk: 'high' })).toBe('expert');
+    const hard = route({ complexity: 'hard', breadth: 'single-file', risk: 'low', verifiability: 'partial' });
+    expect(hard.requirement.minTier).toBe('expert');
+    expect(hard.reasons[0].text).toBe('Score 3 from complexity hard (3) → expert (hard work is always expert).');
+  });
+
   it('floors: critical risk and architecture/plan are expert, migration is at least standard', () => {
     expect(route({ complexity: 'trivial', breadth: 'single-file', risk: 'critical', verifiability: 'strong' }).requirement.minTier).toBe('expert');
     expect(route({ complexity: 'trivial', breadth: 'single-file', risk: 'low', verifiability: 'strong', kind: 'plan' }).requirement.minTier).toBe('expert');

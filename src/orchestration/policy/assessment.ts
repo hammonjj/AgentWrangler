@@ -265,8 +265,15 @@ export function riskFloorOf(policy: RepoPolicy, task: AssessedTask, facts: Scope
   };
 }
 
-/** Does this command look like it actually checks behaviour, rather than formatting it? */
-const TEST_COMMAND = /(^|-)(test|tests|spec|e2e|integration|check|verify)(-|$)/;
+/** A command name that says it checks behaviour, rather than formatting or types. */
+const TEST_COMMAND = /(^|-)(test|tests|unit|spec|e2e|integration|check|verify)(-|$)/;
+/** An argv word that runs tests, whatever the command is called (`npm test`, `cargo test`, `pytest`). */
+const TEST_RUNNER_WORD = /^(test|tests|vitest|jest|mocha|pytest|rspec|playwright)$/;
+
+/** Does this command actually check behaviour? By its name, or by what it runs. */
+function isBehavioural(policy: RepoPolicy, name: string): boolean {
+  return TEST_COMMAND.test(name) || (policy.verification.commands[name]?.run ?? []).some((w) => TEST_RUNNER_WORD.test(w));
+}
 
 /**
  * What the repository is configured to check, which is the ceiling on
@@ -288,11 +295,11 @@ export function configuredVerifiabilityOf(policy: RepoPolicy, task: AssessedTask
     .map((s) => /^command:([a-z][a-z0-9-]*)$/.exec(s.strategy)?.[1])
     .filter((n): n is string => Boolean(n) && commands.includes(n!));
   if (planned.length > 0) {
-    const behavioural = planned.some((n) => TEST_COMMAND.test(n));
+    const behavioural = planned.some((n) => isBehavioural(policy, n));
     const value: Verifiability = behavioural && planned.length > 1 ? 'strong' : behavioural ? 'partial' : 'weak';
     return { value, confidence: 'high', from: 'rule', evidence: `the task plans ${planned.map((n) => `\`${n}\``).join(', ')}` };
   }
-  const behavioural = commands.some((n) => TEST_COMMAND.test(n));
+  const behavioural = commands.some((n) => isBehavioural(policy, n));
   return {
     value: behavioural ? 'partial' : 'weak',
     confidence: 'medium',
@@ -445,7 +452,10 @@ function dimensionSchema(levels: readonly string[], description: string): JsonSc
     properties: {
       value: { type: 'string', enum: [...levels] },
       confidence: { type: 'string', enum: [...CONFIDENCE_LEVELS] },
-      evidence: { type: 'string', minLength: 1, maxLength: 200, description: 'one short line saying why' },
+      // No maxLength: a small local model routinely overruns it, and failing the
+      // whole answer for a long reason throws away every dimension with it.
+      // `fromModel` cuts the stored evidence to 200 instead.
+      evidence: { type: 'string', minLength: 1, description: 'one short line saying why, under 200 characters' },
     },
   };
 }

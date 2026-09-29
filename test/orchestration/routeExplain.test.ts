@@ -23,7 +23,7 @@ describe('route explanation', () => {
     expect(v.summary).toMatch(/Assessment confidence: high\.$/);
     expect(v.gates).toEqual(['human-review']);
     expect(v.requirement).toBe('expert · medium effort · needs edit, shell · 45k context');
-    expect(v.versions).toMatch(/^rtr-1 · cat-[0-9a-f]{8}$/);
+    expect(v.versions).toMatch(/^rtr-2 · cat-[0-9a-f]{8}$/);
   });
 
   it('a manual decision with no shadow yet says so rather than inventing one', () => {
