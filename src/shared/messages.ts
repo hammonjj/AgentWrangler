@@ -2,6 +2,7 @@
  * Typed message protocol between the extension host and the webviews.
  * Imported by both bundles — keep free of `vscode`/Node/DOM imports.
  */
+import type { DelegationOffer, DelegationOfferOutcome } from './delegationIntent';
 import type { ColumnPrefs } from './columns';
 import type {
   ComposerState,
@@ -258,11 +259,13 @@ export type HostToConversation =
    * taken (unreadable, or an image past the size limit).
    */
   | { type: 'dropped'; mentions: string[]; images: ImageAttachment[]; notes: string[] }
+  | { type: 'delegationOffer'; offer?: DelegationOffer }
   | { type: 'sendResult'; requestId: string; error?: string; adopted?: boolean }
   | { type: 'error'; text: string };
 
 export type ConversationToHost =
   | { type: 'ready' }
+  | { type: 'delegationOfferDecision'; offerId: string; outcome: DelegationOfferOutcome }
   | { type: 'send'; text: string; images?: ImageAttachment[]; requestId?: string; sessionKey?: string }
   | { type: 'cancelSend' }
   | { type: 'interrupt' }
