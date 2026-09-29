@@ -230,6 +230,31 @@ export class Integrator {
   }
 }
 
+/**
+ * Before a conflict-resolution attempt (§13.3 step 3): merge the mission
+ * branch into the task's branch, in the task's own worktree, and leave any
+ * conflict in place (markers in the files, `MERGE_HEAD` set) for the agent to
+ * resolve. The agent's result is committed as the merge commit when the
+ * attempt finishes. `clean`: it merged without a conflict after all, and the
+ * merge is committed.
+ */
+export async function mergeMissionIntoTask(
+  exec: Exec,
+  treePath: string,
+  missionBranch: string,
+  message: string,
+): Promise<{ outcome: 'clean' } | { outcome: 'conflict'; files: string[] } | { outcome: 'error'; error: string }> {
+  const git = (args: string[]) => exec('git', args, { cwd: treePath, timeoutMs: MERGE_TIMEOUT_MS });
+  if ((await git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])).code === 0) return { outcome: 'error', error: 'a merge is already in progress in the task’s worktree' };
+  const merge = await git([...NO_HOOKS, 'merge', '--no-ff', '--no-edit', '-m', message, '--end-of-options', missionBranch]);
+  if (merge.code === 0) return { outcome: 'clean' };
+  const r = await git(['diff', '--name-only', '--diff-filter=U', '-z']);
+  const files = r.code === 0 ? [...new Set(r.stdout.split('\0').filter(Boolean))].sort() : [];
+  if (files.length > 0) return { outcome: 'conflict', files };
+  if ((await git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])).code === 0) await git(['merge', '--abort']);
+  return { outcome: 'error', error: (merge.stderr.trim() || merge.stdout.trim()).split('\n').slice(0, 3).join(' ') || `exit ${merge.code}` };
+}
+
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }

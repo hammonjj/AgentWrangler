@@ -59,7 +59,7 @@ describe('transition tables', () => {
         'running→verifying', 'running→queued', 'running→needs-human',
         'verifying→integrating', 'verifying→done', 'verifying→queued', 'verifying→needs-human',
         'integrating→done', 'integrating→queued', 'integrating→needs-human',
-        'needs-human→queued', 'needs-human→done', 'needs-human→failed',
+        'needs-human→queued', 'needs-human→done', 'needs-human→failed', 'needs-human→integrating',
         'done→ready',
         ...active.flatMap((s) => [`${s}→cancelled`, `${s}→skipped`]),
       ].sort(),

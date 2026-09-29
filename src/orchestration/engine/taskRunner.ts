@@ -47,8 +47,10 @@ import type { SessionHandle, SessionViewEvent } from '../../core/session/session
 import type { SessionRecord, SessionRegistry } from '../../core/session/sessionRegistry';
 import type { PermissionModeName } from '../../shared/conversation';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
-import { DEFAULT_REPO_POLICY } from '../../shared/orchestration/repoPolicy';
-import type { PlanRecord, TaskFinalRecord, TelemetryRecord, TurnRecord } from '../../shared/orchestration/telemetry';
+import { DEFAULT_CONFLICT_ATTEMPTS, DEFAULT_REPO_POLICY } from '../../shared/orchestration/repoPolicy';
+import type { IntegrationRecord, PlanRecord, TaskFinalRecord, TelemetryRecord, TurnRecord } from '../../shared/orchestration/telemetry';
+import { Integrator, mergeMissionIntoTask, type IntegrationOutcome } from '../integration/integrator';
+import { checkSummary, gateCommands, missionCommands, missionVerifier, runMissionCheck } from '../integration/missionCheck';
 import { TELEMETRY_SCHEMA_VERSION } from '../../shared/orchestration/telemetry';
 import type { PlanEdit, PlanTaskDraft } from '../../shared/orchestration/plan';
 import {
@@ -79,6 +81,7 @@ import {
   type RoutingReason,
   type TaskAssessment,
   type Task,
+  type TaskIntegration,
   type TaskKind,
   type TaskState,
   type VerificationResult,
@@ -311,6 +314,12 @@ export interface TaskRunnerDeps {
   escalationLimits?: Partial<EscalationLimits>;
   /** What the scheduler reads beyond the missions (#45, §12.3–12.4). Absent: default limits, never paused. */
   scheduling?: SchedulingDeps;
+  /**
+   * `orchestration.parallelTasks` (#46), read when a plan is approved: its
+   * tasks then run in worktrees of their own and are merged into the mission
+   * branch by the Integrator. Absent or false: one at a time in the mission tree.
+   */
+  parallelTasks?: () => boolean;
   log?: (msg: string) => void;
 }
 
@@ -446,6 +455,28 @@ export class TaskRunner implements Disposable {
     return order.find((t) => !['done', 'skipped', 'cancelled', 'failed'].includes(t.state)) ?? order.at(-1) ?? m.tasks[0];
   }
 
+  /**
+   * The task an action is for: the named one, or the current one. In a
+   * mission on one shared tree only the current task can be acted on; in a
+   * parallel mission (#46) any can.
+   */
+  private taskFor(m: Mission, taskId?: string): Task {
+    const current = this.currentTask(m);
+    if (!taskId) return current;
+    const t = m.tasks.find((x) => x.id === taskId);
+    if (!t) throw new TaskError('That task is no longer in the mission.');
+    if (sharedTree(m) && t.id !== current.id) throw new TaskError('That task is not the one the mission is on.');
+    return t;
+  }
+
+  /** Every task's current attempt, in run order. */
+  private currentAttempts(m: Mission): ExecutionAttempt[] {
+    return executionOrder(m.tasks).flatMap((t) => {
+      const a = this.currentAttempt(m, t.id);
+      return a ? [a] : [];
+    });
+  }
+
   /** The current task's current attempt. */
   currentAttempt(m: Mission, taskId?: string): ExecutionAttempt | undefined {
     const task = taskId ? m.tasks.find((t) => t.id === taskId) : this.currentTask(m);
@@ -473,7 +504,8 @@ export class TaskRunner implements Disposable {
     const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
     if (a?.git && a.git.filesChanged > 0 && wt && wt.state !== 'removed') out.push('open-diff');
     // Only the task the mission is on can be acted on: the rest have finished or have not started.
-    const live = task.id === current.id && ['running', 'paused'].includes(m.state);
+    // In a parallel mission (#46) every task is its own, in its own tree.
+    const live = (m.parallel || task.id === current.id) && ['running', 'paused'].includes(m.state);
     // A proposal nobody has started (#38) is started from the launcher's task menu, not retried.
     if (task.state === 'needs-human' && task.attemptIds.length > 0 && (live || !isPlanned(m))) {
       if (a?.state === 'succeeded') out.push('accept');
@@ -980,10 +1012,10 @@ export class TaskRunner implements Disposable {
   }
 
   /** Resume an interrupted attempt: the same session id, through #4's Resume (orphan sweep first). */
-  resume(missionId: string, opts: { auto?: boolean } = {}): Promise<void> {
+  resume(missionId: string, opts: { auto?: boolean; taskId?: string } = {}): Promise<void> {
     return this.queue(missionId, async () => {
       const m = this.need(missionId);
-      const task = this.currentTask(m);
+      const task = this.taskFor(m, opts.taskId);
       const prev = this.currentAttempt(m, task.id);
       if (!prev || prev.state !== 'interrupted' || !prev.resumable) throw new TaskError('There is no interrupted attempt to resume.');
       // An automatic resume queued behind a Cancel (or anything else) must not revive the task.
@@ -997,10 +1029,10 @@ export class TaskRunner implements Disposable {
    * a new worktree and branch for a single task, or in a planned mission the
    * same tree on a new `-a<n>` branch cut at the commit the task started from.
    */
-  retry(missionId: string): Promise<void> {
+  retry(missionId: string, taskId?: string): Promise<void> {
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
-      const task = this.currentTask(m);
+      const task = this.taskFor(m, taskId);
       const prev = this.currentAttempt(m, task.id);
       if (task.state !== 'needs-human') throw new TaskError('The task is not waiting for a decision.');
       if (prev && LIVE.includes(prev.state)) {
@@ -1009,7 +1041,7 @@ export class TaskRunner implements Disposable {
         this.put(m);
       }
       await this.endSession(m, prev);
-      if (isPlanned(m)) {
+      if (sharedTree(m)) {
         if (prev) await this.releaseTree(missionId, prev.id);
         m = await this.restartTree(missionId, task.id, prev);
       } else {
@@ -1025,10 +1057,10 @@ export class TaskRunner implements Disposable {
    * on with its next task. Commits anything the session did after the attempt
    * finished first, so the branch is the result.
    */
-  accept(missionId: string): Promise<void> {
+  accept(missionId: string, taskId?: string): Promise<void> {
     return this.queue(missionId, async () => {
       let m = this.need(missionId);
-      const task = this.currentTask(m);
+      const task = this.taskFor(m, taskId);
       const a = this.currentAttempt(m, task.id);
       const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
       if (!a || a.state !== 'succeeded' || !wt || task.state !== 'needs-human') throw new TaskError('There is no finished attempt to accept.');
@@ -1041,6 +1073,11 @@ export class TaskRunner implements Disposable {
       if (extra || stats.headCommit !== a.git?.headCommit) {
         m = this.patchAttempt(m, a.id, (x) => ({ ...x, flags: { ...x.flags, userEditedBranch: true } }));
         this.put(m);
+      }
+      if (m.parallel) {
+        // Onto the mission branch, verified there (#46); a conflict or a failure comes back to the task.
+        await this.integrateTask(missionId, task.id, a.id, 'user');
+        return;
       }
       if (isPlanned(m)) {
         await this.markDone(missionId, task.id, 'user', 'accepted by the user');
@@ -1073,13 +1110,18 @@ export class TaskRunner implements Disposable {
         this.put(m);
         this.writePlanRecord(m, run.id);
       }
-      const a = this.currentAttempt(m);
-      if (a && LIVE.includes(a.state)) {
-        m = this.endAttempt(m, a.id, 'cancelled', { status: 'cancelled' }, 'cancelled by the user');
-        this.put(m);
+      // A parallel mission (#46) may have several attempts running; the rest have one at most.
+      const attempts = m.parallel ? this.currentAttempts(m) : [this.currentAttempt(m)];
+      for (const a of attempts) {
+        if (!a) continue;
+        if (LIVE.includes(a.state)) {
+          m = this.endAttempt(this.need(missionId), a.id, 'cancelled', { status: 'cancelled' }, 'cancelled by the user');
+          this.put(m);
+        }
+        await this.endSession(this.need(missionId), a);
+        m = await this.retainTree(this.need(missionId), a);
       }
-      await this.endSession(m, a);
-      m = await this.retainTree(this.missions.get(missionId)!, a);
+      m = this.need(missionId);
       const now = this.now();
       const ended: string[] = [];
       for (const t of m.tasks) {
@@ -1571,8 +1613,11 @@ export class TaskRunner implements Disposable {
       if (stops.length > 0) throw new TaskError(`The plan cannot start yet: ${stops.map((i) => i.text).join('; ')}.`);
       this.checkRoute(route);
       const now = this.now();
+      // Chosen once, at the first approval, and kept through replans: a mission never changes how its trees work (#46).
+      const parallel = m.parallel ?? (m.attempts.length === 0 && this.deps.parallelTasks?.() === true);
       m = {
         ...m,
+        ...(parallel ? { parallel: true } : {}),
         planApprovedAt: now,
         defaultRoute: { harness: route.harness, ...(route.model?.trim() ? { model: route.model.trim() } : {}), ...(route.effort?.trim() ? { effort: route.effort.trim() } : {}) },
       };
@@ -1593,7 +1638,7 @@ export class TaskRunner implements Disposable {
           reviewMs: Math.max(0, now - (run.endedAt ?? now)),
         });
       }
-      this.log(`mission ${missionId}: plan approved; ${m.tasks.length} task(s) to run in order`);
+      this.log(`mission ${missionId}: plan approved; ${m.tasks.length} task(s) to run ${parallel ? 'in parallel, each in its own worktree' : 'in order'}`);
       await this.launchNext(missionId);
       return this.need(missionId);
     });
@@ -1646,6 +1691,14 @@ export class TaskRunner implements Disposable {
       let removeInto: string | undefined;
       switch (how) {
         case 'merge-local': {
+          if (isPlanned(m) && m.integration !== 'none') {
+            // Gated (§13.3 step 5, #46): the merge is made and checked in the integration worktree first.
+            const r = await this.mergeGated(m, finisher, branch, manager);
+            if (!r.ok) throw new TaskError(r.why);
+            result = { mergeCommit: r.mergeCommit, note: `merged into ${r.into} after ${r.gate}; nothing was installed, so rebuild or reinstall to run it` };
+            removeInto = r.into;
+            break;
+          }
           const r = await finisher.mergeLocal({ branch, baseRef: m.base.ref, message: `Merge ${branch}: ${m.title}` });
           if (!r.ok) throw new TaskError(r.why);
           result = { mergeCommit: r.mergeCommit, note: `merged into ${r.into}` };
@@ -1690,6 +1743,34 @@ export class TaskRunner implements Disposable {
     });
   }
 
+  /** The gated merge of a planned mission's branch into the base: the repository's gate runs on the merged result (#46). */
+  private async mergeGated(m: Mission, finisher: MissionFinisher, branch: string, manager: WorktreeManager) {
+    const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
+    if (!loaded) return { ok: false as const, why: `${m.repoRoot} is no longer a git repository.` };
+    const tree = await this.missionTree(m.id, manager);
+    const commands = gateCommands(loaded.policy);
+    const verifier = new Verifier({
+      exec: this.deps.exec ?? nodeExec,
+      logsDir: this.deps.logsDir,
+      diffText: () => manager.diffText(tree),
+      changedFiles: () => manager.changedFiles(tree),
+      now: this.now,
+      log: this.log,
+    });
+    const task = executionOrder(m.tasks).at(-1)!;
+    return finisher.mergeLocalGated({
+      branch,
+      baseRef: m.base.ref,
+      message: `Merge ${branch}: ${m.title}`,
+      integrationPath: tree.path,
+      gate: async (_tree, mergeCommit) => {
+        // No pre-existing excuse here: the base must stay usable, so a red check stops the merge whoever caused it.
+        const r = await runMissionCheck({ verifier, policy: loaded.policy, commands, task, runId: `${m.id}-finish`, tree: { ...tree, baseCommit: mergeCommit } }, mergeCommit);
+        return { passed: r.passed, summary: r.passed ? checkSummary(commands) : (r.failure?.summary ?? 'the check failed') };
+      },
+    });
+  }
+
   /** A planned mission's next step: the scheduler decides what starts (#45). Runs inside the mission's queue. */
   private async launchNext(missionId: string): Promise<void> {
     const m = this.need(missionId);
@@ -1720,8 +1801,9 @@ export class TaskRunner implements Disposable {
         priority: 0,
         createdAt: m.createdAt,
         planned: isPlanned(m),
-        // Until #46's integrator, a plan's tasks share the mission worktree, so run one at a time.
-        sharedTree: true,
+        // A P8 plan's tasks share the mission worktree, so run one at a time; a
+        // parallel one's (#46) each have their own, and meet on the mission branch.
+        sharedTree: !m.parallel,
         ...(caps.maxUsageWindowPercent !== undefined ? { maxWindowPercent: caps.maxUsageWindowPercent } : {}),
         ...(caps.maxConcurrentAgents !== undefined ? { maxConcurrentAgents: caps.maxConcurrentAgents } : {}),
         tasks: executionOrder(m.tasks).map((t) => this.schedTask(m, t)),
@@ -1752,7 +1834,8 @@ export class TaskRunner implements Disposable {
       key: t.key,
       state: t.state,
       dependsOn: t.dependsOn,
-      // In the one mission tree, a done task's result is the mission branch.
+      // In the one mission tree, a done task's result is the mission branch; in a
+      // parallel mission a task is done only once it is merged there (#46).
       integrated: t.state === 'done',
       ...(t.invalidated ? { invalidated: true } : {}),
       harness: live?.assignment.harness ?? route.harness,
@@ -1772,7 +1855,8 @@ export class TaskRunner implements Disposable {
    * that is not in a planned mission has no earlier task. Never throws.
    */
   private assignmentInput(m: Mission, t: Task, base: TaskRoute): AssignmentInput | undefined {
-    if (!isPlanned(m)) return undefined;
+    // A parallel mission's task runs in a new tree of its own (#46): no earlier session was in it.
+    if (!sharedTree(m)) return undefined;
     try {
       const pins = this.effective(m, t).policy.pins;
       const route = this.withPins(base, pins);
@@ -2213,6 +2297,11 @@ export class TaskRunner implements Disposable {
     const m = this.need(missionId);
     const task = m.tasks.find((t) => t.id === taskId)!;
     const wt = m.worktrees.find((w) => w.id === a.worktreeId);
+    // In a parallel mission (#46) the work is on the task's own branch, never on the mission branch: nothing to take off.
+    if (m.parallel) {
+      await this.retainTree(m, a);
+      return;
+    }
     if (!wt || m.integration === 'none' || !a.startCommit || wt.state === 'missing' || wt.state === 'removed') return;
     const manager = await this.managerFor(m);
     await manager.commitAll(wt, `aw: ${task.key}: attempt ${a.n}, skipped`).catch((e: Error) => {
@@ -2251,6 +2340,248 @@ export class TaskRunner implements Disposable {
     m = this.patchTask(m, taskId, (t) => transitionTask(m, { ...t, result: { branch: wt!.branch, commit: head, acceptedBy } }, 'done', { now, reason }));
     this.put(m);
     this.writeTaskFinal(m, taskId);
+  }
+
+  // ---- Integration (#46, §13.3) ----
+
+  /**
+   * A parallel mission's task has a result its checks (or the user) passed:
+   * merge its branch into the mission branch in the integration worktree,
+   * verify the mission branch, and act on what happened. Runs in the
+   * mission's queue, which is what serialises one mission's merges; the
+   * pre-merge head is on disk before `git merge` runs.
+   */
+  private async integrateTask(missionId: string, taskId: string, attemptId: string, acceptedBy: 'verification' | 'user'): Promise<void> {
+    let m = this.need(missionId);
+    const task = m.tasks.find((t) => t.id === taskId)!;
+    if (task.state === 'verifying' || task.state === 'needs-human') {
+      m = this.patchTask(m, taskId, (t) => transitionTask(m, t, 'integrating', { now: this.now(), reason: 'merging into the mission branch' }));
+      this.put(m);
+    }
+    const a = m.attempts.find((x) => x.id === attemptId);
+    const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
+    const started = this.now();
+    let result: IntegrationOutcome;
+    try {
+      if (!a || !wt) throw new TaskError('the task has no worktree to take its result from');
+      const integrator = await this.integratorFor(missionId, taskId, attemptId);
+      result = await integrator.integrate({ taskBranch: wt.branch, message: `aw: merge ${task.key}: ${task.title}` });
+    } catch (e) {
+      result = { ok: false, outcome: 'error', error: errorText(e) };
+    }
+    await this.afterIntegration(missionId, taskId, attemptId, result, { started, acceptedBy, recovered: false });
+  }
+
+  /** The Integrator for a mission, with its mission check and its write-ahead into the mission record. */
+  private async integratorFor(missionId: string, taskId: string, attemptId: string): Promise<Integrator> {
+    const m = this.need(missionId);
+    const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
+    if (!loaded) throw new TaskError(`${m.repoRoot} is no longer a git repository`);
+    const manager = await this.manager(loaded);
+    const tree = await this.missionTree(missionId, manager);
+    const task = this.need(missionId).tasks.find((t) => t.id === taskId)!;
+    const exec = this.deps.exec ?? nodeExec;
+    const verifier = new Verifier({
+      exec,
+      logsDir: this.deps.logsDir,
+      withBaseCheckout: (base, fn) => manager.withBaseCheckout(base, fn),
+      diffText: () => manager.diffText(tree),
+      changedFiles: () => manager.changedFiles(tree),
+      now: this.now,
+      log: this.log,
+    });
+    return new Integrator({
+      exec,
+      verifier: missionVerifier({ verifier, policy: loaded.policy, commands: missionCommands(loaded.policy), task, runId: `${attemptId}-mission`, tree }),
+      missionBranch: tree.branch,
+      worktreePath: tree.path,
+      baseCommit: m.base.commit,
+      // Write-ahead (§23.2): a crash from here on is found by recovery and finished.
+      beforeMerge: (r) => this.put({ ...this.need(missionId), pendingMerge: { taskId, attemptId, ...r, at: this.now() } }),
+      log: (msg) => this.log(`mission ${missionId}: ${msg}`),
+    });
+  }
+
+  /**
+   * What a merge came to: `merged` makes the task done and lets the next
+   * start; `conflict` becomes a conflict-resolution attempt or `needs-human`,
+   * per repository policy; `reverted` returns the task with mission
+   * verification's evidence, to escalation (#41); `error` hands it to the user.
+   */
+  private async afterIntegration(
+    missionId: string,
+    taskId: string,
+    attemptId: string,
+    r: IntegrationOutcome,
+    how: { started: number; acceptedBy: 'verification' | 'user'; recovered: boolean },
+  ): Promise<void> {
+    let m = this.need(missionId);
+    const now = this.now();
+    const durationMs = Math.max(0, now - (m.pendingMerge?.at ?? how.started));
+    const { pendingMerge: _done, ...rest } = m;
+    m = rest;
+    const task = m.tasks.find((t) => t.id === taskId)!;
+    const a = m.attempts.find((x) => x.id === attemptId);
+    const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
+    const branch = m.integration !== 'none' ? m.integration.branch : 'the mission branch';
+    const record = (event: IntegrationRecord['event'], extra: Partial<IntegrationRecord> = {}) =>
+      this.writeTelemetry(m, {
+        v: TELEMETRY_SCHEMA_VERSION,
+        type: 'integration',
+        id: `${attemptId}:${event}:${r.preMergeHead ?? 'none'}`,
+        at: now,
+        missionId,
+        taskId,
+        attemptId,
+        event,
+        durationMs,
+        ...(how.recovered ? { recovered: true } : {}),
+        ...extra,
+      });
+    const integration = (x: Omit<TaskIntegration, 'at' | 'attemptId'>): TaskIntegration => ({ ...x, at: now, attemptId, ...(r.preMergeHead ? { preMergeHead: r.preMergeHead } : {}) });
+    const toHuman = (t: Task, reason: string, x: TaskIntegration): Task => {
+      const next = { ...t, integration: x };
+      return t.state === 'integrating' ? transitionTask(m, next, 'needs-human', { now, reason }) : { ...next, stateReason: reason };
+    };
+    // The mission branch moved (a merge, a revert): its tree's record follows it.
+    const noteMission = async () => {
+      const tree = m.integration !== 'none' ? m.worktrees.find((w) => w.id === (m.integration as { worktreeId: string }).worktreeId) : undefined;
+      if (tree) await (await this.managerFor(m)).noteHead(tree).catch(() => undefined);
+    };
+
+    switch (r.outcome) {
+      case 'merged': {
+        const head = wt ? await (await this.managerFor(m)).headOf(wt).catch(() => undefined) : undefined;
+        const why = how.acceptedBy === 'user' ? 'accepted by the user and merged into the mission branch' : 'passed its checks and merged into the mission branch';
+        m = this.patchTask(m, taskId, (t) =>
+          transitionTask(m, { ...t, integration: integration({ outcome: 'merged', mergeCommit: r.mergeCommit }), result: { branch: wt?.branch ?? branch, commit: head ?? r.mergeCommit, acceptedBy: how.acceptedBy } }, 'done', { now, reason: why }),
+        );
+        this.put(m);
+        record('merged');
+        record('mission-verification', { verification: 'passed' });
+        await noteMission();
+        this.writeTaskFinal(this.need(missionId), taskId);
+        await this.endSession(this.need(missionId), a);
+        this.log(`mission ${missionId}: ${task.key} merged into ${branch} at ${r.mergeCommit.slice(0, 8)}`);
+        await this.launchNext(missionId);
+        return;
+      }
+      case 'conflict': {
+        const loaded = this.deps.repoPolicies.forFolder(m.repoRoot);
+        const policy = loaded?.policy.integration;
+        const used = m.attempts.filter((x) => x.taskId === taskId && x.resolvesConflict).length;
+        const max = policy?.conflictAttempts ?? DEFAULT_CONFLICT_ATTEMPTS;
+        const resolve = (policy?.onConflict ?? 'resolve') === 'resolve' && used < max && task.attemptIds.length < this.limits(m).qualityAttempts;
+        const files = r.conflictingFiles;
+        const list = `${files.slice(0, 5).join(', ')}${files.length > 5 ? ` and ${files.length - 5} more` : ''}`;
+        const reason = resolve
+          ? `merging into ${branch} conflicts in ${list}; a conflict-resolution attempt resolves it`
+          : `merging into ${branch} conflicts in ${list}. Merge ${branch} into ${wt?.branch ?? 'its branch'} and resolve it there, then Accept; or retry it fresh`;
+        m = this.patchTask(m, taskId, (t) => toHuman(t, reason, integration({ outcome: 'conflict', conflictingFiles: [...files] })));
+        this.put(m);
+        record('conflict', { conflictingFiles: files.length, conflictAction: resolve ? 'resolve' : 'needs-human' });
+        this.log(`mission ${missionId}: ${task.key} conflicts with ${branch} in ${files.length} file(s)`);
+        if (!resolve || !a || !wt) {
+          this.notify(this.need(missionId), 'needs you', `${task.key}: ${reason}.`, 'open-diff');
+          return;
+        }
+        await this.resolveConflict(missionId, taskId, a, r.preMergeHead);
+        return;
+      }
+      case 'reverted': {
+        const ev = r.evidence;
+        const summary = `mission verification failed after merging ${task.key}: ${ev.summary}; the merge was reverted on ${branch}`;
+        m = this.patchTask(m, taskId, (t) =>
+          toHuman(t, summary, integration({ outcome: 'reverted', mergeCommit: r.mergeCommit, revertCommit: r.revertCommit, evidence: { stage: ev.stage, summary: ev.summary, ...(ev.failingTests ? { failing: ev.failingTests } : {}), ...(ev.signature ? { signature: ev.signature } : {}) } })),
+        );
+        this.put(m);
+        record('mission-verification', { verification: 'failed', stage: ev.stage, ...(ev.signature ? { signature: ev.signature } : {}) });
+        record('reverted', { stage: ev.stage });
+        await noteMission();
+        this.log(`mission ${missionId}: ${summary}`);
+        if (!a) return;
+        // Back to the runner with the evidence: escalation (#41) decides what happens next.
+        const cls = classifyOutcome({
+          gates: this.decisionOf(m, a.id)?.requirement.gates ?? [],
+          filesChanged: a.git?.filesChanged,
+          verification: { verdict: 'failed', signature: ev.signature ?? `mission:${ev.stage}`, summary },
+          previousSignature: previousFailure(m, task, a.id)?.outcome?.signature,
+        })!;
+        await this.escalate(missionId, a.id, cls, { what: 'failed mission verification', click: 'open-diff' });
+        return;
+      }
+      case 'error': {
+        const reason = `could not merge into ${branch}: ${r.error}`;
+        m = this.patchTask(m, taskId, (t) => toHuman(t, reason, integration({ outcome: 'error', evidence: { stage: 'integration', summary: r.error } })));
+        this.put(m);
+        record('error');
+        this.log(`mission ${missionId}: ${task.key} ${reason}`);
+        this.notify(this.need(missionId), 'needs you', `${task.key} ${reason}. Accept it to try the merge again.`);
+        return;
+      }
+    }
+  }
+
+  /**
+   * A conflict-resolution attempt (§13.3 step 3): the mission branch is
+   * merged into the task's branch in the task's own tree, the conflict left
+   * in place, and a new session on the task's route resolves it there. It is
+   * verified and integrated like any attempt. A merge that goes through
+   * cleanly after all is integrated straight away.
+   */
+  private async resolveConflict(missionId: string, taskId: string, prev: ExecutionAttempt, missionHead: string): Promise<void> {
+    let m = this.need(missionId);
+    const task = m.tasks.find((t) => t.id === taskId)!;
+    const wt = m.worktrees.find((w) => w.id === prev.worktreeId);
+    const branch = m.integration !== 'none' ? m.integration.branch : undefined;
+    if (!wt || !branch) return;
+    await this.endSession(m, prev);
+    const merged = await mergeMissionIntoTask(this.deps.exec ?? nodeExec, wt.path, branch, `aw: merge ${branch} into ${task.key} to resolve a conflict`);
+    if (merged.outcome === 'clean') {
+      this.log(`mission ${missionId}: ${branch} merged into ${task.key} cleanly; integrating again`);
+      await this.integrateTask(missionId, taskId, prev.id, 'verification');
+      return;
+    }
+    if (merged.outcome === 'error') {
+      m = this.need(missionId);
+      this.put(this.patchTask(m, taskId, (t) => ({ ...t, stateReason: `could not start resolving the conflict: ${merged.error}` })));
+      this.notify(this.need(missionId), 'needs you', `${task.key} could not start resolving the conflict: ${merged.error}`);
+      return;
+    }
+    try {
+      await this.launch(missionId, { mode: 'fresh', route: this.routeFor(this.need(missionId), taskId, prev), taskId, resolves: { inTree: prev, missionHead, files: merged.files } });
+      this.log(`mission ${missionId}: ${task.key} resolves a conflict in ${merged.files.length} file(s)`);
+    } catch (e) {
+      this.notify(this.need(missionId), 'needs you', `${task.key} could not start resolving the conflict: ${errorText(e)}`);
+    }
+  }
+
+  /**
+   * §23.3 step 4: a merge into the mission branch the core was making when it
+   * stopped. The Integrator puts the integration worktree right (aborting a
+   * merge in progress and making it again, or verifying one that was made);
+   * the outcome is then acted on as if the merge had just finished.
+   */
+  private async recoverMerge(missionId: string): Promise<void> {
+    const m = this.need(missionId);
+    const p = m.pendingMerge;
+    if (!p) return;
+    this.log(`mission ${missionId}: finishing the merge of ${p.taskBranch} cut off by the restart`);
+    let result: IntegrationOutcome;
+    try {
+      const integrator = await this.integratorFor(missionId, p.taskId, p.attemptId);
+      result = await integrator.recover(p);
+    } catch (e) {
+      result = { ok: false, outcome: 'error', error: errorText(e), preMergeHead: p.preMergeHead };
+    }
+    const task = this.need(missionId).tasks.find((t) => t.id === p.taskId);
+    const accepted = this.need(missionId).attempts.find((a) => a.id === p.attemptId)?.flags.userEditedBranch ? 'user' : 'verification';
+    if (!task) {
+      const { pendingMerge: _gone, ...rest } = this.need(missionId);
+      this.put(rest);
+      return;
+    }
+    await this.afterIntegration(missionId, p.taskId, p.attemptId, result, { started: p.at, acceptedBy: accepted, recovered: true });
   }
 
   /** What plan editing needs from outside: fresh ids, the checks a task gets under the repository's policy, the clock. */
@@ -2388,11 +2719,76 @@ export class TaskRunner implements Disposable {
       }
       m = this.need(id);
     }
+    // A merge into the mission branch cut off by the restart (§23.3 step 4), before anything else could merge.
+    if (m.pendingMerge) {
+      await this.recoverMerge(id);
+      m = this.need(id);
+    }
+    if (m.parallel) {
+      await this.recoverParallel(id, branchGone);
+      return;
+    }
     const a = this.currentAttempt(m);
+    if (await this.recoverAttempt(id, a)) return;
+    const task = this.currentTask(m);
+    // An escalation step that was waiting when the core stopped: it runs when it was due, or now.
+    const pending = pendingEscalation(task);
+    if (pending && m.state === 'running') {
+      this.log(`task ${id}: ${task.key} resumes its pending ${pending.action}`);
+      this.scheduleEscalation(id, pending);
+      return;
+    }
+    this.noteMissingTree(id, task, a, branchGone);
+    await this.recoverRest(id);
+  }
+
+  /**
+   * A parallel mission (#46): every task's attempt is recovered, not only the
+   * current task's, since several may have been running. A task whose result
+   * passed but was not yet merged (the core stopped between the two) is merged now.
+   */
+  private async recoverParallel(id: string, branchGone: ReadonlySet<string>): Promise<void> {
+    for (const t of executionOrder(this.need(id).tasks)) {
+      const m = this.need(id);
+      const task = m.tasks.find((x) => x.id === t.id)!;
+      const a = this.currentAttempt(m, task.id);
+      if (await this.recoverAttempt(id, a)) continue;
+      const pending = pendingEscalation(task);
+      if (pending && m.state === 'running') {
+        this.log(`task ${id}: ${task.key} resumes its pending ${pending.action}`);
+        this.scheduleEscalation(id, pending);
+        continue;
+      }
+      if (a?.state === 'succeeded' && (task.state === 'integrating' || task.state === 'verifying') && m.state === 'running') {
+        this.log(`task ${id}: ${task.key} passed before the restart; merging it now`);
+        await this.integrateTask(id, task.id, a.id, a.flags.userEditedBranch ? 'user' : 'verification');
+        continue;
+      }
+      this.noteMissingTree(id, task, a, branchGone);
+    }
+    await this.recoverRest(id);
+  }
+
+  /** A task waiting on the user whose tree has gone says so. */
+  private noteMissingTree(id: string, task: Task, a: ExecutionAttempt | undefined, branchGone: ReadonlySet<string>): void {
+    const m = this.need(id);
+    const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
+    if (wt?.state === 'missing' && task.state === 'needs-human') {
+      const why = branchGone.has(wt.id) ? 'its worktree and branch have gone; retry it fresh' : 'its worktree has gone; recreate it from its branch, or retry';
+      this.put(this.patchTask(m, task.id, (t) => ({ ...t, stateReason: why })));
+    }
+  }
+
+  /**
+   * §23.3 step 2 for one attempt: finish one cut off while finishing, and
+   * reattach or settle one that was live. True when it was one of those.
+   */
+  private async recoverAttempt(id: string, a: ExecutionAttempt | undefined): Promise<boolean> {
+    let m = this.need(id);
     if (a && (a.state === 'finishing' || a.state === 'verifying')) {
       // The core stopped part-way through finishing: finishing again is safe.
       await this.finish(id, a.id);
-      return;
+      return true;
     }
     if (a && LIVE.includes(a.state)) {
       const found = this.findSession(a);
@@ -2416,21 +2812,14 @@ export class TaskRunner implements Disposable {
         this.watch(id, a.id, found.handle, { recovered: true, turnSeen: (a.turnsSeen ?? 0) > 0 });
       }
       await this.apply(id, a.id, verdict);
-      return;
+      return true;
     }
-    const task = this.currentTask(m);
-    // An escalation step that was waiting when the core stopped: it runs when it was due, or now.
-    const pending = pendingEscalation(task);
-    if (pending && m.state === 'running') {
-      this.log(`task ${id}: ${task.key} resumes its pending ${pending.action}`);
-      this.scheduleEscalation(id, pending);
-      return;
-    }
-    const wt = a?.worktreeId ? m.worktrees.find((w) => w.id === a.worktreeId) : undefined;
-    if (wt?.state === 'missing' && task.state === 'needs-human') {
-      const why = branchGone.has(wt.id) ? 'its worktree and branch have gone; retry it fresh' : 'its worktree has gone; recreate it from its branch, or retry';
-      this.put(this.patchTask(m, task.id, (t) => ({ ...t, stateReason: why })));
-    }
+    return false;
+  }
+
+  /** The rest of a mission's recovery, once its attempts are settled: what starts next, previews, planning. */
+  private async recoverRest(id: string): Promise<void> {
+    const m = this.need(id);
     // A planned mission stopped between one task finishing and the next starting: start it now.
     if (isPlanned(m) && m.state === 'running') await this.launchNext(id);
     if (m.planned && m.state === 'plan-review') this.schedulePreview(id);
@@ -2527,7 +2916,8 @@ export class TaskRunner implements Disposable {
     if (!task) throw new TaskError('That task is no longer in the mission.');
     // The one gate that holds whatever called this: a planned mission's work waits for Approve and start.
     if (m.planned && m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
-    const planned = isPlanned(m);
+    const shared = sharedTree(m);
+    const resolves = opts.mode === 'fresh' ? opts.resolves : undefined;
     const n = task.attemptIds.length + 1;
     const prevDecision = resumeOf ? m.decisions.find((d) => d.id === resumeOf.routingDecisionId) : undefined;
     // The policy as it is now, not as it was at the last attempt: a change
@@ -2574,18 +2964,26 @@ export class TaskRunner implements Disposable {
     const manager = await this.manager(loaded);
     let wt: WorktreeAssignment;
     let startCommit: string;
-    if (prevAttempt) {
-      const prev = m.worktrees.find((w) => w.id === prevAttempt.worktreeId);
+    const sameTree = prevAttempt ?? resolves?.inTree;
+    if (sameTree) {
+      const prev = m.worktrees.find((w) => w.id === sameTree.worktreeId);
       if (!prev || prev.state === 'missing' || prev.state === 'removed') throw new TaskError('The attempt’s worktree has gone; recreate it or retry fresh.');
       wt = prev;
       // Carrying on the same work on the same branch: measured from where the task's work began.
-      startCommit = prevAttempt.startCommit ?? prev.baseCommit;
+      startCommit = sameTree.startCommit ?? prev.baseCommit;
     } else {
       try {
-        if (planned) {
+        if (shared) {
           // One tree for the whole mission: each task starts from what the one before it left.
           wt = await this.missionTree(missionId, manager);
           startCommit = await manager.headOf(wt);
+        } else if (m.parallel) {
+          // A tree of its own, cut from the mission branch's head (§13.2): every integrated upstream is in it.
+          const mission = await this.missionTree(missionId, manager);
+          startCommit = await manager.headOf(mission);
+          m = this.need(missionId);
+          const plan = manager.plan({ id: this.id(), missionSlug: missionSlugOf(m), purpose: 'task', taskKey: task.key, taskId: task.id, attempt: n, baseCommit: startCommit });
+          wt = await manager.create(plan);
         } else {
           const plan = manager.plan({ id: this.id(), missionSlug: missionSlug(m), purpose: 'task', taskKey: task.key, taskId: task.id, attempt: n, baseCommit: m.base.commit });
           wt = await manager.create(plan);
@@ -2636,6 +3034,7 @@ export class TaskRunner implements Disposable {
       createdAt: now,
       ...(resumeOf ? { resumeOf: resumeOf.id, ...('auto' in opts && opts.auto ? { autoResumed: true } : {}) } : {}),
       ...(continues ? { continues: continues.id } : {}),
+      ...(resolves ? { resolvesConflict: { missionHead: resolves.missionHead, files: [...resolves.files] } } : {}),
       ...(escalation?.step !== undefined ? { escalation: { decisionId: escalation.id, action: escalation.action, step: escalation.step } } : {}),
     };
     m = { ...m, decisions: [...m.decisions, decision], attempts: [...m.attempts, attempt] };
@@ -2655,6 +3054,7 @@ export class TaskRunner implements Disposable {
       : continues
         ? (opts as { message: string }).message
         : attemptPrompt(task, { harness: route.harness, branch: wt.branch, mission: missionContext(m, task), ...carriedPrompt(mode) }) +
+          (resolves ? conflictPrompt(m, resolves.files) : '') +
           (feedback ? `\n\n## An earlier attempt\n${feedback}` : '');
     if (mode === 'reuse' && fromSid) {
       // Ended by us when its task was done; carried on now, so its end from here is not ours.
@@ -3261,7 +3661,7 @@ export class TaskRunner implements Disposable {
     );
     if (autoResume) {
       // After this step, in the same queue: never inside it.
-      void this.resume(missionId, { auto: true }).catch((e) => this.log(`task ${missionId}: automatic resume failed: ${String(e)}`));
+      void this.resume(missionId, { auto: true, taskId: task.id }).catch((e) => this.log(`task ${missionId}: automatic resume failed: ${String(e)}`));
       return;
     }
     if (launching) {
@@ -3491,7 +3891,7 @@ export class TaskRunner implements Disposable {
         await this.launch(missionId, { mode: 'continue', continues: prev, route, escalation: d, message });
       } else {
         await this.endSession(this.need(missionId), prev);
-        if (isPlanned(this.need(missionId))) {
+        if (sharedTree(this.need(missionId))) {
           await this.releaseTree(missionId, prev.id);
           await this.restartTree(missionId, task.id, prev);
         } else {
@@ -3890,6 +4290,11 @@ export class TaskRunner implements Disposable {
     if (isPlanned(m) && verdict.verdict === 'passed') {
       m = this.endAttempt(m, a.id, 'succeeded', { status: 'succeeded' }, `passed: ${verdict.summary}`, {}, { hold: true });
       this.put(m);
+      if (m.parallel) {
+        // Its own branch passed: now onto the mission branch, one merge at a time, verified there (#46).
+        await this.integrateTask(missionId, task.id, a.id, 'verification');
+        return;
+      }
       try {
         await this.markDone(missionId, task.id, 'verification', `passed its checks: ${verdict.summary}`);
       } catch (e) {
@@ -4404,7 +4809,20 @@ interface DecisionRouting {
 /** How `launch` starts an attempt. */
 type LaunchOptions =
   /** A new session: the first attempt, a fresh retry, or an escalation step that starts over. */
-  | { mode: 'fresh'; route: TaskRoute; taskId?: string; routing?: DecisionRouting; escalation?: EscalationDecision; feedback?: string }
+  | {
+      mode: 'fresh';
+      route: TaskRoute;
+      taskId?: string;
+      routing?: DecisionRouting;
+      escalation?: EscalationDecision;
+      feedback?: string;
+      /**
+       * A conflict-resolution attempt (#46): a new session in `inTree`'s
+       * worktree, where the core has merged the mission branch in and left
+       * the conflict for it.
+       */
+      resolves?: { inTree: ExecutionAttempt; missionHead: string; files: string[] };
+    }
   /** #4's Resume of an interrupted attempt's session. */
   | { mode: 'continue'; resumeOf: ExecutionAttempt; auto?: boolean }
   /** Escalation's "continue" (#41): the failed attempt's session gets `message` next, live or resumed. */
@@ -4515,6 +4933,11 @@ export function mergeCriteria(user: readonly string[], planner: readonly string[
   return out;
 }
 
+/** A planned mission whose tasks share the one mission worktree, in turn (§29 P8), rather than running in their own (#46). */
+export function sharedTree(m: Pick<Mission, 'planned' | 'parallel'>): boolean {
+  return isPlanned(m) && !m.parallel;
+}
+
 export function isPlanned(m: Pick<Mission, 'planned'>): boolean {
   return m.planned === true;
 }
@@ -4546,6 +4969,20 @@ function missionContext(m: Mission, task: Task): { title: string; position: numb
   const position = order.findIndex((t) => t.id === task.id) + 1;
   const before = order.slice(0, Math.max(0, position - 1)).filter((t) => t.state === 'done').map((t) => `${t.key}: ${t.title}`);
   return { title: m.title, position, of: m.tasks.length, before };
+}
+
+/** What a conflict-resolution attempt is told (#46, §13.3 step 3), after the task's own brief. */
+function conflictPrompt(m: Mission, files: readonly string[]): string {
+  const branch = m.integration !== 'none' ? m.integration.branch : 'the mission branch';
+  return [
+    '',
+    '',
+    '## Resolve a merge conflict',
+    `Your branch already holds this task's work, which passed its checks. Other tasks' work has since been merged into ${branch}, and merging your branch into it conflicted. Agent Wrangler has started merging ${branch} into your branch in this worktree and stopped at the conflict: the merge is in progress (\`MERGE_HEAD\` is set) and these files have conflict markers:`,
+    ...files.map((f) => `- ${f}`),
+    '',
+    'Resolve every conflict, leaving no conflict markers, so that both this task and the work already on the mission branch keep working. Do not abort the merge, rebase or reset: whatever you leave is staged and committed as the merge commit when you finish. Run the repository’s checks if you can.',
+  ].join('\n');
 }
 
 /** What a pull request says: the mission and what each task did. The user's own words, sent by their click. */

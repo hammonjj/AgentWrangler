@@ -66,7 +66,8 @@ export const taskMachine = new Machine<TaskState>({
     running: ['verifying', 'queued', 'needs-human'],
     verifying: ['integrating', 'done', 'queued', 'needs-human'],
     integrating: ['done', 'queued', 'needs-human'],
-    'needs-human': ['queued', 'done', 'failed'],
+    // `integrating`: the user accepted a result in a parallel mission, which is then merged (#46).
+    'needs-human': ['queued', 'done', 'failed', 'integrating'],
     // Only when an integrated upstream was rejected or reverted and the user confirmed a rerun.
     done: ['ready'],
   },
