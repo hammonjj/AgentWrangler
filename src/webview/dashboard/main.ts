@@ -18,6 +18,7 @@ import {
 } from '../../shared/columns';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
+import { sortSubagents, subagentText } from '../../shared/subagents';
 import { taskChips } from '../../shared/orchestration/taskView';
 import type { MissionsSnapshot } from '../../shared/orchestration/missionView';
 import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, type MissionIntent } from './missions';
@@ -61,6 +62,7 @@ type TableView = 'status' | 'project' | 'missions';
 
 interface WebviewState {
   collapsed?: string[];
+  expandedSubagents?: string[];
   tableView?: TableView;
   /** Hook-health kind whose banner the user hid. A different kind brings the banner back. */
   bannerDismissed?: string;
@@ -133,6 +135,7 @@ function saveColumns(next: ColumnPrefs): void {
 // Collapse state survives reloads via webview state; Archived starts collapsed.
 const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
+const expandedSubagents = new Set<string>(saved?.expandedSubagents ?? []);
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
 let tableView: TableView = saved?.tableView ?? 'status';
@@ -148,7 +151,7 @@ function sessionView(): 'status' | 'project' {
 }
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], bannerDismissed, project, tableView });
+  vscodeApi.setState({ collapsed: [...collapsed], expandedSubagents: [...expandedSubagents], bannerDismissed, project, tableView });
 }
 
 function esc(s: string): string {
@@ -671,6 +674,40 @@ function ageCell(s: SessionDTO): string {
   return `<td class="c-age" title="${esc(title)}" data-age-ts="${since}">${formatAge(now, since)}</td>`;
 }
 
+/** Check if subagent row is expanded. */
+function subagentExpanded(key: string): boolean {
+  return expandedSubagents.has(key);
+}
+
+/** Render a single subagent row in the subtable. */
+function subagentRowHtml(sa: import('../../shared/model').SubagentInfo): string {
+  const statusDot = `<span class="dot st-${sa.status === 'working' ? 'busy' : sa.status === 'done' ? 'done' : 'blocked'}" aria-hidden="true"></span>`;
+  const agentType = sa.agentType ? ` (${esc(sa.agentType)})` : '';
+  const statusWord = sa.status === 'working' ? 'working' : sa.status === 'done' ? 'done' : 'attention';
+  return `<tr class="subrow-item">
+  <td class="c-dot">${statusDot}</td>
+  <td class="c-label"><span class="label">${esc(sa.label)}${agentType}</span></td>
+  <td class="c-status"><span class="status">${statusWord}</span></td>
+</tr>`;
+}
+
+/** Render the subtable for subagents. */
+function subagentSubrow(s: SessionDTO, span: number): string {
+  if (!s.subagentList || s.subagentList.length === 0) return '';
+  const open = subagentExpanded(s.key);
+  if (!open) return '';
+  const sorted = sortSubagents(s.subagentList);
+  const rows = sorted.map((sa) => subagentRowHtml(sa)).join('');
+  return `<tr class="subrow" data-key="${esc(s.key)}">
+  <td class="c-sub" colspan="${span}">
+    <table class="subagent-table">
+      <thead><tr><th class="c-dot"></th><th class="c-label">Subagent</th><th class="c-status">Status</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </td>
+</tr>`;
+}
+
 function rowHtml(s: SessionDTO, span: number): string {
   // A nickname replaces the whole line, registry handle included: the point of
   // naming something is that the name is what you see. The title it came with
@@ -683,6 +720,13 @@ function rowHtml(s: SessionDTO, span: number): string {
   const kindChip =
     s.kind && s.kind !== 'interactive' ? `<span class="chip kind">${esc(capitalize(s.kind))}</span>` : '';
   const providerChip = `<span class="chip provider ${esc(s.provider)}" title="${esc(s.client ? `${capitalize(s.provider)} · ${s.client}` : capitalize(s.provider))}">${s.provider === 'codex' ? 'Codex' : 'Claude'}</span>`;
+
+  // Subagent disclosure chevron and aggregate text
+  const hasSubagents = s.subagentList && s.subagentList.length > 0;
+  const subagentChevron = hasSubagents
+    ? `<button class="schevron" data-subagent-toggle="${esc(s.key)}" aria-expanded="${subagentExpanded(s.key) ? 'true' : 'false'}" title="${subagentExpanded(s.key) ? 'Hide subagents' : 'Show subagents'}">${subagentExpanded(s.key) ? '▾' : '▸'}</button>`
+    : '';
+  const subagentSummary = hasSubagents ? subagentText({ working: s.subagentList!.filter(sa => sa.status === 'working').length, attention: s.subagentList!.filter(sa => sa.status === 'attention').length, done: s.subagentList!.filter(sa => sa.status === 'done').length }) : '';
 
   // Anything without a column of its own right now — switched off, or folded
   // away by a narrow dock — rides on the row's second line instead, so hiding a
@@ -698,6 +742,7 @@ function rowHtml(s: SessionDTO, span: number): string {
     shown.has('model') ? '' : esc(modelLabel(s.model) ?? ''),
     shown.has('usage') || !s.usage ? '' : `<span class="usage" title="${esc(usageTitle(s.usage))}">${esc(usageCellText(s.usage))}</span>`,
     shown.has('pr') ? '' : prHtml(s),
+    subagentSummary ? `<span class="subagents">${esc(subagentSummary)}</span>` : '',
   ]
     .filter(Boolean)
     .join('<span class="sep">·</span>');
@@ -707,14 +752,14 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title"><span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${rateLimitChip(s)}${statusChip(s)}</span></div>
+    <div class="title">${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${rateLimitChip(s)}${statusChip(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
     .map((c) => CELL[c.id](s))
     .join('')}
   <td class="c-act"><button class="dismiss" data-row-action="${dismissAction(s, sessionView())}" title="${esc(dismissTitle(s))}">${ICON_DISMISS}</button></td>
-</tr>${permissionRow(s, span)}`;
+</tr>${permissionRow(s, span)}${subagentSubrow(s, span)}`;
 }
 
 /**
@@ -1335,6 +1380,12 @@ function render(): void {
     return;
   }
 
+  // Clean up expanded subagents for sessions that are gone
+  const liveKeys = new Set(sessions.map((s) => s.key));
+  for (const key of expandedSubagents) {
+    if (!liveKeys.has(key)) expandedSubagents.delete(key);
+  }
+
   renderUsage();
   // Orchestration was turned off (or never on): there is no Missions view to be on.
   if (tableView === 'missions' && !missionsSnap) tableView = 'status';
@@ -1691,10 +1742,12 @@ app.addEventListener('click', (e) => {
   }
 
   const bannerBtn = target.closest('button[data-banner]') as HTMLElement | null;
+  const schevron = target.closest('button.schevron') as HTMLElement | null;
   const ptoggle = target.closest('button.ptoggle') as HTMLElement | null;
   const pbtn = target.closest('button.pbtn') as HTMLButtonElement | null;
   const qnav = target.closest<HTMLButtonElement>('button[data-qnav]');
   const permRow = target.closest('tr.permrow') as HTMLElement | null;
+  const subrow = target.closest('tr.subrow') as HTMLElement | null;
   const pr = target.closest('.pr') as HTMLElement | null;
   const row = target.closest('tr.row') as HTMLElement | null;
   const secRow = target.closest('tr.sec') as HTMLElement | null;
@@ -1707,6 +1760,23 @@ app.addEventListener('click', (e) => {
       saveState();
       render();
     }
+    return;
+  }
+  if (schevron && schevron.dataset.subagentToggle) {
+    const key = schevron.dataset.subagentToggle;
+    if (expandedSubagents.has(key)) {
+      expandedSubagents.delete(key);
+    } else {
+      expandedSubagents.add(key);
+    }
+    saveState();
+    render();
+    e.stopPropagation();
+    return;
+  }
+  // Clicks inside the subrow must not open the conversation
+  if (subrow) {
+    e.stopPropagation();
     return;
   }
   if (ptoggle && permRow) {
