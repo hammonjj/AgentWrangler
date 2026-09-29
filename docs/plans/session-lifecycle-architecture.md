@@ -585,9 +585,12 @@ guard, so:
    and a §7.4 migration.
 2. **What counts as an orphan:** an entry in `~/.claude/sessions/<pid>.json` whose `sessionId`
    matches, whose pid is alive **and** whose start time matches the entry's `procStart`, whose
-   parent is launchd (ppid 1), and which is not the `agentPid` of any live manifest. A matching
-   process with any other parent is a live owner (a terminal, another app), not an orphan: that
-   goes through the existing take-over path, with its confirmation, never a silent kill.
+   parent is launchd (ppid 1), which is not the `agentPid` of any live manifest, **and** (#62)
+   whose pid and current start time are the `agentPid` + `agentStartTime` of a dead host's
+   manifest for the same id. Any other matching process is a live owner (a terminal, another
+   app, a launchd-parented `claude` no dead host recorded, or one whose manifest is gone), not
+   an orphan: that goes through the existing take-over path, with its confirmation, never a
+   silent kill.
 3. **End it and wait:** SIGTERM, poll up to ~5 s, then SIGKILL; only then load history and
    resume. Until it has exited it may still be writing, and its tail is legitimate conversation.
 4. **Tolerate stale entries:** a `sessions/<pid>.json` whose pid is dead, or alive with a
@@ -1442,8 +1445,13 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
   `src/remote/discord/gateway.ts` (resume hook), `scripts/install-app.sh`, docs.
 - **Tests.** The §16 lifecycle suite.
 - **Manual.** The §16 manual rows, including sleep/wake, logout, and the gating acceptance test.
-- **Risks.** GC deleting a live manifest. The orphan rule ending a wanted session. The migration
-  killing a background shell (guarded).
+- **Risks.** GC deleting a live manifest. The orphan rule ending a wanted session — **resolved
+  (#62)**: a live `claude` on the id is an orphan (swept silently) only on a positive match of
+  its pid *and* current start time against the `agentPid` + `agentStartTime` recorded by the
+  manifest of a dead host for that session (and it must be launchd's child as well). A
+  launchd-parented `claude` that no dead host's manifest names, including when no manifest is
+  left at all, is an owner: it blocks a plain resume and goes through take-over's confirmation.
+  The migration killing a background shell (guarded).
 - **Completion.** Every automated §16 row is green, and the manual rows are recorded once in the
   merge notes.
 - **Rollback.** The default flip is its own commit and merge.
@@ -1477,7 +1485,17 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
     while the core is up, and before every resume: `RunnerService.resume` is the one way to
     resume a Claude id (take-over and Resume here, auto-resume, a migration), and a terminal
     resume sweeps too. An entry with no `procStart`, or one whose start time cannot be read, is
-    treated as an owner: never killed, and it blocks the resume.
+    treated as an owner: never killed, and it blocks the resume. Since #62 it ends only what a
+    dead host recorded: `HostSupervisor.lostAgents(id)` reads the manifests fresh and returns
+    the `agentPid` + `agentStartTime` of each dead host on the id (skipping manifests with no
+    recorded start time, and foreign ones); an entry is an orphan only when its pid and current
+    start time match one of those and its parent is launchd. Every other live, identity-proved,
+    unheld entry is an owner, whatever its parent — a shell's `claude … &`, a `nohup`, or an
+    agent whose manifest is gone (collected after 7 days, or never written) — so it goes
+    through take-over's confirmation instead of a silent kill. The lost manifest is on disk
+    when each sweep reads it: `collect` keeps a recordless dead host's manifest for 7 days from
+    its start, nothing removes one at runtime (`onHostLost`), and `forget` runs only after a
+    clear startup sweep.
   - **GC.** Besides manifests (with an exit record at once, without one once swept or after 7
     days) and runtimes: host logs 14 days after their host has no manifest, and tokens with no
     manifest after a day (a host that never came up). An answered `end` counts as delivery of
@@ -1510,9 +1528,9 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
     recordless host the machine has booted since is a restart (auto-resumable), not a crash; a
     Close or quit during a migration ends or lets go of the new host. Left for the soak/CP3:
     `AGENTWRANGLER_HOSTED` is inherited by everything a hosted agent runs (a nested `claude`
-    loses the file path; not a way in); the sweep's ppid-1 rule would also end a deliberately
-    headless `claude` on the same id (a lost manifest's `agentPid` could prove ownership); an
-    unreachable host during an answer reads as "no longer waiting"; #18's power block counts a
+    loses the file path; not a way in); ~~the sweep's ppid-1 rule would also end a deliberately
+    headless `claude` on the same id~~ (resolved in #62: a lost manifest's `agentPid` +
+    `agentStartTime` must match); an unreachable host during an answer reads as "no longer waiting"; #18's power block counts a
     parked permission ask, so one left overnight holds off idle sleep.
   - **Not done here:** the §16 manual rows and the gating acceptance test (James's, during the
     soak); M3 (logout); CP3; the default flip and removing the setting; staggering the replay of
@@ -1823,7 +1841,7 @@ are already written into the sections named.
 | Question | Evidence | Verdict |
 |---|---|---|
 | Thin host feasible? (uuid dedupe, U2) | S1: SDK `assistant`/`user` uuids are the transcript uuids; a host-set `uuid` is kept | **Yes.** Dedupe `assistant`/`user` only; the rest is ring-only by `seq`; never assume "yielded ⇒ on disk" (§5.1, §11.5) |
-| Can a new `Query` attach to a live CLI? | S1: no; `resume` succeeds and silently forks the transcript | The `Query` lives in the host (§11.3 stands). The **orphan sweep is the only double-owner guard**: before every resume or adopt, orphan = ppid 1 + `procStart` match + no live manifest (§7.3) |
+| Can a new `Query` attach to a live CLI? | S1: no; `resume` succeeds and silently forks the transcript | The `Query` lives in the host (§11.3 stands). The **orphan sweep is the only double-owner guard**: before every resume or adopt, orphan = ppid 1 + `procStart` match + no live manifest + a dead host's manifest recording that pid and start time (§7.3, #62) |
 | How to stop an agent | S1: EOF is ignored mid-turn; SIGTERM drops the in-flight message; SIGTERM kills bg shells at once | **Interrupt → grace → stdin close → SIGTERM → SIGKILL** for `end`; SIGTERM `claude` at once on host signals (§7.1). Resolves a contradiction between §7.1, §11.6 and S1 |
 | Detached host survives quit, crash, install? (U3) | S2: all unattended scenarios, nine core deaths, two builds | **Yes.** Cloned runtime kept, for name matching, lazy loads and identity (§11.7) |
 | Signing, TCC, safeStorage (U5) | S2 measured ad-hoc; #56 has since moved builds to a stable certificate | **Re-sign the clone** with the stable certificate by default, and re-run S2 scenario 7 once on it in Stage 3. Host tokens stay in 0600 files (§10, §11.7) |

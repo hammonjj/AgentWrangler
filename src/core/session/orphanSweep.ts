@@ -9,12 +9,19 @@
  *   with a start time other than the file's `procStart` (the pid was reused).
  *   A SIGKILLed or OOM'd CLI cannot remove its own file. Ignored.
  * - **held**: the agent of a live session host. That host owns it.
- * - **orphan**: alive, the same process, parent launchd (ppid 1), and no live
- *   host's agent. Its host died without ending it (SIGKILL, OOM, a crash). It
- *   is ended here, and waited for: until it has exited it may still be writing,
- *   and that tail is legitimate conversation the resume must read.
- * - **owner**: alive with any other parent — a terminal, an editor, another
- *   app. Never killed here; that is take-over, with its confirmation.
+ * - **orphan**: alive, the same process, parent launchd (ppid 1), and proved to
+ *   be the agent of a *dead* session host for this id: its pid and its current
+ *   start time are the `agentPid` + `agentStartTime` that host's manifest
+ *   recorded (#62). Its host died without ending it (SIGKILL, OOM, a crash).
+ *   It is ended here, silently, and waited for: until it has exited it may
+ *   still be writing, and that tail is legitimate conversation the resume must
+ *   read.
+ * - **owner**: every other live, identity-proved process on the id — a
+ *   terminal, an editor, another app, and also a launchd-parented `claude`
+ *   that no dead host's manifest names (`claude … &` from a shell that has
+ *   since exited, a `nohup`, a manifest already collected or never written).
+ *   Parentage alone never proves Agent Wrangler started it. Never killed here;
+ *   that is take-over, with its confirmation.
  *
  * `clear` is the one answer callers need: nothing but stale entries remain, so
  * a resume will be the only process on the id.
@@ -43,9 +50,22 @@ export interface SweepDeps extends SweepProbe {
   entries(): Promise<ClaudeProcessEntry[]>;
   /** The agent pids of every live session host (known and foreign manifests). */
   heldAgentPids(): Set<number>;
+  /**
+   * The agents recorded by manifests of session hosts for `sessionId` that are
+   * no longer alive, each with the start time it was recorded with. The only
+   * processes the sweep may end: anything else on the id is an owner.
+   */
+  lostAgents(sessionId: string): LostAgent[];
   kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): void;
   delay(ms: number): Promise<void>;
   log(msg: string): void;
+}
+
+/** A dead host's agent, as its manifest recorded it. */
+export interface LostAgent {
+  pid: number;
+  /** The manifest's `agentStartTime`, read the same way as `procStart`. */
+  startTime: string;
 }
 
 export type EntryClass = 'stale' | 'held' | 'orphan' | 'owner';
@@ -74,22 +94,24 @@ export function classifyEntry(
   sessionId: string,
   probe: SweepProbe,
   heldAgentPids: ReadonlySet<number>,
+  lostAgents: readonly LostAgent[],
 ): EntryClass | undefined {
   if (entry.sessionId.toLowerCase() !== sessionId.toLowerCase()) return undefined;
   if (!probe.isAlive(entry.pid)) return 'stale';
-  if (entry.procStart !== undefined) {
-    const now = probe.startTimeOf(entry.pid);
-    // A different process has this pid now. (Unknown is not "different": it
-    // might be the CLI, so it falls through and is never killed on a guess.)
-    if (now !== undefined && now !== entry.procStart) return 'stale';
-    if (now === undefined) return 'owner';
-  } else {
-    // An older CLI that records no start time: identity cannot be proved, so
-    // never kill it, and never resume over it either.
-    return 'owner';
-  }
+  // An older CLI that records no start time: identity cannot be proved, so
+  // never kill it, and never resume over it either.
+  if (entry.procStart === undefined) return 'owner';
+  const now = probe.startTimeOf(entry.pid);
+  // Unknown is not "different": it might be the CLI, so it is never killed on a guess.
+  if (now === undefined) return 'owner';
+  // A different process has this pid now.
+  if (now !== entry.procStart) return 'stale';
   if (heldAgentPids.has(entry.pid)) return 'held';
-  return probe.parentOf(entry.pid) === 1 ? 'orphan' : 'owner';
+  // Only a positive match on a dead host's recorded agent (pid and current
+  // start time) makes an orphan (#62). launchd as the parent is required as
+  // well, a second check: a host's agent is reparented there when it dies.
+  const recorded = lostAgents.some((a) => a.pid === entry.pid && a.startTime === now);
+  return recorded && probe.parentOf(entry.pid) === 1 ? 'orphan' : 'owner';
 }
 
 /** End every orphan on `sessionId`, wait for each to exit, and say whether a resume is now safe. */
@@ -103,9 +125,10 @@ export async function sweepOrphans(sessionId: string, deps: SweepDeps): Promise<
     entries = [];
   }
   const held = deps.heldAgentPids();
+  const lost = deps.lostAgents(sessionId);
   const orphans: ClaudeProcessEntry[] = [];
   for (const entry of entries) {
-    const kind = classifyEntry(entry, sessionId, deps, held);
+    const kind = classifyEntry(entry, sessionId, deps, held, lost);
     if (kind === 'orphan') orphans.push(entry);
     else if (kind === 'owner') result.owners.push(entry.pid);
     else if (kind === 'held') result.held.push(entry.pid);
