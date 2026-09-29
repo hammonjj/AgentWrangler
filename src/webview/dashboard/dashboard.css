@@ -72,6 +72,13 @@ body {
   color: var(--vscode-foreground);
   border-bottom-color: var(--vscode-focusBorder, #007fd4);
 }
+/* Four tabs (#49) do not fit 300 px at full padding: tighten, then wrap rather than overflow. */
+#app.narrow .tabletabs {
+  flex-wrap: wrap;
+}
+#app.narrow .tabletabs button {
+  padding: 4px 6px 6px;
+}
 
 /* ---- launcher ---- */
 
@@ -2275,5 +2282,10 @@ body:has(#app.narrow) #usage {
   grid-template-columns: minmax(0, 1fr);
 }
 #app.narrow .analytics .an-splitrow {
-  grid-template-columns: 4em minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 10px;
+}
+#app.narrow .analytics .an-splitlabel {
+  flex-basis: 100%;
 }
