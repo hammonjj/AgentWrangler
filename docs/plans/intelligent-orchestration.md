@@ -2733,6 +2733,34 @@ that replanning by the user (§11.4) is the bottleneck.
   writers, or fleet-level queries. Routing analytics (Phase 10) is the first real fleet-level
   query. The Phase 10 issue includes the decision: keep scanning JSONL (probably fine for years at
   this volume) or adopt `node:sqlite` if it is stable in Electron's Node by then.
+- **Decided (#49, 2026-09-29): keep JSONL.** Measured with `npm run bench:analytics:electron`
+  (synthetic telemetry only, generated into a temp directory and deleted; 12 months of files,
+  ~19 records a task including 8 turns per attempt and 6 turns of task-less sessions). Machine:
+  Apple M5 Pro, 24 GB, macOS 26.5. Runtime: Electron 44.4.3's Node 24.21.0, SQLite 3.53.4.
+  "Realistic" is a year of heavy orchestrated use, 2,000 tasks; today's log grows about 0.3 MB a
+  month, so it is several times the present rate.
+
+  | Volume | Tasks | JSONL | Records indexed | Index load (JSONL) | Heap: index / + dataset and queries | All metrics + calibration + split | One filtered metric set | SQLite import (one-way) | SQLite DB | SQLite load + parse |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | realistic | 2,000 | 18 MB, 38k lines | 7,020 | 92 ms | 3 / 4 MB | 12 ms | 2 ms | 21 ms | 4.9 MB | 8 ms |
+  | 10x | 20,000 | 181 MB, 377k lines | 70,056 | 913 ms | 24 / 35 MB | 102 ms | 12 ms | 228 ms | 49 MB | 92 ms |
+  | 100x | 200,000 | 1.8 GB, 3.8M lines | 700,437 | 9.8 s | 240 / 348 MB | 1.7 s | 262 ms | 2.3 s | 503 MB | 2.0 s |
+
+  The index skips `turn` records (an attempt record already carries its turns' sums), which cut
+  the 100x heap from ~950 MB to ~350 MB; the load time left is reading and splitting file text
+  that is mostly turns. The index loads in the background at start and is then fed by
+  `appendTelemetry`, so the load is not on the window's critical path. At realistic and 10x volume
+  JSONL is fine and SQLite buys nothing a user would notice; only at 100x is the scan unusable
+  (10 s) where SQLite loads the same records in 2 s. `node:sqlite` loads without a flag or warning
+  in Electron 44's Node 24, but Node 24 documents it as stability 1.1 (active development), not
+  stable. So no import now, and no follow-up issue: SQLite is not the winner at any volume this
+  app is likely to see.
+  **Revisit when** the log crosses ~150 MB (≈10x; the app logs `telemetry: analytics index
+  loaded N records in X ms` at start, so a load over 1 s is the signal), when #52's adaptive
+  routing needs cohort queries the in-memory dataset cannot answer, or when `node:sqlite` is
+  marked stable in the Node Electron ships. The cheaper first step at that point is to write
+  turns to files of their own so the index never reads them; then `node:sqlite` with a one-way
+  import of the JSONL history.
 
 ### 23.2 Write-ahead discipline
 
@@ -3694,6 +3722,9 @@ integration proving accepted handoffs preserve origin, omit harness pins and wai
 - **Architectural changes**: an analytics view (by kind, tier, effort, model, repository); the
   calibration report; the JSONL vs SQLite decision.
 - **Implementation**: #49.
+- **Storage decision (#49, 2026-09-29)**: keep JSONL, no SQLite import. Realistic volume (2,000
+  tasks, 18 MB) loads in 92 ms with a 4 MB heap; 10x in 0.9 s; 100x in 9.8 s, where `node:sqlite`
+  would load in 2.0 s. Measurements, machine, runtime and the revisit trigger are in §23.1.
 - **Tests**: aggregations over fixture telemetry; the "not reported by <harness>" rendering.
 - **Observability**: this is it.
 - **Migration**: if SQLite is adopted, a one-way import of the JSONL history.

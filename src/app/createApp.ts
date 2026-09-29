@@ -624,7 +624,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // Routing analytics (§17, #49): every record the analytics view reads, read-only.
   const analyticsIndex = new AnalyticsIndex();
   host.subscribe(analyticsIndex);
-  void analyticsIndex.load(telemetryDir).catch((err) => log(`telemetry: could not read analytics records: ${String(err)}`));
+  {
+    // The load time is the storage decision's revisit signal (plan §23.1): over a second, look again.
+    const started = Date.now();
+    void analyticsIndex
+      .load(telemetryDir)
+      .then(() => log(`telemetry: analytics index loaded ${analyticsIndex.size} records in ${Date.now() - started} ms`))
+      .catch((err) => log(`telemetry: could not read analytics records: ${String(err)}`));
+  }
   const autoRouting = (): { gate: GateResult; report: ComparisonReport } => {
     const input = { records: routingEvidence.records(), tiers: models.catalog.tiers.map((t) => t.name) };
     return {

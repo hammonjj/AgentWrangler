@@ -319,7 +319,7 @@ describe('not reported', () => {
 });
 
 describe('the read-only index', () => {
-  it('loads the analytics records from the monthly JSONL files, skipping turns without an attempt and torn lines', async () => {
+  it('loads the analytics records from the monthly JSONL files, skipping turns and torn lines', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-analytics-'));
     try {
       const lines = fleet().map((r) => JSON.stringify(r));
@@ -332,10 +332,11 @@ describe('the read-only index', () => {
       let fired = 0;
       index.onDidChange(() => fired++);
       await index.load(dir);
-      expect(index.size).toBe(lines.length + 1);
-      expect(index.records().some((r) => r.id === 'turn:none')).toBe(false);
+      // Attempts carry their turns' sums: the index holds no turns at all.
+      expect(index.size).toBe(lines.length);
+      expect(index.records().some((r) => r.type === 'turn')).toBe(false);
       index.add(localCall('late'));
-      expect(index.size).toBe(lines.length + 2);
+      expect(index.size).toBe(lines.length + 1);
       expect(fired).toBe(2);
 
       const evidence = new RoutingEvidenceIndex();

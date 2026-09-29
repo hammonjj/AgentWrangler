@@ -91,9 +91,20 @@ export class TelemetryIndex<T extends TelemetryRecord> implements Disposable {
   }
 }
 
-/** Everything the analytics view reads (§17, #49). */
+/**
+ * Everything the analytics view reads (§17, #49), except turns: an attempt
+ * record already carries the sums of its turns (usage, cost, permission
+ * asks), and turns are most of the log — at #49's 100x volume, four in five
+ * lines. Skipping them is what keeps the index small (plan §23.1).
+ */
+const INDEXED_TYPES = ANALYTICS_RECORD_TYPES.filter((t) => t !== 'turn');
+
+function isIndexed(r: TelemetryRecord): r is AnalyticsRecord {
+  return r.type !== 'turn' && isAnalyticsRecord(r);
+}
+
 export class AnalyticsIndex extends TelemetryIndex<AnalyticsRecord> {
   constructor() {
-    super(isAnalyticsRecord, ANALYTICS_RECORD_TYPES);
+    super(isIndexed, INDEXED_TYPES);
   }
 }
