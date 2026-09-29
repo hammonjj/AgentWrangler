@@ -40,7 +40,12 @@ import { PreferencesWindow } from './preferencesWindow';
 import { BUILD_ID, createSessionHostRuntime } from './sessionHostRuntime';
 import { createRemoteDaemonAgent } from './remoteDaemonAgent';
 import { MenuBar, menuBarSessions } from './tray';
+import { toolPath } from './toolPath';
 import { WorkbenchWindow } from './workbenchWindow';
+
+// Git invokes git-lfs through PATH while checking out task worktrees. Finder's
+// environment lacks Homebrew's bin directory even when git-lfs is installed.
+process.env.PATH = toolPath(process.env.PATH);
 
 // Before anything reads `getPath('userData')` — which is derived from it — and
 // before the menu is built, since macOS takes the first menu's title from here.
