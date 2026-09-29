@@ -577,7 +577,7 @@ describe('TaskRunner', () => {
       await r.runner.startProposed(mission.id);
       const m = r.runner.get(mission.id)!;
       const d = m.decisions[0];
-      expect(d).toMatchObject({ mode: 'assisted', decidedBy: 'router', agreement: 'accepted', overrides: [], policyVersion: 'rtr-1' });
+      expect(d).toMatchObject({ mode: 'assisted', decidedBy: 'router', agreement: 'accepted', overrides: [], policyVersion: 'rtr-2' });
       expect(d.resolution.target).toMatchObject({ model: 'sonnet', tier: 'standard' });
       expect(d.reasons.map((x) => x.ruleId)).toEqual(expect.arrayContaining(['tier.band', 'effort.complexity', 'assisted.accepted']));
       expect(r.registry.get(attemptOf(m)!.assignment.sessionIds[0])?.launch).toMatchObject({ model: 'sonnet', effort: 'medium', permissionMode: 'auto' });
@@ -740,7 +740,7 @@ describe('TaskRunner', () => {
       const m = r.runner.get(mission.id)!;
       expect(m.policy.mode).toBe('auto');
       const d = m.decisions[0];
-      expect(d).toMatchObject({ mode: 'auto', decidedBy: 'router', agreement: 'matched', overrides: [], policyVersion: 'rtr-1' });
+      expect(d).toMatchObject({ mode: 'auto', decidedBy: 'router', agreement: 'matched', overrides: [], policyVersion: 'rtr-2' });
       expect(d.reasons.map((x) => x.ruleId)).toEqual(expect.arrayContaining(['tier.band', 'effort.complexity', 'auto.routed']));
       expect(d.reasons.map((x) => x.ruleId)).not.toContain('assisted.accepted');
       // The router's choice pins nothing, so escalation may still move it within the caps.

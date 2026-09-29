@@ -11,7 +11,7 @@
 import type { CorpusStatus } from '../../shared/orchestration/autoRouting';
 
 export const CORPUS_STATUS: CorpusStatus = {
-  routerVersion: 'rtr-1',
+  routerVersion: 'rtr-2',
   assessorVersion: 'asm-2',
   cards: 31,
   failing: 0,

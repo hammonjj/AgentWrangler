@@ -935,7 +935,14 @@ assessment at `confidence: low`, which routes conservatively. Assessment never b
 - **Verifiability is `configured` first.** A task whose plan names commands is judged on those
   (`strong` needs a behavioural command plus another); a task with no plan of its own is judged
   one band lower on what the repository has, because nothing has said those commands cover this
-  work. `none` when the policy configures nothing at all.
+  work. `none` when the policy configures nothing at all. A command is behavioural by its name
+  (`test`, `unit`, `e2e`, …) or by what it runs (`npm test`, `vitest`, `pytest`, …); `typecheck`,
+  `lint` and `build` are not. Before `unit` was recognised, a repository whose tests were named
+  `unit` was capped at `weak` on every task.
+- **The model's evidence has no length limit in the schema.** A 7B local model routinely wrote
+  more than 200 characters, failed validation twice, and the whole assessment fell back to rules
+  alone (complexity `involved`, low confidence, so `expert`). The stored evidence is cut to 200
+  instead.
 - **What a model may not do.** It cannot lower a rule's risk, cannot raise verifiability above
   what is configured, cannot name a tool need outside `edit · shell · network · vision · browser`
   (`exclusive:<id>` comes from repo policy alone), and is never sent a model name, a tier or an
@@ -992,7 +999,10 @@ These are **starting values**, justified by §9.2, to be calibrated against the 
 **Tier.**
 
 1. `score = complexity (0–3)`; `+1` if `breadth ≥ subsystem`; `+1` if `risk ≥ high`.
-2. `score 0 → basic`, `1–2 → standard`, `≥ 3 → expert`.
+2. `score 0 → basic`, `1–3 → standard`, `≥ 4 → expert`; `complexity = hard` is always
+   `expert`. (`rtr-1` sent `score 3` to `expert`. That score is `involved` work in one subsystem,
+   which describes most real features and bugfixes, so the shadow record showed nearly every task
+   going to `expert`. `rtr-2` keeps `expert` for work that is also wide and high-risk, or hard.)
 3. Floors: `risk = critical → expert`; `kind ∈ {architecture, plan}` → `expert` (a bad plan
    multiplies every downstream cost); `kind = migration → standard`. Kind ceilings: `kind ∈ {docs, chore}` → at most `standard`
    unless `risk ≥ high`. Floors and ceilings by kind are Maestro's "workload roles" idea (§3.3).
@@ -1074,7 +1084,7 @@ Rendered in the task detail (§18) and as the tooltip of the route chip.
 
 ### 9.6 As built (#38, 2026-09-26)
 
-- **Where it lives.** `src/orchestration/policy/router.ts` (pure; `ROUTER_VERSION = 'rtr-1'`,
+- **Where it lives.** `src/orchestration/policy/router.ts` (pure; `ROUTER_VERSION = 'rtr-2'` since 2026-09-29's band change,
   recorded as a decision's `policyVersion`): `TIER_RULES` and `EFFORT_RULES` are arrays of
   `{id, apply, text, inputs}` evaluated in §9.3's order, and every rule that changes the result
   adds a `RoutingReason` with its id and the levels it read. `resolver.ts` (pure) takes a
