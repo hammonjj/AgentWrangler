@@ -30,6 +30,8 @@ import type { SimCompletionResponse, SimScenario } from '../../src/shared/orches
 import type { PlanRecord, TelemetryRecord } from '../../src/shared/orchestration/telemetry';
 import { isOrchestrationOrigin, type Mission } from '../../src/shared/orchestration/types';
 import { catalog, snapshot } from './routingFixtures';
+import { DelegationSuggestion } from '../../src/ui/conversation/delegationSuggestion';
+import type { AgentSession } from '../../src/shared/model';
 
 const savedEnv: Record<string, string | undefined> = {};
 let gitConfig: string;
@@ -192,6 +194,41 @@ const settled = (r: Rig, id: string) => () => {
 };
 
 describe('delegate: the planner decides single', () => {
+  it.each(['claude', 'codex'] as const)('accepted %s conversation suggestion enters the planner without pinning a harness', async (provider) => {
+    const r = rig([{ output: output([planned('t1')]) }]);
+    const suggestion = new DelegationSuggestion(() => {});
+    const policies = new RepoPolicyStore(path.join(dataDir, 'repos'));
+    const objective = 'Implement a bounded retry policy for the importer and add regression tests.\nAcceptance criteria:\n- Retries stop after two failures\n- Tests pass';
+    let delegated: Mission | undefined;
+    const pending = suggestion.intercept(objective, { provider, sessionId: 'synthetic-origin', cwd: repo } as AgentSession, {
+      context: () => {
+        const loaded = policies.forFolder(repo)!;
+        return { repoRoot: loaded.repo.primaryRoot, policyVersion: loaded.version, verificationCommands: Object.keys(loaded.policy.verification.commands) };
+      },
+      delegate: async (req) => { delegated = await r.runner.delegate(req); },
+      record: (record) => { r.telemetry.push(record); },
+    }, new AbortController().signal);
+    expect(suggestion.offer).toBeDefined();
+    expect(r.runner.list()).toEqual([]);
+    expect(r.planner.calls).toEqual([]);
+    expect(r.harness.launches).toEqual([]);
+    suggestion.decide(suggestion.offer!.id, 'accepted');
+    expect(await pending).toBe(true);
+    await until(settled(r, delegated!.id));
+    const mission = r.runner.get(delegated!.id)!;
+    expect(mission.objective).toBe(objective);
+    expect(mission.repoRoot).toBe(repo);
+    expect(mission.origin).toEqual({ provider, sessionId: 'synthetic-origin' });
+    expect(mission.policy.preferences?.harness).toBeUndefined();
+    expect(r.planner.calls[0].prompt).toContain('Retries stop after two failures');
+    expect(isOpenProposal(mission)).toBe(true);
+    expect(mission.attempts).toEqual([]);
+    expect(mission.worktrees).toEqual([]);
+    expect(r.harness.launches).toEqual([]);
+    await r.runner.startProposed(mission.id);
+    expect(r.harness.launches).toHaveLength(1);
+  });
+
   it('becomes the one-task proposal with an assisted route, on the delegating conversation’s card; nothing runs until it is started', async () => {
     const r = rig([{ output: output([planned('t1', { acceptanceCriteria: ['the synthetic check passes', 'a.ts exports a'] })]) }]);
     const d = await r.runner.delegate({ ...DELEGATION, folder: repo });

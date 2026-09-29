@@ -1,3 +1,4 @@
+import { renderDelegationOffer } from '../common/delegationOffer';
 import './conversation.css';
 import { fileUriToPath, fileUrisToPaths } from '../../shared/attachments';
 import type {
@@ -90,7 +91,7 @@ app.innerHTML = `
 <div id="taskStrip" hidden></div>
 <div id="banner" hidden></div>
 <form id="findbar"><input id="find" type="search" placeholder="Find in conversation" aria-label="Find in conversation"><button>Find</button><button type="button" id="clearfind">Clear</button></form>
-<div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div><div id="proposals" hidden></div></div>
+<div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div><div id="convDelegationOffer" hidden></div><div id="proposals" hidden></div></div>
 <button id="jump" hidden></button>
 <button id="asknav" class="asknav" hidden></button>
 <div id="composer">
@@ -2654,6 +2655,10 @@ vscodeApi.onMessage((body) => {
       }
       break;
     }
+    case 'delegationOffer':
+      renderDelegationOffer(document.getElementById('convDelegationOffer')!, m.offer, (offerId, outcome) => post({ type: 'delegationOfferDecision', offerId, outcome }));
+      if (m.offer) scrollToBottom();
+      break;
     case 'sendResult':
       if (pendingSend?.id !== m.requestId) break;
       const sentSession = pendingSend.session;
@@ -2673,6 +2678,7 @@ vscodeApi.onMessage((body) => {
       }
       break;
     case 'init':
+      renderDelegationOffer(document.getElementById('convDelegationOffer')!, undefined, () => {});
       if (activeSession !== m.session.key) {
         if (activeSession) drafts.set(activeSession, { text: msgEl.value, images: [...attachments] });
         if (pendingSend) post({ type: 'cancelSend' });

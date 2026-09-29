@@ -679,13 +679,25 @@ and card (headed *Task proposal*), without the planner. A proposal with no known
 (either command from your own terminal) is reached from the notification, the launcher's
 **Tasks** menu, or the Missions view instead. The Missions view's *New mission* stays as the
 advanced way to write or plan a mission yourself. Both need `"orchestration.enabled": true`.
-Ordinary Claude Code and Codex conversations started by Agent Wrangler receive one shared
-instruction to offer delegation for substantial separable work. The agent asks for an explicit
-yes before calling `aw delegate --folder <dir>` (and `--criteria` when useful). Small tasks stay
-in the conversation. The command carries no harness preference unless `--claude` or `--codex`
-is supplied; routing chooses from the qualified models. Attempt, planner, reviewer and
-qualification sessions do not receive this instruction. An older optional Claude Code skill
-is in `docs/skills/agentwrangler-task/SKILL.md`.
+**Conversation suggestions (#84).** Before sending an ordinary message to Claude or Codex,
+the conversation pane applies the same deterministic rules, using the repository's verification
+policy. Bounded implementation work with independent checks and background value gets a short
+**Delegate this work?** card. Expand **Review the handoff** to see the full objective, criteria,
+and repository. **Delegate** enters the existing planner; nothing runs until the resulting
+proposal or plan is approved. **Keep working here** or **Dismiss suggestion** sends the original
+message to the conversation. Cancelling the send, switching conversations, or closing the pane
+abandons the offer without sending it; the composer keeps the draft when the pane stays open.
+
+Discussion, explanation, review, small interactive edits, unclear/context-dependent requests,
+requests with images, non-git folders, and orchestration sessions do not get suggestions.
+The conservative rules can miss work worth delegating: explicit “delegate this”, “run this as
+a task”, `aw delegate`, and `aw task` keep their existing paths. Both providers receive shared
+guidance to honor those shortcuts and avoid repeating the app's suggestion. The handoff carries
+no harness preference from the conversation; explicit CLI `--claude` or `--codex` still pins one.
+Local telemetry records accepted, declined, or ignored offers (including cancelled sends),
+provider, rule/policy version, and wait duration, never prompt content or repository paths.
+It respects `telemetry.enabled`. An older optional Claude Code skill is in
+`docs/skills/agentwrangler-task/SKILL.md`.
 
 - **It is a client of the app, never a supervisor.** It talks only to the app's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new at every launch). It never connects to session hosts, and every command goes the same way as the equivalent click. The app shows a short notice when `aw` sends or stops something.
 - **With the app quit**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the app starts) and what the app last recorded. Everything else says the app is not running.

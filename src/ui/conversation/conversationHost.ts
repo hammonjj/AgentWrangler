@@ -6,6 +6,7 @@
  * The shell (a reusable panel, or a pinned one) owns only a lifetime — the same
  * split the dashboard uses between `DashboardHost` and its two shells.
  */
+import { DelegationSuggestion, type ConversationDelegation } from './delegationSuggestion';
 import * as fs from 'node:fs/promises';
 import { archivePage, archivedTool, subagentPath } from '../../claude/conversationArchive';
 import { transcriptPathFor } from '../../claude/transcriptHistory';
@@ -65,6 +66,7 @@ export interface ConversationHostUi {
  * the other side of this interface.
  */
 export interface TaskPaneSource {
+  conversationDelegation?: ConversationDelegation;
   viewFor(sessionKey: string): TaskView | undefined;
   /** Run one of the strip's buttons. Rejects with a message the user should read. */
   /** `taskId`: the task the strip is about, in a mission of several (#43). */
@@ -109,6 +111,7 @@ export class ConversationHost {
   private boundKeys = new Set<string>();
   private ready = false;
   private pendingSend?: AbortController;
+  private readonly suggestion = new DelegationSuggestion((offer) => this.post({ type: 'delegationOffer', offer }));
   private archiveText = new Map<string, string>();
   private subagentFiles = new Map<string, string>();
   /** Capability computation is async and can overlap; only the newest may land. */
@@ -238,7 +241,7 @@ export class ConversationHost {
   // ---- internals ----
 
   private bind(binding: Binding, session: AgentSession): void {
-    if (this.session?.sessionId !== session.sessionId) this.pendingSend?.abort();
+    if (this.session?.sessionId !== session.sessionId || this.session?.provider !== session.provider) this.pendingSend?.abort();
     this.archiveText.clear();
     this.subagentFiles.clear();
     this.binding = binding;
@@ -282,6 +285,7 @@ export class ConversationHost {
     this.source = source;
     // `/clear` replaces the conversation in the same process: a new id, no blocks.
     if (live) this.sourceSubs.push(live.onReset(() => {
+      this.pendingSend?.abort();
       this.binding = { kind: 'live', handle: live };
       this.session = liveSessionRow(live, this.store);
       this.boundKeys.add(this.session.key);
@@ -313,6 +317,7 @@ export class ConversationHost {
       proposals: this.proposals(),
       delegations: this.delegations(),
     });
+    this.post({ type: 'delegationOffer', offer: this.suggestion.offer });
   }
 
   private onStoreUpdate(): void {
@@ -415,6 +420,9 @@ export class ConversationHost {
         this.ready = true;
         await this.sendInit();
         return;
+      case 'delegationOfferDecision':
+        this.suggestion.decide(m.offerId, m.outcome);
+        return;
       case 'cancelSend':
         this.pendingSend?.abort();
         return;
@@ -430,10 +438,15 @@ export class ConversationHost {
         const controller = new AbortController();
         this.pendingSend = controller;
         try {
-          if (source?.send) await source.send(m.text, m.images);
-          else if (key) await this.actions.adoptAndSend(key, m.text, m.images, controller.signal);
-          else throw new Error('No conversation selected.');
-          this.post({ type: 'sendResult', requestId: m.requestId ?? '', adopted: source?.kind === 'transcript' });
+          const session = this.session;
+          const delegated = session && !m.images?.length && await this.suggestion.intercept(m.text, session, this.tasks?.conversationDelegation, controller.signal);
+          if (!delegated && controller.signal.aborted) throw new Error('Send cancelled; your draft was kept.');
+          if (!delegated) {
+            if (source?.send) await source.send(m.text, m.images);
+            else if (key) await this.actions.adoptAndSend(key, m.text, m.images, controller.signal);
+            else throw new Error('No conversation selected.');
+          }
+          this.post({ type: 'sendResult', requestId: m.requestId ?? '', adopted: !delegated && source?.kind === 'transcript' });
         } catch (error) {
           this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: error instanceof Error ? error.message : String(error) });
         } finally { this.pendingSend = undefined; }
