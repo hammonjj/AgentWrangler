@@ -52,7 +52,7 @@ function running(): Mission {
     attempts: [
       a('a1', 't1', { state: 'failed', endedAt: T0 + 60_000, verification: failed, usage: { costUsd: 0.1, costBasis: 'harness-estimate', turns: 1, inputTokens: 100, outputTokens: 50 } }),
       a('a2', 't1', { n: 2, state: 'succeeded', launchedAt: T0 + 60_000, endedAt: T0 + 120_000, verification: passed, git: { baseCommit: 'c1', headCommit: 'c2', commits: 2, filesChanged: 3, insertions: 10, deletions: 2 }, usage: { costUsd: 0.2, costBasis: 'harness-estimate', turns: 2, inputTokens: 200 } }),
-      a('a3', 't2', { state: 'running', launchedAt: T0 + 120_000, assignment: { mode: 'fresh', sessionIds: ['s-3'], harness: 'claude-code' } }),
+      a('a3', 't2', { state: 'running', launchedAt: T0 + 120_000, assignment: { mode: 'cold', sessionIds: ['s-3'], harness: 'claude-code' } }),
     ],
     worktrees: [{ id: 'w1', purpose: 'integration', path: '/Users/test/proj.aw/m-abc123/_integration', branch: 'aw/m-abc123/mission', baseCommit: 'c0', state: 'in-use', createdAt: T0 }],
   });

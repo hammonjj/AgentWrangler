@@ -107,6 +107,10 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
           ...(decision.overrides.length > 0 ? { changed: [...decision.overrides] } : {}),
         }
       : {}),
+    // #54: Assignment mode (cold/reuse/fork/continue)
+    ...(a.assignment.mode ? { assignmentMode: a.assignment.mode as 'cold' | 'reuse' | 'fork' | 'continue' } : {}),
+    // #54: Context tokens at start (first turn's input + cache read + cache write)
+    ...(a.contextTokensAtStart !== undefined ? { contextTokensAtStart: a.contextTokensAtStart } : {}),
     queuedAt: a.timing?.queuedAt,
     startedAt: a.launchedAt,
     endedAt: a.endedAt,

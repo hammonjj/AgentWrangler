@@ -105,6 +105,10 @@ export interface AttemptRecord extends RecordBase {
   agreement?: RouteAgreement;
   /** The dimensions that differ from the recommendation. */
   changed?: RouteDimension[];
+  /** Assignment mode (#54): `cold` (fresh session), `reuse` (warm session on same lineage), `fork` (fork into new worktree), or `continue` (session retry). */
+  assignmentMode?: 'cold' | 'reuse' | 'fork' | 'continue';
+  /** Context tokens at start: input + cache read + cache write from the first turn, or unknown if not reported. */
+  contextTokensAtStart?: number;
   queuedAt?: number;
   startedAt?: number;
   endedAt?: number;
