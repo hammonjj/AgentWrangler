@@ -183,6 +183,30 @@ export interface PolicyChange {
 // Mission and task (§7.2)
 // ---------------------------------------------------------------------------
 
+/** A merge into the mission branch in progress (#46). */
+export interface PendingMerge {
+  taskId: string;
+  attemptId: string;
+  taskBranch: string;
+  message: string;
+  preMergeHead: string;
+  at: Millis;
+}
+
+/** How a task's branch last met the mission branch (#46). */
+export interface TaskIntegration {
+  outcome: 'merged' | 'conflict' | 'reverted' | 'error';
+  at: Millis;
+  attemptId: string;
+  preMergeHead?: string;
+  /** The merge commit (merged or reverted). */
+  mergeCommit?: string;
+  revertCommit?: string;
+  conflictingFiles?: string[];
+  /** Mission verification's failure, for `reverted`; the error, for `error`. */
+  evidence?: { stage: string; summary: string; failing?: string[]; signature?: string };
+}
+
 /** How a mission ended up being finished (§13.3). */
 export type MissionFinish = 'merge-local' | 'pull-request' | 'keep' | 'discard';
 
@@ -197,6 +221,22 @@ export interface Mission {
   base: { ref: string; commit: string };
   /** The mission branch and its integration worktree, or none for a single-task mission. */
   integration: { branch: string; worktreeId: string } | 'none';
+  /**
+   * A planned mission whose tasks run in worktrees of their own, cut from the
+   * mission branch's head, in parallel within the scheduler's limits, and are
+   * merged into the mission branch one at a time by the Integrator (#46,
+   * §13.2–13.3). Set when the plan is approved with
+   * `orchestration.parallelTasks` on. Absent: the P8 way, every task in turn
+   * in the one mission worktree.
+   */
+  parallel?: boolean;
+  /**
+   * A merge into the mission branch, recorded before `git merge` runs
+   * (§23.2 write-ahead) and cleared once its outcome is recorded. Present
+   * after a restart: the merge was cut off, and recovery finishes it (§23.3
+   * step 4).
+   */
+  pendingMerge?: PendingMerge;
   /**
    * The effective mission policy: `policyLayers` resolved (global, then repo,
    * then mission). Frozen when the mission starts; recomputed only when the
@@ -404,6 +444,12 @@ export interface Task {
   result?: TaskResult;
   /** An integrated upstream was later rejected or reverted; a rerun needs the user (§12.3). */
   invalidated?: boolean;
+  /**
+   * The last time its branch met the mission branch, in a parallel mission
+   * (#46): merged, conflicted or reverted by mission verification, with the
+   * evidence. Absent: never integrated, or not a parallel mission.
+   */
+  integration?: TaskIntegration;
   /**
    * The router's proposal while an `assisted` task waits for the user to
    * accept or change it (#38). Copied into the attempt's decision as its
@@ -710,6 +756,12 @@ export interface ExecutionAttempt {
   sentIds?: string[];
   /** Turns the orchestrator saw end, for harnesses that do not echo message ids (Codex). */
   turnsSeen?: number;
+  /**
+   * A conflict-resolution attempt (#46, §13.3 step 3): the core merged the
+   * mission branch into the task's own branch, in the task's own tree, and
+   * this attempt resolves what conflicted. Absent: an ordinary attempt.
+   */
+  resolvesConflict?: { missionHead: string; files: string[] };
   /** The interrupted attempt this one resumes (same session, `assignment.mode: 'continue'`). */
   resumeOf?: string;
   /** The failed attempt whose session this one carries on, with the failure as its message (#41). */

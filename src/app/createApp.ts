@@ -642,10 +642,13 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const localBusy = (): Record<string, number> => {
     const busy: Record<string, number> = {};
     for (const m of orchestration.tasks?.list() ?? []) {
-      const a = orchestration.tasks!.currentAttempt(m);
-      if (!a || !['launching', 'running', 'waiting-human'].includes(a.state)) continue;
-      const source = m.decisions.find((d) => d.id === a.routingDecisionId)?.resolution.target.source;
-      if (source && isEndpointSource(source)) busy[source] = (busy[source] ?? 0) + 1;
+      // Every task's: a parallel mission (#46) can have several running.
+      for (const t of m.tasks) {
+        const a = orchestration.tasks!.currentAttempt(m, t.id);
+        if (!a || !['launching', 'running', 'waiting-human'].includes(a.state)) continue;
+        const source = m.decisions.find((d) => d.id === a.routingDecisionId)?.resolution.target.source;
+        if (source && isEndpointSource(source)) busy[source] = (busy[source] ?? 0) + 1;
+      }
     }
     return busy;
   };
@@ -1487,7 +1490,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // the ones that move a task along only on the task the mission is on.
     if (taskId && m) {
       if (!runner.actions(missionId, taskId).includes(action)) throw new TaskError('That action is no longer available for this task.');
-      if (['accept', 'resume', 'retry', 'recreate-worktree'].includes(action) && runner.currentTask(m).id !== taskId) {
+      // In a parallel mission (#46) every task is its own; `recreate-worktree` is still the current task's.
+      if (['accept', 'resume', 'retry', 'recreate-worktree'].includes(action) && runner.currentTask(m).id !== taskId && !(m.parallel && action !== 'recreate-worktree')) {
         throw new TaskError('That task is not the one the mission is on.');
       }
     }
@@ -1501,11 +1505,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
         host.shell.openFile(await runner.diff(missionId, taskId));
         return;
       case 'accept':
-        return runner.accept(missionId);
+        return runner.accept(missionId, taskId);
       case 'resume':
-        return runner.resume(missionId);
+        return runner.resume(missionId, { taskId });
       case 'retry':
-        return runner.retry(missionId);
+        return runner.retry(missionId, taskId);
       case 'recreate-worktree':
         return runner.recreateWorktree(missionId);
       case 'skip':
@@ -1555,8 +1559,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
               return;
             case 'approve': {
               const defaults = launchDefaults.for(provider);
-              await tasks.approvePlan(missionId, { harness: provider === 'codex' ? 'codex' : 'claude-code', model: defaults.model, effort: defaults.effort });
-              dialogs.flash('Plan approved: its tasks run one at a time on the mission branch.');
+              const approved = await tasks.approvePlan(missionId, { harness: provider === 'codex' ? 'codex' : 'claude-code', model: defaults.model, effort: defaults.effort });
+              dialogs.flash(
+                approved.parallel
+                  ? 'Plan approved: independent tasks run at once, each in its own worktree, and are merged into the mission branch one at a time.'
+                  : 'Plan approved: its tasks run one at a time on the mission branch.',
+              );
               return;
             }
             case 'cancel': {

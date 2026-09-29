@@ -1577,6 +1577,70 @@ artifacts as clean. #32 may want to warn about that rule.
 merging the mission branch into the task branch, and only when the task needs it (stale base or
 conflict).
 
+**As built (#46, 2026-09-29, `src/orchestration/integration/`, `engine/taskRunner.ts`).**
+
+- **Behind a setting.** `orchestration.parallelTasks` (off by default) is read when a plan is
+  first approved and recorded as `Mission.parallel`; a mission never changes mode, replans
+  included. Without it a plan runs as P8 does (one mission tree, one task at a time), so every
+  mission already on disk carries on unchanged. With it the scheduler gets `sharedTree: false`,
+  and #45's limits (two agents per repository by default) decide how many run.
+- **Trees.** The integration worktree is created on the first launch, from `base.commit`. Each
+  task attempt gets `t<n>[-a<k>]` cut from the mission branch's head at launch, so `code`
+  dependencies (which wait for `integrated`, and a parallel task is `done` only once merged) hold.
+  A fresh retry, or an escalation step that starts over, gets a new `-a<k>` tree from the head
+  as it is then; skip and replan leave the task's branch alone, since nothing of it is on the
+  mission branch. Warm-session reuse (#54) is off in parallel missions: a new tree is a new cwd.
+- **Integrator.** `integrate` refuses a dirty tree, the wrong branch or a merge/revert already
+  in progress, hands the pre-merge head to `beforeMerge` (the runner writes
+  `Mission.pendingMerge`, write-ahead), merges `--no-ff` with hooks and signing off, and on a
+  clean merge runs the mission check. Merges are serialised by the runner's per-mission queue:
+  the whole merge-and-verify runs inside it. The mission check (`missionCheck.ts`) is the task
+  `Verifier` over `verification.missionDefault`, or every policy command when that is empty,
+  so a flaky command passes on its re-run and one already red at the mission's base is not
+  blamed; any other non-pass counts as a failure. It does not take one of #45's verification
+  slots (the task's own verification did).
+- **Outcomes.** `merged` → task `done` (`Task.integration`, `result.commit` is the task's head),
+  session ended, next step. `conflict` (files from `diff --diff-filter=U`, then `merge
+  --abort`) → `needs-human`; with repo policy `integration.onConflict: "resolve"` (the default)
+  and fewer than `integration.conflictAttempts` (default 1) resolution attempts and the quality
+  attempt limit not reached, the core merges the mission branch into the task's branch in the
+  task's own tree, leaves the conflict there (`MERGE_HEAD` set), and launches a fresh session
+  on the task's route with `resolvesConflict` and a prompt naming the files. Finishing commits
+  what it leaves, which completes the merge; it is then verified and integrated like any
+  attempt. `reverted` → `revert -m 1` on the mission branch, task `needs-human` with the
+  evidence on `Task.integration`, then `escalate` with a `quality` classification from it, so
+  #41's ladder acts; its "continue" message says the mission's checks failed, not the task's.
+  `error` → `needs-human`; Accept tries the merge again.
+- **Found while building it: a reverted merge is still merged.** Git counts the reverted
+  branch's commits as merged, so merging the same branch again brings back only what was added
+  since and silently drops the reverted work. After a revert the core therefore merges the
+  mission branch into the task's branch and reverts the revert *there*
+  (`reapplyAfterRevert`): the task branch holds its whole change on top of the mission head,
+  which is the failing combination the next attempt should see, and its next merge carries all
+  of it. Only the task's branch is written; nothing is rebased or reset.
+- **Recovery (§23.3 step 4).** Startup recovery runs `recoverMerge` first when `pendingMerge`
+  is set: a merge in progress (`MERGE_HEAD`) is aborted and made again from the recorded head;
+  a merge commit on the recorded head whose second parent is the task branch is verified now;
+  a revert of it already made is reported as `reverted`; anything else is an `error` for the
+  user, and nothing is changed. A task whose result passed but was never merged (the core
+  stopped in between) is merged. Parallel missions recover every task's current attempt, not
+  only the current task's; Cancel ends all of them.
+- **Finish.** A planned mission's *Merge locally* is `MissionFinisher.mergeLocalGated`: the
+  primary checkout must be on the base and clean; the integration tree is detached at the
+  base's tip, the mission branch is merged there `--no-ff`, `finish.gate` (else the mission
+  check, with no base-is-red excuse) runs on that commit, and the base is moved with `merge
+  --ff-only` to exactly that commit, after checking again that the checkout is clean and the
+  tip has not moved. Every path puts the integration tree back on the mission branch, which
+  never moves. The note says nothing was installed. P8 missions use it too; single-task
+  missions keep the plain `mergeLocal`. PR, Keep and Discard are unchanged, and the Missions
+  view's finish buttons and default (`finish.default`) were already there.
+- **Telemetry.** `integration` records: `merged`, `conflict` (count, and `resolve` or
+  `needs-human`), `reverted`, `error`, and `mission-verification` (`passed`/`failed`, stage,
+  signature), each with `durationMs` and `recovered`. No file names.
+- **Not done.** The Missions view shows a task's integration outcome only through its state
+  reason; conflict-resolution attempts run on the task's own route rather than one routed for
+  kind `conflict-resolution`; mission checks do not wait for #45's verification slot.
+
 ### 13.4 Contention before it becomes a conflict
 
 - Before starting a task, the scheduler compares its `scope.paths` and `subsystems` with every
@@ -3608,8 +3672,8 @@ integration proving accepted handoffs preserve origin, omit harness pins and wai
   branch; conflict-resolution attempts; overlap serialisation; leases (#68's `LeaseService`,
   designed by #23; Codex attempts also need #70); admission control on
   usage windows and caps; the mission simulation suite.
-- **Implementation**: #45 scheduler; #46 integration; #47 contention and leases; #48
-  simulation suite.
+- **Implementation**: #45 scheduler; #46 integration (built behind `orchestration.parallelTasks`,
+  §13.3 "As built (#46)"); #47 contention and leases; #48 simulation suite.
 - **Tests**: scheduler tables; temp-repo merges and conflicts; invariant checks over random
   missions; lease acquisition and release across restart.
 - **Observability**: parallelism benefit; queue times; conflict counts; mission verification

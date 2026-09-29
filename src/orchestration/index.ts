@@ -38,6 +38,13 @@ import { WorktreeManager } from './worktrees/worktreeManager';
 /** The setting that switches orchestration on. Read once at start; changing it takes a restart. */
 export const ORCHESTRATION_ENABLED_KEY = 'orchestration.enabled';
 
+/**
+ * Parallel missions (#46), off by default: a plan approved with it on runs its
+ * independent tasks at once, each in a worktree of its own, and merges them
+ * into the mission branch one at a time. Read at each approval.
+ */
+export const PARALLEL_TASKS_KEY = 'orchestration.parallelTasks';
+
 /** Why a Claude attempt cannot start with session hosts off (G1, plan §35.4). */
 export const HOSTS_REQUIRED =
   'Running a task needs “Keep conversations running when Agent Wrangler quits” (Preferences → Conversations): an attempt has to survive a quit or a reinstall.';
@@ -265,6 +272,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     logsDir: path.join(deps.dataDir, 'orchestration', 'logs'),
     settleMs: deps.settleMs,
     ...(deps.scheduling ? { scheduling: deps.scheduling } : {}),
+    parallelTasks: () => deps.settings.get<unknown>(PARALLEL_TASKS_KEY, false) === true,
     log,
   });
   // Recovery (§23.3) waits for #4: hosts adopted, Codex threads rejoined.
