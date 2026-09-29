@@ -22,8 +22,8 @@ import { MissionStore } from '../../src/orchestration/store/missionStore';
 import { WorktreeManager, canonicalPath } from '../../src/orchestration/worktrees/worktreeManager';
 import { missionViewOf } from '../../src/orchestration/view/missionViews';
 import type { SimAttempt, SimScenario } from '../../src/shared/orchestration/simulation';
-import type { TaskFinalRecord, TelemetryRecord } from '../../src/shared/orchestration/telemetry';
-import type { Mission, Task } from '../../src/shared/orchestration/types';
+import type { AttemptRecord, TaskFinalRecord, TelemetryRecord } from '../../src/shared/orchestration/telemetry';
+import type { ExecutionAttempt, Mission, Task } from '../../src/shared/orchestration/types';
 import type { PlanTaskDraft } from '../../src/shared/orchestration/plan';
 import type { Exec } from '../../src/orchestration/worktrees/exec';
 import { snapshot, status } from './routingFixtures';
@@ -626,5 +626,64 @@ describe('scheduling (#45)', () => {
     expect(git(repo, 'rev-parse', '--verify', tree.branch)).toMatch(/^[0-9a-f]{40}$/);
     // Every start went through the harness: one attempt, one launch.
     expect(r.harness.launches).toHaveLength(1);
+  });
+});
+
+describe('warm sessions (#54)', () => {
+  const CHAIN: PlanTaskDraft[] = [
+    { title: 'A', objective: 'Synthetic a.', acceptanceCriteria: ['a'] },
+    { title: 'B', objective: 'Synthetic b.', acceptanceCriteria: ['b'], dependsOn: [{ key: 't1', kind: 'code' }] },
+    { title: 'C', objective: 'Synthetic c.', acceptanceCriteria: ['c'], dependsOn: [{ key: 't2', kind: 'code' }] },
+  ];
+  const first = (m: Mission, key: string) => m.attempts.find((a) => a.id === byKey(m, key).attemptIds[0])!;
+
+  it('A → B → C on one mission tree: B and C carry A’s session on, resumed in the same tree, and telemetry says so', async () => {
+    const r = rig();
+    const m = await r.runner.createMission({ folder: repo, title: 'Warm chain', objective: 'Synthetic.', tasks: CHAIN });
+    script(r, m, { t1: [edit({ 'a.txt': 'a\n' })], t2: [edit({ 'b.txt': 'b\n' })], t3: [edit({ 'c.txt': 'c\n' })] });
+    await r.runner.approvePlan(m.id, ROUTE);
+    await until(() => r.runner.get(m.id)?.state === 'review', 20_000, 'the mission to finish');
+    const cur = r.runner.get(m.id)!;
+    const [a, b, c] = ['t1', 't2', 't3'].map((k) => first(cur, k));
+    const sid = a.assignment.sessionIds[0];
+    expect(a.assignment).toMatchObject({ mode: 'fresh', sessionIds: [sid] });
+    expect(b.assignment).toMatchObject({ mode: 'reuse', sessionIds: [sid], fromAttemptId: a.id, fromSessionId: sid });
+    expect(c.assignment).toMatchObject({ mode: 'reuse', sessionIds: [sid], fromAttemptId: b.id, fromSessionId: sid });
+    // Resumed through the harness in the same tree, each with its own prompt, told the old task is done.
+    const [la, lb, lc] = r.harness.launches;
+    expect(la.request.resume).toBeUndefined();
+    expect([lb.request.resume, lc.request.resume]).toEqual([sid, sid]);
+    expect(new Set(r.harness.launches.map((l) => l.request.cwd)).size).toBe(1);
+    expect(lb.request.prompt).toMatch(/^Your previous task is finished/);
+    expect(lb.request.prompt).toContain('# Task: B');
+    // Every task passed on its own work, and the session's origin is the attempt using it now.
+    expect(cur.tasks.map((t) => [t.key, t.state])).toEqual([['t1', 'done'], ['t2', 'done'], ['t3', 'done']]);
+    expect([a, b, c].map((x) => x.git?.filesChanged)).toEqual([1, 1, 1]);
+    expect(r.registry.get(sid)?.origin).toMatchObject({ attemptId: c.id });
+    // Telemetry: the assignment mode on every attempt record.
+    const recs = r.telemetry.filter((x): x is AttemptRecord => x.type === 'attempt');
+    expect(recs.map((x) => [x.attemptId, x.assignmentMode, x.assignedFrom ?? null])).toEqual([
+      [a.id, 'cold', null],
+      [b.id, 'reuse', a.id],
+      [c.id, 'reuse', b.id],
+    ]);
+  });
+
+  it('a mid-chain tier change starts cold; the next task back on the first route reuses the first session', async () => {
+    const r = rig({ routing: { snapshot: () => snapshot() } });
+    const m = await r.runner.createMission({ folder: repo, title: 'Tier chain', objective: 'Synthetic.', tasks: CHAIN });
+    // B runs on opus (expert); A and C on sonnet (standard).
+    await r.runner.editPlan(m.id, { kind: 'overrides', taskId: byKey(m, 't2').id, overrides: { pins: { model: 'opus' } } });
+    script(r, m, { t1: [edit({ 'a.txt': 'a\n' })], t2: [edit({ 'b.txt': 'b\n' })], t3: [edit({ 'c.txt': 'c\n' })] });
+    await r.runner.approvePlan(m.id, { harness: 'claude-code', model: 'sonnet', effort: 'low' });
+    await until(() => r.runner.get(m.id)?.state === 'review', 20_000, 'the mission to finish');
+    const cur = r.runner.get(m.id)!;
+    const [a, b, c] = ['t1', 't2', 't3'].map((k) => first(cur, k));
+    const tier = (x: ExecutionAttempt) => cur.decisions.find((d) => d.id === x.routingDecisionId)!.resolution.target.tier;
+    expect([a, b, c].map(tier)).toEqual(['standard', 'expert', 'standard']);
+    expect(b.assignment.mode).toBe('fresh');
+    expect(b.assignment.sessionIds[0]).not.toBe(a.assignment.sessionIds[0]);
+    // The expert session is never given to a standard task; A's still satisfies C.
+    expect(c.assignment).toMatchObject({ mode: 'reuse', fromAttemptId: a.id, sessionIds: [a.assignment.sessionIds[0]] });
   });
 });

@@ -146,6 +146,40 @@ describe('CodexHarness', () => {
     expect(handle.composer.effort).toBe('medium');
     service.dispose();
   });
+
+  it('forks a thread into a new worktree over the real executor: thread/fork with cwd, the origin kept (#54)', async () => {
+    const server = new FakeServer();
+    const service = new CodexRunnerService(server as never);
+    const h = new CodexHarness({ sessions: new SessionExecutors([service]), models: () => MODELS });
+    expect(h.capabilities().fork).toBe(true);
+    const handle = await h.launch(req({ fork: 'thread-up', cwd: '/Users/test/proj-wt2' }));
+    expect(server.calls.map((c) => c.method).filter((m) => m !== 'model/list')).toEqual(['thread/fork', 'turn/start']);
+    expect(server.calls[0].params).toMatchObject({ threadId: 'thread-up', cwd: '/Users/test/proj-wt2', config: { model_reasoning_effort: 'medium' } });
+    expect(handle.sessionId).toBe('thread-forked');
+    expect(handle.cwd).toBe('/Users/test/proj-wt2');
+    expect(handle.origin).toEqual(origin);
+    service.dispose();
+  });
+});
+
+describe('fork (#54)', () => {
+  it('Claude: a fresh session with a chosen id, forked from the source (resume + forkSession below)', async () => {
+    const r = recorder();
+    const h = new ClaudeCodeHarness({ sessions: r.sessions, models: () => MODELS });
+    expect(h.capabilities().fork).toBe(true);
+    await h.launch({ cwd: '/Users/test/proj-wt2', prompt: 'Next', target: { harness: 'claude-code', model: 'sonnet', effortNative: 'none' }, origin, fork: 'up', sessionId: 'new-id' });
+    expect(r.requests[0]).toMatchObject({ provider: 'claude', cwd: '/Users/test/proj-wt2', forkFrom: 'up', sessionId: 'new-id' });
+    expect(r.requests[0].resume).toBeUndefined();
+  });
+
+  it('Codex: the fork goes to the executor as `forkFrom`, with its effort set before the first turn', async () => {
+    const r = recorder();
+    const h = new CodexHarness({ sessions: r.sessions, models: () => MODELS });
+    await h.launch({ cwd: '/Users/test/proj-wt2', prompt: 'Next', target: { harness: 'codex', model: 'gpt-6-sol', effortNative: 'high' }, origin, fork: 'thread-up' });
+    expect(r.requests[0]).toMatchObject({ provider: 'codex', cwd: '/Users/test/proj-wt2', forkFrom: 'thread-up' });
+    expect(r.requests[0].resume).toBeUndefined();
+    expect(r.calls).toEqual(['launch', 'setEffort:high', 'send:Next']);
+  });
 });
 
 class FakeServer {
@@ -157,6 +191,7 @@ class FakeServer {
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
     this.calls.push({ method, params });
     if (method === 'thread/start') return { thread: { id: 'thread-1' } };
+    if (method === 'thread/fork') return { thread: { id: 'thread-forked' } };
     if (method === 'turn/start') return { turn: { id: 'turn-1' } };
     return {};
   }
