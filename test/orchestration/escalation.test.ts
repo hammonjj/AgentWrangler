@@ -104,7 +104,7 @@ describe('the ladder, category by category (§15.2)', () => {
     const i = input({ classification: cls('quality-repeat', 's'), history: hist(['quality-new', 's'], ['quality-repeat', 's']), pinned: ['effort'], pinnedBy: { effort: 'the mission' } });
     const out = decideEscalation(i);
     expect(out.decisions[0]).toMatchObject({ action: 'raise-effort', blockedBy: 'pin', reason: 'Effort is pinned by the mission, so it is not raised.' });
-    expect(out.final).toMatchObject({ action: 'raise-tier', delta: { tier: 'expert' }, mode: 'cold', target: { model: 'opus', tier: 'expert' } });
+    expect(out.final).toMatchObject({ action: 'raise-tier', delta: { tier: 'expert' }, mode: 'fresh', target: { model: 'opus', tier: 'expert' } });
   });
 
   it('a mission capped at standard never goes to expert, and says which cap stopped it', () => {
@@ -207,7 +207,7 @@ describe('the ladder, category by category (§15.2)', () => {
 
   it('context: a larger window at the same tier, else a split', () => {
     const bigger = decideEscalation(input({ classification: cls('context'), history: hist(['context']), probe: probeFrom({ largest: 1_000_000 }).probe }));
-    expect(bigger.final).toMatchObject({ action: 'switch-model', mode: 'cold' });
+    expect(bigger.final).toMatchObject({ action: 'switch-model', mode: 'fresh' });
     expect(steps(input({ classification: cls('context'), history: hist(['context']) }))).toEqual(['switch-model✗unavailable', 'split-task']);
     expect(steps(input({ classification: cls('context'), history: hist(['context']), route: { ...ROUTE, contextWindow: undefined } }))).toEqual(['switch-model✗unavailable', 'split-task']);
     expect(steps(input({ classification: cls('context'), history: hist(['context']), pinned: ['model', 'tier'] }))).toEqual(['switch-model✗pin', 'split-task']);
@@ -219,7 +219,7 @@ describe('the ladder, category by category (§15.2)', () => {
   });
 
   it('stuck: one fresh try, then a person', () => {
-    expect(decideEscalation(input({ classification: cls('stuck', 'wall-clock'), history: hist(['stuck', 'wall-clock']) })).final).toMatchObject({ action: 'retry-same', mode: 'cold' });
+    expect(decideEscalation(input({ classification: cls('stuck', 'wall-clock'), history: hist(['stuck', 'wall-clock']) })).final).toMatchObject({ action: 'retry-same', mode: 'fresh' });
     expect(steps(input({ classification: cls('stuck', 'wall-clock'), history: hist(['stuck', 'wall-clock'], ['stuck', 'wall-clock']) }))).toEqual(['needs-human']);
   });
 

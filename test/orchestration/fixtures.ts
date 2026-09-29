@@ -59,7 +59,7 @@ export function attempt(id: string, taskId: string, overrides: Partial<Execution
     id,
     taskId,
     n: 1,
-    assignment: { mode: 'cold', sessionIds: [], harness: 'claude-code' },
+    assignment: { mode: 'fresh', sessionIds: [], harness: 'claude-code' },
     state: 'created',
     verification: [],
     flags: {},

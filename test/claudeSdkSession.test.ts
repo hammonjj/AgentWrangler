@@ -282,6 +282,17 @@ describe('ClaudeSdkSession: the host protocol, in-process', () => {
     expect(resumed.calls.options).toMatchObject({ resume: 'old-id', sessionId: undefined });
   });
 
+  it('forks into a new id in its own cwd: resume + forkSession, with the chosen id (#54)', () => {
+    const fork = fakeQuery();
+    const events: HostEvent[] = [];
+    const s = new ClaudeSdkSession({ cwd: '/Users/test/p-wt2', sessionId: 'fork-id', forkFrom: 'source-id' }, { query: fork.query, binary: '/b', log: () => undefined });
+    s.subscribe(0, (e) => events.push(e));
+    s.start();
+    expect(fork.calls.options).toMatchObject({ cwd: '/Users/test/p-wt2', resume: 'source-id', forkSession: true, sessionId: 'fork-id' });
+    // The session is the fork's from the start, not the source's.
+    expect(events.find((e) => e.type === 'sessionId')).toMatchObject({ type: 'sessionId', sessionId: 'fork-id' });
+  });
+
   it('reports a failed start as an exit with an error', () => {
     const session = new ClaudeSdkSession(
       { cwd: '/Users/test/p' },

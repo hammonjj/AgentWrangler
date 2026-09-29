@@ -437,6 +437,8 @@ export interface HostBoot {
     cwd: string;
     resume?: string;
     sessionId?: string;
+    /** Start `sessionId` as a fork of this session: its conversation, in `cwd` (#54). */
+    forkFrom?: string;
     permissionMode?: string;
     model?: string;
     effort?: string;

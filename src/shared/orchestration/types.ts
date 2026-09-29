@@ -579,16 +579,35 @@ export interface RoutingDecision {
  * Which session runs an attempt. `sessionIds` holds every id that session has
  * had, current last: an id can change mid-life (`/clear`, and per #4's code
  * compaction and resume), and #4's registry follows it with the same `origin`
- * (amended at the #25 gate). (#54: `cold` / `reuse` / `fork` / `continue`).
+ * (amended at the #25 gate).
  */
 export interface AgentAssignment {
-  mode: 'cold' | 'reuse' | 'fork' | 'continue';
+  /**
+   * `fresh`: a new session. `continue`: the same task's earlier session
+   * (#4's Resume, escalation's continue, §15.2). `reuse`: an earlier task's
+   * idle session on the same worktree (#54, §22.1). `fork`: a new session
+   * forked from an upstream task's conversation into this attempt's worktree.
+   */
+  mode: AssignmentMode;
   sessionIds: string[];
   harness: HarnessId;
-  /** For `reuse` or `fork`: the session id being reused or forked from. */
-  sourceSessionId?: string;
-  /** For `reuse`: which attempt created the warm session. */
-  sourceAttemptId?: string;
+  /** `reuse` / `fork`: the attempt whose session this carries on or was forked from. */
+  fromAttemptId?: string;
+  /** `reuse` / `fork`: that session's id when it was taken (for `reuse`, also `sessionIds[0]`). */
+  fromSessionId?: string;
+}
+
+export type AssignmentMode = 'fresh' | 'continue' | 'reuse' | 'fork';
+
+/**
+ * What an attempt's session held, in input-side tokens (input + cache read +
+ * cache write) of one model request (#54). Absent: not reported.
+ */
+export interface AttemptContext {
+  /** At the attempt's start: a carried session's last known context, or a cold session's first request. */
+  atStart?: number;
+  /** The last request seen: what a later task that reuses the session would start from. */
+  last?: number;
 }
 
 export interface AttemptOutcome {
@@ -681,8 +700,8 @@ export interface ExecutionAttempt {
   git?: AttemptGitStats;
   verification: VerificationResult[];
   usage?: UsageSummary;
-  /** Context tokens at start (#54): input + cache read + cache write from the first turn, or absent if not reported. */
-  contextTokensAtStart?: number;
+  /** Context size at the start and at the last request (#54). */
+  context?: AttemptContext;
   flags: AttemptFlags;
   /**
    * The client message ids of every message the orchestrator sent into the

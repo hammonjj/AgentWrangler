@@ -28,12 +28,18 @@
  * - **Concurrency.** Global, per repository, per harness, per source and per
  *   local endpoint (its free slots); verification has its own limit per
  *   repository. A mission on one shared worktree runs one task at a time.
+ * - **Warm sessions (#54).** A first attempt's `start` carries its session
+ *   assignment (`engine/assignment.ts`): an earlier task's warm session that
+ *   satisfies its route, ahead of a new one, and never one on the wrong
+ *   harness, model or tier. Between otherwise equal tasks, one with a warm
+ *   session goes first. A session goes to one start per step.
  * - **Capacity waits and backoff.** A full source, a rate-limit backoff or a
  *   usage window at the admission threshold (85% by default, below the 98%
  *   auto-pause) is a `wait`, never a failure. `wake` says when the next timed
  *   wait ends.
  */
 import type { DependencyKind, HarnessId, Millis, MissionState, ModelSourceId, TaskState } from '../../shared/orchestration/types';
+import { chooseAssignment, type AssignmentChoice, type AssignmentInput } from './assignment';
 
 // ---------------------------------------------------------------------------
 // Inputs
@@ -106,6 +112,11 @@ export interface SchedTask {
   live?: SchedAttempt;
   /** A pending escalation step (#41): the next attempt is its. */
   retry?: { decisionId: string; notBefore?: Millis };
+  /**
+   * What a first attempt's session could be (#54): its route's requirement
+   * and the warm sessions earlier tasks left. Absent: a new session.
+   */
+  assignment?: AssignmentInput;
 }
 
 export interface SchedMission {
@@ -147,7 +158,7 @@ export type WaitReason =
   | 'verification';
 
 export type SchedulerAction =
-  | { kind: 'start'; missionId: string; taskId: string; retryOf?: string }
+  | { kind: 'start'; missionId: string; taskId: string; retryOf?: string; assignment?: AssignmentChoice }
   | { kind: 'verify'; missionId: string; taskId: string; attemptId: string }
   | { kind: 'wait'; missionId: string; taskId: string; reason: WaitReason; detail: string; until?: Millis }
   | { kind: 'block'; missionId: string; taskId: string; upstream: string[]; detail: string }
@@ -218,6 +229,8 @@ interface Candidate {
   notBefore?: Millis;
   /** In a shared tree: the task whose work is in it now, if another. */
   heldBy?: string;
+  /** A warm session satisfies its requirement (#54): ahead of an otherwise equal task that needs a new one. */
+  warm?: boolean;
 }
 
 /**
@@ -230,12 +243,16 @@ function treeHolder(m: SchedMission): SchedTask | undefined {
   return m.tasks.find((t) => t.live) ?? m.tasks.find((t) => t.attempts > 0 && !ENDED.includes(t.state));
 }
 
-/** Critical path, then mission priority, then mission age, then plan order; ids break any tie. */
+/**
+ * Critical path, then mission priority, then mission age, then a warm
+ * session over a new one (#54), then plan order; ids break any tie.
+ */
 function byPriority(a: Candidate, b: Candidate): number {
   return (
     b.path - a.path ||
     b.m.priority - a.m.priority ||
     a.m.createdAt - b.m.createdAt ||
+    (a.warm === b.warm ? 0 : a.warm ? -1 : 1) ||
     a.order - b.order ||
     (a.m.id < b.m.id ? -1 : a.m.id > b.m.id ? 1 : 0)
   );
@@ -265,6 +282,7 @@ export function schedule(state: MissionsSnapshot, capacity: CapacitySnapshot, no
   const wakes: Millis[] = [];
   const candidates: Candidate[] = [];
   const verifyQueue: Candidate[] = [];
+  const takenSessions = new Set<string>();
   const missions = [...state.missions].sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
 
   // What is running now, and what must stop.
@@ -321,7 +339,8 @@ export function schedule(state: MissionsSnapshot, capacity: CapacitySnapshot, no
       }
       if (!STARTABLE.includes(t.state)) return;
       if (!dependenciesMet(m, t)) return;
-      candidates.push({ m, t, path, order, heldBy });
+      const warm = t.assignment ? chooseAssignment(t.assignment).mode !== 'cold' : false;
+      candidates.push({ m, t, path, order, heldBy, ...(warm ? { warm } : {}) });
     });
     // Done tasks on their own branches go onto the mission branch (#46 carries it out).
     if (!m.sharedTree) {
@@ -358,7 +377,15 @@ export function schedule(state: MissionsSnapshot, capacity: CapacitySnapshot, no
     agents.add(`source:${c.t.source}`);
     agents.add(`slots:${c.t.source}`);
     liveMissions.add(c.m.id);
-    out.push({ kind: 'start', missionId: c.m.id, taskId: c.t.id, ...(c.retryOf ? { retryOf: c.retryOf } : {}) });
+    if (c.retryOf) {
+      out.push({ kind: 'start', missionId: c.m.id, taskId: c.t.id, retryOf: c.retryOf });
+      continue;
+    }
+    // A first attempt carries its session: a warm one that satisfies its route, else a new one.
+    // A session goes to one start per step.
+    const assignment: AssignmentChoice = c.t.assignment ? chooseAssignment(c.t.assignment, takenSessions) : { mode: 'cold', reason: 'no warm session to carry on' };
+    if (assignment.mode !== 'cold') takenSessions.add(assignment.sessionId.toLowerCase());
+    out.push({ kind: 'start', missionId: c.m.id, taskId: c.t.id, assignment });
   }
 
   const next = wakes.filter((w) => w > now).sort((a, b) => a - b)[0];

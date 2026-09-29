@@ -29,8 +29,9 @@ const CAPABILITIES: HarnessCapabilities = {
   permissionModes: [],
   preassignedSessionId: false,
   resume: true,
-  // `thread/fork` exists, but not through `LaunchRequest`.
-  fork: false,
+  // `thread/fork` with `cwd`: the fork keeps the thread's context and works in
+  // the new directory (#54 spike, 2026-09-29, app-server 0.155.0-alpha.16.3).
+  fork: true,
   midSessionModelChange: true,
   midSessionEffortChange: 'per-turn',
   // `turn/start.outputSchema` exists, but not through `LaunchRequest`.
@@ -74,11 +75,11 @@ export class CodexHarness implements AgentHarness {
       cwd: req.cwd,
       model: req.target.model || undefined,
       effort,
-      ...(req.resume ? { resume: req.resume } : {}),
+      ...(req.resume ? { resume: req.resume } : req.fork ? { forkFrom: req.fork } : {}),
       origin: req.origin,
       ...(policy ? { policy } : {}),
     });
-    if (req.resume && effort) await handle.setEffort(effort);
+    if ((req.resume || req.fork) && effort) await handle.setEffort(effort);
     await handle.send(req.prompt, undefined, req.promptId ? { clientMessageId: req.promptId } : undefined);
     return handle;
   }

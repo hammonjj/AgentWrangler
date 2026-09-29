@@ -170,9 +170,24 @@ export function attemptPrompt(
     branch: string;
     /** Where the task sits in a planned mission (#43): the tasks before it are already on this branch. */
     mission?: { title: string; position: number; of: number; before: string[] };
+    /**
+     * The session already has an earlier task's conversation (#54): `reuse`,
+     * the same session carried on in the same worktree; `fork`, a copy of an
+     * upstream task's conversation in a new worktree.
+     */
+    carried?: 'reuse' | 'fork';
   },
 ): string {
-  const lines = [`# Task: ${task.title}`, '', task.objective.trim()];
+  const lines: string[] = [];
+  if (ctx.carried === 'reuse') {
+    lines.push('Your previous task is finished and its work is committed on this branch. What follows is a new, separate task: do not carry on the old one.', '');
+  } else if (ctx.carried === 'fork') {
+    lines.push(
+      'This conversation was copied from an earlier task, which is finished. You are now in a different worktree, on a different branch: re-check paths and file contents before you rely on what you saw there. What follows is a new, separate task.',
+      '',
+    );
+  }
+  lines.push(`# Task: ${task.title}`, '', task.objective.trim());
   const criteria = task.acceptanceCriteria.map((c) => c.trim()).filter(Boolean);
   if (criteria.length > 0) lines.push('', '## Acceptance criteria', ...criteria.map((c) => `- ${c}`));
   if (ctx.mission) {

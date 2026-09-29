@@ -55,6 +55,7 @@ import {
   EFFORT_LEVELS,
   LAUNCHING_ACTIONS,
   isOrchestrationOrigin,
+  type AssignmentMode,
   type AttemptState,
   type EffortLevel,
   type EscalationDecision,
@@ -125,7 +126,9 @@ import { resolveRoute, type ResolverSnapshot } from '../policy/resolver';
 import { compareRoutes, recommendRoute } from '../policy/recommend';
 import { changesRoute, decideEscalation, limitsFor, pendingEscalation, type EscalationInput, type EscalationLimits, type ProbeAnswer, type ProbeRequest } from '../policy/escalation';
 import { classifyOutcome, type Classification } from '../policy/outcome';
-import { attemptRecord, addTurnUsage, escalationRecord, routingRecord, waitedMs } from './attemptRecord';
+import { attemptRecord, addTurnContext, addTurnUsage, escalationRecord, routingRecord, waitedMs } from './attemptRecord';
+import type { AssignmentInput, WarmCandidate } from './assignment';
+import { requestContextOf } from '../../core/telemetry/requestContext';
 import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt, NO_AUTO_PERMISSION_MODE } from './attemptPolicy';
 import { sessionVerdict, turnFailure, turnMessageIds, type HandleView, type SessionVerdict } from './sessionVerdict';
 import {
@@ -362,6 +365,8 @@ interface Watcher {
   queued: boolean;
   /** Reattached at start-up, and not yet checked for a prompt that never arrived. */
   checkPrompt: boolean;
+  /** Began as a recovery: turns before it went unseen. */
+  recovered: boolean;
 }
 
 export class TaskRunner implements Disposable {
@@ -1741,6 +1746,7 @@ export class TaskRunner implements Disposable {
     let phase: 'agent' | 'verify-queued' | 'verifying' | undefined;
     if (live) phase = this.verifyWaiters.has(live.id) ? 'verify-queued' : live.state === 'verifying' ? 'verifying' : 'agent';
     else if (this.starting.has(t.id)) phase = 'agent';
+    const assignment = !live && !pending && t.attemptIds.length === 0 ? this.assignmentInput(m, t, route) : undefined;
     return {
       id: t.id,
       key: t.key,
@@ -1754,7 +1760,69 @@ export class TaskRunner implements Disposable {
       attempts: t.attemptIds.length,
       ...(phase ? { live: { id: live?.id ?? `starting:${t.id}`, phase } } : {}),
       ...(pending && !this.starting.has(t.id) ? { retry: { decisionId: pending.id, ...(pending.notBefore !== undefined ? { notBefore: pending.notBefore } : {}) } } : {}),
+      ...(assignment ? { assignment } : {}),
     };
+  }
+
+  /**
+   * What the scheduler needs to pick a task's first session (#54): its route
+   * (pins applied) as a requirement, the harness's capabilities, the tree it
+   * will run in, and every warm session an earlier task of the mission left
+   * that could still be carried on. Undefined when nothing could be: a task
+   * that is not in a planned mission has no earlier task. Never throws.
+   */
+  private assignmentInput(m: Mission, t: Task, base: TaskRoute): AssignmentInput | undefined {
+    if (!isPlanned(m)) return undefined;
+    try {
+      const pins = this.effective(m, t).policy.pins;
+      const route = this.withPins(base, pins);
+      const harness = this.deps.harnesses.get(route.harness);
+      if (!harness) return undefined;
+      const target = this.targetFor(route);
+      const snap = this.deps.routing?.snapshot();
+      const candidates: WarmCandidate[] = [];
+      for (const u of m.tasks) {
+        if (u.id === t.id || u.state !== 'done') continue;
+        const a = m.attempts.find((x) => x.id === u.attemptIds.at(-1));
+        const sid = a?.assignment.sessionIds.at(-1);
+        if (!a || a.state !== 'succeeded' || !a.worktreeId || !sid) continue;
+        // Only while this task's attempt was the last to use it: a later attempt
+        // (running, failed or set aside) has put its own work in that conversation.
+        if (usedLater(m, a, sid)) continue;
+        if (!this.sessionContinuable(a)) continue;
+        const ran = m.decisions.find((d) => d.id === a.routingDecisionId)?.resolution.target;
+        if (!ran) continue;
+        const entry = snap?.catalog.entries.find((e) => e.descriptor.source === ran.source && e.aliases.includes(ran.model || (ran.harness === 'claude-code' ? 'default' : '')));
+        const window = entry && isKnown(entry.descriptor.contextWindow) ? entry.descriptor.contextWindow.value : undefined;
+        candidates.push({
+          attemptId: a.id,
+          taskId: u.id,
+          taskKey: u.key,
+          sessionId: sid,
+          harness: a.assignment.harness,
+          source: ran.source,
+          model: ran.model,
+          tier: ran.tier,
+          treeId: a.worktreeId,
+          idle: !!this.continuableHandle(a),
+          ...(a.context?.last !== undefined ? { contextTokens: a.context.last } : {}),
+          ...(window !== undefined ? { contextWindow: window } : {}),
+          endedAt: a.endedAt ?? a.createdAt,
+        });
+      }
+      const caps = harness.capabilities();
+      return {
+        requirement: { harness: route.harness, source: target.source, model: target.model, minTier: target.tier, maxTier: target.tier },
+        tiers: snap?.catalog.tiers ?? DEFAULT_TIERS,
+        ...(pins ? { pins: { ...(pins.harness ? { harness: pins.harness } : {}), ...(pins.source ? { source: pins.source } : {}), ...(pins.model ? { model: pins.model } : {}) } } : {}),
+        capabilities: { resume: caps.resume, fork: caps.fork },
+        ...(m.integration !== 'none' ? { treeId: m.integration.worktreeId } : {}),
+        upstream: t.dependsOn.map((d) => d.taskId),
+        candidates,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   /** The effective policy, or undefined when it cannot be worked out (a scheduler read must never throw). */
@@ -1930,7 +1998,21 @@ export class TaskRunner implements Disposable {
           this.notify(this.need(m.id), 'needs you', `${task.key}: ${capped}`);
           return;
         }
+        // The session the scheduler assigned (#54): an earlier task's, or a new one.
+        const choice = a.assignment;
+        const from = choice && choice.mode !== 'cold' ? m.attempts.find((x) => x.id === choice.fromAttemptId) : undefined;
         try {
+          if (from && choice && choice.mode !== 'cold') {
+            try {
+              await this.launch(m.id, { mode: choice.mode, route, taskId: task.id, from, reason: choice.reason });
+              return;
+            } catch (e) {
+              // It could not be carried on after all: the task gets a new session instead, once.
+              const t = this.need(m.id).tasks.find((x) => x.id === task.id);
+              if (!t || t.attemptIds.length === 0) throw e;
+              this.log(`mission ${m.id}: ${task.key} could not carry on ${choice.mode === 'reuse' ? 'the earlier session' : 'the fork'} (${errorText(e)}); starting a new session`);
+            }
+          }
           await this.launch(m.id, { mode: 'fresh', route, taskId: task.id });
         } catch (e) {
           // `launch` has already left the task waiting on the user, saying why.
@@ -2392,7 +2474,7 @@ export class TaskRunner implements Disposable {
         ? escalationMessage(task, carried, step, 'continue')
         : a.assignment.mode === 'continue'
           ? CONTINUE_PROMPT
-          : attemptPrompt(task, { harness: a.assignment.harness, branch: wt.branch, mission: missionContext(m, task) });
+          : attemptPrompt(task, { harness: a.assignment.harness, branch: wt.branch, mission: missionContext(m, task), ...carriedPrompt(a.assignment.mode) });
     this.log(`task ${m.id}: attempt ${a.n} had no turn seen before the restart; sending its prompt again (deduplicated by id)`);
     try {
       await handle.send(prompt, undefined, { clientMessageId: promptId });
@@ -2453,6 +2535,8 @@ export class TaskRunner implements Disposable {
     // dimensions; a conflict or a spent count cap stops it here.
     const eff = this.effective(m, task);
     const route: TaskRoute = this.withPins(resumeOf ? routeFromDecision(prevDecision, resumeOf) : (opts as { route: TaskRoute }).route, eff.policy.pins);
+    // Another task's session (#54): taken only while it still can be, else a new one.
+    let carry = opts.mode === 'reuse' || opts.mode === 'fork' ? { mode: opts.mode, from: opts.from, reason: opts.reason } : undefined;
     let harness: AgentHarness;
     let loaded: LoadedRepoPolicy;
     try {
@@ -2465,6 +2549,13 @@ export class TaskRunner implements Disposable {
       const held = this.holdRefusal(route);
       if (held) throw new TaskError(held);
       harness = this.checkRoute(route);
+      if (carry) {
+        const why = this.carryRefusal(m, carry.mode, carry.from, route, harness);
+        if (why) {
+          this.log(`task ${missionId}: ${task.key} starts in a new session: ${why}`);
+          carry = undefined;
+        }
+      }
       const policy = this.deps.repoPolicies.forFolder(m.repoRoot);
       if (!policy) throw new TaskError(`${m.repoRoot} is no longer a git repository.`);
       loaded = policy;
@@ -2519,7 +2610,11 @@ export class TaskRunner implements Disposable {
     const decision = this.decision(m, task, n, route, harness, routing);
     const provider = PROVIDER[route.harness] ?? 'claude';
     const preassigned = harness.capabilities().preassignedSessionId;
-    const sessionIds = prevAttempt ? [...prevAttempt.assignment.sessionIds] : preassigned ? [randomUUID()] : [];
+    const mode: AssignmentMode = carry ? carry.mode : opts.mode === 'continue' ? 'continue' : 'fresh';
+    const fromSid = carry?.from.assignment.sessionIds.at(-1);
+    const sessionIds = prevAttempt ? [...prevAttempt.assignment.sessionIds] : mode === 'reuse' && fromSid ? [fromSid] : preassigned ? [randomUUID()] : [];
+    // A carried session starts from what it last held (#54); a cold one from its first request, when that is reported.
+    const carriedContext = (carry?.from ?? prevAttempt)?.context?.last;
     const promptId = randomUUID();
     const attempt: ExecutionAttempt = {
       id: this.id(),
@@ -2528,7 +2623,8 @@ export class TaskRunner implements Disposable {
       routingDecisionId: decision.id,
       startCommit,
       repoPolicyVersion: loaded.version,
-      assignment: { mode: opts.mode === 'fresh' ? 'cold' : opts.mode, sessionIds, harness: route.harness },
+      assignment: { mode, sessionIds, harness: route.harness, ...(carry && fromSid ? { fromAttemptId: carry.from.id, fromSessionId: fromSid } : {}) },
+      ...(carriedContext !== undefined ? { context: { atStart: carriedContext } } : {}),
       worktreeId: wt.id,
       state: 'created',
       verification: [],
@@ -2558,11 +2654,21 @@ export class TaskRunner implements Disposable {
       ? CONTINUE_PROMPT
       : continues
         ? (opts as { message: string }).message
-        : attemptPrompt(task, { harness: route.harness, branch: wt.branch, mission: missionContext(m, task) }) + (feedback ? `\n\n## An earlier attempt\n${feedback}` : '');
-    // Escalation's "continue" (§15.2): the failed attempt's session is still
-    // here and idle, so the failure goes to it as its next message. Watched
-    // from now, so the turns it already finished are not read as this attempt's.
-    const live = continues ? this.continuableHandle(continues) : undefined;
+        : attemptPrompt(task, { harness: route.harness, branch: wt.branch, mission: missionContext(m, task), ...carriedPrompt(mode) }) +
+          (feedback ? `\n\n## An earlier attempt\n${feedback}` : '');
+    if (mode === 'reuse' && fromSid) {
+      // Ended by us when its task was done; carried on now, so its end from here is not ours.
+      this.stoppedByUs.delete(fromSid.toLowerCase());
+      this.log(`task ${missionId}: ${task.key} ${carry!.reason}`);
+    } else if (mode === 'fork') {
+      this.log(`task ${missionId}: ${task.key} ${carry!.reason}`);
+    }
+    // Escalation's "continue" (§15.2), or a later task's `reuse` (#54): the
+    // session is still here and idle, so the message goes to it as its next
+    // one. Watched from now, so the turns it already finished are not read as
+    // this attempt's.
+    const liveFrom = continues ?? (mode === 'reuse' ? carry?.from : undefined);
+    const live = liveFrom ? this.continuableHandle(liveFrom) : undefined;
     if (live) {
       this.watch(missionId, attempt.id, live, { recovered: false, fromNow: true });
       let outcome: string;
@@ -2593,7 +2699,15 @@ export class TaskRunner implements Disposable {
         target: { harness: route.harness, source: decision.resolution.target.source, model: route.model ?? '', effortNative: route.effort?.trim() || 'none' },
         origin: originOf(m, attempt),
         permissionMode: provider === 'claude' ? decisionMode(decision) : undefined,
-        ...(prevAttempt ? { resume: sessionIds.at(-1) } : sessionIds[0] ? { sessionId: sessionIds[0] } : {}),
+        ...(prevAttempt
+          ? { resume: sessionIds.at(-1) }
+          : mode === 'reuse'
+            ? { resume: fromSid }
+            : mode === 'fork'
+              ? { fork: fromSid, ...(sessionIds[0] ? { sessionId: sessionIds[0] } : {}) }
+              : sessionIds[0]
+                ? { sessionId: sessionIds[0] }
+                : {}),
         policy,
       });
     } catch (e) {
@@ -2610,7 +2724,7 @@ export class TaskRunner implements Disposable {
     }
     m = this.patchAttempt(m, attempt.id, (x) => transitionAttempt(m, x, 'running', { now: this.now() }));
     this.put(m);
-    this.log(`task ${missionId}: attempt ${n} running in ${wt.path}${id ? ` as ${id}` : ''}`);
+    this.log(`task ${missionId}: attempt ${n} running in ${wt.path}${id ? ` as ${id}` : ''}${mode === 'reuse' ? ' (resumed)' : mode === 'fork' ? ` (forked from ${fromSid})` : ''}`);
     this.watch(missionId, attempt.id, handle, { recovered: false });
   }
 
@@ -2872,6 +2986,7 @@ export class TaskRunner implements Disposable {
       turnEnded: opts.recovered,
       queued: false,
       checkPrompt: opts.recovered && opts.turnSeen !== true,
+      recovered: opts.recovered,
     };
     const listener = (e: SessionViewEvent) => {
       if (e.type === 'turnEnd') this.onTurnEnd(w, e.raw);
@@ -2925,7 +3040,13 @@ export class TaskRunner implements Disposable {
     // A turn caused by a message the orchestrator did not send was the user's (§16.3).
     // Codex echoes no ids: more turns than sends is the tell.
     const intervened = ids ? ids.some((id) => !sent.has(id)) : a.assignment.harness === 'codex' && turnsSeen > sent.size;
-    this.put(this.patchAttempt(m, a.id, (x) => ({ ...x, turnsSeen, flags: intervened ? { ...x.flags, userIntervened: true } : x.flags })));
+    // Its context (#54): a cold session's first request, and every turn's last one.
+    // Read from the turn itself, so it is known with telemetry off too. A turn
+    // first seen after a restart is not this attempt's first.
+    const context = addTurnContext(a, requestContextOf(raw), turnsSeen === 1 && !w.recovered);
+    this.put(
+      this.patchAttempt(m, a.id, (x) => ({ ...x, turnsSeen, ...(context ? { context } : {}), flags: intervened ? { ...x.flags, userIntervened: true } : x.flags })),
+    );
   }
 
   /** Read the session and move the attempt along. Runs in the mission's queue. */
@@ -3238,6 +3359,37 @@ export class TaskRunner implements Disposable {
     const record = sid ? (this.deps.registry.get(sid) as SessionRecord | undefined) : undefined;
     const harness = this.deps.harnesses.get(a.assignment.harness);
     return !!record && record.state !== 'failed' && !!harness?.capabilities().resume;
+  }
+
+  /**
+   * Why another task's session can no longer be carried into this one's
+   * attempt (#54), or undefined when it can. Checked at launch: the
+   * scheduler's choice was made on a snapshot, and the session, the tree or
+   * the route may have moved since.
+   */
+  private carryRefusal(m: Mission, mode: 'reuse' | 'fork', from: ExecutionAttempt, route: TaskRoute, harness: AgentHarness): string | undefined {
+    const sid = from.assignment.sessionIds.at(-1);
+    if (!sid) return 'the earlier session never had an id';
+    if (from.assignment.harness !== route.harness) return `the earlier session runs on ${from.assignment.harness}; the route is ${route.harness}`;
+    // The route as it is now (a pin may have changed since the step): never another source, model or tier.
+    const ran = m.decisions.find((d) => d.id === from.routingDecisionId)?.resolution.target;
+    const want = this.targetFor(route);
+    if (!ran) return 'the earlier session’s route is not on record';
+    if (ran.source !== want.source || ran.model !== want.model || ran.tier !== want.tier) {
+      return `the earlier session ran ${ran.model || 'the default model'} (${ran.tier}); the route is now ${want.model || 'the default model'} (${want.tier})`;
+    }
+    if (usedLater(m, from, sid)) return 'a later attempt has used it';
+    const tree = m.integration !== 'none' ? m.integration.worktreeId : undefined;
+    const sameTree = isPlanned(m) && tree !== undefined && tree === from.worktreeId;
+    if (mode === 'reuse') {
+      if (!sameTree) return 'it works in another worktree';
+      if (!this.sessionContinuable(from)) return 'it can no longer be carried on';
+      return undefined;
+    }
+    if (sameTree) return 'it is in this worktree already; it would be reused, not forked';
+    if (!harness.capabilities().fork) return `${route.harness} cannot fork a session into a new worktree`;
+    if (!this.continuableHandle(from) && !this.deps.registry.get(sid)) return 'its conversation is not on record';
+    return undefined;
   }
 
   /** The attempt's session, live here, idle and asking nothing: it can be sent the next message now. */
@@ -4070,17 +4222,39 @@ function sameId(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
-/** Whether `a` carries on (directly, or through other carried-on attempts) the session of attempt `fromId`. */
+/**
+ * Whether `a` carries on (directly, or through other carried-on attempts) the
+ * session of attempt `fromId`: escalation's continue (#41), or a later task's
+ * `reuse` of it (#54). Either keeps the first attempt's origin on a live handle.
+ */
 function continuesFrom(m: Mission, a: ExecutionAttempt, fromId: string): boolean {
   const seen = new Set<string>();
   let cur: ExecutionAttempt | undefined = a;
-  while (cur?.continues && !seen.has(cur.id)) {
-    if (cur.continues === fromId) return true;
+  let next = cur && carriedFrom(cur);
+  while (cur && next && !seen.has(cur.id)) {
+    if (next === fromId) return true;
     seen.add(cur.id);
-    const next: string = cur.continues;
-    cur = m.attempts.find((x) => x.id === next);
+    const id: string = next;
+    cur = m.attempts.find((x) => x.id === id);
+    next = cur && carriedFrom(cur);
   }
   return false;
+}
+
+/** An attempt recorded after `a` has had session `sid`: `a` is no longer the last to have used it. */
+function usedLater(m: Mission, a: ExecutionAttempt, sid: string): boolean {
+  const at = m.attempts.findIndex((x) => x.id === a.id);
+  return m.attempts.some((x, i) => i > at && x.assignment.sessionIds.some((s) => sameId(s, sid)));
+}
+
+/** The prompt's lead for a session that already has another task's conversation (#54). */
+function carriedPrompt(mode: AssignmentMode): { carried?: 'reuse' | 'fork' } {
+  return mode === 'reuse' || mode === 'fork' ? { carried: mode } : {};
+}
+
+/** The attempt whose session this one carries on, if it does. */
+function carriedFrom(a: ExecutionAttempt): string | undefined {
+  return a.continues ?? (a.assignment.mode === 'reuse' ? a.assignment.fromAttemptId : undefined);
 }
 
 /** The task's newest failed attempt before `beforeId`. */
@@ -4234,7 +4408,14 @@ type LaunchOptions =
   /** #4's Resume of an interrupted attempt's session. */
   | { mode: 'continue'; resumeOf: ExecutionAttempt; auto?: boolean }
   /** Escalation's "continue" (#41): the failed attempt's session gets `message` next, live or resumed. */
-  | { mode: 'continue'; continues: ExecutionAttempt; route: TaskRoute; escalation: EscalationDecision; message: string };
+  | { mode: 'continue'; continues: ExecutionAttempt; route: TaskRoute; escalation: EscalationDecision; message: string }
+  /**
+   * A task's first attempt in another task's session (#54, the scheduler's
+   * assignment): `reuse` carries `from`'s session on in the same worktree,
+   * live or resumed; `fork` starts a new session forked from it. Falls back to
+   * `fresh` before anything starts when the session can no longer be taken.
+   */
+  | { mode: 'reuse' | 'fork'; route: TaskRoute; taskId: string; from: ExecutionAttempt; reason: string };
 
 /** The newest assessment of the mission's task. */
 function latestAssessment(m: Mission, taskId: string): TaskAssessment | undefined {

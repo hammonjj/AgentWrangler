@@ -53,6 +53,8 @@ export interface HostLaunch {
   /** Always set: the session's id, fresh or resumed, known before the host starts. */
   sessionId: string;
   resume?: boolean;
+  /** A fresh `sessionId` forked from this session (#54). Never with `resume`. */
+  forkFrom?: string;
   permissionMode?: string;
   model?: string;
   effort?: string;
@@ -332,6 +334,7 @@ export class HostSupervisor {
         cwd: launch.cwd,
         resume: launch.resume ? launch.sessionId : undefined,
         sessionId: launch.resume ? undefined : launch.sessionId,
+        ...(launch.forkFrom && !launch.resume ? { forkFrom: launch.forkFrom } : {}),
         permissionMode: launch.permissionMode,
         model: launch.model,
         effort: launch.effort,

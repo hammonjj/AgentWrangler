@@ -666,7 +666,7 @@ Deliberately small. Ownership is the service that is the only writer.
 | **TaskAssessment** | What the work is like | Assessor | inside its Mission | Immutable; a new one when inputs change |
 | **RoutingDecision** | Requirement, reasons, resolution, shadow recommendation | Router + Resolver | inside its Mission | Immutable; one per attempt |
 | **ExecutionAttempt** | One try at a task: a session in a worktree | TaskRunner | inside its Mission | Includes the `AgentAssignment` |
-| **AgentAssignment** | Which session runs the attempt: `fresh` or `continue` | Scheduler | inside Attempt | Named separately so session reuse (§22) is a new mode, not a refactor |
+| **AgentAssignment** | Which session runs the attempt: `fresh`, `continue`, `reuse` or `fork` (§22.1, #54) | Scheduler | inside Attempt | Named separately so session reuse (§22) is a new mode, not a refactor |
 | **WorktreeAssignment** | A worktree and branch AW created, and its state | WorktreeManager | inside its Mission | Also the mission branch's integration worktree |
 | **VerificationPlan** | Ordered stages to run on a result | Verifier | inside Task (derived, persisted for reproducibility) | Stages name strategies from repo policy |
 | **VerificationResult** | One stage's outcome with evidence | Verifier | inside Attempt | Logs on disk, only summaries in state |
@@ -719,10 +719,11 @@ verdict, reason}, catalogVersion}`, `shadow? {requirement, target, reasons}`, `d
 | 'user'`, `decidedAt`. Invariant: immutable; `target.tier ≤ requirement.maxTier` always.
 
 **ExecutionAttempt**: `id`, `taskId`, `n`, `routingDecisionId`, `assignment {mode: 'fresh' |
-'continue', sessionIds[], harness}`, `worktreeId`, `state`, `launchedAt`, `endedAt`, `outcome?
+'continue' | 'reuse' | 'fork', sessionIds[], harness, fromAttemptId?, fromSessionId?}` (the last
+two for `reuse` / `fork`, §22.1), `worktreeId`, `state`, `launchedAt`, `endedAt`, `outcome?
 {status, category, signature}`, `git {baseCommit, headCommit, commits, filesChanged, insertions,
-deletions}`, `verification[]`, `usage` summary (§16), `flags {userIntervened, userEditedBranch,
-tookOver}`. Invariants: persisted as `launching` **before** `SessionExecutors.launch` is called;
+deletions}`, `verification[]`, `usage` summary (§16), `context? {atStart?, last?}` (input-side
+tokens of one request, #54), `flags {userIntervened, userEditedBranch, tookOver}`. Invariants: persisted as `launching` **before** `SessionExecutors.launch` is called;
 never reopened after it ends; `interrupted` means its session was lost (host or agent gone,
 machine down), whether that is seen live or by recovery at startup.
 `sessionIds` (amended at the #25 gate) lists every id the attempt's session has had, current
@@ -829,7 +830,7 @@ active-time clock stops while it waits (§16.3).
   was connected, and Claude's replay may repeat or skip one (§16.3).
 - **The orchestrator ends the attempt's session**, through the handle (registry `stopped`), once
   the task can no longer use it: after `done`, `failed` or `cancelled`, or when a retry will be
-  fresh. It stays live (idle) while verification runs, because a `quality-new` retry continues it
+  fresh. (A later task in the same tree may resume it by id: `reuse`, §22.1.) It stays live (idle) while verification runs, because a `quality-new` retry continues it
   (§15.2).
 - `launching` has no registry counterpart: #4 records a Claude session when `launch` returns (its
   id is pre-assigned), a Codex one when `thread/start` returns, before the first turn. The full
@@ -1893,10 +1894,12 @@ Append-only JSONL, monthly files under `orchestration/telemetry/`. Each line has
 `sessionId`, `harness`, `source`, `modelsUsed {model: {in, out, cacheRead, cacheWrite, thinking,
 costUsd?}}`, `effort {requested?, applied?}`, `permissionMode`, `durationMs`, `apiMs?`, `ttftMs?`,
 `numTurns` (model round trips), `toolCalls {byTool}`, `permissionAsks`, `waitedOnHumanMs`,
-`terminalReason?`, `isError`, `apiErrorStatus?`, `contextTokensPeak?`, `attemptId?`.
+`terminalReason?`, `isError`, `apiErrorStatus?`, `contextTokensPeak?`, `requestContext? {first?,
+last?}` (input-side tokens of the turn's first and last main-thread request, #54), `attemptId?`.
 
 **`attempt`**: written when an attempt ends (and a partial record on `interrupted`).
-`missionId`, `taskId`, `attemptId`, `n`, `mode`, `routingConfidence`, `assessment` (dimension
+`missionId`, `taskId`, `attemptId`, `n`, `mode`, `assignmentMode? (cold | continue | reuse |
+fork)`, `assignedFrom?`, `contextTokensAtStart?` (#54, §22.1), `routingConfidence`, `assessment` (dimension
 values + confidences + assessor version), `requirement {tier, effort}`, `target {harness, source,
 model, resolvedModel, tier, effortRequested, effortNative, effortApplied?, location}`,
 `shadow? {tier, effort, target}`, `agreement? (assisted: accepted | changed-tier | changed-effort |
@@ -2530,46 +2533,117 @@ MVP ships caps and admission thresholds (Phase 9); the strategies above are Futu
 
 ---
 
-## 22. Session specialization and hierarchical orchestration (design; deferred)
+## 22. Session specialization and hierarchical orchestration (22.1 built by #54; 22.2 deferred)
 
 ### 22.1 Specialization
 
-The separation that makes this possible later is already in the model: `RoutingDecision` says what
-the work needs; `AgentAssignment` says which session does it. Today's assignment modes are `cold`
-(fresh session), `continue` (session retry, the retry-with-feedback of §15), `reuse` and `fork`:
+The separation that makes this possible is in the model: `RoutingDecision` says what the work
+needs; `AgentAssignment` says which session does it. The modes before #54 were `fresh` and
+`continue` (the retry-with-feedback of §15 is already session reuse). #54 added (as built below):
 
-- `cold`: a fresh session.
-- `continue`: retry in the same session (§15).
 - `reuse(sessionId)`: an idle AW session with warm context in the **same worktree lineage**. A
   session's cwd is fixed, so reuse applies to sequential tasks on one branch, not to parallel
   tasks in different trees.
 - `fork(sessionId)`: a new session forked from an upstream task's conversation into a new
-  worktree, so B starts with A's context.
-
-**Fork spike for #54 (2026-09-29).** Both harnesses support changing working directory on fork:
-
-*Claude Code:* `forkSession(sessionId, { dir: newCwd })` is available in the Agent SDK. Transcripts
-are stored per project directory (`~/.claude/sessions/<projDir>`), so a fork to a new `cwd` records
-its transcript in the new directory. The fork operation returns a new sessionId. Tested the API
-exists; context inheritance would be tested by resuming the forked session in the new tree and
-confirming it retains the upstream transcript for context.
-
-*Codex:* `thread/fork` RPC exists in the wire protocol and can be sent to an app-server. Each
-thread has its own cwd (set via `workspace` param on `thread/start` / `thread/resume`), and forks
-can target a different cwd from the upstream thread. Tested the API exists; context inheritance
-would be tested by forking a thread, setting a different `workspace` on the forked thread, and
-confirming it retains the upstream thread's turns for context.
-
-**Verdict:** Implementable for both harnesses. The fork works; context inheritance is the harness's
-responsibility (it keeps the conversation history on the thread/session itself, not in the
-transcript). **Implemented (#54, 2026-09-29):** Assignment modes (`cold`, `reuse`, `fork`), pure
-assignment function (`src/orchestration/engine/assignment.ts`, 13 tests), telemetry scaffolding
-(assignmentMode and contextTokensAtStart fields). Remaining: scheduler ranking, TaskRunner
-integration, HarnessCapabilities.fork in runners, live fork tests.
+  worktree, so B starts with A's context. Whether a fork can change working directory was the
+  question to settle at the start of #54 (transcripts are stored per project directory): it can,
+  on both harnesses (the spike result below).
 
 The scheduler would rank "a warm session that satisfies the requirement" above "a new session".
 Nothing is recorded about agents as reputations. History is per cohort and route (§20), not per
 session.
+
+**Spike result (#54), 2026-09-29.** Question: can a fork of an upstream task's conversation run in
+a new worktree (a new working directory) and keep its context? Method: a throwaway directory pair
+under the system temp dir, with a neutral prompt ("remember the word X"), then the fork was asked
+for the word and to run `pwd`. (Plain directories stood in for the two worktrees: this sandbox
+refused git commits outside the agent's own tree. Neither harness looks at git for this.)
+
+- **Claude Code: yes.** Mechanism: Agent SDK 0.3.268 `query({ resume: <source id>, forkSession:
+  true, cwd: <dir 2> })`, on the bundled CLI 2.1.284 (and the 2.1.236 on PATH). The fork recalled
+  the word, its `Bash` ran in dir 2, and it got a new session id (a chosen one can be passed as
+  `sessionId`). Transcript lookup: the CLI found the source's transcript under dir 1's project
+  directory although `cwd` was dir 2, and wrote the fork's transcript under **dir 2's** project
+  directory, so the fork is an ordinary dir-2 session from then on (resumable there, and where
+  AW's per-project transcript index looks for it). The source's file is only read. Caveat: a
+  plain `resume` with a different `cwd` also recalls the context and runs tools in the new
+  directory, but keeps appending to the transcript under the **old** project directory, so the
+  session's file and its working directory disagree. AW never does that: `reuse` resumes only in
+  the session's own tree, and a change of tree is always a fork.
+- **Codex: yes.** Mechanism: app-server 0.155.0-alpha.16.3 `thread/fork { threadId, cwd: <dir 2>
+  }`, then `turn/start` on the new thread. The fork recalled the word and its command ran with
+  `cwd` dir 2, under a new thread id. Caveat: without `cwd` on `thread/fork` the fork runs in the
+  source's directory, which is what AW's `CodexRunnerService.fork` did before #54; it now sends it.
+
+Both harnesses' `fork` capability is therefore `true`.
+
+**Gate finding (existing telemetry, 2026-09-29): insufficient to show start-up context is a
+significant share of attempt cost, and what it does show points the other way.** Of 19 `attempt`
+records, 16 have turn records with usage (14 Claude Code, 2 Codex). The median attempt is **one**
+AW turn (one prompt, one result) of about 100 model requests, so the first turn's input + cache
+read + cache write is a median 99.4% of the attempt's input-side tokens: the first *turn* is the
+whole attempt, and says nothing about start-up. No record held a per-request figure
+(`contextTokensPeak` was never filled). The nearest proxy, the first turn's input side divided by
+its model requests, is a median **0.7%** (interquartile 0.5–1.0%) of the attempt's total tokens.
+So a cold start's own context is small next to an attempt; what reuse could save is the
+re-reading of the repository a new session does, which no existing field isolates. Reuse ships
+regardless, measured: each attempt now records its assignment mode and its context at start, and
+each turn its first and last request's context, so the issue's own criterion (fewer tokens per
+task in sequential chains, first-attempt success not lower) can be checked on real chains.
+
+**As built (#54, 2026-09-29).**
+
+- **Modes.** `AgentAssignment.mode` is `fresh | continue | reuse | fork`, with `fromAttemptId` and
+  `fromSessionId` for the last two. `continue` is unchanged (#4's Resume, escalation's continue).
+  Telemetry reports `fresh` as `cold`.
+- **The decision is its own module**, `engine/assignment.ts` (`chooseAssignment`, pure). Input:
+  the route's requirement (harness, source, model, `[minTier, maxTier]`), the effective pins, the
+  harness's `resume` / `fork` capabilities, the tree the attempt will run in, the task's upstream
+  tasks, and the warm candidates: the last attempt of each done task of the mission, if it
+  succeeded, its session can still be carried on (idle here, or on record and resumable), and no
+  later attempt has used that session. Output: `{mode, sessionId?, fromAttemptId?, reason}`.
+  `RoutingDecision`, the router and the resolver are untouched: the route is decided exactly as
+  before, and assignment only picks among sessions that already satisfy it.
+- **The tier rule.** A warm session is taken only if its harness, source and model are the
+  route's, every pin matches, and its tier is inside the route's `[minTier, maxTier]` (a tier the
+  catalog does not order only matches a requirement of exactly it). A manual or planned route has
+  `minTier = maxTier =` its target's tier, so in practice the tier must be the same. Anything else
+  is `cold`, with the reason saying which dimension refused it. Reuse never changes a route.
+- **Lineage and forks.** `reuse` only in the same worktree (a planned mission's one tree, today),
+  so sequential tasks on one branch; never across parallel trees. `fork` only from an upstream
+  task, into a different tree, on a harness whose `fork` capability is on. Until #46 gives tasks
+  trees of their own, every planned task shares the mission tree, so `fork` is implemented and
+  tested but not yet reached in a real mission.
+- **Context ceiling.** Above 120k input-side tokens, or above half the model's window when the
+  catalog knows it, the session is not carried on (`cold`). A session whose context was never
+  reported is still reused, and the reason says so.
+- **Ranking.** Reuse before fork, a live idle session before one to resume, then the most
+  recent, then the smallest. In the scheduler, a warm session breaks a tie between otherwise equal
+  tasks (after critical path, priority and age, before plan order), and one session goes to one
+  start per step.
+- **Scheduler.** `SchedTask.assignment` carries the input (built by the runner's snapshot
+  builder); a first attempt's `start` carries the chosen `assignment`. A retry's `start` carries
+  none: escalation decides its session, as before. The step stays pure and deterministic.
+- **Runner.** A planned task that passes still has its session ended; the next task's `reuse`
+  resumes it by id in the same tree (or sends to it directly when it is still live and idle), with
+  a lead line saying the previous task is done and this one is separate. The launch re-checks the
+  choice (harness, tree, that no later attempt used it, that it can still be resumed) and falls
+  back to a new session before anything starts if it cannot; if the carried launch itself fails,
+  the task gets one new-session attempt. Turn attribution follows `reuse` like escalation's
+  continue (`continuesFrom`), a resumed session's registry origin becomes the new attempt's, and a
+  row's task badge is the newest attempt's. `fork` goes through `AttemptLaunch.fork` →
+  `LaunchRequest.forkFrom` → the Claude SDK session (`resume` + `forkSession` + a chosen
+  `sessionId`, in-process and in session hosts) or Codex `thread/fork` with `cwd`.
+- **Telemetry.** The runners add each turn's first and last main-thread request's input side to
+  its turn end (`awRequestContext`); the `turn` record carries it as `requestContext`. An attempt's
+  `context.atStart` is the carried session's last known context for `reuse` / `fork` / `continue`,
+  or a cold session's first request; `context.last` moves every turn. The `attempt` record has
+  `assignmentMode`, `assignedFrom` and `contextTokensAtStart`, absent when unknown (never 0). All
+  fields are additive: old missions and records load unchanged, with no schema bump.
+- **Not built:** reputations or per-session history; keeping a passed task's session live for the
+  next one (it is resumed instead, which restarts the process but keeps the conversation and a warm
+  prompt cache); the conversation pane showing a fork's inherited history (it shows the fork from
+  its first new message).
 
 ### 22.2 Hierarchy
 

@@ -45,6 +45,13 @@ export interface ClaudeSessionOptions {
   resume?: string;
   /** Id for a *fresh* session, known before the first turn. Refused by the CLI if a transcript exists. */
   sessionId?: string;
+  /**
+   * Start as a fork of this session (#54): a new session (`sessionId`, when
+   * given) with its conversation, working in `cwd`. The SDK's `resume` +
+   * `forkSession`; the source's transcript is only read, so it may be live.
+   * The fork's transcript is written under `cwd`'s project directory.
+   */
+  forkFrom?: string;
   permissionMode?: string;
   model?: string;
   /** `low` | `medium` | `high` | `xhigh` | `max`, or absent for the CLI's default. Start-time only. */
@@ -166,6 +173,7 @@ export class ClaudeSdkSession {
       maxBytes: deps.ringBytes,
       onListenerError: (err) => deps.log(`session event listener failed: ${String(err)}`),
     });
+    // A fork's own id is its new one; the SDK names it at `init` when none was chosen.
     const initialId = opts.resume ?? opts.sessionId;
     if (initialId) this.emit({ type: 'sessionId', sessionId: initialId });
   }
@@ -261,7 +269,9 @@ export class ClaudeSdkSession {
     this.localSecret = key;
     const options: Options = {
       cwd: this.opts.cwd,
-      resume: this.opts.resume,
+      // A fork resumes its source into a new id (`forkSession`), which may be chosen (`sessionId`).
+      resume: this.opts.resume ?? this.opts.forkFrom,
+      ...(this.opts.forkFrom && !this.opts.resume ? { forkSession: true } : {}),
       sessionId: this.opts.resume ? undefined : this.opts.sessionId,
       // Free strings by the time they reach here (a setting, a dropdown built
       // from what the model advertised). An unknown value is the CLI's to reject.

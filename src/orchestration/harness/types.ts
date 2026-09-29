@@ -61,8 +61,17 @@ export interface AttemptLaunch {
   origin: OrchestrationOrigin;
   /** Claude only; ignored by a harness whose `permissionModes` is empty. */
   permissionMode?: PermissionModeName;
-  /** Continue this session (escalation's "continue", §15.2) rather than start a fresh one. */
+  /**
+   * Continue this session (escalation's "continue", §15.2, or `reuse` of an
+   * earlier task's, #54) rather than start a fresh one. Its working
+   * directory is `cwd`, which must be the session's own.
+   */
   resume?: string;
+  /**
+   * Start a new session forked from this one (#54): its conversation, working
+   * in `cwd`, a different worktree. Only when `capabilities().fork`; never with `resume`.
+   */
+  fork?: string;
   /** A fresh session's id, when the harness can take one. Chosen by the adapter if absent. */
   sessionId?: string;
   /**

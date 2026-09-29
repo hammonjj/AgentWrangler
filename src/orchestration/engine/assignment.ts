@@ -1,127 +1,182 @@
 /**
- * Pure assignment function for #54: decide between cold, reuse, or fork for a new attempt.
+ * Which session runs an attempt (`docs/plans/intelligent-orchestration.md`
+ * §22.1, #54): a new one, an earlier task's warm one (`reuse`), or a fork of
+ * an upstream task's conversation into this attempt's worktree (`fork`).
  *
- * Inputs: task requirement, and a set of idle, fully stopped warm sessions.
- * Outputs: cold, reuse(id), or fork(id), with a reason.
+ * Separate from routing on purpose. The route (the `RoutingDecision`) says
+ * what the work needs; this only picks, among sessions that already exist,
+ * one that satisfies it. It never changes the route:
  *
- * Rules (§22):
- * - reuse: sequential tasks on the same lineage (same branch/worktree); session must satisfy the route
- * - fork: only where a spike said it works (#54); into a new worktree on a different branch
- * - HARD RULE: a session whose tier, harness or model does not satisfy the requirement is never used
- * - ambiguous tier → cold
+ * - **The requirement wins.** A warm session on another harness, source or
+ *   model, or on a tier outside `[minTier, maxTier]`, is never taken. Nor is
+ *   one a pin rules out.
+ * - **Reuse stays on its tree.** A session's working directory is fixed, so
+ *   `reuse` is only for the next task in the same worktree (sequential tasks
+ *   on one branch), never for a task in a parallel tree.
+ * - **Fork crosses trees**, only from an upstream task, and only on a harness
+ *   whose adapter can fork into a new working directory (the #54 spike).
+ * - **A full session is left alone.** Above the context ceiling it is cold.
+ *
+ * Pure and deterministic: the same input gives the same answer.
  */
+import { tierRank, type TierDef } from '../../shared/orchestration/catalog';
+import type { HarnessId, Millis, ModelSourceId, TierName } from '../../shared/orchestration/types';
 
-import type { HarnessId, TierName } from '../../shared/orchestration/types';
-
-export type AssignmentMode = 'cold' | 'reuse' | 'fork';
-
-export interface AssignmentResult {
-  mode: AssignmentMode;
-  sessionId?: string;
-  reason: string;
+/** What the route asks for, from its routing requirement and target. */
+export interface AssignmentRequirement {
+  harness: HarnessId;
+  source: ModelSourceId;
+  /** Empty: the harness's own default model. */
+  model: string;
+  minTier: TierName;
+  maxTier: TierName;
 }
 
-export interface WarmSession {
-  sessionId: string;
+/** The effective pins (§10.2): a warm session must match every one set. */
+export interface AssignmentPins {
+  harness?: HarnessId;
+  source?: ModelSourceId;
+  model?: string;
+}
+
+/** The route harness's adapter capabilities that matter here. */
+export interface AssignmentCapabilities {
+  /** A session on record can be resumed by id (in its own working directory). */
+  resume: boolean;
+  /** A session can be forked into a new working directory with its context. */
+  fork: boolean;
+}
+
+/** An idle session an earlier attempt left, which the next one could carry on. */
+export interface WarmCandidate {
+  /** The attempt that ran in it last. */
   attemptId: string;
+  taskId: string;
+  /** For reasons. */
+  taskKey?: string;
+  sessionId: string;
   harness: HarnessId;
+  source: ModelSourceId;
   model: string;
   tier: TierName;
-  /** Session's last known worktree/branch, for lineage check */
-  lastWorktreeId?: string;
-  lastBranch?: string;
+  /** The worktree its working directory is. */
+  treeId: string;
+  /** Live here, idle and asking nothing: it can take the next message now. Otherwise it is resumed from its record. */
+  idle: boolean;
+  /** Its last known context, input-side tokens. Absent: not reported. */
+  contextTokens?: number;
+  /** Its model's context window, when known. */
+  contextWindow?: number;
+  endedAt: Millis;
 }
 
-export interface RouteRequirement {
-  minTier: TierName;
-  harness: HarnessId;
-  model: string;
-  /** Ordered list of tiers from weakest to strongest */
-  tierOrder: TierName[];
+export interface AssignmentInput {
+  requirement: AssignmentRequirement;
+  /** The catalog's tier order, weakest first. */
+  tiers: readonly TierDef[];
+  pins?: AssignmentPins;
+  capabilities: AssignmentCapabilities;
+  /** The worktree the attempt will run in, when it is one that exists already (a planned mission's tree). Absent: a new one. */
+  treeId?: string;
+  /** The task's upstream task ids: a fork comes only from one of these. */
+  upstream: readonly string[];
+  candidates: readonly WarmCandidate[];
+  /** Context above this (input-side tokens) is not carried on. Default `DEFAULT_CONTEXT_CEILING`. */
+  contextCeiling?: number;
 }
 
-export interface AssignmentContext {
-  /** The task's current worktree, for lineage check on reuse */
-  worktreeId?: string;
-  /** The task's branch (mission or task branch), for lineage check on reuse */
-  branch?: string;
-  /** Ordered list of tiers, so we can check tier satisfaction */
-  tierOrder: TierName[];
-  /** Whether fork is enabled by harness capabilities */
-  forkEnabled: boolean;
+export type AssignmentChoice =
+  | { mode: 'cold'; reason: string }
+  | { mode: 'reuse' | 'fork'; sessionId: string; fromAttemptId: string; reason: string };
+
+/** Above this much context a session is not carried on to another task (input-side tokens). */
+export const DEFAULT_CONTEXT_CEILING = 120_000;
+/** Nor above this share of its model's window, when the window is known. */
+export const CONTEXT_WINDOW_SHARE = 0.5;
+
+/** The ceiling that applies to one candidate. */
+export function contextCeilingFor(c: Pick<WarmCandidate, 'contextWindow'>, ceiling = DEFAULT_CONTEXT_CEILING): number {
+  return c.contextWindow !== undefined && c.contextWindow > 0 ? Math.min(ceiling, Math.floor(c.contextWindow * CONTEXT_WINDOW_SHARE)) : ceiling;
+}
+
+/** Whether `tier` is inside `[min, max]`. A tier the catalog does not order only matches a requirement of exactly it. */
+export function tierWithin(tiers: readonly TierDef[], tier: TierName, min: TierName, max: TierName): boolean {
+  const r = tierRank(tiers, tier);
+  const lo = tierRank(tiers, min);
+  const hi = tierRank(tiers, max);
+  if (r < 0 || lo < 0 || hi < 0) return min === max && tier === min;
+  return r >= lo && r <= hi;
+}
+
+type Verdict = { ok: true; mode: 'reuse' | 'fork' } | { ok: false; why: string };
+
+function judge(input: AssignmentInput, c: WarmCandidate, taken: ReadonlySet<string>): Verdict {
+  const req = input.requirement;
+  const pins = input.pins ?? {};
+  const name = c.taskKey ?? c.taskId;
+  if (taken.has(c.sessionId.toLowerCase())) return { ok: false, why: `${name}'s session is taken by another start` };
+  if (c.harness !== req.harness) return { ok: false, why: `${name}'s session runs on ${c.harness}; the route is ${req.harness}` };
+  if (pins.harness !== undefined && c.harness !== pins.harness) return { ok: false, why: `${name}'s session is not on the pinned harness` };
+  if (c.source !== req.source || (pins.source !== undefined && c.source !== pins.source)) return { ok: false, why: `${name}'s session runs on ${c.source}; the route is ${req.source}` };
+  if (c.model !== req.model || (pins.model !== undefined && c.model !== pins.model)) {
+    return { ok: false, why: `${name}'s session runs ${c.model || 'the default model'}; the route is ${req.model || 'the default model'}` };
+  }
+  if (!tierWithin(input.tiers, c.tier, req.minTier, req.maxTier)) {
+    const range = req.minTier === req.maxTier ? req.minTier : `${req.minTier}–${req.maxTier}`;
+    return { ok: false, why: `${name}'s session is ${c.tier}; the route needs ${range}` };
+  }
+  const ceiling = contextCeilingFor(c, input.contextCeiling);
+  if (c.contextTokens !== undefined && c.contextTokens > ceiling) return { ok: false, why: `${name}'s session holds ${c.contextTokens} tokens, above the ceiling of ${ceiling}` };
+  if (input.treeId !== undefined && c.treeId === input.treeId) {
+    if (c.idle || input.capabilities.resume) return { ok: true, mode: 'reuse' };
+    return { ok: false, why: `${name}'s session is not live and ${req.harness} cannot resume it` };
+  }
+  // Another tree: a session's working directory is fixed, so only a fork can cross.
+  if (!input.upstream.includes(c.taskId)) return { ok: false, why: `${name}'s session is in another worktree and is not upstream of this task` };
+  if (!input.capabilities.fork) return { ok: false, why: `${name}'s session is in another worktree and ${req.harness} cannot fork into a new one` };
+  return { ok: true, mode: 'fork' };
+}
+
+/** Reuse before fork, then a live session before one to resume, then the newest, then the smallest; ids break a tie. */
+function rank(a: { c: WarmCandidate; mode: 'reuse' | 'fork' }, b: { c: WarmCandidate; mode: 'reuse' | 'fork' }): number {
+  return (
+    (a.mode === b.mode ? 0 : a.mode === 'reuse' ? -1 : 1) ||
+    (a.c.idle === b.c.idle ? 0 : a.c.idle ? -1 : 1) ||
+    b.c.endedAt - a.c.endedAt ||
+    (a.c.contextTokens ?? Infinity) - (b.c.contextTokens ?? Infinity) ||
+    (a.c.attemptId < b.c.attemptId ? -1 : a.c.attemptId > b.c.attemptId ? 1 : 0)
+  );
 }
 
 /**
- * Check if a tier satisfies a requirement (tier ≥ minTier in the ordering).
- * Returns false for ambiguous tiers (not in the tier order).
+ * The session for the next attempt: the best warm session that satisfies the
+ * requirement, else a new one (`cold`), saying why. `taken`: session ids
+ * (lower case) already given to another start in the same step.
  */
-function tierSatisfies(candidateTier: TierName, minTier: TierName, tierOrder: TierName[]): boolean {
-  const candIdx = tierOrder.indexOf(candidateTier);
-  const minIdx = tierOrder.indexOf(minTier);
-  if (candIdx < 0) return false; // Ambiguous tier: reject
-  if (minIdx < 0) return false; // Shouldn't happen: minTier must be in the order
-  return candIdx >= minIdx; // Candidate must be at or above min
-}
-
-/**
- * Decide the assignment mode for a new attempt.
- *
- * @param requirement What the work needs (tier, harness, model)
- * @param warmSessions Idle, fully stopped sessions available for reuse/fork
- * @param context Where the task is running, and what's enabled
- * @returns The assignment mode and a human-readable reason
- */
-export function decideAssignment(
-  requirement: RouteRequirement,
-  warmSessions: WarmSession[],
-  context: AssignmentContext,
-): AssignmentResult {
-  // Rule 1: Session must satisfy the requirement (harness, model, tier)
-  // Rule 2: reuse only on same lineage
-  // Rule 3: fork only if enabled and on different lineage
-  // Rule 4: ambiguous tier always → cold
-
-  // Find warm sessions that satisfy the requirement
-  const candidates = warmSessions.filter((session) => {
-    // Harness must match exactly
-    if (session.harness !== requirement.harness) return false;
-
-    // Model must match exactly
-    if (session.model !== requirement.model) return false;
-
-    // Tier must satisfy requirement (or session is ambiguous → cold)
-    if (!tierSatisfies(session.tier, requirement.minTier, context.tierOrder)) return false;
-
-    return true;
-  });
-
-  if (candidates.length === 0) {
-    return { mode: 'cold', reason: 'no warm session satisfies the requirement' };
+export function chooseAssignment(input: AssignmentInput, taken: ReadonlySet<string> = new Set()): AssignmentChoice {
+  if (input.candidates.length === 0) return { mode: 'cold', reason: 'no warm session to carry on' };
+  const fit: { c: WarmCandidate; mode: 'reuse' | 'fork' }[] = [];
+  const refused: string[] = [];
+  // Dedupe by session: the newest attempt in it speaks for it.
+  const bySession = new Map<string, WarmCandidate>();
+  for (const c of input.candidates) {
+    const key = c.sessionId.toLowerCase();
+    const had = bySession.get(key);
+    if (!had || c.endedAt > had.endedAt || (c.endedAt === had.endedAt && c.attemptId > had.attemptId)) bySession.set(key, c);
   }
-
-  // Try reuse first (cheaper than fork, same lineage).
-  // Lineage is determined by worktree only (within a mission, tasks share the worktree but have different branches).
-  const reuseCandidate = candidates.find((session) => session.lastWorktreeId === context.worktreeId);
-
-  if (reuseCandidate) {
-    return {
-      mode: 'reuse',
-      sessionId: reuseCandidate.sessionId,
-      reason: `reuse warm session from attempt ${reuseCandidate.attemptId}`,
-    };
+  for (const c of [...bySession.values()].sort((a, b) => (a.attemptId < b.attemptId ? -1 : a.attemptId > b.attemptId ? 1 : 0))) {
+    const v = judge(input, c, taken);
+    if (v.ok) fit.push({ c, mode: v.mode });
+    else refused.push(v.why);
   }
-
-  // Try fork (if enabled, different lineage allowed)
-  if (context.forkEnabled) {
-    // Pick the first candidate on a different lineage (any will do, they all satisfy the requirement)
-    const forkCandidate = candidates[0];
-    return {
-      mode: 'fork',
-      sessionId: forkCandidate.sessionId,
-      reason: `fork from attempt ${forkCandidate.attemptId} into new worktree`,
-    };
-  }
-
-  // No reuse (different lineage) and fork not enabled
-  return { mode: 'cold', reason: 'warm session on different lineage, fork not enabled' };
+  if (fit.length === 0) return { mode: 'cold', reason: refused[0] ?? 'no warm session to carry on' };
+  fit.sort(rank);
+  const best = fit[0];
+  const name = best.c.taskKey ?? best.c.taskId;
+  const ctx = best.c.contextTokens !== undefined ? `${best.c.contextTokens} tokens of context` : 'context not reported';
+  const reason =
+    best.mode === 'reuse'
+      ? `carries on ${name}'s session in the same worktree (${best.c.tier}, ${ctx})`
+      : `forks ${name}'s conversation into this task's worktree (${best.c.tier}, ${ctx})`;
+  return { mode: best.mode, sessionId: best.c.sessionId, fromAttemptId: best.c.attemptId, reason };
 }

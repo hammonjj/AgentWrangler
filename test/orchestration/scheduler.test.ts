@@ -18,6 +18,8 @@ import {
   type SchedulerAction,
   type SchedulerLimits,
 } from '../../src/orchestration/engine/scheduler';
+import type { AssignmentInput, WarmCandidate } from '../../src/orchestration/engine/assignment';
+import { DEFAULT_TIERS } from '../../src/shared/orchestration/catalog';
 import type { HarnessId, ModelSourceId } from '../../src/shared/orchestration/types';
 
 const T0 = 1_800_000_000_000;
@@ -248,6 +250,91 @@ describe('schedule: priority', () => {
     const x = schedule({ missions: [a, b] }, cap({}, { global: 2 }), T0);
     expect(schedule({ missions: [b, a] }, cap({}, { global: 2 }), T0)).toEqual(x);
     expect(schedule({ missions: [a, b] }, cap({}, { global: 2 }), T0)).toEqual(x);
+  });
+});
+
+describe('schedule: warm sessions (#54)', () => {
+  const warmOf = (taskId: string, over: Partial<WarmCandidate> = {}): WarmCandidate => ({
+    attemptId: `${taskId}-a1`,
+    taskId,
+    taskKey: taskId,
+    sessionId: `s-${taskId}`,
+    harness: 'claude-code',
+    source: 'anthropic',
+    model: 'sonnet',
+    tier: 'standard',
+    treeId: 'wt',
+    idle: false,
+    contextTokens: 30_000,
+    endedAt: T0,
+    ...over,
+  });
+  const needs = (candidates: WarmCandidate[], over: Partial<AssignmentInput> = {}): AssignmentInput => ({
+    requirement: { harness: 'claude-code', source: 'anthropic', model: 'sonnet', minTier: 'standard', maxTier: 'standard' },
+    tiers: DEFAULT_TIERS,
+    capabilities: { resume: true, fork: false },
+    treeId: 'wt',
+    upstream: [],
+    candidates,
+    ...over,
+  });
+  const startOf = (out: SchedulerAction[], taskId: string) => out.find((a) => a.kind === 'start' && a.taskId === taskId) as Extract<SchedulerAction, { kind: 'start' }> | undefined;
+
+  it('the start carries the assignment: a satisfying warm session, ranked above a new one', () => {
+    const m = mission([done('A'), task('B', { dependsOn: [code('A')], assignment: needs([warmOf('A')]) })], { sharedTree: true });
+    const out = schedule({ missions: [m] }, cap(), T0);
+    expect(startOf(out, 'B')).toEqual({
+      kind: 'start',
+      missionId: 'm1',
+      taskId: 'B',
+      assignment: { mode: 'reuse', sessionId: 's-A', fromAttemptId: 'A-a1', reason: expect.stringMatching(/carries on A's session/) },
+    });
+  });
+
+  it('a warm session on the wrong tier or harness is not given: the start is cold, saying why', () => {
+    for (const w of [warmOf('A', { tier: 'expert' }), warmOf('A', { harness: 'codex', source: 'openai' })]) {
+      const m = mission([done('A'), task('B', { dependsOn: [code('A')], assignment: needs([w]) })], { sharedTree: true });
+      expect(startOf(schedule({ missions: [m] }, cap(), T0), 'B')?.assignment).toMatchObject({ mode: 'cold' });
+    }
+  });
+
+  it('a task with nothing to carry on starts cold; a retry carries no assignment (escalation decides its session)', () => {
+    expect(startOf(schedule({ missions: [mission([task('A')])] }, cap(), T0), 'A')?.assignment).toEqual({ mode: 'cold', reason: 'no warm session to carry on' });
+    const r = schedule({ missions: [mission([task('A', { state: 'queued', attempts: 1, retry: { decisionId: 'd1' } })])] }, cap(), T0);
+    expect(startOf(r, 'A')).toEqual({ kind: 'start', missionId: 'm1', taskId: 'A', retryOf: 'd1' });
+  });
+
+  it('between otherwise equal tasks, the one with a warm session goes first', () => {
+    // C is first in plan order, but B can carry A's session on; one slot.
+    const m = mission([done('A'), task('C'), task('B', { assignment: needs([warmOf('A')]) })]);
+    expect(starts(schedule({ missions: [m] }, cap({}, { global: 1 }), T0))).toEqual(['B']);
+    // Without the warm session, plan order.
+    const plain = mission([done('A'), task('C'), task('B')]);
+    expect(starts(schedule({ missions: [plain] }, cap({}, { global: 1 }), T0))).toEqual(['C']);
+    // The critical path still comes first: warmth only breaks a tie.
+    const longer = mission([done('A'), task('C'), task('D', { dependsOn: [code('C')] }), task('B', { assignment: needs([warmOf('A')]) })]);
+    expect(starts(schedule({ missions: [longer] }, cap({}, { global: 1 }), T0))).toEqual(['C']);
+  });
+
+  it('one session goes to one start per step; the next best, or cold, for the other', () => {
+    const both = needs([warmOf('A'), warmOf('Z', { endedAt: T0 - 1 })]);
+    const m = mission([done('A'), done('Z'), task('B', { assignment: both }), task('C', { assignment: both })]);
+    const out = schedule({ missions: [m] }, cap({}, { global: 5, perRepo: 5 }), T0);
+    expect(startOf(out, 'B')?.assignment).toMatchObject({ mode: 'reuse', sessionId: 's-A' });
+    expect(startOf(out, 'C')?.assignment).toMatchObject({ mode: 'reuse', sessionId: 's-Z' });
+    const one = needs([warmOf('A')]);
+    const m2 = mission([done('A'), task('B', { assignment: one }), task('C', { assignment: one })]);
+    const out2 = schedule({ missions: [m2] }, cap({}, { global: 5, perRepo: 5 }), T0);
+    expect(startOf(out2, 'B')?.assignment).toMatchObject({ mode: 'reuse' });
+    expect(startOf(out2, 'C')?.assignment).toMatchObject({ mode: 'cold', reason: expect.stringMatching(/taken by another start/) });
+  });
+
+  it('stays pure and deterministic with assignments in the snapshot', () => {
+    const m = mission([done('A'), task('B', { assignment: needs([warmOf('A'), warmOf('A2', { sessionId: 's-A2' })]) }), task('C')]);
+    const snap = JSON.stringify(m);
+    const x = schedule({ missions: [m] }, cap(), T0);
+    expect(schedule({ missions: [m] }, cap(), T0)).toEqual(x);
+    expect(JSON.stringify(m)).toBe(snap);
   });
 });
 

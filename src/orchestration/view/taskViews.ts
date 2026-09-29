@@ -391,16 +391,14 @@ export function taskBadgeOf(m: Mission, attempt: ExecutionAttempt): TaskBadge | 
 export function taskBadges(missions: readonly Mission[]): Map<string, TaskBadge> {
   const out = new Map<string, TaskBadge>();
   for (const m of missions) {
-    for (const task of m.tasks) {
-      for (const id of task.attemptIds) {
-        const a = m.attempts.find((x) => x.id === id);
-        if (!a) continue;
-        const badge = taskBadgeOf(m, a);
-        if (!badge) continue;
-        for (const sessionId of a.assignment.sessionIds) {
-          const key = sessionKeyFor(a.assignment.harness, sessionId);
-          if (key) out.set(key, badge);
-        }
+    // In the order the attempts were made, so a session a later task carried on (#54) shows that task.
+    for (const a of m.attempts) {
+      if (!m.tasks.some((t) => t.attemptIds.includes(a.id))) continue;
+      const badge = taskBadgeOf(m, a);
+      if (!badge) continue;
+      for (const sessionId of a.assignment.sessionIds) {
+        const key = sessionKeyFor(a.assignment.harness, sessionId);
+        if (key) out.set(key, badge);
       }
     }
   }
