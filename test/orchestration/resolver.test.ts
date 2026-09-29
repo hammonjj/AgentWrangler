@@ -7,7 +7,8 @@ import { describe, expect, it } from 'vitest';
 import { resolveRoute, ASSUMED_HOSTED_WINDOW } from '../../src/orchestration/policy/resolver';
 import { recommendRoute, compareRoutes } from '../../src/orchestration/policy/recommend';
 import type { RouteRequirement } from '../../src/shared/orchestration/types';
-import { assessed, catalog, snapshot, status } from './routingFixtures';
+import { buildCatalog } from '../../src/shared/orchestration/catalog';
+import { ANTHROPIC_MODELS, OPENAI_MODELS, assessed, catalog, snapshot, status } from './routingFixtures';
 import { T0 } from './fixtures';
 
 function req(over: Partial<RouteRequirement> = {}): RouteRequirement {
@@ -33,6 +34,18 @@ describe('resolver', () => {
         'gpt-5.6-sol: Unassigned',
       ]),
     );
+  });
+
+  it('ranks a Claude model without auto mode (Haiku) after same-tier models that can run unattended', () => {
+    const models = ANTHROPIC_MODELS.map((m) => ({ ...m, autoMode: m.value !== 'haiku' }));
+    const cat = buildCatalog({ reported: [{ source: 'anthropic', models, at: T0 }, { source: 'openai', models: OPENAI_MODELS, at: T0 }] });
+    const basic = req({ minTier: 'basic', maxTier: 'basic' });
+    const r = resolveRoute(basic, snapshot({ catalog: cat }));
+    expect(r.target).toMatchObject({ harness: 'codex', model: 'gpt-6-luna' });
+    expect(r.candidates.filter((c) => c.verdict === 'fallback').map((c) => c.target.model)).toContain('haiku');
+    // Still the pick when it is the only one, or when the user prefers its harness.
+    expect(resolveRoute(basic, snapshot({ catalog: buildCatalog({ reported: [{ source: 'anthropic', models, at: T0 }] }) })).target).toMatchObject({ model: 'haiku' });
+    expect(resolveRoute(basic, snapshot({ catalog: cat }), { preferences: { harness: 'claude-code' } }).target).toMatchObject({ model: 'haiku' });
   });
 
   it('ranks by preference: the launcher’s harness first within the tier', () => {

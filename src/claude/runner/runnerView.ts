@@ -819,6 +819,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
         resolvedModel?: unknown;
         supportsEffort?: unknown;
         supportedEffortLevels?: unknown;
+        supportsAutoMode?: unknown;
       }[];
       const choices: ModelChoice[] = models
         .filter((m) => typeof m?.value === 'string' && m.value !== '')
@@ -835,6 +836,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
             label: m.displayName ? modelChoiceLabel(m.displayName, resolved) : (m.value as string),
             resolved,
             effortLevels,
+            ...(typeof m.supportsAutoMode === 'boolean' ? { autoMode: m.supportsAutoMode } : {}),
             ...(typeof m.description === 'string' && m.description !== '' ? { description: m.description } : {}),
           };
         });

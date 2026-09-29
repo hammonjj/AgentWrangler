@@ -16,6 +16,15 @@ describe('attemptPermissionMode (§24.1)', () => {
     expect(attemptPermissionMode(undefined, 'bypassPermissions')).toBe('auto');
     expect(attemptPermissionMode('default', 'auto')).toBe('default');
   });
+
+  it('turns auto into acceptEdits on a model reported to have no auto (Haiku); unknown leaves it', () => {
+    expect(attemptPermissionMode(undefined, 'auto', false)).toBe('acceptEdits');
+    expect(attemptPermissionMode(undefined, 'auto', true)).toBe('auto');
+    expect(attemptPermissionMode(undefined, 'auto', undefined)).toBe('auto');
+    // Never more permissive than the ceiling, and a mode other than auto is kept.
+    expect(attemptPermissionMode(undefined, 'default', false)).toBe('default');
+    expect(attemptPermissionMode('plan', 'auto', false)).toBe('plan');
+  });
 });
 
 describe('attemptLaunchPolicy', () => {

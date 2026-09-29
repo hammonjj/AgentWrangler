@@ -126,7 +126,7 @@ import { compareRoutes, recommendRoute } from '../policy/recommend';
 import { changesRoute, decideEscalation, limitsFor, pendingEscalation, type EscalationInput, type EscalationLimits, type ProbeAnswer, type ProbeRequest } from '../policy/escalation';
 import { classifyOutcome, type Classification } from '../policy/outcome';
 import { attemptRecord, addTurnUsage, escalationRecord, routingRecord, waitedMs } from './attemptRecord';
-import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt } from './attemptPolicy';
+import { attemptLaunchPolicy, attemptPermissionMode, attemptPrompt, NO_AUTO_PERMISSION_MODE } from './attemptPolicy';
 import { sessionVerdict, turnFailure, turnMessageIds, type HandleView, type SessionVerdict } from './sessionVerdict';
 import {
   DEFAULT_SCHEDULER_LIMITS,
@@ -2684,12 +2684,24 @@ export class TaskRunner implements Disposable {
     };
   }
 
+  /** Whether Claude Code reported `auto` available on the target's model; undefined when nothing said. */
+  private autoModeOf(target: ExecutionTarget): boolean | undefined {
+    const alias = target.model || (target.harness === 'claude-code' ? 'default' : '');
+    const entry = this.deps.routing
+      ?.snapshot()
+      .catalog.entries.find(
+        (e) => e.descriptor.source === target.source && ((alias && e.aliases.includes(alias)) || (!!target.resolvedModel && e.descriptor.resolvedId === target.resolvedModel)),
+      );
+    const a = entry?.descriptor.autoMode;
+    return a && isKnown(a) ? a.value : undefined;
+  }
+
   private decision(m: Mission, task: Task, n: number, route: TaskRoute, harness: AgentHarness, routing: DecisionRouting): RoutingDecision {
     const rec = routing.recommendation;
     const accepted = routing.accepted && !!rec?.resolution.target;
     const target: ExecutionTarget = accepted ? rec!.resolution.target! : { ...this.targetFor(route), harness: harness.id };
     const appDefault = this.deps.launchDefaults.for('claude').permissionMode;
-    const permissionMode = PROVIDER[route.harness] === 'claude' ? attemptPermissionMode(route.permissionMode, appDefault) : undefined;
+    const permissionMode = PROVIDER[route.harness] === 'claude' ? attemptPermissionMode(route.permissionMode, appDefault, this.autoModeOf(target)) : undefined;
     const inputs = permissionMode ? { inputs: { permissionMode } } : {};
     const cmp = rec ? compareRoutes(rec.resolution.target, target, routing.offered) : undefined;
     const mode = m.policy.mode ?? 'manual';
@@ -3411,12 +3423,15 @@ export class TaskRunner implements Disposable {
     if (t) {
       // A new model keeps "no effort sent" when the last route sent none.
       const effort = base.effort && t.effortNative !== 'none' ? t.effortNative : undefined;
+      // `acceptEdits` on a new model may only have been the stand-in for an
+      // `auto` the last model lacked (Haiku); the new one gets its own mode.
+      const keepMode = t.harness === base.harness && base.permissionMode && !(base.permissionMode === NO_AUTO_PERMISSION_MODE && t.model !== base.model);
       return {
         harness: t.harness,
         ...(isEndpointSource(t.source) ? { source: t.source } : {}),
         model: t.model,
         ...(effort ? { effort } : {}),
-        ...(t.harness === base.harness && base.permissionMode ? { permissionMode: base.permissionMode } : {}),
+        ...(keepMode ? { permissionMode: base.permissionMode } : {}),
       };
     }
     if (d.delta?.effort) {
