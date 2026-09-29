@@ -100,8 +100,8 @@ describe('migrateMission', () => {
     source: { kind: 'user', trusted: true },
     tasks: [],
     attempts: [
-      { id: 'a1', taskId: 't1', n: 1, assignment: { mode: 'fresh', sessionId: 'sess-1', harness: 'claude-code' }, state: 'running' },
-      { id: 'a2', taskId: 't1', n: 2, assignment: { mode: 'fresh', harness: 'codex' }, state: 'created' },
+      { id: 'a1', taskId: 't1', n: 1, assignment: { mode: 'cold', sessionId: 'sess-1', harness: 'claude-code' }, state: 'running' },
+      { id: 'a2', taskId: 't1', n: 2, assignment: { mode: 'cold', harness: 'codex' }, state: 'created' },
     ],
     createdAt: 1,
     updatedAt: 1,
@@ -111,7 +111,7 @@ describe('migrateMission', () => {
   it('moves a v0 file to v1: one session id becomes a list, lists get defaults', () => {
     const m = migrateMission(v0);
     expect(m.v).toBe(MISSION_SCHEMA_VERSION);
-    expect(m.attempts[0].assignment).toEqual({ mode: 'fresh', sessionIds: ['sess-1'], harness: 'claude-code' });
+    expect(m.attempts[0].assignment).toEqual({ mode: 'cold', sessionIds: ['sess-1'], harness: 'claude-code' });
     expect(m.attempts[1].assignment.sessionIds).toEqual([]);
     expect(m.attempts[0].verification).toEqual([]);
     expect(m.attempts[0].flags).toEqual({});

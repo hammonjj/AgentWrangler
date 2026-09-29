@@ -579,12 +579,16 @@ export interface RoutingDecision {
  * Which session runs an attempt. `sessionIds` holds every id that session has
  * had, current last: an id can change mid-life (`/clear`, and per #4's code
  * compaction and resume), and #4's registry follows it with the same `origin`
- * (amended at the #25 gate).
+ * (amended at the #25 gate). (#54: `cold` / `reuse` / `fork` / `continue`).
  */
 export interface AgentAssignment {
-  mode: 'fresh' | 'continue';
+  mode: 'cold' | 'reuse' | 'fork' | 'continue';
   sessionIds: string[];
   harness: HarnessId;
+  /** For `reuse` or `fork`: the session id being reused or forked from. */
+  sourceSessionId?: string;
+  /** For `reuse`: which attempt created the warm session. */
+  sourceAttemptId?: string;
 }
 
 export interface AttemptOutcome {
@@ -677,6 +681,8 @@ export interface ExecutionAttempt {
   git?: AttemptGitStats;
   verification: VerificationResult[];
   usage?: UsageSummary;
+  /** Context tokens at start (#54): input + cache read + cache write from the first turn, or absent if not reported. */
+  contextTokensAtStart?: number;
   flags: AttemptFlags;
   /**
    * The client message ids of every message the orchestrator sent into the

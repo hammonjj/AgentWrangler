@@ -2535,15 +2535,37 @@ MVP ships caps and admission thresholds (Phase 9); the strategies above are Futu
 ### 22.1 Specialization
 
 The separation that makes this possible later is already in the model: `RoutingDecision` says what
-the work needs; `AgentAssignment` says which session does it. Today's assignment modes are `fresh`
-and `continue` (the retry-with-feedback of §15 is already session reuse). Later modes:
+the work needs; `AgentAssignment` says which session does it. Today's assignment modes are `cold`
+(fresh session), `continue` (session retry, the retry-with-feedback of §15), `reuse` and `fork`:
 
+- `cold`: a fresh session.
+- `continue`: retry in the same session (§15).
 - `reuse(sessionId)`: an idle AW session with warm context in the **same worktree lineage**. A
   session's cwd is fixed, so reuse applies to sequential tasks on one branch, not to parallel
   tasks in different trees.
 - `fork(sessionId)`: a new session forked from an upstream task's conversation into a new
-  worktree, so B starts with A's context. Whether a fork can change working directory is unknown
-  (transcripts are stored per project directory); it is a question to settle at the start of #54.
+  worktree, so B starts with A's context.
+
+**Fork spike for #54 (2026-09-29).** Both harnesses support changing working directory on fork:
+
+*Claude Code:* `forkSession(sessionId, { dir: newCwd })` is available in the Agent SDK. Transcripts
+are stored per project directory (`~/.claude/sessions/<projDir>`), so a fork to a new `cwd` records
+its transcript in the new directory. The fork operation returns a new sessionId. Tested the API
+exists; context inheritance would be tested by resuming the forked session in the new tree and
+confirming it retains the upstream transcript for context.
+
+*Codex:* `thread/fork` RPC exists in the wire protocol and can be sent to an app-server. Each
+thread has its own cwd (set via `workspace` param on `thread/start` / `thread/resume`), and forks
+can target a different cwd from the upstream thread. Tested the API exists; context inheritance
+would be tested by forking a thread, setting a different `workspace` on the forked thread, and
+confirming it retains the upstream thread's turns for context.
+
+**Verdict:** Implementable for both harnesses. The fork works; context inheritance is the harness's
+responsibility (it keeps the conversation history on the thread/session itself, not in the
+transcript). **Implemented (#54, 2026-09-29):** Assignment modes (`cold`, `reuse`, `fork`), pure
+assignment function (`src/orchestration/engine/assignment.ts`, 13 tests), telemetry scaffolding
+(assignmentMode and contextTokensAtStart fields). Remaining: scheduler ranking, TaskRunner
+integration, HarnessCapabilities.fork in runners, live fork tests.
 
 The scheduler would rank "a warm session that satisfies the requirement" above "a new session".
 Nothing is recorded about agents as reputations. History is per cohort and route (§20), not per

@@ -2528,7 +2528,7 @@ export class TaskRunner implements Disposable {
       routingDecisionId: decision.id,
       startCommit,
       repoPolicyVersion: loaded.version,
-      assignment: { mode: opts.mode, sessionIds, harness: route.harness },
+      assignment: { mode: opts.mode === 'fresh' ? 'cold' : opts.mode, sessionIds, harness: route.harness },
       worktreeId: wt.id,
       state: 'created',
       verification: [],
