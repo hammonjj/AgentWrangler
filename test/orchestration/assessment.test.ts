@@ -262,6 +262,23 @@ describe('configured verifiability', () => {
     expect(configuredVerifiabilityOf(policy, t).value).toBe('weak');
   });
 
+  it('counts a test command by what it runs, not only by its name', () => {
+    const named = { typecheck: commands.typecheck, unit: { run: ['npm', 'test'], timeoutSec: 600 }, build: { run: ['npm', 'run', 'build'], timeoutSec: 600 } };
+    const policy = policyWith({ verification: { commands: named, missionDefault: [] } });
+    const t = task({ verification: { stages: [{ strategy: 'command:typecheck', required: true }, { strategy: 'command:unit', required: true }] } });
+    expect(configuredVerifiabilityOf(policy, t).value).toBe('strong');
+    const runner = policyWith({ verification: { commands: { suite: { run: ['npx', 'vitest', 'run'], timeoutSec: 600 } }, missionDefault: [] } });
+    expect(configuredVerifiabilityOf(runner, task()).value).toBe('partial');
+  });
+
+  it('does not count typecheck or build as behavioural', () => {
+    const policy = policyWith({
+      verification: { commands: { typecheck: commands.typecheck, build: { run: ['npm', 'run', 'build'], timeoutSec: 600 } }, missionDefault: [] },
+    });
+    const t = task({ verification: { stages: [{ strategy: 'command:typecheck', required: true }, { strategy: 'command:build', required: true }] } });
+    expect(configuredVerifiabilityOf(policy, t).value).toBe('weak');
+  });
+
   it('ignores a stage naming a command the policy does not have', () => {
     const policy = policyWith({ verification: { commands, missionDefault: [] } });
     const t = task({ verification: { stages: [{ strategy: 'command:invented', required: true }] } });

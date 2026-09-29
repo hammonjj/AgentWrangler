@@ -44,8 +44,13 @@ import { matchesAny } from './globs';
 
 /** The effort an assessment runs at: the cheapest deliberation, on the cheapest model (§8.3). */
 export const ASSESSOR_EFFORT = 'low';
-/** A classifier that takes longer than this has already cost more than the answer is worth. */
-const DEFAULT_TIMEOUT_MS = 45_000;
+/**
+ * A classifier that takes longer than this has already cost more than the
+ * answer is worth. It covers a cold `claude` start plus a long task, which
+ * 45 s often did not: a timeout is a rules-only assessment, and that routes
+ * to the top tier.
+ */
+const DEFAULT_TIMEOUT_MS = 90_000;
 /** Enough files to size a scope; past this the counts are reported as a floor. */
 const MAX_FILES = 2_000;
 /** How deep into a repository the walk goes before it stops looking. */

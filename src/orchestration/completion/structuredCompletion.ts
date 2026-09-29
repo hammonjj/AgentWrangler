@@ -4,7 +4,7 @@
  * the plan validator's repair step and the review verifier.
  *
  * **A completion is not a session** (amended at the #25 gate). It runs an
- * in-process, one-shot SDK `query()` with no tools, `maxTurns: 1` and
+ * in-process, one-shot SDK `query()` with no tools, a few turns and
  * `outputFormat: json_schema`: no session host, no registry record, no row,
  * no transcript (`persistSession: false`), and no user or project settings
  * (`settingSources: []`, so AW's own status hooks do not fire and no
@@ -48,7 +48,7 @@ export interface CompletionRequest {
    * #36). It runs there in `plan` permission mode with `READ_ONLY_TOOLS` and
    * nothing else — the list is fixed here, not by the caller, so no request can
    * hand a completion an edit or a shell — and up to `maxTurns` round trips.
-   * Absent: no tools, one turn, in the temp dir.
+   * Absent: no tools, `NO_TOOL_TURNS` turns, in the temp dir.
    */
   workspace?: { cwd: string; maxTurns?: number };
 }
@@ -57,6 +57,14 @@ export interface CompletionRequest {
 export const READ_ONLY_TOOLS: readonly string[] = ['Read', 'Grep', 'Glob'];
 /** Round trips a workspace completion may take by default: enough to open a handful of files. */
 const DEFAULT_WORKSPACE_TURNS = 16;
+/**
+ * Round trips a no-tools completion may take. The JSON answer arrives as a
+ * call to the CLI's structured-output tool; a model that answers in text
+ * first is asked again, which is a second turn. With `maxTurns: 1` that ended
+ * in "Reached maximum number of turns (1)". No other tool is offered, so the
+ * extra turns can only be spent on the answer.
+ */
+const NO_TOOL_TURNS = 3;
 
 export interface CompletionUsage {
   inputTokens?: number;
@@ -251,7 +259,7 @@ export class ClaudeStructuredCompletion implements StructuredCompletion {
             // steer the reviewer, and the rest of the disk is not its business.
             canUseTool: async (name: string, input: Record<string, unknown>) => workspaceToolDecision(ws.cwd, name, input),
           }
-        : { tools: [], maxTurns: 1 }),
+        : { tools: [], maxTurns: NO_TOOL_TURNS }),
       outputFormat: { type: 'json_schema', schema: req.schema as Record<string, unknown> },
       persistSession: false,
       settingSources: [],

@@ -46,7 +46,7 @@ describe('StructuredCompletion', () => {
       model: 'haiku',
       systemPrompt: 'Assess the task.',
       tools: [],
-      maxTurns: 1,
+      maxTurns: 3,
       outputFormat: { type: 'json_schema', schema: SCHEMA },
       persistSession: false,
       settingSources: [],
