@@ -55,6 +55,21 @@ export interface ExclusiveResource {
 export type FinishDefault = Exclude<MissionFinish, 'discard'>;
 
 /**
+ * A conflict merging a task into the mission branch (#46): `resolve` merges
+ * the mission branch into the task's branch and starts a conflict-resolution
+ * attempt on it (at most `conflictAttempts` per task, within its attempt
+ * limit); `needs-human` hands it to the user with the conflicting files.
+ */
+export type OnConflict = 'resolve' | 'needs-human';
+
+export interface IntegrationPolicy {
+  onConflict?: OnConflict;
+  conflictAttempts?: number;
+}
+
+export const DEFAULT_CONFLICT_ATTEMPTS = 1;
+
+/**
  * When the review-agent verifier runs (#36, §14.1 `review`).
  * - `auto`: when the task's assessed risk is `moderate` or higher, or its
  *   verifiability `weak` or lower — the tasks the repository's own checks say
@@ -96,6 +111,11 @@ export interface RepoPolicy {
     gate: string[];
   };
   /**
+   * What a merge conflict on the mission branch becomes (#46, §13.3 step 3).
+   * Absent when the file sets none: `resolve`, with one attempt.
+   */
+  integration?: IntegrationPolicy;
+  /**
    * Routing controls at repository scope (§10.2, #40): pins, caps,
    * preferences and exclusions for every mission in this repository, between
    * the global defaults and the mission's own. Absent when the file sets none,
@@ -114,6 +134,7 @@ export interface RepoPolicyFile {
   risk?: RiskRule[];
   exclusive?: ExclusiveResource[];
   finish?: { default?: FinishDefault; gate?: string[] };
+  integration?: IntegrationPolicy;
   routing?: ExecutionPolicy;
 }
 
@@ -146,6 +167,7 @@ export type ParseResult = { ok: true; file: RepoPolicyFile } | { ok: false; erro
 const RISK_LEVELS: readonly Risk[] = ['low', 'moderate', 'high', 'critical'];
 const REVIEW_WHEN: readonly ReviewWhen[] = ['auto', 'always', 'never'];
 const FINISH_DEFAULTS: readonly FinishDefault[] = ['merge-local', 'pull-request', 'keep'];
+const ON_CONFLICT: readonly OnConflict[] = ['resolve', 'needs-human'];
 const COMMAND_NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const RESOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 
@@ -161,7 +183,7 @@ export function validateRepoPolicyFile(doc: unknown): ParseResult {
     err('', 'a policy must be a JSON object');
     return { ok: false, errors };
   }
-  unknownKeys(doc, ['$schema', 'v', 'worktrees', 'verification', 'review', 'risk', 'exclusive', 'finish', 'routing'], '', err);
+  unknownKeys(doc, ['$schema', 'v', 'worktrees', 'verification', 'review', 'risk', 'exclusive', 'finish', 'integration', 'routing'], '', err);
   if ('v' in doc && doc.v !== REPO_POLICY_VERSION) err('v', `unsupported version ${JSON.stringify(doc.v)}; this build reads ${REPO_POLICY_VERSION}`);
 
   if ('worktrees' in doc) {
@@ -241,6 +263,20 @@ export function validateRepoPolicyFile(doc: unknown): ParseResult {
         err('finish.default', `must be one of ${FINISH_DEFAULTS.map((x) => JSON.stringify(x)).join(', ')}`);
       }
       if ('gate' in f) nameList(f.gate, 'finish.gate', err);
+    }
+  }
+
+  if ('integration' in doc) {
+    const g = doc.integration;
+    if (!isObject(g)) err('integration', 'must be an object');
+    else {
+      unknownKeys(g, ['onConflict', 'conflictAttempts'], 'integration', err);
+      if ('onConflict' in g && !ON_CONFLICT.includes(g.onConflict as OnConflict)) {
+        err('integration.onConflict', `must be one of ${ON_CONFLICT.map((x) => JSON.stringify(x)).join(', ')}`);
+      }
+      if ('conflictAttempts' in g && !(Number.isInteger(g.conflictAttempts) && (g.conflictAttempts as number) >= 0 && (g.conflictAttempts as number) <= 5)) {
+        err('integration.conflictAttempts', 'must be a whole number from 0 to 5');
+      }
     }
   }
 
@@ -439,6 +475,10 @@ export function resolveRepoPolicy(
     if (layer.exclusive !== undefined) policy.exclusive = layer.exclusive.map((r) => ({ ...r, ...(r.paths ? { paths: [...r.paths] } : {}) }));
     if (layer.finish?.default !== undefined) policy.finish.default = layer.finish.default;
     if (layer.finish?.gate !== undefined) policy.finish.gate = [...layer.finish.gate];
+    if (layer.integration !== undefined) {
+      const next = { ...policy.integration, ...layer.integration };
+      if (Object.keys(next).length > 0) policy.integration = next;
+    }
     if (layer.routing !== undefined) {
       const parsed = validateExecutionPolicy(layer.routing);
       if (parsed.ok && Object.keys(parsed.policy).length > 0) policy.routing = mergeRouting(policy.routing, parsed.policy);

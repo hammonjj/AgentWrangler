@@ -408,24 +408,30 @@ export interface DelegationSuggestionRecord extends RecordBase {
 }
 
 /**
- * A task branch merged into the mission branch (§16.2, #46):
- * merged, conflict, reverted, or mission-verification outcome.
+ * One step of a task branch meeting the mission branch (§16.2, P9
+ * observability "conflict counts; mission verification health"; #46). A merge
+ * writes `merged` or `conflict` (or `error`), a clean merge then its
+ * `mission-verification` outcome, and a failed one `reverted`. Counts and
+ * stage names only: no file names, no output.
  */
 export interface IntegrationRecord extends RecordBase {
   type: 'integration';
   missionId: string;
   taskId: string;
-  taskBranch: string;
-  missionBranch: string;
-  outcome: 'merged' | 'conflict' | 'reverted' | 'error';
-  /** The merge commit, or the revert commit, or undefined on error. */
-  commit?: string;
-  /** Conflicting files when outcome is 'conflict'. */
-  conflictingFiles?: string[];
-  /** When reverted, the verification failure that caused it. */
-  verificationFailure?: { stage: string; summary: string };
-  errorSummary?: string;
-  durationMs?: number;
+  attemptId: string;
+  event: 'merged' | 'conflict' | 'reverted' | 'error' | 'mission-verification';
+  /** For `mission-verification`. */
+  verification?: 'passed' | 'failed';
+  /** For `mission-verification` failed and `reverted`: the stage that failed, and its failure signature. */
+  stage?: string;
+  signature?: string;
+  /** For `conflict`: how many files conflicted, and what policy made of it. */
+  conflictingFiles?: number;
+  conflictAction?: 'resolve' | 'needs-human';
+  /** Finished by startup recovery after a quit or crash mid-merge (§23.3 step 4). */
+  recovered?: boolean;
+  /** The merge and its verification, from the write-ahead record to the outcome. */
+  durationMs: number;
 }
 
 export type TelemetryRecord =
