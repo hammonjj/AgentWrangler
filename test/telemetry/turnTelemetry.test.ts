@@ -78,14 +78,14 @@ beforeEach(() => {
 });
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-function sink(now = () => 1_790_000_000_000): TurnTelemetry {
+function sink(now = () => 1_790_000_000_000, local = false): TurnTelemetry {
   const deps: TurnTelemetryDeps = {
     sessions: { list: () => handles as unknown as SessionHandle[], onDidChange: (l) => changed.event(l) },
     log: new TelemetryLog(dir),
     enabled: () => enabled,
     appliedEffort: (id) => applied[id],
     registry: {
-      get: (id) => ({ v: 1, sessionId: id ?? '', provider: 'claude', cwd: '/Users/test/proj', launch: { effort: 'high' }, state: 'live', createdAt: 0, lastShownAt: 0, updatedAt: 0 }),
+      get: (id) => ({ v: 1, sessionId: id ?? '', provider: 'claude', cwd: '/Users/test/proj', launch: { effort: 'high', ...(local ? { policy: { claude: { localProvider: { source: 'local:box', baseUrl: 'http://127.0.0.1:18080/v1', model: 'qwen', contextWindow: 65536 } } } } : {}) }, state: 'live', createdAt: 0, lastShownAt: 0, updatedAt: 0 }),
       noteApplied: (id, a) => void notes.push({ id, ...a }),
     },
     now,
@@ -105,6 +105,16 @@ function add(h: FakeHandle): FakeHandle {
 }
 
 describe('TurnTelemetry', () => {
+  it('records zero API cost for a local Claude turn, ignoring the SDK estimate', () => {
+    const t = sink(() => 1_790_000_000_000, true);
+    const h = add(new FakeHandle('claude', 'sess-1'));
+    h.turnEnd(claudeResult('res-local', 12.5, 100, 10), 'host-local');
+    expect(records()[0]).toMatchObject({ source: 'local:box', costUsd: 0, costBasis: 'none', modelsUsed: { 'claude-opus': { in: 100, out: 10 } } });
+    expect(records()[0].modelsUsed?.['claude-opus'].costUsd).toBeUndefined();
+    const text = fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('');
+    expect(text).not.toContain('12.5');
+    t.dispose();
+  });
   it('records a Claude turn with usage, effort, tools, asks and waiting time, and nothing said', () => {
     let clock = 1_790_000_000_000;
     const t = sink(() => clock);

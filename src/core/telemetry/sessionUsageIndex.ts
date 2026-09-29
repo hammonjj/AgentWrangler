@@ -70,8 +70,12 @@ export function addTurn(sums: Sums | undefined, r: TurnRecord): Sums {
   }
   if (r.costUsd !== undefined && r.costBasis !== 'none') {
     u.costUsd = Math.round(((u.costUsd ?? 0) + r.costUsd) * 1e9) / 1e9;
-    u.costBasis = s.costed === 0 || u.costBasis === r.costBasis ? r.costBasis : 'mixed';
-    s.costed++;
+    u.costBasis = u.costBasis === 'none' || u.costBasis === r.costBasis ? r.costBasis : 'mixed';
+    if (models.length > 0) s.costed++;
+  }
+  if (r.costUsd === 0 && r.costBasis === 'none' && r.source.startsWith('local:')) {
+    if (u.costUsd === undefined) u.costUsd = 0;
+    if (models.length > 0) s.costed++;
   }
   u.uncostedTurns = s.costed > 0 ? s.withUsage - s.costed : 0;
   if (r.coversGap) u.coversGap = true;

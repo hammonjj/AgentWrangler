@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CompletionRequest, CompletionResult, StructuredCompletion } from '../../src/orchestration/completion/structuredCompletion';
 import { SimulatedCompletion } from '../../src/orchestration/completion/simulatedCompletion';
-import { ASSUMED_LOCAL_PLANNER_WINDOW, pickPlannerEntry } from '../../src/orchestration/local/localEndpointService';
+import { pickPlannerEntry } from '../../src/orchestration/local/localEndpointService';
 import {
   LOCAL_PLANNER_INSTRUCTIONS,
   PLANNER_INSTRUCTIONS,
@@ -286,14 +286,14 @@ describe('pickPlannerEntry', () => {
     expect(pickPlannerEntry(catalog([entry('local:a:m', { tier: 'expert', window: 65_536 })]), up)?.entry.key).toBe('local:a:m');
   });
 
-  it('refuses a window too small for an excerpt; assumes a safe window when none is known', () => {
+  it('refuses a window too small for an excerpt or one that is not known', () => {
     expect(pickPlannerEntry(catalog([entry('local:a:m', { window: 8_192 })]), up)).toBeUndefined();
-    expect(pickPlannerEntry(catalog([entry('local:a:m')]), up)).toMatchObject({ contextWindow: ASSUMED_LOCAL_PLANNER_WINDOW, windowKnown: false });
+    expect(pickPlannerEntry(catalog([entry('local:a:m')]), up)).toBeUndefined();
   });
 
-  it('prefers a higher tier, then constrained decoding, then the largest known window', () => {
+  it('prefers the standard tier, then constrained decoding, then the largest known window', () => {
     const pick = (es: CatalogEntry[]) => pickPlannerEntry(catalog(es), up)?.entry.key;
-    expect(pick([entry('local:a:std', { window: 131_072, schema: true }), entry('local:b:exp', { tier: 'expert', window: 32_768 })])).toBe('local:b:exp');
+    expect(pick([entry('local:a:std', { window: 131_072, schema: true }), entry('local:b:exp', { tier: 'expert', window: 32_768 })])).toBe('local:a:std');
     expect(pick([entry('local:a:plain', { window: 131_072 }), entry('local:b:schema', { window: 32_768, schema: true })])).toBe('local:b:schema');
     expect(pick([entry('local:a:small', { window: 32_768 }), entry('local:b:big', { window: 131_072 })])).toBe('local:b:big');
     expect(pick([entry('local:a:unknown'), entry('local:b:known', { window: 32_768 })])).toBe('local:b:known');

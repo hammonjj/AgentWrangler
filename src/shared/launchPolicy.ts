@@ -47,6 +47,19 @@ export interface ClaudeLaunchPolicy {
   fallbackModel?: string;
   /** Structured output for the final result. */
   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> };
+  /** Native /v1/messages endpoint for this session. Only a key reference is serialized. */
+  localProvider?: ClaudeLocalProvider;
+  /** Ordinary conversation guidance, appended to Claude Code's system prompt. */
+  conversationInstructions?: string;
+}
+
+export interface ClaudeLocalProvider {
+  source: string;
+  baseUrl: string;
+  model: string;
+  contextWindow: number;
+  maxOutputTokens?: number;
+  keyRef?: string;
 }
 
 /** Codex sandboxes AW will ask for. `danger-full-access` is never one of them. */
@@ -121,7 +134,26 @@ function parseClaude(raw: unknown): ClaudeLaunchPolicy | undefined {
   if (isObject(format) && format.type === 'json_schema' && isObject(format.schema)) {
     out.outputFormat = { type: 'json_schema', schema: format.schema };
   }
+  if (typeof raw.conversationInstructions === 'string' && raw.conversationInstructions.trim()) out.conversationInstructions = raw.conversationInstructions;
+  const local = parseClaudeLocalProvider(raw.localProvider);
+  if (local) out.localProvider = local;
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function parseClaudeLocalProvider(raw: unknown): ClaudeLocalProvider | undefined {
+  if (!isObject(raw)) return undefined;
+  if (typeof raw.baseUrl !== 'string' || !/^https?:\/\/[^\s@]+\/v1$/.test(raw.baseUrl)) return undefined;
+  if (typeof raw.source !== 'string' || !/^local:[a-z0-9-]+$/.test(raw.source)) return undefined;
+  if (typeof raw.model !== 'string' || !raw.model.trim()) return undefined;
+  const contextWindow = typeof raw.contextWindow === 'number' && Number.isInteger(raw.contextWindow) && raw.contextWindow > 0 ? raw.contextWindow : undefined;
+  if (!contextWindow) return undefined;
+  const out: ClaudeLocalProvider = { source: raw.source, baseUrl: raw.baseUrl, model: raw.model.trim(), contextWindow };
+  if (typeof raw.maxOutputTokens === 'number' && Number.isInteger(raw.maxOutputTokens) && raw.maxOutputTokens > 0) out.maxOutputTokens = raw.maxOutputTokens;
+  if (typeof raw.keyRef === 'string') {
+    if (raw.keyRef !== `localEndpoint:${out.source.slice('local:'.length)}`) return undefined;
+    out.keyRef = raw.keyRef;
+  }
+  return out;
 }
 
 function parseCodex(raw: unknown): CodexLaunchPolicy | undefined {

@@ -181,8 +181,13 @@ describe('the local planner through the task runner', () => {
     expect(run.source).toBeUndefined();
   });
 
-  it('no preference, or local ruled out: hosted only, the local model never asked', async () => {
-    for (const policy of [{}, { preferences: { preferLocal: true }, exclusions: { disableLocal: true } }, { preferences: { preferLocal: true }, caps: { location: 'hosted-only' as const } }]) {
+  it('no preference selects the healthy local planner; exclusions keep the hosted planner', async () => {
+    const first = rig({});
+    const planned = await first.runner.planMission({ folder: repo, objective: 'Fix the invoice total.' });
+    await until(() => first.runner.get(planned.id)?.state === 'plan-review', 5000, 'the plan');
+    expect(first.local.calls).toHaveLength(1);
+    expect(first.hosted.calls).toHaveLength(0);
+    for (const policy of [{ exclusions: { disableLocal: true } }, { caps: { location: 'hosted-only' as const } }]) {
       const r = rig(policy);
       const m = await r.runner.planMission({ folder: repo, objective: 'Fix the invoice total.' });
       await until(() => r.runner.get(m.id)?.state === 'plan-review', 5000, 'the plan');

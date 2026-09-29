@@ -104,6 +104,7 @@ function renderLocalStatus(row: HTMLElement, entry: CatalogEntry, tiers: TierDef
       endpointOn: endpoint.enabled,
       health: endpoint.health.state,
       ...(endpoint.responses !== undefined ? { responses: endpoint.responses } : {}),
+      ...(endpoint.messages !== undefined ? { messages: endpoint.messages } : {}),
       ...(model?.stage1 ? { stage1: model.stage1 } : {}),
       ...(model?.plannerWindowFits !== undefined ? { plannerWindowFits: model.plannerWindowFits } : {}),
     },
@@ -229,20 +230,25 @@ function renderEndpoint(
   for (const m of e.models) {
     const row = el('div', 'pf-endpoint-model');
     row.append(el('span', 'pf-label', m.label), el('code', 'pf-key', m.id));
-    const q = button(m.qualifying ? 'Qualifying…' : 'Qualify', () => post({ type: 'localEndpoint', change: { op: 'qualify', id: e.id, model: m.id } }));
-    q.disabled = !!m.qualifying || !e.enabled;
-    q.title = 'Runs 10 tool calls, 10 tool-result round trips and 20 JSON replies against this model (synthetic prompts). Sets tool calling and structured output to measured.';
-    row.appendChild(q);
-    const t = button(m.tasksRunning ? 'Running tasks…' : 'Qualify tasks', () => post({ type: 'localEndpoint', change: { op: 'qualifyTasks', id: e.id, model: m.id } }));
-    t.disabled = !!m.tasksRunning || !!m.qualifying || !e.enabled;
-    t.title =
-      e.responses === false
-        ? 'Stage 2 needs /v1/responses, which this server does not serve: it will report not runnable.'
-        : 'Stage 2: small scratch repos with seeded bugs, each run 3 times as a Codex thread on this endpoint, in the attempt sandbox. A run passes when the tests pass, the tests are untouched and the diff stays inside the allowed paths. Takes minutes. Does not set a tier.';
-    row.appendChild(t);
+    for (const harness of m.harnesses ?? []) {
+      const label = harness === 'codex' ? 'Codex' : 'Claude Code';
+      if (harness === 'codex') {
+        const q = button(m.qualifying ? 'Qualifying…' : `Qualify ${label}`, () => post({ type: 'localEndpoint', change: { op: 'qualify', id: e.id, model: m.id, harness } }));
+        q.disabled = !!m.qualifying || !e.enabled;
+        q.title = `Runs synthetic tool and JSON probes for ${label}.`;
+        row.appendChild(q);
+      }
+      const t = button(m.tasksRunning ? 'Running tasks…' : `Qualify tasks (${label})`, () => post({ type: 'localEndpoint', change: { op: 'qualifyTasks', id: e.id, model: m.id, harness } }));
+      t.disabled = !!m.tasksRunning || !!m.qualifying || !e.enabled;
+      t.title = `Runs synthetic scratch repositories through ${label} on this endpoint.`;
+      row.appendChild(t);
+    }
     card.appendChild(row);
-    card.appendChild(el('p', 'pf-desc pf-model-fact', m.qualification ?? 'Not qualified: tool calling unknown, so it is not given agentic work.'));
-    if (m.tasksRunning || m.tasks) card.appendChild(el('p', 'pf-desc pf-model-fact', m.tasksRunning ?? m.tasks!));
+    for (const harness of m.harnesses ?? []) {
+      card.appendChild(el('p', 'pf-desc pf-model-fact', `${harness}: ${m.qualifications?.[harness] ?? 'not qualified'}`));
+      card.appendChild(el('p', 'pf-desc pf-model-fact', `${harness} tasks: ${m.taskQualifications?.[harness] ?? 'not run'}`));
+    }
+    if (m.tasksRunning) card.appendChild(el('p', 'pf-desc pf-model-fact', m.tasksRunning));
     const s = summaries.find((x) => x.source === e.source && x.model === m.id);
     if (s) card.appendChild(el('p', 'pf-desc pf-model-fact', localSummaryText(s)));
   }

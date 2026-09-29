@@ -17,6 +17,8 @@ import { ClaudeCodeHarness } from '../src/orchestration/harness/claudeCodeHarnes
 import { codexPolicyParams, CodexRunnerService } from '../src/codex/runner';
 import { parseLaunchPolicy, type LaunchPolicy } from '../src/shared/launchPolicy';
 import { emptyHostState, type HostEvent, type HostSnapshot } from '../src/shared/sessionProtocol';
+import { localClaudeEnv } from '../src/sessionHost/env';
+import { CONVERSATION_DELEGATION_INSTRUCTIONS, withConversationDelegation } from '../src/shared/conversationDelegation';
 
 const POLICY: LaunchPolicy = {
   claude: {
@@ -44,6 +46,13 @@ function memento(initial: Record<string, unknown> = {}) {
 }
 
 describe('parseLaunchPolicy', () => {
+  it('keeps only a validated local Claude provider and never serializes a key', () => {
+    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080/v1', model: 'qwen', contextWindow: 65536, maxOutputTokens: 4096, keyRef: 'localEndpoint:box' };
+    expect(parseLaunchPolicy({ claude: { localProvider: { ...provider, key: 'synthetic-secret' } } })?.claude?.localProvider).toEqual(provider);
+    expect(JSON.stringify(parseLaunchPolicy({ claude: { localProvider: { ...provider, key: 'synthetic-secret' } } }))).not.toContain('synthetic-secret');
+    expect(parseLaunchPolicy({ claude: { localProvider: { ...provider, model: '' } } })).toBeUndefined();
+    expect(parseLaunchPolicy({ claude: { localProvider: { ...provider, keyRef: 'localEndpoint:other' } } })).toBeUndefined();
+  });
   it('keeps a well-formed policy as it is', () => {
     expect(parseLaunchPolicy(JSON.parse(JSON.stringify(POLICY)))).toEqual(POLICY);
   });
@@ -79,6 +88,41 @@ describe('parseLaunchPolicy', () => {
 });
 
 describe('claudePolicyOptions', () => {
+  it('adds the same consent instruction once when an ordinary session resumes with earlier guidance', () => {
+    expect(withConversationDelegation(undefined)).toBe(CONVERSATION_DELEGATION_INSTRUCTIONS);
+    expect(withConversationDelegation('Keep answers short.')).toBe(`Keep answers short.\n\n${CONVERSATION_DELEGATION_INSTRUCTIONS}`);
+    expect(withConversationDelegation(withConversationDelegation('Keep answers short.'))).toBe(withConversationDelegation('Keep answers short.'));
+    expect(CONVERSATION_DELEGATION_INSTRUCTIONS).toMatch(/explicitly and wait for a clear yes/);
+  });
+  it('builds a local-only SDK environment and preserves a simultaneous hosted launch', async () => {
+    const inherited = { PATH: '/bin', ANTHROPIC_API_KEY: 'inherited-key', ANTHROPIC_BASE_URL: 'https://old.invalid', ANTHROPIC_MODEL: 'old', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_OAUTH_TOKEN: 'old-oauth', OPENAI_API_KEY: 'other-key' };
+    const processBefore = { ...process.env };
+    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080/v1', model: 'qwen', contextWindow: 65536, maxOutputTokens: 4096, keyRef: 'localEndpoint:box' };
+    const seen: any[] = [];
+    const query: QueryFn = ({ options }) => { seen.push(options); return (async function* () {})() as any; };
+    new ClaudeSdkSession({ cwd: '/Users/test/proj', model: 'qwen', policy: { localProvider: provider } }, { query, binary: '/fake/claude', log: () => undefined, sdkOptions: { env: inherited }, localKey: async () => 'synthetic-secret' }).start();
+    new ClaudeSdkSession({ cwd: '/Users/test/proj', model: 'sonnet' }, { query, binary: '/fake/claude', log: () => undefined, sdkOptions: { env: inherited } }).start();
+    await Promise.resolve();
+    expect(seen).toHaveLength(2);
+    const local = seen.find((x) => x.model === 'qwen').env;
+    const hosted = seen.find((x) => x.model === 'sonnet').env;
+    expect(local).toMatchObject({ PATH: '/bin', ANTHROPIC_BASE_URL: provider.baseUrl, ANTHROPIC_API_KEY: 'synthetic-secret', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '65536', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '4096' });
+    for (const key of ['ANTHROPIC_MODEL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY']) expect(local).not.toHaveProperty(key);
+    expect(hosted).toEqual(inherited);
+    expect(inherited.ANTHROPIC_API_KEY).toBe('inherited-key');
+    expect(process.env).toEqual(processBefore);
+    expect(localClaudeEnv(inherited, provider).ANTHROPIC_API_KEY).toBe('agent-wrangler-local');
+  });
+
+  it('appends the shared instruction only when the conversation policy requests it', () => {
+    const seen: any[] = [];
+    const query: QueryFn = ({ options }) => { seen.push(options); return (async function* () {})() as any; };
+    const deps = { query, binary: '/fake/claude', log: () => undefined };
+    new ClaudeSdkSession({ cwd: '/Users/test/proj', policy: { conversationInstructions: CONVERSATION_DELEGATION_INSTRUCTIONS } }, deps).start();
+    new ClaudeSdkSession({ cwd: '/Users/test/proj' }, deps).start();
+    expect(seen[0].systemPrompt).toMatchObject({ type: 'preset', append: CONVERSATION_DELEGATION_INSTRUCTIONS });
+    expect(seen[1].systemPrompt).toBeUndefined();
+  });
   it('maps the claude half onto SDK options, and nothing else', () => {
     expect(claudePolicyOptions(POLICY.claude)).toEqual(POLICY.claude);
     expect(claudePolicyOptions(undefined)).toEqual({});

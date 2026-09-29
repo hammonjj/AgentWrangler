@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import { endProcess, type EndOutcome } from '../../claude/runner/adopt';
 import { isSameProcessAlive, startTimeOf } from '../procStart';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
+import { parseLaunchPolicy } from '../../shared/launchPolicy';
 import type { HostBoot, HostManifest } from '../../shared/sessionProtocol';
 import { HostClient } from './hostClient';
 import { readManifest, readManifests, removeHostFiles } from './manifestFile';
@@ -43,6 +44,7 @@ export interface HostSupervisorOptions {
   startTimeoutMs?: number;
   /** `lifecycle.orphanIdleHours`, read at each spawn and pushed to hosts on connect. */
   orphanIdleHours?: () => number;
+  endpointKey?: (ref: string) => Promise<string | undefined>;
 }
 
 export interface HostLaunch {
@@ -250,6 +252,8 @@ export class HostSupervisor {
       build: this.opts.build,
       log: this.opts.log,
       orphanIdleHours: this.opts.orphanIdleHours,
+      localKeyRef: parseLaunchPolicy(launch.policy)?.claude?.localProvider?.keyRef,
+      endpointKey: this.opts.endpointKey,
     });
     return { client, hostId };
   }

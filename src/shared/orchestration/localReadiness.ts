@@ -11,9 +11,8 @@
  * - **Planning** (§11.5): `pickPlannerEntry`. The same, but at
  *   `PLANNER_LOCAL_MIN_TIER` or above, with a context window a repository
  *   excerpt fits in.
- * - **Agentic work**: the resolver (§19.7). A tier, an endpoint serving
- *   `/v1/responses` (Codex's wire), and tool calling that something has said
- *   parses: stage 1 of qualification measures it.
+ * - **Agentic work**: the resolver (§19.7). A tier, a native Messages or
+ *   Responses route, a known window and qualification for that harness.
  *
  * A model whose stage-1 verdict is completion-only is shown as that, with the
  * measured count, rather than as a list of needs it can never meet.
@@ -44,9 +43,10 @@ export interface LocalModelFacts {
   health: HealthState;
   /** `/v1/responses` as probed. Undefined: not probed, or the probe could not say. */
   responses?: boolean;
+  messages?: boolean;
   /** Stage 1 of qualification, when it has run. */
   stage1?: { verdict: 'agentic' | 'completion-only'; toolCalls: { ok: number; runs: number }; error?: string };
-  /** The window fits a repository excerpt (`contextLimits`). Undefined: taken as fitting, as the planner does with an unknown window. */
+  /** The window fits a repository excerpt (`contextLimits`). Undefined: still unknown. */
   plannerWindowFits?: boolean;
 }
 
@@ -71,7 +71,7 @@ export interface LocalStatusInput {
   entry: Pick<CatalogEntry, 'enabled' | 'tier' | 'descriptor'>;
   tiers: readonly TierDef[];
   facts: LocalModelFacts;
-  /** The routing defaults rule out Codex (`localHarnessWarning`). */
+  /** A routing default may restrict which qualified harness is eligible. */
   harnessBlocked?: string;
 }
 
@@ -99,27 +99,29 @@ export function localModelStatus(input: LocalStatusInput): LocalModelStatus {
   const minRank = plannerMinRank(tiers);
   const minName = tiers[minRank]?.name;
   const p: string[] = [...base];
+  if (facts.health !== 'reachable' && facts.health !== 'down') p.push('a healthy endpoint');
   if (!minName) p.push('a tier list with more than one tier');
   else if (!hasTier) p.push(`tier ${minName} or above`);
   else if (rank < minRank) p.push(`tier ${minName} or above (it has ${entry.tier})`);
-  if (facts.plannerWindowFits === false) p.push('a context window a repository excerpt fits in');
+  if (facts.plannerWindowFits !== true) p.push('a known context window a repository excerpt fits in');
 
-  // Agentic: a Codex thread on the endpoint.
+  // Agentic: a qualified native harness on the endpoint.
   const a: string[] = [...base];
   let completionOnly: string | undefined;
   const s1 = facts.stage1;
-  if (s1 && !s1.error && s1.verdict === 'completion-only') {
+  if (s1 && !s1.error && s1.verdict === 'completion-only' && facts.messages !== true && !d.qualifiedHarnesses?.length) {
     completionOnly = `stage-1 qualification: tool calls ${s1.toolCalls.ok}/${s1.toolCalls.runs} (measured)`;
-  } else if (facts.responses === false) {
-    completionOnly = 'the server has no /v1/responses, which Codex needs';
+  } else if (facts.responses === false && facts.messages === false) {
+    completionOnly = 'the server has neither /v1/responses nor /v1/messages';
   } else if (isKnown(d.toolCalling) && d.toolCalling.value === 'none') {
     completionOnly = `its tool calls do not parse (${d.toolCalling.from})`;
   }
   if (!completionOnly) {
-    if (facts.responses !== true) a.push('/v1/responses probed on its server');
+    if (facts.responses !== true && facts.messages !== true) a.push('a native harness route probed on its server');
+    if (!isKnown(d.contextWindow)) a.push('a known context window');
+    if (!d.qualifiedHarnesses?.length) a.push('qualification for Codex or Claude Code');
     if (!isKnown(d.toolCalling)) a.push('measured tool calling (run Qualify)');
     if (!hasTier) a.push('a tier');
-    if (input.harnessBlocked) a.push('routing defaults that allow Codex');
   }
 
   const completions: Readiness = { ready: c.length === 0, needs: c };
@@ -142,10 +144,7 @@ function statusText(c: Readiness, p: Readiness, a: LocalModelStatus['agentic'], 
 }
 
 /**
- * The routing defaults rule out the Codex path, which is the only one a local
- * model does agentic work through (§19.7): the harness is pinned or preferred
- * to Claude Code, or Codex is excluded. Undefined when they do not, or when no
- * local model is enabled.
+ * Explain when a harness preference or exclusion narrows local routing.
  */
 export function localHarnessWarning(policy: ExecutionPolicy | undefined, localModelsEnabled: boolean): string | undefined {
   if (!localModelsEnabled || !policy) return undefined;
@@ -154,5 +153,5 @@ export function localHarnessWarning(policy: ExecutionPolicy | undefined, localMo
   else if (policy.exclusions?.harnesses?.includes('codex')) cause = 'exclude Codex';
   else if (policy.preferences?.harness === 'claude-code') cause = 'prefer Claude Code';
   if (!cause) return undefined;
-  return `The routing defaults ${cause}. That rules out the Codex path, so local models cannot get agentic work (they still answer completions and plan).`;
+  return `The routing defaults ${cause}. Local agentic work needs a qualified model on the allowed native harness.`;
 }

@@ -150,9 +150,14 @@ export class TurnTelemetry implements Disposable {
     const prior = this.unpersisted.get(key) ?? this.deps.log.segment(key);
     const state: SegmentState | undefined = prior && t.reset ? { ...prior, resetPending: true } : prior;
     const usage = claude ? claudeTurnUsage(state, raw, now) : codexTurnUsage(state, raw, now);
+    const localClaude = claude ? this.deps.registry?.get(sessionId)?.launch.policy?.claude?.localProvider : undefined;
     if (usage.kind === 'duplicate') return;
+    if (localClaude && usage.next.totals) {
+      delete usage.next.totals.costUsd;
+      for (const model of Object.values(usage.next.totals.models)) delete model.costUsd;
+    }
     t.reset = false;
-    if (claude && this.deps.onModelLimits) {
+    if (claude && !localClaude && this.deps.onModelLimits) {
       for (const [model, limits] of Object.entries(claudeModelLimits(raw))) this.deps.onModelLimits(model, limits);
     }
 
@@ -179,9 +184,15 @@ export class TurnTelemetry implements Disposable {
       : this.codexRecord(handle, sessionId, raw, now);
     if (usage.kind === 'usage') {
       record.modelsUsed = usage.modelsUsed;
+      if (localClaude) {
+        for (const model of Object.values(record.modelsUsed)) delete model.costUsd;
+      }
       const noPriorBaseline = !prior && handle.startedAt < this.startedAt;
       if (usage.coversGap || noPriorBaseline) record.coversGap = true;
-      if (claude) {
+      if (localClaude) {
+        record.costUsd = 0;
+        record.costBasis = 'none';
+      } else if (claude) {
         if (usage.costUsd !== undefined) {
           record.costUsd = usage.costUsd;
           record.costBasis = 'harness-estimate';
@@ -218,7 +229,7 @@ export class TurnTelemetry implements Disposable {
       id: str(r.uuid) ?? `${sessionId}:${now}`,
       sessionId,
       harness: 'claude-code',
-      source: 'anthropic',
+      source: this.deps.registry?.get(sessionId)?.launch.policy?.claude?.localProvider?.source ?? 'anthropic',
       modelsUsed: {},
       effort: prune({ requested, applied }),
       permissionMode: handle.composer.permissionMode,

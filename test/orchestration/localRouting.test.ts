@@ -33,6 +33,7 @@ function localReport(over: Partial<ModelDescriptor> = {}, extra: Partial<LocalMo
       maxConcurrency: known(2, 'probed'),
       throughput: UNKNOWN,
       costBasis: 'none',
+      qualifiedHarnesses: ['codex'],
       ...over,
     },
     harnesses: ['codex'],
@@ -53,6 +54,26 @@ const reachable = (freeSlots?: number): SourceStatus => ({
 });
 
 describe('the resolver and a local model', () => {
+  it('chooses a qualified standard local route before same-tier hosted and records hosted fallback reasons', () => {
+    const hosted = buildCatalog({ reported: [{ source: 'anthropic', models: [{ value: 'sonnet', label: 'Sonnet', resolved: 'claude-sonnet-5' }, { value: 'opus', label: 'Opus', resolved: 'claude-opus-5-5' }], at: 1 }], local: [] });
+    const local = tiered([localReport()]);
+    const snap = { catalog: { ...hosted, entries: [...hosted.entries, ...local.entries] }, sources: { 'local:box': reachable(2) }, now: 0 };
+    const selected = resolveRoute(REQ, snap);
+    expect(selected.target?.source).toBe('local:box');
+    const high = resolveRoute({ ...REQ, minTier: 'expert' }, snap);
+    expect(high.target?.source).toBe('anthropic');
+    expect(high.candidates.find((c) => c.target.source === 'local:box')?.reason).toMatch(/below the required expert/);
+    const oversized = resolveRoute({ ...REQ, needs: ['context:100000'] }, snap);
+    expect(oversized.target?.source).toBe('anthropic');
+    expect(oversized.candidates.find((c) => c.target.source === 'local:box')?.reason).toMatch(/context 66k < needed 100k/);
+    const down = resolveRoute(REQ, { ...snap, sources: { 'local:box': { ...reachable(), health: { state: 'down' as const, reason: 'endpoint stopped' } } } });
+    expect(down.target?.source).toBe('anthropic');
+    expect(down.candidates.find((c) => c.target.source === 'local:box')?.reason).toMatch(/endpoint stopped/);
+    const unqualified = resolveRoute(REQ, { ...snap, catalog: { ...snap.catalog, entries: snap.catalog.entries.map((e) => e.descriptor.source === 'local:box' ? { ...e, descriptor: { ...e.descriptor, qualifiedHarnesses: [] } } : e) } });
+    expect(unqualified.target?.source).toBe('anthropic');
+    expect(unqualified.candidates.find((c) => c.target.source === 'local:box')?.reason).toMatch(/has not qualified/);
+  });
+
   it('routes to it once it has a tier and its tool calls are measured', () => {
     const r = resolveRoute(REQ, { catalog: tiered([localReport()]), sources: { 'local:box': reachable(2) }, now: 0 });
     expect(r.outcome).toBe('resolved');
@@ -84,7 +105,7 @@ describe('the resolver and a local model', () => {
     const external = localReport({ location: 'hosted', contextWindow: UNKNOWN }, { external: true });
     const r = resolveRoute({ ...REQ, needs: ['context:50000'] }, { catalog: tiered([external]), sources: {}, now: 0 });
     expect(r.outcome).toBe('needs-human');
-    expect(r.candidates[0].reason).toMatch(/context window not reported/);
+    expect(r.candidates[0].reason).toMatch(/local context window is unknown/);
   });
 
   it('`disableLocal` turns off loopback endpoints; an external one counts as hosted', () => {

@@ -33,3 +33,18 @@ export function agentEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   out[HOSTED_ENV] = '1';
   return out;
 }
+
+/** A native Messages session gets provider settings only in its own SDK child. */
+export function localClaudeEnv(base: Record<string, string | undefined>, provider: { baseUrl: string; contextWindow: number; maxOutputTokens?: number }, key?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const providerSwitches = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_API_KEY', 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS']);
+  for (const [name, value] of Object.entries(base)) {
+    if (value === undefined || name.startsWith('ANTHROPIC_') || name.startsWith('OPENAI_') || name.startsWith('CLAUDE_CODE_USE_') || providerSwitches.has(name)) continue;
+    out[name] = value;
+  }
+  out.ANTHROPIC_BASE_URL = provider.baseUrl;
+  out.ANTHROPIC_API_KEY = key || 'agent-wrangler-local';
+  out.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(provider.contextWindow);
+  if (provider.maxOutputTokens) out.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(provider.maxOutputTokens);
+  return out;
+}

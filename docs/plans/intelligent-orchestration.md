@@ -2431,6 +2431,25 @@ Open:
 
 ---
 
+### 19.10 As built (#83): Claude Code on native local Messages endpoints
+
+An endpoint advertises Codex only when `/v1/responses` was probed and Claude Code only when
+`/v1/messages` was probed. There is no translator. Qualification is stored by endpoint,
+model and harness; old unscoped results are read as Codex results. Codex keeps the direct
+stage-1 probe; Claude Code qualifies through native Messages task fixtures, since a
+Messages-only server may have no chat-completions route. A successful fixture run measures
+agentic tool use for that harness. The resolver requires the selected pair to have qualified,
+and Preferences shows both.
+
+Claude local attempts carry a validated launch policy with the named model, `/v1` base URL,
+catalog context window, maximum output and `keyRef`. The key is read from safeStorage by the
+core and sent to a session host over its authenticated socket after boot; in-process sessions
+read it directly. The SDK child alone gets the local provider environment. A resume or §7.4
+host migration uses the recorded policy and repeats the key hand-off. The key is absent from
+the policy, registry, manifest, boot line, telemetry, events and logs. Hosted sessions keep
+their ordinary environment. Local turns ignore Claude's API cost estimate and use the
+catalog's context window in the conversation display.
+
 ## 20. Historical and adaptive routing (design only; not built)
 
 ### 20.1 Shape: learned proposes, deterministic disposes
@@ -3458,6 +3477,17 @@ proposal card), #43 and #44.
   task, no planner, hand-planned missions and `aw task` untouched), the edge guard in
   `lifecycles.test.ts`, the planner's input, the socket method and the CLI.
 
+**As built (#84): conversation consent and route neutrality.** Ordinary Agent Wrangler
+conversation launches for Claude Code and Codex carry the same public-safe instruction. It
+suggests Delegate only for substantial separable work, asks for a clear yes before running
+`aw delegate --folder` with optional `--criteria`, and leaves the harness to routing unless
+the user requests one. The instruction is in Claude's system prompt append or Codex's developer
+instructions, persisted in the launch policy for resume and migration. Attempt, planner,
+reviewer and qualification launches do not carry it. The CLI sends no harness from its shell
+environment; `--claude` and `--codex` still set explicit preferences. A plain delegation's
+policy has no harness preference. A single-task delegation uses the resolver's route, and the
+proposal or plan still waits for approval before work starts.
+
 ### P9: Scheduling, integration and contention
 
 - **Objective**: independent tasks run at the same time, safely, and their results meet on a
@@ -3831,4 +3861,3 @@ refusal to take `send` or `stop` from an agent's environment, and #22's checkout
   (§13.3).
 - **G3: decision 7, refined.** #26–#32 start now; #33 waits for G1. Recommended: they use only
   merged code, and #4's open items do not touch them.
-

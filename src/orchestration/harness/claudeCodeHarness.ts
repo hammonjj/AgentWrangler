@@ -8,12 +8,16 @@ import { randomUUID } from 'node:crypto';
 import type { SessionExecutors } from '../../core/session/sessionExecutors';
 import type { SessionHandle } from '../../core/session/sessionHandle';
 import type { ModelChoice } from '../../shared/conversation';
+import type { ClaudeLocalProvider } from '../../shared/launchPolicy';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
+import type { ModelSourceId } from '../../shared/orchestration/types';
 import { assertTarget, nativeEffort, type AgentHarness, type AttemptLaunch, type HarnessCapabilities } from './types';
 
 export interface ClaudeCodeHarnessDeps {
   sessions: Pick<SessionExecutors, 'launch'>;
   /** What the CLI last reported (`ModelCatalogService`). */
   models: () => ModelChoice[];
+  localProvider?: (source: ModelSourceId, model: string) => ClaudeLocalProvider | undefined;
 }
 
 const CAPABILITIES: HarnessCapabilities = {
@@ -49,6 +53,13 @@ export class ClaudeCodeHarness implements AgentHarness {
 
   async launch(req: AttemptLaunch): Promise<SessionHandle> {
     assertTarget(this.id, req);
+    let policy = req.policy;
+    if (req.target.source && isEndpointSource(req.target.source)) {
+      if (!req.target.model) throw new Error('A local model has to be named: there is no default model on an endpoint.');
+      const provider = this.deps.localProvider?.(req.target.source, req.target.model);
+      if (!provider) throw new Error(`The endpoint for ${req.target.source} is not registered, is off, or has no native /v1/messages route and known context window.`);
+      policy = { ...policy, claude: { ...policy?.claude, localProvider: provider } };
+    }
     const handle = await this.deps.sessions.launch({
       provider: 'claude',
       cwd: req.cwd,
@@ -59,7 +70,7 @@ export class ClaudeCodeHarness implements AgentHarness {
       // With an id of its own the prompt is sent here, so it carries that id.
       ...(req.promptId ? {} : { initialPrompt: req.prompt }),
       origin: req.origin,
-      ...(req.policy ? { policy: req.policy } : {}),
+      ...(policy ? { policy } : {}),
     });
     // Not awaited, like `initialPrompt`: the send settles when the agent takes it.
     if (req.promptId) void handle.send(req.prompt, undefined, { clientMessageId: req.promptId });

@@ -19,6 +19,7 @@ import type { Disposable } from '../../core/events';
 import { InputQueue } from '../../core/runner/inputQueue';
 import { SeqLog } from '../../core/session/seqLog';
 import { parseLaunchPolicy, type ClaudeLaunchPolicy } from '../../shared/launchPolicy';
+import { localClaudeEnv } from '../../sessionHost/env';
 import {
   emptyHostState,
   reduceHostSnapshot,
@@ -92,6 +93,8 @@ export interface ClaudeSessionDeps {
    * the agent's pid); in-process sessions pass nothing.
    */
   sdkOptions?: Partial<Options>;
+  /** The core reads safeStorage, or the host receives the key over its authenticated socket. */
+  localKey?: (ref: string) => Promise<string | undefined>;
 }
 
 /** The end sequence's timings (playbook §7.1). */
@@ -130,6 +133,8 @@ export class ClaudeSdkSession {
   readonly epoch = randomUUID();
   private input = new InputQueue<SDKUserMessage>();
   private query?: Query;
+  private starting = false;
+  private localSecret?: string;
   private pending = new Map<string, PendingAsk>();
   private settled: string[] = [];
   private sentUuids: string[] = [];
@@ -228,7 +233,32 @@ export class ClaudeSdkSession {
   // ---- commands ----
 
   start(): void {
-    if (this.query || this.snap.state === 'exited') return;
+    if (this.query || this.starting || this.snap.state === 'exited') return;
+    this.starting = true;
+    void this.startQuery();
+  }
+
+  private async startQuery(): Promise<void> {
+    const policy = parseLaunchPolicy({ claude: this.opts.policy })?.claude;
+    if (policy?.localProvider && this.opts.model && this.opts.model !== policy.localProvider.model) {
+      this.exit({ reason: 'error', error: 'The local session model does not match its endpoint policy.' });
+      return;
+    }
+    let key: string | undefined;
+    if (policy?.localProvider?.keyRef) {
+      try {
+        key = await this.deps.localKey?.(policy.localProvider.keyRef);
+      } catch {
+        this.exit({ reason: 'error', error: 'Could not read the local endpoint key.' });
+        return;
+      }
+      if (!key) {
+        this.exit({ reason: 'error', error: 'The local endpoint key is unavailable.' });
+        return;
+      }
+    }
+    if (this.snap.state === 'exited' || this.snap.state === 'ending') return;
+    this.localSecret = key;
     const options: Options = {
       cwd: this.opts.cwd,
       resume: this.opts.resume,
@@ -236,20 +266,22 @@ export class ClaudeSdkSession {
       // Free strings by the time they reach here (a setting, a dropdown built
       // from what the model advertised). An unknown value is the CLI's to reject.
       permissionMode: this.opts.permissionMode as Options['permissionMode'],
-      model: this.opts.model,
+      model: policy?.localProvider?.model ?? this.opts.model,
       effort: this.opts.effort ? (this.opts.effort as Options['effort']) : undefined,
       pathToClaudeCodeExecutable: this.deps.binary,
       canUseTool: this.canUseTool,
       includePartialMessages: true,
-      stderr: (data) => this.deps.log(`runner stderr: ${data.trim().slice(0, 400)}`),
+      stderr: (data) => this.deps.log(`runner stderr: ${this.safe(data.trim()).slice(0, 400)}`),
       ...this.deps.sdkOptions,
       // Last, so nothing merged above can loosen a rule the launch asked for.
-      ...claudePolicyOptions(this.opts.policy, this.opts.model),
+      ...claudePolicyOptions(this.opts.policy, policy?.localProvider?.model ?? this.opts.model),
     };
+    if (policy?.conversationInstructions) options.systemPrompt = { type: 'preset', preset: 'claude_code', append: policy.conversationInstructions };
+    if (policy?.localProvider) options.env = localClaudeEnv((this.deps.sdkOptions?.env ?? process.env) as Record<string, string | undefined>, policy.localProvider, key);
     try {
       this.query = this.deps.query({ prompt: this.input, options });
     } catch (err) {
-      this.exit({ reason: 'error', error: `Could not start Claude Code: ${String(err)}` });
+      this.exit({ reason: 'error', error: policy?.localProvider ? 'Could not start Claude Code on the local endpoint.' : `Could not start Claude Code: ${String(err)}` });
       return;
     }
     void this.pump(this.query);
@@ -406,7 +438,7 @@ export class ClaudeSdkSession {
     } catch (err) {
       // A forced close during `end` surfaces as the iterator throwing. That is
       // the ending we asked for, not a failure.
-      this.exit(this.snap.state === 'ending' ? {} : { reason: 'error', error: String(err) });
+      this.exit(this.snap.state === 'ending' ? {} : { reason: 'error', error: this.safe(String(err)) });
     }
   }
 
@@ -414,7 +446,8 @@ export class ClaudeSdkSession {
     // Once the exit is reported, nothing more is: a client must be able to
     // treat `exit` as the last event.
     if (this.snap.state === 'exited') return;
-    const m = msg as {
+    const safeMsg = this.localSecret ? redactSecret(msg, this.localSecret) : msg;
+    const m = safeMsg as {
       type?: string;
       subtype?: string;
       session_id?: unknown;
@@ -424,7 +457,7 @@ export class ClaudeSdkSession {
     if (typeof m.session_id === 'string' && m.session_id && m.session_id !== this.snap.sessionId) {
       this.emit({ type: 'sessionId', sessionId: m.session_id });
     }
-    this.emit({ type: 'message', msg });
+    this.emit({ type: 'message', msg: safeMsg });
 
     if (m.type === 'system' && m.subtype === 'init') {
       if (this.snap.state === 'starting') this.setState('idle');
@@ -510,6 +543,10 @@ export class ClaudeSdkSession {
     });
   }
 
+  private safe(value: string): string {
+    return this.localSecret ? value.split(this.localSecret).join('[local key]') : value;
+  }
+
   private waitForExit(ms: number): Promise<boolean> {
     return this.waitUntil(() => this.snap.state === 'exited', this.exitWaiters, ms);
   }
@@ -554,4 +591,12 @@ function remember(list: string[], id: string, max: number): void {
 function flush(waiters: (() => void)[]): void {
   const now = waiters.splice(0);
   for (const w of now) w();
+}
+
+/** SDK events may echo tool output; never let a local endpoint key into the event ring. */
+function redactSecret(value: unknown, secret: string): unknown {
+  if (typeof value === 'string') return value.split(secret).join('[local key]');
+  if (Array.isArray(value)) return value.map((item) => redactSecret(item, secret));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSecret(item, secret)]));
+  return value;
 }

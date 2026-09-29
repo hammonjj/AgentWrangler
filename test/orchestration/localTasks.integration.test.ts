@@ -113,6 +113,7 @@ function localReport(): LocalModelReport {
       maxConcurrency: known(2, 'probed'),
       throughput: UNKNOWN,
       costBasis: 'none',
+      qualifiedHarnesses: ['codex'],
     },
     harnesses: ['codex'],
     endpointEnabled: true,
@@ -216,7 +217,7 @@ describe('a task on a local model', () => {
 
     const [rec] = records(r);
     expect(rec).toMatchObject({ outcome: 'succeeded', target: { source: LOCAL, location: 'local' }, cost: { basis: 'none' } });
-    expect(rec.cost.usd).toBeUndefined();
+    expect(rec.cost.usd).toBe(0);
     expect(rec.local).toMatchObject({ source: LOCAL, runtime: 'llama.cpp', device: 'Test device', contextWindow: 65536, tokPerSecFrom: 'attempt' });
     expect(rec.local!.outTokPerSec).toBeGreaterThan(0);
     expect(rec.local!.queueMs).toBeGreaterThanOrEqual(0);

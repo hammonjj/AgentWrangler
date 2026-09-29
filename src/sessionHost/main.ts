@@ -65,7 +65,9 @@ function readBootLine(): Promise<HostBoot> {
 
 async function main(): Promise<void> {
   const boot = await readBootLine();
-  const say = (m: string) => log(boot.hostId, m);
+  let localSecret: string | undefined;
+  const safe = (value: string) => localSecret ? value.split(localSecret).join('[local key]') : value;
+  const say = (m: string) => log(boot.hostId, safe(m));
   const fake = process.env.AW_SESSION_HOST_FAKE === '1';
   // Applied exactly as the core sent it; parsed only so a malformed field is dropped, never widened.
   const policy = parseLaunchPolicy(boot.launch.policy);
@@ -113,7 +115,7 @@ async function main(): Promise<void> {
     const child = spawn(o.command, o.args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'pipe'] });
     agent = child;
     child.stderr?.on('data', (d: Buffer) => {
-      const text = d.toString('utf8');
+      const text = safe(d.toString('utf8'));
       stderrTail = (stderrTail + text).slice(-STDERR_TAIL_CHARS);
       say(`claude stderr: ${text.trim().slice(0, 400)}`);
     });
@@ -153,6 +155,8 @@ async function main(): Promise<void> {
   // The fake agent spawns its dummy child through the same hook, so tests see a real agent process.
   const sdkOptions: Partial<Options> = { env: agentEnv(process.env), spawnClaudeCodeProcess: spawnAgent };
 
+  let deliverLocalKey: ((key: string | undefined) => void) | undefined;
+  const localKey = new Promise<string | undefined>((resolve) => { deliverLocalKey = resolve; });
   const session = new ClaudeSdkSession(
     {
       cwd: boot.launch.cwd,
@@ -163,7 +167,7 @@ async function main(): Promise<void> {
       effort: boot.launch.effort,
       policy: policy?.claude,
     },
-    { query: (fake ? fakeQuery : sdkQuery) as QueryFn, binary: boot.launch.binary, log: say, sdkOptions },
+    { query: (fake ? fakeQuery : sdkQuery) as QueryFn, binary: boot.launch.binary, log: say, sdkOptions, localKey: async () => localKey },
   );
 
   const idle = new IdleRule(0, monotonicMs());
@@ -176,6 +180,11 @@ async function main(): Promise<void> {
     token: boot.token,
     log: say,
     configure: (p) => {
+      if (p.localKey !== undefined) {
+        localSecret = p.localKey || undefined;
+        deliverLocalKey?.(p.localKey);
+        deliverLocalKey = undefined;
+      }
       if ('orphanIdleHours' in p) {
         idle.setHours(p.orphanIdleHours);
         say(`idle-orphan rule: ${idle.currentHours > 0 ? `${idle.currentHours} h` : 'off'}`);

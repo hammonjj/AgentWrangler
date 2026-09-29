@@ -1381,8 +1381,7 @@ export class TaskRunner implements Disposable {
       this.log(`mission ${m.id}: could not resolve its policy for the planner: ${errorText(e)}`);
       return {};
     }
-    const prefer = p.preferences?.preferLocal === true || p.preferences?.strategy === 'prefer-local';
-    if (!prefer || p.exclusions?.disableLocal || p.caps?.location === 'hosted-only') return {};
+    if (p.exclusions?.disableLocal || p.caps?.location === 'hosted-only') return {};
     return { preferLocal: true, ...(p.exclusions?.sources?.length ? { excludeSources: [...p.exclusions.sources] } : {}) };
   }
 

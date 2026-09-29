@@ -17,8 +17,7 @@ export type Command =
    * `delegate` (#82) is the handoff: the planner decides one task or several.
    * `task` is the explicit single-task shortcut (#80). For both: `objective`
    * undefined: read it from stdin (`aw delegate -`). `folder` undefined: the
-   * current directory. `harness` undefined: the agent this shell belongs to,
-   * else Claude.
+   * current directory. `harness` undefined: let the resolver choose.
    */
   | { kind: 'delegate' | 'task'; objective: string | undefined; criteria: string[]; folder: string | undefined; harness: 'claude' | 'codex' | undefined; json: boolean }
   | { kind: 'tasks'; json: boolean };
@@ -38,7 +37,7 @@ Usage:
                             proposal or the plan in the app ("-" reads the objective from stdin)
       --criteria "a; b"     acceptance criteria, separated by semicolons
       --folder <dir>        the repository (default: the current directory)
-      --claude | --codex    which agent to prefer (default: the one running this shell)
+      --claude | --codex    which agent to prefer (default: let routing choose)
   aw task <objective…>      shortcut: always one task, no planner (same options as delegate)
   aw tasks                  tasks that are not finished
 

@@ -6,8 +6,8 @@
  *
  * The rule the formatters keep: a session with no records has no usage at all
  * (`undefined`, and nothing is shown), and a figure the agent did not report is
- * said to be unreported, never shown as zero. The webview never asks which
- * agent it is; the aggregate already says what is known.
+ * said to be unreported, never shown as zero. Local API cost is known to be
+ * zero and is labelled as such. The webview reads the aggregate's basis.
  */
 import type { CostBasis } from './orchestration/types';
 
@@ -22,9 +22,9 @@ export interface SessionUsage {
    * separately; Codex counts it inside input).
    */
   tokens: { total: number; input: number; output: number; cacheRead: number; cacheWrite: number };
-  /** Summed over the turns that had a cost. Absent when none did. */
+  /** Summed known API cost. Local turns contribute zero; absent when unknown. */
   costUsd?: number;
-  /** Where the cost comes from; `mixed` when turns disagree. `none`: nothing reported a cost. */
+  /** Where the cost comes from; `mixed` when turns disagree. `none`: no priced API cost. */
   costBasis: CostBasis | 'mixed';
   /** Turns with usage but no cost, while others had one: the cost is then a lower bound. */
   uncostedTurns: number;
@@ -57,7 +57,8 @@ export function formatUsd(usd: number): string {
 
 /** How the cost is labelled in the cell: short, but never without its basis. */
 function costPart(u: SessionUsage): string {
-  if (u.costUsd === undefined || u.costBasis === 'none') return 'cost not reported';
+  if (u.costBasis === 'none') return u.costUsd === 0 ? '$0 API cost' : 'cost not reported';
+  if (u.costUsd === undefined) return 'cost not reported';
   const amount = `${formatUsd(u.costUsd)}${u.uncostedTurns > 0 ? '+' : ''}`;
   switch (u.costBasis) {
     case 'harness-estimate':
@@ -84,7 +85,9 @@ function basisSentence(u: SessionUsage): string {
     case 'mixed':
       return 'Cost mixes the agent\'s own estimate and the telemetry.prices setting.';
     default:
-      return 'This agent reports no cost. Set per-model prices in telemetry.prices to estimate one.';
+      return u.costUsd === 0
+        ? 'Local model API cost is $0; no token price is applied.'
+        : 'This agent reports no cost. Set per-model prices in telemetry.prices to estimate one.';
   }
 }
 
@@ -95,7 +98,7 @@ export function usageTitle(u: SessionUsage): string {
     `${u.turns} turn${u.turns === 1 ? '' : 's'} recorded.`,
     `Tokens: ${t.total.toLocaleString('en-US')} (input ${t.input.toLocaleString('en-US')}, output ${t.output.toLocaleString('en-US')}, cache read ${t.cacheRead.toLocaleString('en-US')}, cache write ${t.cacheWrite.toLocaleString('en-US')}).`,
   ];
-  if (u.costUsd !== undefined && u.costBasis !== 'none') lines.push(`Cost: $${u.costUsd.toFixed(4)}.`);
+  if (u.costUsd !== undefined) lines.push(`Cost: $${u.costUsd.toFixed(4)}.`);
   lines.push(basisSentence(u));
   if (u.uncostedTurns > 0) lines.push(`${u.uncostedTurns} turn${u.uncostedTurns === 1 ? ' has' : 's have'} no cost, so the total is a lower bound.`);
   if (u.unknownTurns > 0) lines.push(`${u.unknownTurns} turn${u.unknownTurns === 1 ? '' : 's'} reported no usable usage.`);

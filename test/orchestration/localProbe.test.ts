@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest';
 import { CapabilityCatalog } from '../../src/core/capabilityCatalog';
 import { probeEndpoint } from '../../src/orchestration/local/probe';
 import type { FetchFn } from '../../src/orchestration/local/openaiWire';
-import { buildCatalog, isKnown, modelsInTierRange } from '../../src/shared/orchestration/catalog';
+import { buildCatalog, isKnown, known, modelsInTierRange } from '../../src/shared/orchestration/catalog';
 import type { LocalEndpointConfig, LocalRuntime } from '../../src/shared/orchestration/localEndpoints';
 import { localModelReports, type EndpointProbe, type Qualification } from '../../src/shared/orchestration/localModels';
 
@@ -136,6 +136,24 @@ function qual(model: string, toolCalling: 'basic' | 'none'): Qualification {
 }
 
 describe('local models in the catalog', () => {
+  it('advertises only probed native routes and qualifies each harness separately', async () => {
+    const p = await probe('llama.cpp');
+    const model = p.models[0].id;
+    const codex = localModelReports(cfg(), p, { [model]: { codex: qual(model, 'basic') } })[0];
+    expect(codex.harnesses).toEqual(['codex', 'claude-code']);
+    expect(codex.descriptor.qualifiedHarnesses).toEqual(['codex']);
+    expect(localModelReports(cfg(), p, { [model]: qual(model, 'basic') })[0].descriptor.qualifiedHarnesses).toEqual(['codex']);
+    const messages = localModelReports(cfg(), { ...p, routes: { responses: known(false, 'probed'), messages: known(true, 'probed') } }, { [model]: { 'claude-code': qual(model, 'basic') } })[0];
+    expect(messages.harnesses).toEqual(['claude-code']);
+    expect(messages.descriptor.qualifiedHarnesses).toEqual(['claude-code']);
+    const taskQualified = localModelReports(cfg(), { ...p, routes: { responses: known(false, 'probed'), messages: known(true, 'probed') } }, {}, {
+      [model]: { 'claude-code': { model, at: 3, runnable: true, k: 1, runs: [{ fixture: 'synthetic', n: 1, pass: true, testsPass: true, testsUntouched: true, diffInside: true, turns: 1, toolCalls: 1, wallMs: 10 }], passed: 1, avgTurns: 1, avgWallMs: 10, inputTokens: 1, outputTokens: 1 } },
+    })[0];
+    expect(taskQualified.descriptor.qualifiedHarnesses).toEqual(['claude-code']);
+    expect(taskQualified.descriptor.toolCalling).toEqual(known('basic', 'measured'));
+    const responses = localModelReports(cfg(), { ...p, routes: { responses: known(true, 'probed'), messages: known(false, 'probed') } })[0];
+    expect(responses.harnesses).toEqual(['codex']);
+  });
   it('a probed model is unassigned, and becomes routable only once a tier is assigned', async () => {
     const endpoint = cfg();
     const p = await probe('llama.cpp');
@@ -147,7 +165,7 @@ describe('local models in the catalog', () => {
     expect(entry.defaultTier).toBeUndefined();
     expect(entry.routable).toBe(false);
     expect(entry.notRoutableBecause).toBe('Unassigned');
-    expect(entry.harnesses).toEqual(['codex']);
+    expect(entry.harnesses).toEqual(['codex', 'claude-code']);
     expect(entry.descriptor).toMatchObject({
       location: 'local',
       costBasis: 'none',
