@@ -317,6 +317,12 @@ export interface ModelDescriptor {
   streaming: Known<boolean>;
   /** Native effort levels, or `[]` for a model with no effort control. */
   nativeEffort: Known<string[]>;
+  /**
+   * Claude Code only: whether its permission mode `auto` is available on this
+   * model. Where it is not, an unattended attempt cannot run in `auto` and
+   * would ask about every edit. Absent for models no Claude Code reported.
+   */
+  autoMode?: Known<boolean>;
   /** Local servers: slots. Hosted: unknown. */
   maxConcurrency: Known<number>;
   /** Measured from telemetry (later). */
@@ -445,6 +451,7 @@ function descriptorFor(
     // A reported model with no levels has no effort control: that is what the
     // harness said (Claude: `supportsEffort` false; Haiku), not a gap.
     nativeEffort: known([...(primary.effortLevels ?? [])], 'reported'),
+    ...(source === 'anthropic' ? { autoMode: primary.autoMode !== undefined ? known(primary.autoMode, 'reported') : UNKNOWN } : {}),
     maxConcurrency: UNKNOWN,
     throughput: UNKNOWN,
     costBasis: 'plan-window',
@@ -591,12 +598,21 @@ export function modelsInTierRange(
   });
 }
 
-/** FNV-1a over what affects resolution: the tiers and each model's tier, enablement and effort map. */
+/**
+ * Claude Code said `auto` is not available on this model (Haiku). Unknown is
+ * not unavailable: a model nobody has reported on is not held back.
+ */
+export function autoModeUnavailable(entry: Pick<CatalogEntry, 'descriptor'>): boolean {
+  const a = entry.descriptor.autoMode;
+  return a !== undefined && isKnown(a) && !a.value;
+}
+
+/** FNV-1a over what affects resolution: the tiers and each model's tier, enablement, effort map and auto mode. */
 function catalogVersion(tiers: TierDef[], entries: CatalogEntry[]): string {
   const basis = JSON.stringify({
     tiers,
     models: entries
-      .map((e) => [e.key, e.tier ?? null, e.enabled, e.effortMap ?? null, e.aliases])
+      .map((e) => [e.key, e.tier ?? null, e.enabled, e.effortMap ?? null, e.aliases, autoModeUnavailable(e)])
       .sort((a, b) => (String(a[0]) < String(b[0]) ? -1 : 1)),
   });
   let h = 0x811c9dc5;

@@ -34,15 +34,30 @@ const PERMISSIVENESS: Record<PermissionModeName, number> = {
 export const ATTEMPT_PERMISSION_MODE: PermissionModeName = 'auto';
 
 /**
+ * What an attempt runs in instead of `auto` on a model that has no `auto`
+ * (Haiku). Claude Code falls back to asking about everything there; this at
+ * least lets edits inside the worktree through, and the allow rules cover
+ * the repo's checks and worktree `git`.
+ */
+export const NO_AUTO_PERMISSION_MODE: PermissionModeName = 'acceptEdits';
+
+/**
  * The mode an attempt runs in: what the route asked for (default `auto`),
  * no more permissive than the app's default, and never `bypassPermissions`.
+ * `autoMode: false` (the model was reported not to have it) turns `auto`
+ * into `acceptEdits`; unknown leaves it alone.
  */
-export function attemptPermissionMode(requested: PermissionModeName | undefined, appDefault: PermissionModeName | undefined): PermissionModeName {
+export function attemptPermissionMode(
+  requested: PermissionModeName | undefined,
+  appDefault: PermissionModeName | undefined,
+  autoMode?: boolean,
+): PermissionModeName {
   let mode = requested ?? ATTEMPT_PERMISSION_MODE;
   const ceiling = appDefault ?? ATTEMPT_PERMISSION_MODE;
   if ((PERMISSIVENESS[mode] ?? 0) > (PERMISSIVENESS[ceiling] ?? 0)) mode = ceiling;
   // A ceiling of `bypassPermissions` still does not let an attempt bypass anything.
   if (mode === 'bypassPermissions') mode = ATTEMPT_PERMISSION_MODE;
+  if (mode === 'auto' && autoMode === false) mode = NO_AUTO_PERMISSION_MODE;
   return mode;
 }
 
