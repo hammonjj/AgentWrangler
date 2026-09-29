@@ -9,6 +9,7 @@ import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { TaskBadge } from '../shared/orchestration/taskView';
 import type { MissionOp, MissionsSnapshot } from '../shared/orchestration/missionView';
+import { parseRef, parseSelection, type AnalyticsRef, type AnalyticsSelection, type AnalyticsView } from '../shared/orchestration/analyticsView';
 import { displayTitle, GLOBAL_PROJECT_DIR, type AgentSession, type HookHealth, type ProjectDTO } from '../shared/model';
 import { checkoutRootFor } from '../core/checkout';
 import { occupantsOf, occupiesCheckout, sharedCheckouts, type CheckoutEntry } from '../core/sharedCheckout';
@@ -109,6 +110,20 @@ export interface MissionSource {
   onDidRequestShow?(listener: (missionId?: string) => void): Disposable;
 }
 
+/**
+ * The Analytics view (#49), behind an interface for the same reason as the
+ * others: the dashboard forwards the pane's selection and clicks, and posts
+ * back what `analyticsView.ts` made of the telemetry. It reads; nothing here
+ * writes a record.
+ */
+export interface AnalyticsSource {
+  view(selection: AnalyticsSelection): AnalyticsView;
+  /** Open this item's breakdown and evidence in the conversation pane. */
+  showDetail(selection: AnalyticsSelection, ref: AnalyticsRef): void;
+  /** The telemetry grew: a view on screen is stale. */
+  onDidChange(listener: () => void): Disposable;
+}
+
 /** Starting a conversation is the extension's job, not the dashboard's; it only asks. */
 export interface ConversationLauncher {
   newConversation(cwd: string, provider?: 'claude' | 'codex'): Promise<unknown>;
@@ -139,6 +154,7 @@ export class DashboardHost {
     private models: Pick<CapabilityCatalog, 'value' | 'onDidChange'>,
     private tasks?: TaskBadgeSource,
     private missions?: MissionSource,
+    private analytics?: AnalyticsSource,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
@@ -183,9 +199,30 @@ export class DashboardHost {
       const show = this.missions.onDidRequestShow?.((missionId) => void this.webview.postMessage({ type: 'showMissions', missionId } satisfies HostToDashboard));
       if (show) this.subs.push(show);
     }
+    // Only a pane showing Analytics has asked; the others are not sent a view they would discard.
+    if (this.analytics) this.subs.push(this.analytics.onDidChange(() => this.pushAnalyticsSoon()));
+  }
+
+  /** The Analytics selection the pane last sent; absent until it shows the view. */
+  private analyticsSelection?: AnalyticsSelection;
+  private analyticsTimer?: ReturnType<typeof setTimeout>;
+
+  private pushAnalytics(): void {
+    if (!this.analytics || !this.analyticsSelection) return;
+    void this.webview.postMessage({ type: 'analytics', view: this.analytics.view(this.analyticsSelection) } satisfies HostToDashboard);
+  }
+
+  /** Records arrive in bursts (an attempt's end writes several): one recompute per burst. */
+  private pushAnalyticsSoon(): void {
+    if (!this.analyticsSelection || this.analyticsTimer) return;
+    this.analyticsTimer = setTimeout(() => {
+      this.analyticsTimer = undefined;
+      this.pushAnalytics();
+    }, 500);
   }
 
   dispose(): void {
+    if (this.analyticsTimer) clearTimeout(this.analyticsTimer);
     for (const s of this.subs) s.dispose();
     this.subs = [];
   }
@@ -437,6 +474,15 @@ export class DashboardHost {
       case 'pauseAll':
         this.actions.pauseAll(m.pause);
         break;
+      case 'analyticsQuery':
+        this.analyticsSelection = parseSelection(m.selection);
+        this.pushAnalytics();
+        break;
+      case 'analyticsDetail': {
+        const ref = parseRef(m.ref);
+        if (ref) this.analytics?.showDetail(parseSelection(m.selection), ref);
+        break;
+      }
     }
   }
 

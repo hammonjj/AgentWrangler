@@ -72,6 +72,7 @@ import { LocalMetricsIndex } from '../core/telemetry/localMetricsIndex';
 import { RoutingEvidenceIndex } from '../core/telemetry/routingEvidenceIndex';
 import { AnalyticsIndex } from '../core/telemetry/telemetryIndex';
 import { comparisonReport, effectiveMode, evaluateGate, type ComparisonReport, type GateResult } from '../shared/orchestration/autoRouting';
+import { analyticsDetail, analyticsView, type AnalyticsSelection } from '../shared/orchestration/analyticsView';
 import { CORPUS_STATUS } from '../orchestration/policy/corpusStatus';
 import { ROUTER_VERSION } from '../orchestration/policy/router';
 import { ASSESSOR_VERSION } from '../orchestration/policy/assessment';
@@ -141,6 +142,7 @@ import type {
   StopOutcome,
 } from '../core/control/protocol';
 import type {
+  AnalyticsSource,
   ConversationLauncher,
   MissionSource,
   ProjectSource,
@@ -212,6 +214,8 @@ export interface AgentWranglerApp {
   autoRouting: () => { gate: GateResult; report: ComparisonReport };
   /** Fires when a routing or attempt record is added: the gate and the report may have moved. */
   onDidChangeRoutingEvidence: (listener: () => void) => { dispose(): void };
+  /** The table's Analytics view (#49), computed from the telemetry log. Read-only. */
+  analytics: AnalyticsSource;
   pause: PauseService;
   usage: UsageSource;
   codexUsage: UsageSource;
@@ -632,6 +636,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
       .then(() => log(`telemetry: analytics index loaded ${analyticsIndex.size} records in ${Date.now() - started} ms`))
       .catch((err) => log(`telemetry: could not read analytics records: ${String(err)}`));
   }
+  /**
+   * What the Analytics view is computed from. Repository is joined through the
+   * mission store's index (`missionId` → `repoRoot`, §17): no record carries a
+   * path. With orchestration off there is no store, and every task's
+   * repository is `unknown`.
+   */
+  const analyticsInput = (selection: AnalyticsSelection) => {
+    let repos: Map<string, string> | undefined;
+    const repoOf = (missionId: string): string | undefined => {
+      repos ??= new Map((orchestration.store?.list() ?? []).map((e) => [e.id, e.repoRoot]));
+      return repos.get(missionId);
+    };
+    return { records: analyticsIndex.records(), tiers: models.catalog.tiers.map((t) => t.name), repoOf, selection, now: Date.now() };
+  };
   const autoRouting = (): { gate: GateResult; report: ComparisonReport } => {
     const input = { records: routingEvidence.records(), tiers: models.catalog.tiers.map((t) => t.name) };
     return {
@@ -3080,6 +3098,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
     localMetrics,
     autoRouting,
     onDidChangeRoutingEvidence: (listener) => routingEvidence.onDidChange(listener),
+    analytics: {
+      view: (selection) => analyticsView(analyticsInput(selection)),
+      showDetail: (selection, ref) => {
+        const detail = analyticsDetail(analyticsInput(selection), ref);
+        if (detail) surface?.showDetail(detail);
+      },
+      onDidChange: (listener) => analyticsIndex.onDidChange(listener),
+    },
     pause,
     usage,
     codexUsage,

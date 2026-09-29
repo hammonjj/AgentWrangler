@@ -15,6 +15,7 @@ import type {
 import type { HookHealth, ProjectDTO, SessionDTO } from './model';
 import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from './orchestration/taskView';
 import type { MissionOp, MissionsSnapshot } from './orchestration/missionView';
+import type { AnalyticsDetail, AnalyticsRef, AnalyticsSelection, AnalyticsView } from './orchestration/analyticsView';
 import type { UsageState } from './usage';
 
 // ---- Dashboard ----
@@ -71,6 +72,12 @@ export type HostToDashboard =
   | { type: 'showMissions'; missionId?: string }
   /** A Missions view action was refused or failed; shown beside the mission, not as a modal. */
   | { type: 'missionError'; missionId: string; text: string }
+  /**
+   * The Analytics view (#49) for the selection the pane last sent. Sent only
+   * to a pane that asked (`analyticsQuery`), and again whenever the telemetry
+   * it is computed from grows.
+   */
+  | { type: 'analytics'; view: AnalyticsView }
   /**
    * The folder dialog closed on a choice. Sent before the snapshot that will
    * contain it, because the webview has to know which entry to select and the
@@ -172,7 +179,11 @@ export type DashboardToHost =
    * everything currently frozen. Machine-wide on purpose — the budget being
    * protected is the account's, not this window's.
    */
-  | { type: 'pauseAll'; pause: boolean };
+  | { type: 'pauseAll'; pause: boolean }
+  /** The Analytics view is showing, or its filters changed: send the view for this selection (#49). */
+  | { type: 'analyticsQuery'; selection: AnalyticsSelection }
+  /** A metric, the split or a calibration row was clicked: show its detail in the conversation pane. */
+  | { type: 'analyticsDetail'; selection: AnalyticsSelection; ref: AnalyticsRef };
 
 // ---- Conversation pane ----
 
@@ -261,10 +272,17 @@ export type HostToConversation =
   | { type: 'dropped'; mentions: string[]; images: ImageAttachment[]; notes: string[] }
   | { type: 'delegationOffer'; offer?: DelegationOffer }
   | { type: 'sendResult'; requestId: string; error?: string; adopted?: boolean }
-  | { type: 'error'; text: string };
+  | { type: 'error'; text: string }
+  /**
+   * Not a session: an analytics item's breakdown and evidence (#49). The pane
+   * draws it in place of the conversation until the next `init`.
+   */
+  | { type: 'analyticsDetail'; detail: AnalyticsDetail };
 
 export type ConversationToHost =
   | { type: 'ready' }
+  /** Back from an analytics detail to the conversation under it (#49). */
+  | { type: 'closeDetail' }
   | { type: 'delegationOfferDecision'; offerId: string; outcome: DelegationOfferOutcome }
   | { type: 'send'; text: string; images?: ImageAttachment[]; requestId?: string; sessionKey?: string }
   | { type: 'cancelSend' }

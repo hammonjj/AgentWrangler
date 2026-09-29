@@ -34,6 +34,7 @@ import type { SessionHandle } from '../core/session/sessionHandle';
 import type { SessionHostRuntime } from '../core/session/hostSupervisor';
 import type { EnsureReason } from '../remote/daemon/client';
 import type { RemoteDaemonPaths } from '../remote/daemon/paths';
+import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 
 /**
  * Persisted key/value, the same structural shape `ArchiveService` and
@@ -159,6 +160,8 @@ export interface WorkbenchSurface {
   showSession(handle: SessionHandle, options?: { preserveFocus?: boolean }): void;
   /** Give this conversation a surface of its own, which row clicks never swap away. */
   openInTab(key: string): void;
+  /** Show something that is not a session in the conversation half: an analytics item's detail (#49). */
+  showDetail(detail: AnalyticsDetail): void;
 }
 
 /**

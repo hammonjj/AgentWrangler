@@ -1690,3 +1690,98 @@ body,
 
 #searchresults { border-bottom:2px solid var(--vscode-panel-border); }
 #sessionusage { font-size:11px; }
+
+/* ---- analytics detail (#49) ----
+ * The pane's one non-session mode: drawn over the conversation, which keeps
+ * its DOM (and keeps streaming) underneath until the next session is shown.
+ * Everything wraps; tables keep to the pane's width. */
+#convApp.detail-mode > :not(#analyticsDetail) {
+  display: none !important;
+}
+#convApp #analyticsDetail {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+#convApp #analyticsDetail .ad-head {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--aw-rule);
+}
+#convApp #analyticsDetail .ad-titlerow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+#convApp #analyticsDetail .ad-title {
+  font-weight: 600;
+}
+#convApp #analyticsDetail .ad-heuristic {
+  padding: 0 6px;
+  border: 1px solid var(--vscode-charts-yellow, #d7ba7d);
+  border-radius: 8px;
+  font-size: 0.8em;
+  color: var(--vscode-charts-yellow, #d7ba7d);
+}
+#convApp #analyticsDetail .ad-back {
+  margin-left: auto;
+  padding: 1px 8px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  font: inherit;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  cursor: pointer;
+}
+#convApp #analyticsDetail .ad-subtitle,
+#convApp #analyticsDetail .ad-sub,
+#convApp #analyticsDetail .ad-evmeta,
+#convApp #analyticsDetail .ad-none {
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#convApp #analyticsDetail .ad-body {
+  padding: 4px 12px 16px;
+}
+#convApp #analyticsDetail .ad-facts {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 3px 12px;
+  margin: 8px 0;
+}
+#convApp #analyticsDetail .ad-fact {
+  color: var(--vscode-descriptionForeground);
+}
+#convApp #analyticsDetail .ad-factvalue {
+  margin: 0;
+}
+#convApp #analyticsDetail .ad-h {
+  margin: 12px 0 4px;
+  font-size: 0.8em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+}
+#convApp #analyticsDetail .ad-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+#convApp #analyticsDetail .ad-row td {
+  padding: 2px 6px 2px 0;
+  vertical-align: top;
+  border-bottom: 1px solid var(--aw-rule);
+}
+#convApp #analyticsDetail .ad-evidence {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+#convApp #analyticsDetail .ad-ev {
+  display: flex;
+  flex-direction: column;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--aw-rule);
+}
