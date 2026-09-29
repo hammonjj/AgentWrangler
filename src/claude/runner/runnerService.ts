@@ -44,6 +44,7 @@ export interface RunnerServiceDeps {
    * `CapabilityCatalog`.
    */
   rememberModels?: (models: ModelChoice[] | undefined) => void;
+  localKey?: (ref: string) => Promise<string | undefined>;
   /** Session hosts: where new sessions run when `enabled()` says so, and how surviving ones are adopted. */
   hosts?: { supervisor: HostSupervisor; enabled: () => boolean };
   /**
@@ -80,7 +81,7 @@ export class RunnerService implements SessionExecutor, Disposable {
     const launch = hosts && !opts.resume && !opts.sessionId ? { ...opts, sessionId: randomUUID() } : opts;
     const session = hosts
       ? spawnHostedClaude(launch, { supervisor: hosts.supervisor, binary, log: this.deps.log, loadHistory, beforeResume: this.deps.beforeResume })
-      : createLocalClaudeHandle(launch, { query: this.deps.query, binary, log: this.deps.log, loadHistory });
+      : createLocalClaudeHandle(launch, { query: this.deps.query, binary, log: this.deps.log, loadHistory, localKey: this.deps.localKey });
     const place = this.deps.locate?.(opts.cwd) ?? {};
     this.track(session, (id) =>
       this.deps.registry?.live({

@@ -489,47 +489,49 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
   it is not contacted while off, and everywhere it appears it says *data leaves this machine*.
 - **Keys** go in the system keychain (`safeStorage`), never in settings. Storing refuses when
   the OS cannot encrypt. A Codex thread on the endpoint gets the key per request, and the key
-  is never written to the session registry.
+  is never written to the session registry. For a native `/v1/messages` Claude Code session, the
+  core resolves the key reference and passes the key to its session host over the authenticated
+  socket after boot. Only that session's SDK environment gets the endpoint URL, key (or dummy),
+  and catalog context window. Resume and host migration repeat the hand-off. Neither the launch
+  policy nor the registry or host manifest contains the key.
 - **Probe.** AW reads what the runtime says: the model list, context window, vision, slots
   (llama.cpp), constrained decoding, and whether the server serves `/v1/responses` (Codex) and
   `/v1/messages` natively. It probes those with an empty POST, which generates nothing. Each fact
   says where it came from (`probed`, `declared`, `measured`), and anything nobody said stays
   unknown. Health is read every 30 s. One miss is *degraded*, two in a row is *down*.
 - **Tier map.** Every probed model shows up **unassigned** and is never routed to until you give
-  it a tier. *Qualify* runs §19.6's stage-1 probe against it: 10 tool calls, 10 tool-result round
+  it a tier. *Qualify Codex* runs §19.6's stage-1 direct probe: 10 tool calls, 10 tool-result round
   trips and 20 JSON replies, all synthetic. That sets tool calling and structured output to
-  `measured`. Any miss makes the model completion-only.
+  `measured` for Codex. Claude Code uses the native Messages task fixtures below.
 - **Qualify tasks** runs stage 2 (plan §19.9). There are four small scratch repos, plain Node
   with no dependencies, each with seeded bugs, a check (`node test/check.js`), protected tests and
-  a list of the paths the agent may change. Each runs 3 times as a Codex thread on the endpoint,
-  under the same sandbox and prompt framing as a routed attempt, in a temp dir that is removed
+  a list of the paths the agent may change. Each runs 3 times through the selected native harness,
+  under the same permissions and prompt framing as a routed attempt, in a temp dir that is removed
   afterwards. A run passes when the check exits 0, nothing under `test/` changed, and every
   changed path is inside the allowed ones. A run that asks for approval fails, since nobody is
   there to answer it. The result shows the pass rate, turns, wall time and tokens, all
-  `measured`. It is kept with stage 1's and survives a restart, and each run writes a
-  `local-call` record. On a server without `/v1/responses` (`mlx_lm.server`) it says *not
-  runnable: no /v1/responses* and records no pass rate. It takes minutes. Neither stage ever
+  `measured`. Results are kept separately for each native harness, survive a restart, and each run writes a
+  `local-call` record. A harness whose native route is absent is marked *not runnable* for that
+  harness. It takes minutes. Neither stage ever
   sets a tier.
 - **Status beside the tier picker.** Each local model's row in the tier map says what it can
   be picked for now, and what it still needs for each kind of work:
   - Completions need it enabled, at the weakest tier (`basic`), on an endpoint that is on and
     not down.
   - Planning needs `standard` or above and a context window a repository excerpt fits in.
-  - Agentic work needs `/v1/responses` on the server, tool calling that is measured (or
-    declared), and a tier.
+  - Agentic work needs a native `/v1/responses` (Codex) or `/v1/messages` (Claude Code) route,
+    qualification for that harness, and a tier.
 
   A model that stage 1 found completion-only is shown as *Completion only* with the measured
   count, for example `tool calls 0/10`. Both stages' results appear under the picker.
-- **Harness-pin warning.** If the routing defaults pin or prefer Claude Code, or exclude Codex,
-  while a local model is enabled, Preferences warns that this rules out the Codex path, so local
-  models cannot get agentic work. They still answer completions and plan.
-- **What it does once tiered.** Agentic tasks run as a Codex thread whose model provider is the
-  endpoint (Responses wire), under the same sandbox as any attempt. That needs `/v1/responses`
-  on the server and measured tool calling. A model at the weakest tier (`basic`) answers
+- **Harness-pin warning.** Preferences reminds you that a harness pin or exclusion needs a
+  qualified model on the harness it permits.
+- **What it does once tiered.** Agentic tasks run through their qualified native harness:
+  Codex on Responses or Claude Code on Messages, under the same attempt permissions. A model at the weakest tier (`basic`) answers
   structured completions (assessment) directly over `chat/completions`, ahead of Haiku, and falls
-  back to Haiku if it fails. The **planner** runs on a local model when a mission prefers local
-  models (*Prefer local models*, or strategy *prefer-local*) and one tiered `standard` or above
-  is up. It has no tools, so Agent Wrangler reads the repository for it and puts an excerpt in
+  back to Haiku if it fails. The **planner** uses a healthy local model at `standard` or above
+  whenever its known context window can hold the repository excerpt and policy allows local
+  work. It has no tools, so Agent Wrangler reads the repository for it and puts an excerpt in
   the prompt, sized to the model's context window: the file tree from `git ls-files`, the
   manifests and READMEs, and the files the objective names or mentions. The plan gets the same
   checks and repair round as a hosted one. If the local model fails for any reason but Cancel,
@@ -677,8 +679,13 @@ and card (headed *Task proposal*), without the planner. A proposal with no known
 (either command from your own terminal) is reached from the notification, the launcher's
 **Tasks** menu, or the Missions view instead. The Missions view's *New mission* stays as the
 advanced way to write or plan a mission yourself. Both need `"orchestration.enabled": true`.
-A Claude Code skill telling agents when to delegate is in
-`docs/skills/agentwrangler-task/SKILL.md`; copy it to `~/.claude/skills/`.
+Ordinary Claude Code and Codex conversations started by Agent Wrangler receive one shared
+instruction to offer delegation for substantial separable work. The agent asks for an explicit
+yes before calling `aw delegate --folder <dir>` (and `--criteria` when useful). Small tasks stay
+in the conversation. The command carries no harness preference unless `--claude` or `--codex`
+is supplied; routing chooses from the qualified models. Attempt, planner, reviewer and
+qualification sessions do not receive this instruction. An older optional Claude Code skill
+is in `docs/skills/agentwrangler-task/SKILL.md`.
 
 - **It is a client of the app, never a supervisor.** It talks only to the app's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new at every launch). It never connects to session hosts, and every command goes the same way as the equivalent click. The app shows a short notice when `aw` sends or stops something.
 - **With the app quit**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the app starts) and what the app last recorded. Everything else says the app is not running.

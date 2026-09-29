@@ -268,7 +268,8 @@ export type ControlRequest =
 //   ping        {}                                  → {seq, now}
 //   configure   ConfigureParams                     → {ok: true}; core only. Stage 4, additive:
 //                                                     only sent to a host advertising
-//                                                     `configure.orphanIdleHours`
+//                                                     `configure.orphanIdleHours`; a local
+//                                                     key may be handed off here after boot
 //
 // Notifications (host → core):
 //   event       {event: HostEvent}                  every event, in seq order
@@ -331,6 +332,8 @@ export const CLIENT_CAPABILITY_PASSIVE = 'passive';
 export interface ConfigureParams {
   /** The idle-orphan rule (§7.5): hours with no client before an idle session is parked. 0 = never. */
   orphanIdleHours?: number;
+  /** Secret sent only over the authenticated host socket; never serialized to disk or events. */
+  localKey?: string;
 }
 
 export interface HelloParams {

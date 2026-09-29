@@ -26,7 +26,7 @@ import {
   type ControlTasksResult,
 } from '../core/control/protocol';
 import * as path from 'node:path';
-import { agentEnvironment, harnessOf, originOf, parseArgs, USAGE, type Command } from './args';
+import { agentEnvironment, originOf, parseArgs, USAGE, type Command } from './args';
 import { ATTACH_BACKLOG, AttachRenderer } from './attach';
 import { ControlClient } from './client';
 import { formatDelegation, formatOffline, formatProjects, formatProposal, formatSession, formatSessions, formatStatus, formatTasks } from './format';
@@ -164,7 +164,7 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
         folder: path.resolve(cmd.folder ?? process.cwd()),
         objective,
         acceptanceCriteria: cmd.criteria,
-        ...((cmd.harness ?? harnessOf(process.env)) ? { harness: cmd.harness ?? harnessOf(process.env) } : {}),
+        ...(cmd.harness ? { harness: cmd.harness } : {}),
         ...(originOf(process.env) ? { origin: originOf(process.env) } : {}),
       };
       if (cmd.kind === 'delegate') {

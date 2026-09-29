@@ -767,7 +767,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
     const { appends, patches, composer, turnEnd } = reduceRunnerMessage(this.blockState, msg);
     for (const p of patches) this.patch(p);
     if (appends.length > 0) this.append(appends);
-    if (composer) this.setComposer(composer);
+    if (composer) this.setComposer(this.policy?.claude?.localProvider ? { ...composer, costUsd: undefined, contextWindow: this.policy.claude.localProvider.contextWindow } : composer);
     if (turnEnd) {
       void this.refreshContext();
       clearTimeout(this.interruptTimer);
@@ -785,7 +785,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
       const usage = (await this.exec.control({ op: 'getContextUsage' })) as
         | { totalTokens?: number; maxTokens?: number }
         | undefined;
-      if (usage) this.setComposer({ contextTokens: usage.totalTokens, contextWindow: usage.maxTokens });
+      if (usage) this.setComposer({ contextTokens: usage.totalTokens, contextWindow: this.policy?.claude?.localProvider?.contextWindow ?? usage.maxTokens });
     } catch {
       /* Optional on older CLIs. No fabricated context percentage. */
     }

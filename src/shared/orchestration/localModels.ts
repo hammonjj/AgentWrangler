@@ -8,7 +8,7 @@
  * **unknown** when nobody knows. Two facts start unknown on purpose (§19.6):
  * tool calling is per model, not per runtime, so only a qualification run
  * sets it; and a harness endpoint counts only when the probe found it
- * (`/v1/responses` for Codex), because AW ships no protocol translator.
+ * (`/v1/responses` for Codex, `/v1/messages` for Claude Code), because AW ships no protocol translator.
  *
  * Pure and shared: the main process builds these, Preferences renders them.
  */
@@ -25,6 +25,7 @@ import {
   type ToolCallingLevel,
 } from './localEndpoints';
 import type { HarnessId, Millis } from './types';
+import type { TaskQualification } from './localQualification';
 
 /** One model as the server listed it, with what the server said about it. */
 export interface ProbedModel {
@@ -75,7 +76,7 @@ export interface Qualification {
 /** A local model, ready for the catalog. */
 export interface LocalModelReport {
   descriptor: ModelDescriptor;
-  /** Harnesses that can drive it: `codex` only where `/v1/responses` was probed. */
+  /** Harnesses whose native routes were probed. Qualification is tracked separately. */
   harnesses: HarnessId[];
   /** Its endpoint is on. Off: listed, never routed and never called. */
   endpointEnabled: boolean;
@@ -104,7 +105,8 @@ function declaredOr<T>(v: T | undefined): Known<T> {
 export function localModelReports(
   cfg: LocalEndpointConfig,
   probe: EndpointProbe | undefined,
-  qualifications: Record<string, Qualification> = {},
+  qualifications: Record<string, Qualification | Partial<Record<HarnessId, Qualification>>> = {},
+  tasks: Record<string, Partial<Record<HarnessId, TaskQualification>>> = {},
 ): LocalModelReport[] {
   if (!probe) return [];
   const source = endpointSource(cfg.id);
@@ -112,10 +114,27 @@ export function localModelReports(
   const external = location !== 'local';
   const runtime = 'value' in probe.runtime ? probe.runtime.value : 'openai-compatible';
   const responses = 'value' in probe.routes.responses && probe.routes.responses.value === true;
+  const messages = 'value' in probe.routes.messages && probe.routes.messages.value === true;
   return probe.models.map((m) => {
     const declared = cfg.models?.[m.id] ?? {};
-    const q = qualifications[m.id];
-    const measuredTools: Known<ToolCallingLevel> = q ? known(q.toolCalling, 'measured') : UNKNOWN;
+    const saved = qualifications[m.id];
+    const byHarness: Partial<Record<HarnessId, Qualification>> = saved && 'toolCalling' in saved ? { codex: saved as Qualification } : (saved as Partial<Record<HarnessId, Qualification>> | undefined ?? {});
+    const taskByHarness = tasks[m.id] ?? {};
+    const harnesses: HarnessId[] = [...(responses ? ['codex' as const] : []), ...(messages ? ['claude-code' as const] : [])];
+    const taskQualified = (h: HarnessId) => {
+      const result = taskByHarness[h];
+      return result?.runnable === true && !result.error && result.passed > 0;
+    };
+    const qualifiedHarnesses = harnesses.filter((h) => {
+      const stage1 = byHarness[h];
+      return (stage1?.verdict === 'agentic' && !stage1.error) || taskQualified(h);
+    });
+    const q = qualifiedHarnesses.length
+      ? qualifiedHarnesses.map((h) => byHarness[h]).find((result) => result?.verdict === 'agentic')
+      : byHarness.codex ?? byHarness['claude-code'];
+    const measuredTools: Known<ToolCallingLevel> = qualifiedHarnesses.some(taskQualified)
+      ? known('basic', 'measured')
+      : q ? known(q.toolCalling, 'measured') : UNKNOWN;
     const measuredJson: Known<StructuredOutputLevel> = q ? known(q.structuredOutput, 'measured') : UNKNOWN;
     const descriptor: ModelDescriptor = {
       source,
@@ -135,14 +154,15 @@ export function localModelReports(
       throughput: q?.throughput ? known(q.throughput, 'measured') : UNKNOWN,
       // `$0 API cost` by rule (§19.4). An external endpoint may bill, but AW has no price for it.
       costBasis: 'none',
+      qualifiedHarnesses,
       ...(cfg.device ? { hardware: { device: cfg.device } } : {}),
     };
     return {
       descriptor,
-      harnesses: responses ? ['codex'] : [],
+      harnesses,
       endpointEnabled: endpointEnabled(cfg),
       external,
-      ...(responses ? {} : { completionOnlyBecause: 'Completion only: the server has no /v1/responses, which Codex needs' }),
+      ...(harnesses.length ? {} : { completionOnlyBecause: 'Completion only: the server has neither /v1/responses nor /v1/messages' }),
       reportedAt: probe.at,
     };
   });

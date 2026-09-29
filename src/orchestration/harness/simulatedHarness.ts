@@ -57,7 +57,11 @@ export class SimulatedHarness implements AgentHarness {
     this.id = opts.id ?? 'claude-code';
     this.scenario = parseSimScenario(opts.scenario);
     const models = opts.models ?? [{ value: 'claude-simulated', label: 'Simulated', provider: 'anthropic' }];
-    this.inner = new ClaudeCodeHarness({ sessions: opts.sessions, models: () => models });
+    this.inner = new ClaudeCodeHarness({
+      sessions: opts.sessions,
+      models: () => models,
+      localProvider: (source, model) => ({ source, model, baseUrl: 'http://127.0.0.1:18080/v1', contextWindow: 65536 }),
+    });
   }
 
   capabilities(): HarnessCapabilities {

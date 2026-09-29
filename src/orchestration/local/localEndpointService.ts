@@ -43,7 +43,8 @@ import type { HealthState, SourceHealth, SourceStatus } from '../../shared/orche
 import type { LocalCallRecord, LocalRunMetrics, TelemetryRecord } from '../../shared/orchestration/telemetry';
 import { TELEMETRY_SCHEMA_VERSION } from '../../shared/orchestration/telemetry';
 import type { ModelSourceId } from '../../shared/orchestration/types';
-import type { CodexModelProvider } from '../../shared/launchPolicy';
+import type { HarnessId } from '../../shared/orchestration/types';
+import type { ClaudeLocalProvider, CodexModelProvider } from '../../shared/launchPolicy';
 import { LocalStructuredCompletion, type LocalCompletionTarget, type SlotLease } from '../completion/localCompletion';
 import type { StructuredCompletion } from '../completion/structuredCompletion';
 import { PLANNER_LOCAL_MIN_TIER, plannerMinRank } from '../../shared/orchestration/localReadiness';
@@ -66,12 +67,12 @@ const DOWN_AFTER = 2;
 interface Stored {
   v: 1;
   probes: Record<string, EndpointProbe>;
-  qualifications: Record<string, Record<string, Qualification>>;
+  qualifications: Record<string, Record<string, Partial<Record<HarnessId, Qualification>>>>;
   /** Stage 2 (§19.6), per endpoint then model. Optional: stored state from before stage 2 has none. */
-  tasks?: Record<string, Record<string, TaskQualification>>;
+  tasks?: Record<string, Record<string, Partial<Record<HarnessId, TaskQualification>>>>;
 }
 
-/** Runs stage 2 for one model: `runTaskQualification` over the shipped fixtures, bound to the app's Codex harness. */
+/** Runs stage 2 for one model through its selected native harness. */
 export type TaskQualifier = (req: {
   source: ModelSourceId;
   model: string;
@@ -136,7 +137,7 @@ export class LocalEndpointService implements Disposable {
   private readonly qualifying = new Set<string>();
   /** Stage 2 running, per `<id>\0<model>`: runs done of the total. */
   private readonly qualifyingTasks = new Map<string, { done: number; passed: number; total?: number }>();
-  private taskQualifier?: TaskQualifier;
+  private taskQualifiers: Partial<Record<HarnessId, TaskQualifier>> = {};
   private stored: Stored;
   private timer?: ReturnType<typeof setInterval>;
   private sub?: Disposable;
@@ -273,7 +274,7 @@ export class LocalEndpointService implements Disposable {
 
   /** The catalog's input: every model every endpoint reported, on or off. */
   reports(): LocalModelReport[] {
-    return this.endpoints().flatMap((e) => localModelReports(e, this.stored.probes[e.id], this.stored.qualifications[e.id]));
+    return this.endpoints().flatMap((e) => localModelReports(e, this.stored.probes[e.id], this.stored.qualifications[e.id], this.stored.tasks?.[e.id]));
   }
 
   /** Slots the server has, as known: probed, else declared. */
@@ -374,6 +375,24 @@ export class LocalEndpointService implements Disposable {
     };
   }
 
+  /** Session-scoped native Messages endpoint. The key itself stays in safeStorage. */
+  claudeProvider(source: ModelSourceId, model: string): ClaudeLocalProvider | undefined {
+    const id = endpointIdOf(source);
+    const cfg = id ? this.endpoint(id) : undefined;
+    const probe = id ? this.stored.probes[id] : undefined;
+    if (!id || !cfg || !endpointEnabled(cfg) || !probe || !isKnown(probe.routes.messages) || probe.routes.messages.value !== true) return undefined;
+    const report = this.reports().find((r) => r.descriptor.source === source && r.descriptor.modelId === model);
+    if (!report || !isKnown(report.descriptor.contextWindow)) return undefined;
+    return {
+      source,
+      baseUrl: `${cfg.url}/v1`,
+      model,
+      contextWindow: report.descriptor.contextWindow.value,
+      ...(isKnown(report.descriptor.maxOutputTokens) ? { maxOutputTokens: report.descriptor.maxOutputTokens.value } : {}),
+      ...(cfg.hasKey ? { keyRef: endpointKeyRef(id) } : {}),
+    };
+  }
+
   /** What an attempt record says about a run on this endpoint's model: runtime, device, context window. */
   runFacts(source: ModelSourceId, model: string): Omit<LocalRunMetrics, 'source'> | undefined {
     const id = endpointIdOf(source);
@@ -436,7 +455,7 @@ export class LocalEndpointService implements Disposable {
 
   /** The local model the planner uses now, if any (§11.5): `pickPlannerEntry` over this service's health. */
   pickPlanner(catalog: CapabilityCatalogView, opts: { excludeSources?: readonly ModelSourceId[] } = {}): LocalPlannerPick | undefined {
-    return pickPlannerEntry(catalog, (s) => this.status(s).health.state === 'down', opts);
+    return pickPlannerEntry(catalog, (s) => this.status(s).health.state !== 'reachable', opts);
   }
 
   /** Record a direct call's outcome in telemetry. */
@@ -527,56 +546,58 @@ export class LocalEndpointService implements Disposable {
         return p?.reachable ? { ok: true, lines: [reachableReason(p)] } : { ok: false, lines: [`✗  ${p?.error ?? 'unreachable'}`] };
       }
       case 'qualify':
-        return this.qualify(change.id, change.model);
+        return this.qualify(change.id, change.model, change.harness ?? 'codex');
       case 'qualifyTasks':
-        return this.qualifyTasks(change.id, change.model);
+        return this.qualifyTasks(change.id, change.model, change.harness ?? 'codex');
     }
   }
 
-  /** Stage 2's runner, once the app has a Codex harness to give it. Without one, stage 2 says it is unavailable. */
-  useTaskQualifier(q: TaskQualifier | undefined): void {
-    this.taskQualifier = q;
+  /** Stage 2's runner for a native harness. Without one, stage 2 says it is unavailable. */
+  useTaskQualifier(q: TaskQualifier | undefined, harness: HarnessId = 'codex'): void {
+    this.taskQualifiers[harness] = q;
   }
 
   /** Stage 2's stored result for one model. */
-  taskQualification(id: string, model: string): TaskQualification | undefined {
-    return this.stored.tasks?.[id]?.[model];
+  taskQualification(id: string, model: string, harness: HarnessId = 'codex'): TaskQualification | undefined {
+    return this.stored.tasks?.[id]?.[model]?.[harness];
   }
 
   /**
    * Stage 2 of §19.6's qualification for one model: the scratch-repo fixtures,
-   * k = 3 each, as Codex threads on this endpoint. Results are `measured`,
+   * k = 3 each, through the selected harness on this endpoint. Results are `measured`,
    * stored beside stage 1's, and each run is a `local-call` record with
    * purpose `qualification`. Nothing here, or anywhere, sets a tier from them.
    *
-   * An endpoint without `/v1/responses` cannot run a harness, so stage 2 is
+   * An endpoint without that harness's native route cannot run it, so stage 2 is
    * recorded as not runnable, with no pass rate.
    */
-  async qualifyTasks(id: string, model: string): Promise<{ ok: boolean; lines: string[] }> {
+  async qualifyTasks(id: string, model: string, harness: HarnessId = 'codex'): Promise<{ ok: boolean; lines: string[] }> {
     const cfg = this.endpoint(id);
     const probe = this.stored.probes[id];
     if (!cfg || !probe?.models.some((m) => m.id === model)) return { ok: false, lines: ['✗  That model is not listed by the endpoint.'] };
     if (!endpointEnabled(cfg)) return { ok: false, lines: ['✗  Turn the endpoint on first.'] };
-    const flag = `${id}\0${model}`;
+    const flag = `${id}\0${model}\0${harness}`;
     if (this.qualifyingTasks.has(flag) || this.qualifying.has(flag)) return { ok: false, lines: ['Already running.'] };
-    const responses = isKnown(probe.routes.responses) ? probe.routes.responses.value : undefined;
-    if (responses !== true) {
+    const route = harness === 'codex' ? probe.routes.responses : probe.routes.messages;
+    const supported = isKnown(route) ? route.value : undefined;
+    const routeName = harness === 'codex' ? '/v1/responses' : '/v1/messages';
+    if (supported !== true) {
       const q: TaskQualification = {
         model,
         at: this.now(),
         runnable: false,
-        reason: responses === false ? 'no /v1/responses' : 'no /v1/responses (the probe could not tell; probe again)',
+        reason: supported === false ? `no ${routeName}` : `no ${routeName} (the probe could not tell; probe again)`,
       };
-      this.storeTasks(id, model, q);
+      this.storeTasks(id, model, harness, q);
       this.changed();
       return { ok: false, lines: [taskQualificationText(q)] };
     }
-    const s1 = this.stored.qualifications[id]?.[model];
+    const s1 = this.stored.qualifications[id]?.[model]?.[harness];
     if (s1 && !s1.error && s1.verdict === 'completion-only') {
       return { ok: false, lines: ['✗  Stage 1 found it completion-only (its tool calls do not parse), so the tasks would not be run.'] };
     }
-    const run = this.taskQualifier;
-    if (!run) return { ok: false, lines: ['✗  Task qualification is not available: there is no Codex harness to run it through.'] };
+    const run = this.taskQualifiers[harness];
+    if (!run) return { ok: false, lines: [`✗  Task qualification is not available: there is no ${harness} harness to run it through.`] };
 
     const progress: { done: number; passed: number; total?: number } = { done: 0, passed: 0 };
     this.qualifyingTasks.set(flag, progress);
@@ -627,7 +648,7 @@ export class LocalEndpointService implements Disposable {
         return { ok: false, lines: [`✗  Task qualification could not run: ${result.error ?? 'no fixtures'}`] };
       }
       const q = summariseTaskRuns(model, this.now(), result.k, result.runs, result.error);
-      this.storeTasks(id, model, q);
+      this.storeTasks(id, model, harness, q);
       return { ok: !result.error, lines: [taskQualificationText(q)] };
     } finally {
       lease?.release();
@@ -636,19 +657,22 @@ export class LocalEndpointService implements Disposable {
     }
   }
 
-  private storeTasks(id: string, model: string, q: TaskQualification): void {
+  private storeTasks(id: string, model: string, harness: HarnessId, q: TaskQualification): void {
     const tasks = this.stored.tasks ?? {};
-    this.stored = { ...this.stored, tasks: { ...tasks, [id]: { ...tasks[id], [model]: q } } };
+    this.stored = { ...this.stored, tasks: { ...tasks, [id]: { ...tasks[id], [model]: { ...tasks[id]?.[model], [harness]: q } } } };
     this.save();
   }
 
   /** Stage 1 of §19.6's qualification for one model: tool calls, round trips, JSON. Results are `measured` facts. */
-  async qualify(id: string, model: string): Promise<{ ok: boolean; lines: string[] }> {
+  async qualify(id: string, model: string, harness: HarnessId = 'codex'): Promise<{ ok: boolean; lines: string[] }> {
+    if (harness === 'claude-code') return { ok: false, lines: ['Claude Code qualification runs through Qualify tasks on native /v1/messages.'] };
     const cfg = this.endpoint(id);
     const probe = this.stored.probes[id];
     if (!cfg || !probe?.models.some((m) => m.id === model)) return { ok: false, lines: ['✗  That model is not listed by the endpoint.'] };
     if (!endpointEnabled(cfg)) return { ok: false, lines: ['✗  Turn the endpoint on first.'] };
-    const flag = `${id}\0${model}`;
+    const route = harness === 'codex' ? probe.routes.responses : probe.routes.messages;
+    if (!isKnown(route) || route.value !== true) return { ok: false, lines: [`✗  ${harness} needs its native endpoint route.`] };
+    const flag = `${id}\0${model}\0${harness}`;
     if (this.qualifying.has(flag) || this.qualifyingTasks.has(flag)) return { ok: false, lines: ['Already running.'] };
     this.qualifying.add(flag);
     this.changed();
@@ -665,7 +689,7 @@ export class LocalEndpointService implements Disposable {
       });
       this.stored = {
         ...this.stored,
-        qualifications: { ...this.stored.qualifications, [id]: { ...this.stored.qualifications[id], [model]: q } },
+        qualifications: { ...this.stored.qualifications, [id]: { ...this.stored.qualifications[id], [model]: { ...this.stored.qualifications[id]?.[model], [harness]: q } } },
       };
       this.save();
       this.recordCall({
@@ -715,26 +739,31 @@ export class LocalEndpointService implements Disposable {
         ...(slots !== undefined ? { slots: `${slots} (${probe && isKnown(probe.slots) ? 'probed' : 'declared'})` } : {}),
         routes: probe ? routesText(probe) : 'not probed',
         ...(probe && isKnown(probe.routes.responses) ? { responses: probe.routes.responses.value } : {}),
+        ...(probe && isKnown(probe.routes.messages) ? { messages: probe.routes.messages.value } : {}),
         ...(probe ? { probedAt: probe.at } : {}),
         ...(probe?.error ? { error: probe.error } : {}),
         busy: this.probing.has(e.id),
         models: (probe?.models ?? []).map((m): LocalEndpointModelView => {
           const key = `${source}:${m.id}`;
-          const q = quals[m.id];
-          const t = this.stored.tasks?.[e.id]?.[m.id];
-          const running = this.qualifyingTasks.get(`${e.id}\0${m.id}`);
+          const byHarness = quals[m.id] ?? {};
+          const q = byHarness.codex ?? byHarness['claude-code'];
+          const tasks = this.stored.tasks?.[e.id]?.[m.id];
+          const t = tasks?.codex ?? tasks?.['claude-code'];
+          const running = this.qualifyingTasks.get(`${e.id}\0${m.id}\0codex`) ?? this.qualifyingTasks.get(`${e.id}\0${m.id}\0claude-code`);
           const entry = catalog?.entries.find((x) => x.key === key);
           const window = entry && isKnown(entry.descriptor.contextWindow) ? entry.descriptor.contextWindow.value : undefined;
           return {
             id: m.id,
             label: entry?.descriptor.label ?? shortModelName(m.id),
+            harnesses: entry?.harnesses.filter((h): h is 'codex' | 'claude-code' => h === 'codex' || h === 'claude-code'),
+            qualifications: Object.fromEntries(Object.entries(byHarness).filter((pair): pair is [string, Qualification] => pair[1] !== undefined).map(([h, result]) => [h, qualificationText(result)])),
+            taskQualifications: Object.fromEntries(Object.entries(tasks ?? {}).filter((pair): pair is [string, TaskQualification] => pair[1] !== undefined).map(([h, result]) => [h, taskQualificationText(result)])),
             key,
-            ...(q ? { qualification: qualificationText(q), stage1: { verdict: q.verdict, toolCalls: q.toolCalls, ...(q.error ? { error: q.error } : {}) } } : {}),
-            ...(this.qualifying.has(`${e.id}\0${m.id}`) ? { qualifying: true } : {}),
+            ...(q ? { qualification: Object.entries(byHarness).filter((pair): pair is [string, Qualification] => pair[1] !== undefined).map(([h, result]) => `${h}: ${qualificationText(result)}`).join(' · '), stage1: { verdict: q.verdict, toolCalls: q.toolCalls, ...(q.error ? { error: q.error } : {}) } } : {}),
+            ...(this.qualifying.has(`${e.id}\0${m.id}\0codex`) || this.qualifying.has(`${e.id}\0${m.id}\0claude-code`) ? { qualifying: true } : {}),
             ...(t ? { tasks: taskQualificationText(t) } : {}),
             ...(running ? { tasksRunning: `Running tasks: ${running.done}${running.total ? `/${running.total}` : ''} done, ${running.passed} passed` } : {}),
-            // As the planner sees it (§11.5): an unknown window is assumed to fit.
-            plannerWindowFits: window === undefined || contextLimits(window) !== undefined,
+            plannerWindowFits: window !== undefined && contextLimits(window) !== undefined,
           };
         }),
       };
@@ -791,14 +820,11 @@ export class LocalEndpointService implements Disposable {
  * so Preferences' status line applies the same rule.
  */
 export { PLANNER_LOCAL_MIN_TIER };
-/** The window assumed for a local model whose window nobody knows: small enough to be safe on any current model. */
-export const ASSUMED_LOCAL_PLANNER_WINDOW = 32_768;
-
 /** The local planner's model, and the window its budget is sized to. */
 export interface LocalPlannerPick {
   entry: CatalogEntry;
   contextWindow: number;
-  /** The window is the catalog's (`probed`, `declared` or `measured`), not the assumption. */
+  /** The window is the catalog's (`probed`, `declared` or `measured`). */
   windowKnown: boolean;
 }
 
@@ -808,8 +834,8 @@ export interface LocalPlannerPick {
  * one the user turned on), is enabled, has a tier
  * of at least `PLANNER_LOCAL_MIN_TIER`, is not on an endpoint that is down,
  * and has a window a repository excerpt fits in (`contextLimits`). Among
- * those: the highest tier, then constrained decoding, then the largest known
- * window (an unknown one ranks last, at `ASSUMED_LOCAL_PLANNER_WINDOW`), then
+ * those: the lowest sufficient tier, then constrained decoding, then the largest known
+ * window (an unknown one is ineligible), then
  * catalog order. Pure.
  */
 export function pickPlannerEntry(
@@ -823,12 +849,13 @@ export function pickPlannerEntry(
     .map((entry, order) => {
       const d = entry.descriptor;
       const windowKnown = isKnown(d.contextWindow);
-      const contextWindow = isKnown(d.contextWindow) ? d.contextWindow.value : ASSUMED_LOCAL_PLANNER_WINDOW;
+      const contextWindow = isKnown(d.contextWindow) ? d.contextWindow.value : 0;
       return { entry, order, windowKnown, contextWindow, rank: tierRank(catalog.tiers, entry.tier) };
     })
     .filter(
       (c) =>
         c.entry.completions === true &&
+        c.windowKnown &&
         c.entry.enabled &&
         c.entry.tier !== undefined &&
         c.rank >= min &&
@@ -839,7 +866,7 @@ export function pickPlannerEntry(
   const schema = (e: CatalogEntry) => (isKnown(e.descriptor.structuredOutput) && e.descriptor.structuredOutput.value === 'schema' ? 0 : 1);
   picks.sort(
     (a, b) =>
-      b.rank - a.rank ||
+      a.rank - b.rank ||
       schema(a.entry) - schema(b.entry) ||
       Number(b.windowKnown) - Number(a.windowKnown) ||
       b.contextWindow - a.contextWindow ||
@@ -881,22 +908,27 @@ function parseStored(raw: unknown): Stored {
       probes[id] = { ...p, healthPath: typeof p.healthPath === 'string' ? p.healthPath : '/v1/models' };
     }
   }
-  const qualifications: Record<string, Record<string, Qualification>> = {};
+  const qualifications: Stored['qualifications'] = {};
   for (const [id, byModel] of Object.entries(s.qualifications ?? {})) {
     if (!byModel || typeof byModel !== 'object') continue;
-    const ok: Record<string, Qualification> = {};
+    const ok: Record<string, Partial<Record<HarnessId, Qualification>>> = {};
     for (const [model, q] of Object.entries(byModel)) {
-      if (q && typeof q === 'object' && (q.toolCalling === 'basic' || q.toolCalling === 'none' || q.toolCalling === 'reliable')) ok[model] = q;
+      if (!q || typeof q !== 'object') continue;
+      const legacy = q as unknown as Qualification;
+      const saved = q as Partial<Record<HarnessId, Qualification>>;
+      const valid = (v: Qualification | undefined) => v && (v.toolCalling === 'basic' || v.toolCalling === 'none' || v.toolCalling === 'reliable');
+      ok[model] = legacy.toolCalling ? { codex: legacy } : { ...(valid(saved.codex) ? { codex: saved.codex } : {}), ...(valid(saved['claude-code']) ? { 'claude-code': saved['claude-code'] } : {}) };
     }
     qualifications[id] = ok;
   }
-  const tasks: Record<string, Record<string, TaskQualification>> = {};
+  const tasks: NonNullable<Stored['tasks']> = {};
   for (const [id, byModel] of Object.entries(s.tasks ?? {})) {
     if (!byModel || typeof byModel !== 'object') continue;
-    const ok: Record<string, TaskQualification> = {};
+    const ok: Record<string, Partial<Record<HarnessId, TaskQualification>>> = {};
     for (const [model, q] of Object.entries(byModel)) {
-      const parsed = parseTaskQualification(q);
-      if (parsed) ok[model] = parsed;
+      const legacy = parseTaskQualification(q);
+      const saved = q as Partial<Record<HarnessId, TaskQualification>>;
+      ok[model] = legacy ? { codex: legacy } : { ...(parseTaskQualification(saved?.codex) ? { codex: saved.codex } : {}), ...(parseTaskQualification(saved?.['claude-code']) ? { 'claude-code': saved['claude-code'] } : {}) };
     }
     tasks[id] = ok;
   }

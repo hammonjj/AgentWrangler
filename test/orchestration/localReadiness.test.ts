@@ -9,15 +9,15 @@ import type { ExecutionPolicy } from '../../src/shared/orchestration/types';
 
 const TIERS = [...DEFAULT_TIERS];
 
-function entry(opts: { enabled?: boolean; tier?: string; toolCalling?: Known<'reliable' | 'basic' | 'none'> } = {}): Pick<CatalogEntry, 'enabled' | 'tier' | 'descriptor'> {
+function entry(opts: { enabled?: boolean; tier?: string; toolCalling?: Known<'reliable' | 'basic' | 'none'>; qualified?: boolean } = {}): Pick<CatalogEntry, 'enabled' | 'tier' | 'descriptor'> {
   return {
     enabled: opts.enabled ?? true,
     tier: opts.tier,
-    descriptor: { source: 'local:box', modelId: 'm', toolCalling: opts.toolCalling ?? UNKNOWN } as unknown as CatalogEntry['descriptor'],
+    descriptor: { source: 'local:box', modelId: 'm', toolCalling: opts.toolCalling ?? UNKNOWN, qualifiedHarnesses: opts.qualified ? ['codex'] : [], contextWindow: known(65536, 'probed') } as unknown as CatalogEntry['descriptor'],
   };
 }
 
-const UP: LocalModelFacts = { endpointOn: true, health: 'reachable', responses: true };
+const UP: LocalModelFacts = { endpointOn: true, health: 'reachable', responses: true, plannerWindowFits: true };
 
 describe('localModelStatus', () => {
   it('not enabled: every kind of work needs it enabled', () => {
@@ -32,7 +32,7 @@ describe('localModelStatus', () => {
     const s = localModelStatus({ entry: entry(), tiers: TIERS, facts: UP });
     expect(s.completions.needs).toEqual(['tier basic']);
     expect(s.planning.needs).toEqual(['tier standard or above']);
-    expect(s.agentic.needs).toEqual(['measured tool calling (run Qualify)', 'a tier']);
+    expect(s.agentic.needs).toEqual(['qualification for Codex or Claude Code', 'measured tool calling (run Qualify)', 'a tier']);
     expect(s.completions.ready || s.planning.ready || s.agentic.ready).toBe(false);
   });
 
@@ -64,20 +64,20 @@ describe('localModelStatus', () => {
     expect(s.text).toBe('Ready for completions · Completion only: stage-1 qualification: tool calls 0/10 (measured) · Planning needs tier standard or above (it has basic)');
   });
 
-  it('completion-only because the server has no /v1/responses', () => {
-    const s = localModelStatus({ entry: entry({ tier: 'standard' }), tiers: TIERS, facts: { ...UP, responses: false } });
-    expect(s.agentic.completionOnly).toBe('the server has no /v1/responses, which Codex needs');
+  it('completion-only because the server has no native harness route', () => {
+    const s = localModelStatus({ entry: entry({ tier: 'standard' }), tiers: TIERS, facts: { ...UP, responses: false, messages: false } });
+    expect(s.agentic.completionOnly).toBe('the server has neither /v1/responses nor /v1/messages');
   });
 
   it('ready for completions: enabled, the weakest tier, endpoint on and up', () => {
     const s = localModelStatus({ entry: entry({ tier: 'basic' }), tiers: TIERS, facts: { ...UP, responses: undefined } });
     expect(s.completions).toEqual({ ready: true, needs: [] });
-    expect(s.agentic.needs).toEqual(['/v1/responses probed on its server', 'measured tool calling (run Qualify)']);
+    expect(s.agentic.needs).toEqual(['a native harness route probed on its server', 'qualification for Codex or Claude Code', 'measured tool calling (run Qualify)']);
   });
 
   it('ready for agentic work: /v1/responses probed, tool calling measured, a tier', () => {
     const s = localModelStatus({
-      entry: entry({ tier: 'standard', toolCalling: known('reliable', 'measured') }),
+      entry: entry({ tier: 'standard', toolCalling: known('reliable', 'measured'), qualified: true }),
       tiers: TIERS,
       facts: { ...UP, stage1: { verdict: 'agentic', toolCalls: { ok: 10, runs: 10 } } },
     });
@@ -86,25 +86,25 @@ describe('localModelStatus', () => {
     expect(s.text).toMatch(/^Ready for planning, agentic work · Completions needs/);
   });
 
-  it('declared tool calling counts, and says it was not measured', () => {
+  it('declared tool calling still needs harness qualification', () => {
     const s = localModelStatus({ entry: entry({ tier: 'standard', toolCalling: known('basic', 'declared') }), tiers: TIERS, facts: UP });
-    expect(s.agentic.ready).toBe(true);
-    expect(s.text).toMatch(/tool calling declared, not measured/);
+    expect(s.agentic.ready).toBe(false);
+    expect(s.agentic.needs).toContain('qualification for Codex or Claude Code');
   });
 
   it('planning needs a window a repository excerpt fits in', () => {
     const s = localModelStatus({ entry: entry({ tier: 'standard' }), tiers: TIERS, facts: { ...UP, plannerWindowFits: false } });
-    expect(s.planning.needs).toEqual(['a context window a repository excerpt fits in']);
+    expect(s.planning.needs).toEqual(['a known context window a repository excerpt fits in']);
   });
 
-  it('routing defaults that rule out Codex block agentic work', () => {
+  it('a Claude harness preference does not block a qualified local harness', () => {
     const s = localModelStatus({
-      entry: entry({ tier: 'standard', toolCalling: known('reliable', 'measured') }),
+      entry: entry({ tier: 'standard', toolCalling: known('reliable', 'measured'), qualified: true }),
       tiers: TIERS,
       facts: UP,
       harnessBlocked: 'pinned',
     });
-    expect(s.agentic).toEqual({ ready: false, needs: ['routing defaults that allow Codex'] });
+    expect(s.agentic).toEqual({ ready: true, needs: [] });
   });
 
   it('with a custom tier list, completions follow tiers[0]', () => {
@@ -120,9 +120,9 @@ describe('localHarnessWarning', () => {
   const warns = (policy: ExecutionPolicy, enabled = true) => localHarnessWarning(policy, enabled);
 
   it('warns when routing pins or prefers Claude Code, or excludes Codex, and local models are enabled', () => {
-    expect(warns({ pins: { harness: 'claude-code' } })).toMatch(/pin the harness to Claude Code\. That rules out the Codex path, so local models cannot get agentic work/);
-    expect(warns({ preferences: { harness: 'claude-code' } })).toMatch(/prefer Claude Code\. That rules out the Codex path/);
-    expect(warns({ exclusions: { harnesses: ['codex'] } })).toMatch(/exclude Codex\. That rules out the Codex path/);
+    expect(warns({ pins: { harness: 'claude-code' } })).toMatch(/pin the harness to Claude Code\. Local agentic work needs/);
+    expect(warns({ preferences: { harness: 'claude-code' } })).toMatch(/prefer Claude Code\. Local agentic work needs/);
+    expect(warns({ exclusions: { harnesses: ['codex'] } })).toMatch(/exclude Codex\. Local agentic work needs/);
   });
 
   it('says nothing when no local model is enabled, or the policy leaves Codex open', () => {

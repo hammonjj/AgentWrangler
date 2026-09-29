@@ -326,6 +326,8 @@ export interface ModelDescriptor {
   price?: { inPerMTok: number; outPerMTok: number; cacheReadPerMTok?: number };
   /** Local only, optional. */
   hardware?: { device?: string; memoryGb?: number };
+  /** Local only: each native harness must qualify separately. */
+  qualifiedHarnesses?: HarnessId[];
 }
 
 export interface CatalogEntry {

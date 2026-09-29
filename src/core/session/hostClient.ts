@@ -77,6 +77,9 @@ export interface HostClientOptions {
   log: (msg: string) => void;
   /** The idle-orphan rule's hours, pushed to a host that takes `configure` on every connect. */
   orphanIdleHours?: () => number;
+  /** Spawn only: a key reference, resolved in the core and sent over the authenticated socket. */
+  localKeyRef?: string;
+  endpointKey?: (ref: string) => Promise<string | undefined>;
   /** Follow without counting as someone looking (the remote daemon): see `CLIENT_CAPABILITY_PASSIVE`. */
   passive?: boolean;
   /** Heartbeat and waits, injectable for tests. */
@@ -239,11 +242,19 @@ export class HostClient {
   /** Push the settings a host applies on its own (the idle-orphan rule), if it takes them. */
   async configure(): Promise<void> {
     const peer = this.peer;
-    if (!peer || !this.hello?.capabilities.includes(CAPABILITY_CONFIGURE_IDLE) || !this.opts.orphanIdleHours) return;
+    if (!peer || !this.hello?.capabilities.includes(CAPABILITY_CONFIGURE_IDLE)) return;
+    let localKey: string | undefined;
+    if (this.opts.localKeyRef) {
+      try {
+        localKey = await this.opts.endpointKey?.(this.opts.localKeyRef);
+      } catch {
+        this.opts.log(`host ${this.opts.hostId}: local endpoint key unavailable`);
+      }
+    }
     try {
-      await peer.request('configure', { orphanIdleHours: this.opts.orphanIdleHours() }, { timeoutMs: 10_000 });
+      await peer.request('configure', { ...(this.opts.orphanIdleHours ? { orphanIdleHours: this.opts.orphanIdleHours() } : {}), ...(this.opts.localKeyRef ? { localKey: localKey ?? '' } : {}) }, { timeoutMs: 10_000 });
     } catch (err) {
-      this.opts.log(`host ${this.opts.hostId}: configure failed (${String(err)})`);
+      this.opts.log(`host ${this.opts.hostId}: configure failed`);
     }
   }
 

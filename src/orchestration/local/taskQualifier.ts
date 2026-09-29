@@ -4,11 +4,10 @@
  * harness and endpoint the model would be routed through, and judge each run
  * on what is in the repo afterwards.
  *
- * - **Same path as an attempt.** A run is `AgentHarness.launch` on the Codex
- *   harness with a `local:<id>` target, so it gets the endpoint's
- *   `codexProvider` and `codexThreadParams` exactly as a routed attempt does
- *   (§19.7.1), under `attemptLaunchPolicy`'s Codex sandbox (`workspace-write`,
- *   `on-request`) and with `attemptPrompt`'s framing.
+ * - **Same path as an attempt.** A run is `AgentHarness.launch` with a
+ *   `local:<id>` target, so its native provider and permission policy are
+ *   applied exactly as they are for a routed attempt (§19.7.1), with
+ *   `attemptPrompt`'s framing.
  * - **A scratch repo per run.** The fixture's `repo/` is copied into a fresh
  *   temp dir, `git init`ed and committed, so the diff is exactly the run's.
  *   The dir is removed afterwards, whatever happened.
@@ -25,7 +24,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { SessionHandle, SessionViewEvent } from '../../core/session/sessionHandle';
-import { codexTurnUsage, type SegmentState } from '../../core/telemetry/turnUsage';
+import { claudeTurnUsage, codexTurnUsage, type SegmentState } from '../../core/telemetry/turnUsage';
 import { changedPaths, judgeRun, parseFixture, type TaskFixture, type TaskRun } from '../../shared/orchestration/localQualification';
 import { DEFAULT_REPO_POLICY } from '../../shared/orchestration/repoPolicy';
 import type { ModelSourceId } from '../../shared/orchestration/types';
@@ -44,8 +43,8 @@ const SETTLE_MS = 1_500;
 const BRANCH = 'qualify';
 
 export interface TaskQualifierDeps {
-  /** The Codex harness, with the endpoints' `localProvider`. */
-  harness: Pick<AgentHarness, 'launch'>;
+  /** The selected harness, with its endpoint provider. */
+  harness: Pick<AgentHarness, 'launch'> & Partial<Pick<AgentHarness, 'id'>>;
   fixturesDir: string;
   exec?: Exec;
   /** Where scratch repos go. Default: the system temp dir. */
@@ -176,11 +175,11 @@ async function runOnce(
             objective: fixture.prompt,
             acceptanceCriteria: [`\`${fixture.check.join(' ')}\` exits 0`, `Nothing matching ${fixture.protected.join(', ')} is changed`],
           },
-          { harness: 'codex', branch: BRANCH },
+            { harness: deps.harness.id === 'claude-code' ? 'claude-code' : 'codex', branch: BRANCH },
         ),
-        target: { harness: 'codex', model: req.model, source: req.source, effortNative: 'none' },
+        target: { harness: deps.harness.id === 'claude-code' ? 'claude-code' : 'codex', model: req.model, source: req.source, effortNative: 'none' },
         origin: { kind: 'orchestration', missionId: 'qualification', taskId: fixture.id, attemptId: `qualification:${started}:${fixture.id}:${n}` },
-        policy: attemptLaunchPolicy({ harness: 'codex', primaryRoot: dir, repoPolicy: DEFAULT_REPO_POLICY }),
+        policy: attemptLaunchPolicy({ harness: deps.harness.id === 'claude-code' ? 'claude-code' : 'codex', primaryRoot: dir, repoPolicy: DEFAULT_REPO_POLICY }),
       });
     } catch (e) {
       return { fatal: `could not start a run: ${String((e as Error).message ?? e)}` };
@@ -284,7 +283,7 @@ function sumTokens(turnEnds: readonly unknown[], at: number): { inputTokens?: nu
   let output = 0;
   let any = false;
   for (const raw of turnEnds) {
-    const u = codexTurnUsage(state, raw, at);
+    const u = 'modelUsage' in (raw as Record<string, unknown> ?? {}) ? claudeTurnUsage(state, raw, at) : codexTurnUsage(state, raw, at);
     if (u.kind === 'duplicate') continue;
     state = u.next;
     if (u.kind !== 'usage') continue;

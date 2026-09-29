@@ -50,6 +50,18 @@ describe('formatters', () => {
     expect(usageCellText(priced)).toMatch(/\$0\.20 priced$/);
   });
 
+  it('shows local API cost as zero without treating a later hosted turn as uncosted', () => {
+    const local = turn({ id: 'local', source: 'local:synthetic', modelsUsed: { qwen: { in: 30, out: 10 } }, costUsd: 0, costBasis: 'none' });
+    const one = usageOf([local]);
+    expect(usageCellText(one)).toBe('40 tok · $0 API cost');
+    expect(usageHeaderText(one)).toContain('$0 API cost');
+    expect(usageTitle(one)).toContain('Local model API cost is $0');
+    const mixed = usageOf([local, turn({ id: 'hosted' })]);
+    expect(mixed.costUsd).toBe(0.5);
+    expect(mixed.costBasis).toBe('harness-estimate');
+    expect(mixed.uncostedTurns).toBe(0);
+  });
+
   it('marks a partial cost as a lower bound', () => {
     const u = usageOf([turn({ id: 'a' }), turn({ id: 'b', costUsd: undefined, costBasis: 'none' })]);
     expect(u.uncostedTurns).toBe(1);

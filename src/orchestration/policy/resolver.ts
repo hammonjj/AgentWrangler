@@ -187,6 +187,8 @@ function hardFilter(
   // probe, or the user. Unknown is "cannot satisfy a hard need".
   const endpoint = isEndpointSource(d.source);
   if (endpoint) {
+    if (!isKnown(d.contextWindow)) return { reason: `${label}: local context window is unknown; probe or declare it before routing` };
+    if (!d.qualifiedHarnesses?.includes(c.target.harness)) return { reason: `${label} on ${harnessLabel(c.target.harness)}: this model has not qualified through that harness` };
     if (!isKnown(d.toolCalling)) return { reason: `${label}: tool calling not measured yet; run its qualification in Preferences → Orchestration` };
     if (d.toolCalling.value === 'none') return { reason: `${label}: its tool calls do not parse (completion only)` };
   }
@@ -230,6 +232,7 @@ function compare(a: Considered, b: Considered, req: RouteRequirement, policy: Re
     (c) => (prefer?.harness && c.target.harness === prefer.harness ? 0 : 1),
     (c) => (prefer?.source && c.entry.descriptor.source === prefer.source ? 0 : 1),
     (c) => (prefer?.preferLocal || prefer?.strategy === 'prefer-local' ? (c.entry.descriptor.location === 'local' ? 0 : 1) : 0),
+    (c) => (c.entry.descriptor.location === 'local' ? 0 : 1),
     // A soft preference only (§6.4): a model that can be asked to think harder, when harder is wanted.
     (c) => (req.effort === 'high' || req.effort === 'max' ? (c.entry.effortMap ? 0 : 1) : 0),
     (c) => {

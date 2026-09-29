@@ -15,6 +15,7 @@ export interface LocalClaudeDeps {
   binary: string;
   log: (msg: string) => void;
   loadHistory?: (sessionId: string, cwd: string) => Promise<ConversationHistory>;
+  localKey?: (ref: string) => Promise<string | undefined>;
 }
 
 /** Build a local Claude handle. It is not started: call `start()` once listeners are attached. */
@@ -32,7 +33,7 @@ export function createLocalClaudeHandle(request: Omit<LaunchRequest, 'provider'>
     // In-process, the view subscribes from the first event and nothing joins
     // late, so the replay ring only has to exist, not to be deep. The 16 MiB
     // default is for the Stage 3 host, where a reconnecting core needs it.
-    { query: deps.query, binary: deps.binary, log: deps.log, ringBytes: IN_PROCESS_RING_BYTES },
+    { query: deps.query, binary: deps.binary, log: deps.log, ringBytes: IN_PROCESS_RING_BYTES, localKey: deps.localKey },
   );
   return new RunnerView(
     {

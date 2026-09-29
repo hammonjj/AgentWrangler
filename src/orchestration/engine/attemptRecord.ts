@@ -9,6 +9,7 @@
 import { TELEMETRY_SCHEMA_VERSION, type AttemptRecord, type EscalationRecord, type RoutingRecord, type TurnRecord } from '../../shared/orchestration/telemetry';
 import type { EscalationDecision, ExecutionAttempt, Millis, Mission, ReviewVerdict, RoutingDecision, UsageSummary } from '../../shared/orchestration/types';
 import { reviewCounts } from '../../shared/orchestration/verification';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 
 /** Fold one turn record into an attempt's usage. A record already counted is ignored. */
 export function addTurnUsage(usage: UsageSummary | undefined, r: TurnRecord): UsageSummary {
@@ -110,7 +111,7 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     startedAt: a.launchedAt,
     endedAt: a.endedAt,
     usage: a.usage?.byModel ?? {},
-    cost: { ...(a.usage?.costUsd !== undefined ? { usd: a.usage.costUsd } : {}), basis: a.usage?.costBasis ?? 'none' },
+    cost: isEndpointSource(target.source) ? { usd: 0, basis: 'none' } : { ...(a.usage?.costUsd !== undefined ? { usd: a.usage.costUsd } : {}), basis: a.usage?.costBasis ?? 'none' },
     turns: a.usage?.turns ?? 0,
     outcome,
     category: a.outcome?.category,

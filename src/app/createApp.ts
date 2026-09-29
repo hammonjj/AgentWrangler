@@ -55,7 +55,7 @@ import { createOrchestration, parseRoutingSettings, ROUTING_KEY } from '../orche
 import { TaskError, type TaskAction, type TaskRoute, type TaskRunner } from '../orchestration/engine/taskRunner';
 import { explainRecommendation, targetLabel } from '../orchestration/view/routeExplain';
 import { sourceStatus } from '../shared/orchestration/sourceHealth';
-import { EFFORT_LEVELS, type RouteRecommendation } from '../shared/orchestration/types';
+import { EFFORT_LEVELS, isOrchestrationOrigin, type RouteRecommendation } from '../shared/orchestration/types';
 import { nativeEffortFor, tierRank } from '../shared/orchestration/catalog';
 import { policyContextFor } from '../shared/orchestration/executionPolicy';
 import { editPolicy, type PolicyEditorDeps } from './policyEditor';
@@ -65,6 +65,8 @@ import { isEndpointSource } from '../shared/orchestration/localEndpoints';
 import { LocalEndpointService } from '../orchestration/local/localEndpointService';
 import { taskQualifier } from '../orchestration/local/taskQualifier';
 import { CodexHarness } from '../orchestration/harness/codexHarness';
+import { ClaudeCodeHarness } from '../orchestration/harness/claudeCodeHarness';
+import { CONVERSATION_DELEGATION_INSTRUCTIONS, withConversationDelegation } from '../shared/conversationDelegation';
 import { LocalMetricsIndex } from '../core/telemetry/localMetricsIndex';
 import { RoutingEvidenceIndex } from '../core/telemetry/routingEvidenceIndex';
 import { comparisonReport, effectiveMode, evaluateGate, type ComparisonReport, type GateResult } from '../shared/orchestration/autoRouting';
@@ -374,6 +376,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         log,
         build: host.sessionHosts.runtime.buildId,
         orphanIdleHours: () => host.settings.get<number>('lifecycle.orphanIdleHours', 24),
+        endpointKey: (ref) => localEndpoints.keyByRef(ref),
       })
     : undefined;
   const hostScan = hostSupervisor?.scan() ?? { alive: [], dead: [], foreign: [] };
@@ -533,6 +536,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     registry: sessionRegistry,
     locate,
     rememberModels: (list) => models.remember('anthropic', list),
+    localKey: (ref) => localEndpoints.keyByRef(ref),
     // Experimental until the Stage 4 soak: new sessions run in hosts only
     // with the setting on. Surviving hosts are adopted either way.
     hosts: hostSupervisor
@@ -559,6 +563,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
       log,
     }),
   );
+  localEndpoints.useTaskQualifier(
+    taskQualifier({
+      harness: new ClaudeCodeHarness({ sessions, models: () => [], localProvider: (s, m) => localEndpoints.claudeProvider(s, m) }),
+      fixturesDir: path.join(__dirname, '..', 'qualification-fixtures'),
+      log,
+    }),
+    'claude-code',
+  );
 
   // Take back every session still running in a host, before the providers'
   // first scan: each is ours from the first snapshot, never an external
@@ -582,7 +594,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * registry remembers (a resume should come back on the same model, mode and
    * effort), otherwise the current defaults.
    */
-  const claudeLaunch = (previous?: SessionRecord) => launchDefaults.resumed('claude', previous?.launch);
+  const claudeLaunch = (previous?: SessionRecord) => {
+    const launch = launchDefaults.resumed('claude', previous?.launch);
+    if (!previous || isOrchestrationOrigin(previous.origin)) return launch;
+    return { ...launch, policy: { ...launch.policy, claude: { ...launch.policy?.claude, conversationInstructions: withConversationDelegation(launch.policy?.claude?.conversationInstructions) } } };
+  };
 
   // #4's startup is settled once hosts are adopted (above, synchronously) and
   // Codex threads are rejoined (in `start()`). Orchestration's recovery waits for it.
@@ -1292,7 +1308,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // Working in a folder is the strongest possible statement that it belongs
     // in the list, so it also undoes a removal — the same rule as browsing.
     if (remember) projects.add(cwd);
-    const runner = await sessions.launch(launchDefaults.request('claude', cwd));
+    const runner = await sessions.launch(launchDefaults.request('claude', cwd, { policy: { claude: { conversationInstructions: CONVERSATION_DELEGATION_INSTRUCTIONS } } }));
     surface?.showSession(runner);
     return runner;
   };
@@ -1307,7 +1323,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }
     if (remember) projects.add(cwd);
     try {
-      const runner = await sessions.launch(launchDefaults.request('codex', cwd));
+      const runner = await sessions.launch(launchDefaults.request('codex', cwd, { policy: { codex: { developerInstructions: CONVERSATION_DELEGATION_INSTRUCTIONS } } }));
       surface?.showSession(runner);
     } catch (error) {
       log(`starting Codex conversation failed: ${String(error)}`);
@@ -1953,12 +1969,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
   async function proposeTask(req: ProposeTaskRequest): Promise<ProposedTask> {
     if (!tasks) throw new TaskError('Tasks are off. Turn on orchestration ("orchestration.enabled": true in settings.json) first.');
     const runner = tasks;
-    const harness = req.harness === 'codex' ? 'codex' : 'claude-code';
+    const harness = req.harness === 'codex' ? 'codex' : req.harness === 'claude' ? 'claude-code' : undefined;
     const { mission, recommendation } = await runner.propose({
       folder: req.folder,
       objective: req.objective,
       acceptanceCriteria: req.acceptanceCriteria ?? [],
-      policy: { preferences: { harness } },
+      ...(harness ? { policy: { preferences: { harness } } } : {}),
       ...(req.origin ? { origin: req.origin } : {}),
     });
     const target = recommendation.resolution.target;
@@ -2001,12 +2017,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
   async function delegate(req: ProposeTaskRequest): Promise<DelegateResult> {
     if (!tasks) throw new TaskError('Delegating is off. Turn on orchestration ("orchestration.enabled": true in settings.json) first.');
     const runner = tasks;
-    const harness = req.harness === 'codex' ? 'codex' : 'claude-code';
+    const harness = req.harness === 'codex' ? 'codex' : req.harness === 'claude' ? 'claude-code' : undefined;
     const mission = await runner.delegate({
       folder: req.folder,
       objective: req.objective,
       acceptanceCriteria: req.acceptanceCriteria ?? [],
-      policy: { preferences: { harness } },
+      ...(harness ? { policy: { preferences: { harness } } } : {}),
       ...(req.origin ? { origin: req.origin } : {}),
     });
     const from = mission.origin ? store.get(originKey(mission.origin)) : undefined;
@@ -2249,7 +2265,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
       : { blocks: [], truncated: false };
     // A thread AW started before comes back under the rules it was started with (#71).
     const previous = sessionRegistry.get(session.sessionId);
-    const policy = previous?.launch.policy;
+    const policy = !previous || isOrchestrationOrigin(previous.origin)
+      ? previous?.launch.policy
+      : { ...previous.launch.policy, codex: { ...previous.launch.policy?.codex, developerInstructions: withConversationDelegation(previous.launch.policy?.codex?.developerInstructions) } };
     let runner: Awaited<ReturnType<CodexRunnerService['resume']>>;
     for (;;) {
       try {

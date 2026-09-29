@@ -89,6 +89,7 @@ export interface LocalEndpointView {
   error?: string;
   /** `/v1/responses` as probed. Undefined: not probed, or the probe could not say. */
   responses?: boolean;
+  messages?: boolean;
   models: LocalEndpointModelView[];
   busy?: boolean;
 }
@@ -97,6 +98,9 @@ export interface LocalEndpointView {
 export interface LocalEndpointModelView {
   id: string;
   label: string;
+  harnesses?: ('codex' | 'claude-code')[];
+  qualifications?: Partial<Record<'codex' | 'claude-code', string>>;
+  taskQualifications?: Partial<Record<'codex' | 'claude-code', string>>;
   /** The catalog key, to find its tier-map entry. */
   key: string;
   /** Stage 1's line (`qualificationText`). */
@@ -259,9 +263,9 @@ export type LocalEndpointChange =
   | { op: 'setKey'; id: string }
   | { op: 'clearKey'; id: string }
   | { op: 'probe'; id: string }
-  | { op: 'qualify'; id: string; model: string }
+  | { op: 'qualify'; id: string; model: string; harness?: 'codex' | 'claude-code' }
   /** Stage 2 (§19.6): scratch-repo tasks through Codex on the endpoint. */
-  | { op: 'qualifyTasks'; id: string; model: string };
+  | { op: 'qualifyTasks'; id: string; model: string; harness?: 'codex' | 'claude-code' };
 
 /** A `localEndpoint` message's change, or nothing if it is not well formed. */
 export function localEndpointChange(raw: unknown): LocalEndpointChange | undefined {
@@ -281,9 +285,10 @@ export function localEndpointChange(raw: unknown): LocalEndpointChange | undefin
     case 'enable':
       return id && typeof c.enabled === 'boolean' ? { op: 'enable', id, enabled: c.enabled } : undefined;
     case 'qualify':
-      return id && typeof c.model === 'string' && c.model !== '' ? { op: 'qualify', id, model: c.model } : undefined;
     case 'qualifyTasks':
-      return id && typeof c.model === 'string' && c.model !== '' ? { op: 'qualifyTasks', id, model: c.model } : undefined;
+      return id && typeof c.model === 'string' && c.model !== '' && (c.harness === undefined || c.harness === 'codex' || c.harness === 'claude-code')
+        ? { op: c.op, id, model: c.model, ...(c.harness ? { harness: c.harness } : {}) }
+        : undefined;
     default:
       return undefined;
   }

@@ -90,7 +90,7 @@ export interface OrchestrationDeps {
   local?: {
     service: Pick<
       LocalEndpointService,
-      'codexProvider' | 'checkNow' | 'onDown' | 'pickCompletion' | 'completionFor' | 'recordCall' | 'runFacts'
+      'codexProvider' | 'claudeProvider' | 'checkNow' | 'onDown' | 'pickCompletion' | 'completionFor' | 'recordCall' | 'runFacts'
     > &
       Partial<Pick<LocalEndpointService, 'pickPlanner'>>;
     catalog: () => CapabilityCatalogView;
@@ -170,7 +170,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
   const local = deps.local;
   // The adapters are the only orchestration code that touches the executors (§6.2).
   const harnesses = new Map<HarnessId, AgentHarness>([
-    ['claude-code', new ClaudeCodeHarness({ sessions: deps.sessions, models })],
+    ['claude-code', new ClaudeCodeHarness({ sessions: deps.sessions, models, ...(local ? { localProvider: (s, m) => local.service.claudeProvider(s, m) } : {}) })],
     [
       'codex',
       new CodexHarness({ sessions: deps.sessions, models, ...(local ? { localProvider: (s, m) => local.service.codexProvider(s, m) } : {}) }),
