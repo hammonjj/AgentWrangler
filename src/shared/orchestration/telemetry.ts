@@ -371,6 +371,17 @@ export interface PlanReviewRecord extends RecordBase {
   reviewMs: number;
 }
 
+/** Local calibration of the conversation offer. Never contains request content. */
+export interface DelegationSuggestionRecord extends RecordBase {
+  type: 'delegation-suggestion';
+  provider: 'claude' | 'codex';
+  outcome: 'accepted' | 'declined' | 'ignored';
+  reason: 'bounded-work';
+  assessorVersion: number;
+  repoPolicyVersion: string;
+  durationMs: number;
+}
+
 /**
  * A task branch merged into the mission branch (§16.2, #46):
  * merged, conflict, reverted, or mission-verification outcome.
@@ -393,6 +404,7 @@ export interface IntegrationRecord extends RecordBase {
 }
 
 export type TelemetryRecord =
+  | DelegationSuggestionRecord
   | TurnRecord
   | AttemptRecord
   | RoutingRecord

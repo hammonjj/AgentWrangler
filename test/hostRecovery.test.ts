@@ -217,6 +217,59 @@ describe('HostSupervisor.collect: strays', () => {
   });
 });
 
+describe('HostSupervisor.lostAgents (#62)', () => {
+  const DEAD = 999_999; // above macOS's pid ceiling: never a live process
+  function withRun(body: (runDir: string, sup: HostSupervisor) => void): void {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'awlost-'));
+    try {
+      const runDir = path.join(root, 'run');
+      fs.mkdirSync(runDir, { recursive: true });
+      const sup = new HostSupervisor({
+        runDir,
+        fallbackRunDir: path.join(root, 'fb'),
+        logDir: path.join(root, 'logs'),
+        runtime: { buildId: 't', prepare: async () => ({ exe: '', entry: '' }) },
+        log: () => undefined,
+        build: 't',
+      });
+      body(runDir, sup);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const put = (runDir: string, m: HostManifest | Record<string, unknown>) =>
+    fs.writeFileSync(path.join(runDir, `${String(m.hostId)}.json`), JSON.stringify(m));
+
+  it("returns only the recorded agents of this session's dead hosts, with their start times", () => {
+    withRun((runDir, sup) => {
+      put(runDir, manifest({ hostId: 'lostlost', sessionId: 'S1', hostPid: DEAD, agentPid: 50, agentStartTime: 'T50', startedAt: Date.now() }));
+      // No recorded start time: identity cannot be proved.
+      put(runDir, manifest({ hostId: 'notimeaa', hostPid: DEAD, agentPid: 51, startedAt: Date.now() }));
+      // A live host (this test process): its agent is held, not lost.
+      put(runDir, manifest({ hostId: 'liveliva', hostPid: process.pid, agentPid: 52, agentStartTime: 'T52', startedAt: Date.now() }));
+      // Another session's dead host.
+      put(runDir, manifest({ hostId: 'otherses', sessionId: 's2', hostPid: DEAD, agentPid: 53, agentStartTime: 'T53', startedAt: Date.now() }));
+      // A manifest version this build does not know: its agent fields are not trusted.
+      put(runDir, { ...manifest({ hostId: 'foreignf', hostPid: DEAD, agentPid: 54, agentStartTime: 'T54' }), v: 2 });
+      expect(sup.lostAgents('s1')).toEqual([{ pid: 50, startTime: 'T50' }]);
+      expect(sup.heldAgentPids()).toEqual(new Set([52]));
+    });
+  });
+
+  it("keeps a lost host's manifest through startup's collect, so the sweep that follows can read it; forget removes it", () => {
+    withRun((runDir, sup) => {
+      const lost = manifest({ hostId: 'lostlost', hostPid: DEAD, agentPid: 50, agentStartTime: 'T50', startedAt: Date.now() });
+      put(runDir, lost);
+      put(runDir, manifest({ hostId: 'exitedex', hostPid: DEAD, agentPid: 51, agentStartTime: 'T51', startedAt: Date.now(), exit: { reason: 'ended', at: 1, lastSeq: 1 } }));
+      sup.collect(sup.scan());
+      expect(fs.readdirSync(runDir)).toEqual(['lostlost.json']);
+      expect(sup.lostAgents('s1')).toEqual([{ pid: 50, startTime: 'T50' }]);
+      sup.forget(lost);
+      expect(sup.lostAgents('s1')).toEqual([]);
+    });
+  });
+});
+
 describe('withHostedPermission', () => {
   const row: AgentSession = {
     provider: 'claude',

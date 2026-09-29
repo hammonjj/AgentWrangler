@@ -284,6 +284,12 @@ export interface ModelChoice {
    * of the model, not of the product, and Haiku has none.
    */
   effortLevels?: string[];
+  /**
+   * Whether the permission mode `auto` is available on this model, as Claude
+   * Code's `supportsAutoMode` reports it (Haiku: false). Absent when the CLI
+   * did not say, and for Codex, which has no such mode.
+   */
+  autoMode?: boolean;
   /** The CLI's own sentence about the model, when it gave one. */
   description?: string;
   /**
