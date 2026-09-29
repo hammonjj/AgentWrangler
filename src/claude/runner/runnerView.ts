@@ -20,6 +20,7 @@ import type { Disposable } from '../../core/events';
 import type { CommandOutcome, SendOptions, SessionHandle, SessionLifecycle } from '../../core/session/sessionHandle';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
 import { SessionViewBase } from '../../core/session/sessionView';
+import { claudeRequestTokens, foldRequest, REQUEST_CONTEXT_KEY, type RequestContext } from '../../core/telemetry/requestContext';
 import type {
   BlockPatch,
   ComposerState,
@@ -185,6 +186,8 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
   /** The model list has been answered, so `init` does not ask for it again. */
   private modelsLoaded = false;
   private modelAttempts = 0;
+  /** The context of this turn's first and last main-thread request, so far (#54). */
+  private turnRequests: RequestContext = {};
   /** How the agent went, once it has: lets the owner tell a lost host from a clean end. */
   lastExit?: HostExit;
   private execSub?: Disposable;
@@ -764,6 +767,7 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
       void this.loadModels();
     }
 
+    this.turnRequests = foldRequest(this.turnRequests, claudeRequestTokens(msg));
     const { appends, patches, composer, turnEnd } = reduceRunnerMessage(this.blockState, msg);
     for (const p of patches) this.patch(p);
     if (appends.length > 0) this.append(appends);
@@ -775,8 +779,12 @@ export class RunnerView extends SessionViewBase implements SessionHandle {
       this.setLifecycle(turnEnd.queued > 0 ? 'running' : 'idle');
       this.setComposer({ busy: turnEnd.queued > 0, queued: turnEnd.queued });
       // The SDK's `result`, untranslated: usage, cost, turns, timings, stop
-      // reason. Its totals are cumulative for this execution only.
-      this.emitTurnEnd(msg, this.exec.executionId);
+      // reason. Its totals are cumulative for this execution only. The one
+      // thing added: the context of the turn's first and last request (#54),
+      // which the `result` does not carry.
+      const requests = this.turnRequests;
+      this.turnRequests = {};
+      this.emitTurnEnd(requests.first !== undefined && msg && typeof msg === 'object' ? { ...msg, [REQUEST_CONTEXT_KEY]: requests } : msg, this.exec.executionId);
     }
   }
 

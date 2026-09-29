@@ -99,6 +99,13 @@ export interface LaunchRequest {
   sessionId?: string;
   /** Session id to continue. */
   resume?: string;
+  /**
+   * Session id to fork (#54): a new session with that one's conversation,
+   * working in `cwd`, which may be another directory than the source's.
+   * Claude: SDK `resume` + `forkSession`, into `sessionId` when given.
+   * Codex: `thread/fork` with `cwd`. Never with `resume`.
+   */
+  forkFrom?: string;
   /** Sent as the first message once the session is up. */
   initialPrompt?: string;
   /**

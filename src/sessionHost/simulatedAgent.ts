@@ -355,7 +355,8 @@ export function simulatedQuery({ prompt, options }: { prompt: AsyncIterable<SDKU
   let wake: (() => void) | undefined;
   let done = false;
   let failure: Error | undefined;
-  const sessionId = options.resume ?? options.sessionId ?? randomUUID();
+  // A fork (`resume` + `forkSession`) is a new session: its chosen id, or one of its own.
+  const sessionId = options.forkSession ? (options.sessionId ?? randomUUID()) : (options.resume ?? options.sessionId ?? randomUUID());
   const model = options.model ?? 'claude-simulated';
   const cwd = options.cwd ?? process.cwd();
   const totals = emptyTotals();

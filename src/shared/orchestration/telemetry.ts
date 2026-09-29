@@ -76,6 +76,13 @@ export interface TurnRecord extends RecordBase {
   isError: boolean;
   apiErrorStatus?: number;
   contextTokensPeak?: number;
+  /**
+   * Input-side tokens (input + cache read + cache write) of the turn's first
+   * and last main-thread model request (#54): the first is what a cold
+   * session starts from, the last what a session carried on starts from.
+   * Absent when the harness did not report per-request usage.
+   */
+  requestContext?: { first?: number; last?: number };
   costBasis: CostBasis;
   /**
    * The first turn seen after the core was away: its usage is the difference
@@ -86,6 +93,9 @@ export interface TurnRecord extends RecordBase {
   attemptId?: string;
 }
 
+/** An attempt's assignment as telemetry reports it: `fresh` is `cold`. */
+export type AttemptAssignmentMode = 'cold' | 'continue' | 'reuse' | 'fork';
+
 /** Written when an attempt ends, and partially when it is interrupted (§16.2). */
 export interface AttemptRecord extends RecordBase {
   type: 'attempt';
@@ -94,6 +104,21 @@ export interface AttemptRecord extends RecordBase {
   attemptId: string;
   n: number;
   mode: RoutingMode;
+  /**
+   * Which session ran it (#54): `cold` a new one (the assignment's `fresh`),
+   * `continue` the same task's earlier session, `reuse` an earlier task's
+   * session on the same worktree, `fork` a fork of an upstream task's.
+   * Absent on records written before #54.
+   */
+  assignmentMode?: AttemptAssignmentMode;
+  /** `reuse` / `fork`: the attempt whose session it carried on or forked. */
+  assignedFrom?: string;
+  /**
+   * Input-side tokens the session held at the start: a carried session's last
+   * known context, or a cold session's first request. Absent when not
+   * reported, never 0 for unknown.
+   */
+  contextTokensAtStart?: number;
   /** The repository policy the attempt ran under (`LoadedRepoPolicy.version`, #32); `default` when it had none. */
   repoPolicyVersion?: string;
   routingConfidence?: string;

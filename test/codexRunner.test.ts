@@ -61,7 +61,8 @@ describe('CodexRunner', () => {
 
     const runner = await service.fork('thread-external', '/Users/test/proj', history);
 
-    expect(server.calls[0]).toEqual({ method: 'thread/fork', params: { threadId: 'thread-external' } });
+    // The fork's working directory goes on the call (#54): without it the fork works in the original's.
+    expect(server.calls[0]).toEqual({ method: 'thread/fork', params: { threadId: 'thread-external', cwd: '/Users/test/proj' } });
     expect(runner.threadId).toBe('thread-forked');
     expect((await new LiveSessionSource(runner).init()).blocks).toEqual(history);
     expect(runner.composer.model).toBe('gpt-forked');
@@ -124,8 +125,30 @@ describe('CodexRunner', () => {
     server.notifications.fire({ method: 'thread/tokenUsage/updated', params: { threadId: 'other', turnId: 'x', tokenUsage: {} } });
     server.notifications.fire({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } } });
     expect(ends).toEqual([
-      { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' }, usageUpdate: { turnId: 'turn-1', tokenUsage }, model: 'gpt-test' },
+      {
+        threadId: 'thread-1',
+        turn: { id: 'turn-1', status: 'completed' },
+        usageUpdate: { turnId: 'turn-1', tokenUsage },
+        model: 'gpt-test',
+        // The turn's first and last request's input side (#54).
+        awRequestContext: { first: 10, last: 10 },
+      },
     ]);
+  });
+
+  it('reports the first and last request of a turn, not usage a fork or resume inherited (#54)', async () => {
+    const server = new FakeServer();
+    const runner = new CodexRunner(server as any, 'thread-1', '/Users/test/proj', 'gpt-test');
+    const ends: any[] = [];
+    runner.onTurnEnd((raw) => ends.push(raw));
+    const usage = (input: number) => ({ total: { inputTokens: input }, last: { inputTokens: input, cachedInputTokens: 1, outputTokens: 2 } });
+    // Before any turn of ours: what the thread already had.
+    server.notifications.fire({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread-1', turnId: 'old', tokenUsage: usage(900) } });
+    await runner.send('hello');
+    server.notifications.fire({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread-1', turnId: 'turn-1', tokenUsage: usage(17_000) } });
+    server.notifications.fire({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread-1', turnId: 'turn-1', tokenUsage: usage(19_500) } });
+    server.notifications.fire({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+    expect(ends[0].awRequestContext).toEqual({ first: 17_000, last: 19_500 });
   });
 
   it('uses the final assistant message to distinguish Waiting from Done', async () => {

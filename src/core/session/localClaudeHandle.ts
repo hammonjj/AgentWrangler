@@ -25,6 +25,7 @@ export function createLocalClaudeHandle(request: Omit<LaunchRequest, 'provider'>
       cwd: request.cwd,
       resume: request.resume,
       sessionId: request.sessionId,
+      forkFrom: request.forkFrom,
       permissionMode: request.permissionMode,
       model: request.model,
       effort: request.effort,

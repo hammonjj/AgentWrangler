@@ -18,6 +18,7 @@ import type {
   SessionLifecycle,
 } from '../core/session/sessionHandle';
 import { SessionViewBase } from '../core/session/sessionView';
+import { codexRequestTokens, foldRequest, REQUEST_CONTEXT_KEY, type RequestContext } from '../core/telemetry/requestContext';
 import { resumePolicy, type ExecutorRegistry } from '../core/session/sessionRegistry';
 import type { ConversationHistory } from '../claude/transcriptHistory';
 import { capText, type ComposerState, type ConvBlock, type ImageAttachment, type PermissionModeName } from '../shared/conversation';
@@ -167,6 +168,8 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
   private turnOutcome: 'completed' | 'failed' | 'interrupted' = 'completed';
   /** The last `thread/tokenUsage/updated`: `total` is cumulative per thread, `last` one turn's worth. */
   private tokenUsage?: { turnId?: string; tokenUsage: unknown };
+  /** The context of the running turn's first and last request, from its usage updates (#54). */
+  private turnRequests: RequestContext = {};
   private idleStatus: 'waiting' | 'done';
   private lastActivityAt = Date.now();
   private seq = 0;
@@ -380,11 +383,15 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
       // `turn/completed` carries no usage; this is where Codex reports it.
       if (params.tokenUsage && typeof params.tokenUsage === 'object') {
         this.tokenUsage = { turnId: typeof params.turnId === 'string' ? params.turnId : undefined, tokenUsage: params.tokenUsage };
+        // Only the running turn's own requests: a fork or a resume reports the usage it inherited first.
+        const forTurn = typeof params.turnId === 'string' ? params.turnId === this.activeTurnId : this.activeTurnId !== undefined;
+        if (forTurn) this.turnRequests = foldRequest(this.turnRequests, codexRequestTokens(params.tokenUsage));
       }
       return;
     }
     if (event.method === 'turn/started') {
       this.activeTurnId = params.turn?.id;
+      this.turnRequests = {};
       this.setBusy(true);
       this.turnAssistantText = '';
       this.turnOutcome = 'completed';
@@ -409,9 +416,16 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
       // status, error, timings). It has no usage of its own, so the latest
       // `thread/tokenUsage/updated` rides along as `usageUpdate` (its params
       // minus the thread id: {turnId, tokenUsage: {total, last,
-      // modelContextWindow}}), and the thread's model as `model`: the only two
-      // things added.
-      this.emitTurnEnd({ ...params, ...(this.tokenUsage ? { usageUpdate: this.tokenUsage } : {}), model: this.currentModel });
+      // modelContextWindow}}), the thread's model as `model`, and the context
+      // of the turn's first and last request (#54): the only things added.
+      const requests = this.turnRequests;
+      this.turnRequests = {};
+      this.emitTurnEnd({
+        ...params,
+        ...(this.tokenUsage ? { usageUpdate: this.tokenUsage } : {}),
+        model: this.currentModel,
+        ...(requests.first !== undefined ? { [REQUEST_CONTEXT_KEY]: requests } : {}),
+      });
       return;
     }
     if (event.method === 'item/agentMessage/delta') {
@@ -765,11 +779,14 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
       effort: request.effort,
       permissionMode: request.permissionMode,
       origin: request.origin,
-      policy: resumePolicy(this.record.registry, request.resume, request.policy),
+      // A resume or a fork without a policy of its own keeps the original's.
+      policy: resumePolicy(this.record.registry, request.resume ?? request.forkFrom, request.policy),
     };
     const runner = request.resume
       ? await this.resume(request.resume, request.cwd, request.initialBlocks ?? [], request.model, launch)
-      : await this.start(request.cwd, request.model, launch);
+      : request.forkFrom
+        ? await this.fork(request.forkFrom, request.cwd, request.initialBlocks ?? [], request.model, launch.policy, launch)
+        : await this.start(request.cwd, request.model, launch);
     if (request.initialPrompt) await runner.send(request.initialPrompt);
     return runner;
   }
@@ -962,15 +979,22 @@ export class CodexRunnerService implements SessionExecutor, Disposable {
     runner.shutdown();
     this.change.fire();
   }
-  /** A new thread with this one's history. A policy the original had comes with it. */
-  async fork(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string, policy?: LaunchPolicy): Promise<CodexRunner> {
-    const result = await this.server.request<any>('thread/fork', { threadId, ...codexThreadParams(policy, undefined, await this.providerKey(policy), model) });
+  /**
+   * A new thread with this one's history, working in `cwd`. A policy the
+   * original had comes with it. `cwd` goes on `thread/fork` itself: without
+   * it the fork's tools run in the original's directory (measured, #54, app-server
+   * 0.155.0-alpha.16.3). `launch`: how an orchestrated fork was asked for (its origin and effort).
+   */
+  async fork(threadId: string, cwd: string, initialBlocks: ConvBlock[] = [], model?: string, policy?: LaunchPolicy, launch: CodexLaunch = {}): Promise<CodexRunner> {
+    const effort = launch.effort;
+    const result = await this.server.request<any>('thread/fork', { threadId, cwd, ...codexThreadParams(policy, effort, await this.providerKey(policy), model) });
     const forkedId = result?.thread?.id;
     if (typeof forkedId !== 'string') throw new Error('Codex App Server returned no forked thread id');
     const runner = new CodexRunner(
-      this.server, forkedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(), undefined, policy,
+      this.server, forkedId, cwd, result?.thread?.model ?? result?.model ?? model, initialBlocks, () => this.change.fire(), launch.origin, policy,
     );
-    return this.track(runner, { policy });
+    runner.startedWithEffort(effort);
+    return this.track(runner, { ...launch, policy });
   }
   private track(runner: CodexRunner, launch: CodexLaunch = {}): CodexRunner {
     this.runners.set(runner.threadId.toLowerCase(), runner);

@@ -19,6 +19,7 @@ import type { SessionHandle, SessionViewEvent } from '../session/sessionHandle';
 import type { SessionExecutors } from '../session/sessionExecutors';
 import type { SessionRegistry } from '../session/sessionRegistry';
 import type { TelemetryLog } from './telemetryLog';
+import { requestContextOf } from './requestContext';
 import { claudeModelLimits, claudeTurnUsage, codexTurnUsage, priceCost, type PriceTable, type SegmentState } from './turnUsage';
 
 export const TELEMETRY_ENABLED_KEY = 'telemetry.enabled';
@@ -207,6 +208,8 @@ export class TurnTelemetry implements Disposable {
     } else {
       record.usageUnknown = usage.why;
     }
+    const requests = requestContextOf(raw);
+    if (requests) record.requestContext = requests;
     if (Object.keys(toolCalls).length > 0) record.toolCalls = toolCalls;
     if (permissionAsks > 0) record.permissionAsks = permissionAsks;
     if (waited > 0) record.waitedOnHumanMs = waited;

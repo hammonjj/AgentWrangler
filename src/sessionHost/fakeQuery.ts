@@ -92,7 +92,8 @@ export function fakeQuery({ prompt, options }: { prompt: AsyncIterable<SDKUserMe
   let failure: Error | undefined;
   let closing = false;
   let inputEnded = false;
-  const sessionId = options.resume ?? options.sessionId ?? randomUUID();
+  // A fork (`resume` + `forkSession`) is a new session: its chosen id, or one of its own.
+  const sessionId = options.forkSession ? (options.sessionId ?? randomUUID()) : (options.resume ?? options.sessionId ?? randomUUID());
   const push = (m: unknown) => {
     out.push(m);
     wake?.();

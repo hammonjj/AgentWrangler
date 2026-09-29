@@ -162,6 +162,7 @@ async function main(): Promise<void> {
       cwd: boot.launch.cwd,
       resume: boot.launch.resume,
       sessionId: boot.launch.sessionId,
+      forkFrom: boot.launch.forkFrom,
       permissionMode: boot.launch.permissionMode,
       model: boot.launch.model,
       effort: boot.launch.effort,

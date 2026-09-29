@@ -417,7 +417,7 @@ describe('CodexRunnerService', () => {
     const server = new FakeCodex();
     const service = new CodexRunnerService(server as any);
     const fork = await service.fork('t1', '/Users/test/proj', [], undefined, POLICY);
-    expect(server.of('thread/fork')).toEqual([{ threadId: 't1', ...POLICY.codex }]);
+    expect(server.of('thread/fork')).toEqual([{ threadId: 't1', cwd: '/Users/test/proj', ...POLICY.codex }]);
     expect(fork.policy).toEqual(POLICY);
     service.dispose();
   });

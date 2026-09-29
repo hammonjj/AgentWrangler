@@ -6,7 +6,14 @@
  * never the objective, the prompt or anything the agent wrote. A field
  * nobody reported is absent, never zero.
  */
-import { TELEMETRY_SCHEMA_VERSION, type AttemptRecord, type EscalationRecord, type RoutingRecord, type TurnRecord } from '../../shared/orchestration/telemetry';
+import {
+  TELEMETRY_SCHEMA_VERSION,
+  type AttemptAssignmentMode,
+  type AttemptRecord,
+  type EscalationRecord,
+  type RoutingRecord,
+  type TurnRecord,
+} from '../../shared/orchestration/telemetry';
 import type { EscalationDecision, ExecutionAttempt, Millis, Mission, ReviewVerdict, RoutingDecision, UsageSummary } from '../../shared/orchestration/types';
 import { reviewCounts } from '../../shared/orchestration/verification';
 import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
@@ -36,6 +43,27 @@ export function addTurnUsage(usage: UsageSummary | undefined, r: TurnRecord): Us
     u.costBasis = u.costBasis === 'none' || u.costBasis === r.costBasis ? r.costBasis : 'price-table';
   }
   return u;
+}
+
+/**
+ * Fold one turn's request context (its first and last request, as the runner
+ * reported it) into an attempt's (#54). A cold (`fresh`) attempt takes its
+ * first turn's first request as its context at start; a carried session had
+ * its `atStart` set at launch. Every turn moves `last`. `firstTurn`: this is
+ * the first turn the attempt's session ran for it, seen from its start.
+ */
+export function addTurnContext(
+  a: Pick<ExecutionAttempt, 'assignment' | 'context'>,
+  rc: { first?: number; last?: number } | undefined,
+  firstTurn: boolean,
+): ExecutionAttempt['context'] {
+  if (!rc) return a.context;
+  const out = { ...a.context };
+  const first = known(rc.first);
+  if (out.atStart === undefined && a.assignment.mode === 'fresh' && firstTurn && first !== undefined) out.atStart = first;
+  const last = known(rc.last);
+  if (last !== undefined) out.last = last;
+  return out.atStart === undefined && out.last === undefined ? a.context : out;
 }
 
 function round(n: number): number {
@@ -91,6 +119,9 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     attemptId: a.id,
     n: a.n,
     mode: decision.mode,
+    assignmentMode: assignmentModeOf(a),
+    assignedFrom: a.assignment.mode === 'reuse' || a.assignment.mode === 'fork' ? a.assignment.fromAttemptId : undefined,
+    contextTokensAtStart: known(a.context?.atStart),
     repoPolicyVersion: a.repoPolicyVersion,
     ...(assessment ? { assessment: assessment.snapshot, routingConfidence: assessment.confidence } : {}),
     target: { ...target, ...(decision.requirement.effort ? { effortRequested: decision.requirement.effort } : {}) },
@@ -141,6 +172,17 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
   if (a.git) record.git = { filesChanged: a.git.filesChanged, insertions: a.git.insertions, deletions: a.git.deletions, commits: a.git.commits };
   if (outcome === 'interrupted') record.partial = true;
   return prune(record);
+}
+
+/** The assignment as telemetry names it (#54): a new session is `cold`, whatever the engine calls it. */
+export function assignmentModeOf(a: Pick<ExecutionAttempt, 'assignment'>): AttemptAssignmentMode {
+  const mode = a.assignment.mode;
+  return mode === 'continue' || mode === 'reuse' || mode === 'fork' ? mode : 'cold';
+}
+
+/** A token count that was reported: a positive finite number. Zero and garbage are "not known". */
+function known(n: number | undefined): number | undefined {
+  return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 /**

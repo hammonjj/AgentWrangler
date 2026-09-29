@@ -32,6 +32,7 @@ export function spawnHostedClaude(request: Omit<LaunchRequest, 'provider'>, deps
     cwd: request.cwd,
     sessionId,
     resume: request.resume !== undefined,
+    ...(request.forkFrom && !request.resume ? { forkFrom: request.forkFrom } : {}),
     permissionMode: request.permissionMode,
     model: request.model,
     effort: request.effort,

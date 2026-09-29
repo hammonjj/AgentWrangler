@@ -25,8 +25,9 @@ const CAPABILITIES: HarnessCapabilities = {
   permissionModes: ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk', 'bypassPermissions'],
   preassignedSessionId: true,
   resume: true,
-  // The SDK can fork, but `LaunchRequest` has no way to ask for it yet.
-  fork: false,
+  // SDK `resume` + `forkSession` in a new `cwd`: the fork keeps the context and
+  // its tools run in the new directory (#54 spike, 2026-09-29, CLI 2.1.284).
+  fork: true,
   midSessionModelChange: true,
   // No SDK call; the view sends `/effort` when the CLI offers it (§6.4).
   midSessionEffortChange: 'slash-command',
@@ -66,7 +67,8 @@ export class ClaudeCodeHarness implements AgentHarness {
       model: req.target.model || undefined,
       effort: nativeEffort(req.target),
       permissionMode: req.permissionMode,
-      ...(req.resume ? { resume: req.resume } : { sessionId: req.sessionId ?? randomUUID() }),
+      // A fork is a fresh session (its own id, chosen here) with another's conversation.
+      ...(req.resume ? { resume: req.resume } : { sessionId: req.sessionId ?? randomUUID(), ...(req.fork ? { forkFrom: req.fork } : {}) }),
       // With an id of its own the prompt is sent here, so it carries that id.
       ...(req.promptId ? {} : { initialPrompt: req.prompt }),
       origin: req.origin,
