@@ -417,6 +417,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const sweep = sweepOrphans(sessionId, {
       entries: () => readProcessEntries(sessionsDir()),
       heldAgentPids: () => hostSupervisor?.heldAgentPids() ?? new Set(),
+      // The only processes it may end: agents a dead host's manifest names
+      // (pid + start time, #62). Anything else is take-over, confirmed.
+      lostAgents: (id) => hostSupervisor?.lostAgents(id) ?? [],
       isAlive: isPidAlive,
       startTimeOf,
       parentOf: parentPidOf,
