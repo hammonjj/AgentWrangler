@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyPolicyChange,
+  autoModeUnavailable,
   buildCatalog,
   DEFAULT_TIERS,
   defaultEffortMap,
@@ -188,6 +189,19 @@ describe('buildCatalog', () => {
     expect(get('openai:gpt-6-sol').costReporting).toBe('price-table');
     expect(get('openai:gpt-6-sol').descriptor.price).toEqual({ inPerMTok: 1, outPerMTok: 8 });
     expect(get('openai:gpt-6-astra').costReporting).toBe('none');
+  });
+
+  it('carries whether Claude Code has auto mode on a model, and a change moves the version', () => {
+    const withAuto = (haiku: boolean | undefined): ReportedModels[] =>
+      REPORTED.map((r) => (r.source === 'anthropic' ? { ...r, models: r.models.map((m) => (/haiku/.test(m.resolved ?? '') ? { ...m, autoMode: haiku } : m)) } : r));
+    const off = buildCatalog({ reported: withAuto(false) });
+    const haiku = off.entries.find((e) => /haiku/.test(e.key))!;
+    expect(haiku.descriptor.autoMode).toEqual({ value: false, from: 'reported' });
+    expect(autoModeUnavailable(haiku)).toBe(true);
+    const unknown = buildCatalog({ reported: withAuto(undefined) });
+    expect(autoModeUnavailable(unknown.entries.find((e) => /haiku/.test(e.key))!)).toBe(false);
+    expect(off.version).not.toBe(unknown.version);
+    expect(off.entries.find((e) => e.key === 'openai:gpt-6-sol')!.descriptor.autoMode).toBeUndefined();
   });
 });
 

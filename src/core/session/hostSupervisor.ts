@@ -18,6 +18,7 @@ import { parseLaunchPolicy } from '../../shared/launchPolicy';
 import type { HostBoot, HostManifest } from '../../shared/sessionProtocol';
 import { HostClient } from './hostClient';
 import { readManifest, readManifests, removeHostFiles } from './manifestFile';
+import type { LostAgent } from './orphanSweep';
 
 /** Where a host runs from. The Electron front end clones and signs its own bundle; tests use Node. */
 export interface SessionHostRuntime {
@@ -118,8 +119,10 @@ export class HostSupervisor {
   /**
    * Remove what gone hosts left: manifests, tokens, sockets, and runtimes
    * nothing uses. A host that died without an exit record keeps its manifest
-   * for a while: it names the agent that may still be running, which the
-   * Stage 4 orphan sweep needs.
+   * for a while: it names the agent that may still be running, and it is the
+   * sweep's only proof that such a process is ours to end (`lostAgents`, #62).
+   * So it stays until `forget` after a clear sweep, or `LOST_MANIFEST_KEEP_MS`.
+   * Startup calls this before its sweeps run; they still find it.
    */
   collect(scan: ScanResult, now = Date.now()): void {
     for (const m of scan.dead) {
@@ -168,6 +171,27 @@ export class HostSupervisor {
     for (const { manifest } of readManifests(this.opts.runDir, true)) {
       if (typeof manifest.agentPid !== 'number') continue;
       if (isSameProcessAlive(manifest.hostPid, manifest.hostStartTime)) out.add(manifest.agentPid);
+    }
+    return out;
+  }
+
+  /**
+   * The agents of dead hosts for `sessionId`, as their manifests recorded
+   * them: the only processes the orphan sweep may end (#62). Read fresh, so a
+   * host lost while the app runs is included. An entry with no recorded
+   * `agentStartTime` is skipped, since it cannot prove that a live pid is
+   * still that agent. So are foreign manifests: only `v`, `hostId`,
+   * `hostPid`, `hostStartTime`, `sessionId` and `protocol` keep their meaning
+   * across versions, and a guess never gets a process killed.
+   */
+  lostAgents(sessionId: string): LostAgent[] {
+    const id = sessionId.toLowerCase();
+    const out: LostAgent[] = [];
+    for (const { manifest, known } of readManifests(this.opts.runDir, true)) {
+      if (!known || manifest.sessionId?.toLowerCase() !== id) continue;
+      if (typeof manifest.agentPid !== 'number' || !manifest.agentStartTime) continue;
+      if (isSameProcessAlive(manifest.hostPid, manifest.hostStartTime)) continue;
+      out.push({ pid: manifest.agentPid, startTime: manifest.agentStartTime });
     }
     return out;
   }

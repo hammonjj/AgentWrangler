@@ -12,6 +12,7 @@ import { HostSupervisor } from '../src/core/session/hostSupervisor';
 import { readManifests } from '../src/core/session/manifestFile';
 import { sweepOrphans, sweepRefusal } from '../src/core/session/orphanSweep';
 import { adoptHostedClaude, spawnHostedClaude } from '../src/core/session/remoteClaudeHandle';
+import type { HostManifest } from '../src/shared/sessionProtocol';
 
 /**
  * Stage 4, with real detached hosts over real sockets and a scripted agent:
@@ -70,6 +71,7 @@ const liveAgents = async (sessionId: string) =>
 const sweepDeps = (sup: HostSupervisor) => ({
   entries: () => readProcessEntries(sessionsDir),
   heldAgentPids: () => sup.heldAgentPids(),
+  lostAgents: (sessionId: string) => sup.lostAgents(sessionId),
   isAlive: isPidAlive,
   startTimeOf,
   parentOf: parentPidOf,
@@ -154,6 +156,31 @@ async function spawnOrphan(termDelayMs = 0): Promise<number> {
 function writeEntry(pid: number, sessionId: string, procStart = startTimeOf(pid)): void {
   fs.mkdirSync(sessionsDir, { recursive: true });
   fs.writeFileSync(path.join(sessionsDir, `${pid}.json`), JSON.stringify({ pid, sessionId, procStart }));
+}
+
+/**
+ * The manifest a SIGKILLed host leaves: no exit record, naming `agentPid` as its agent. The host
+ * pid is above macOS's pid ceiling, so it is never alive (and `afterAll` never signals it).
+ */
+function writeLostManifest(hostId: string, sessionId: string, agentPid: number, agentStartTime = startTimeOf(agentPid)): void {
+  fs.mkdirSync(runDir, { recursive: true });
+  const m: HostManifest = {
+    v: 1,
+    hostId,
+    provider: 'claude',
+    sessionId,
+    cwd: root,
+    hostPid: 999_999,
+    hostStartTime: 'Thu Jan  1 00:00:00 1970',
+    agentPid,
+    agentStartTime,
+    socketPath: path.join(runDir, `${hostId}.sock`),
+    protocol: 1,
+    hostBuild: 'test',
+    sdkVersion: 'test',
+    startedAt: Date.now(),
+  };
+  fs.writeFileSync(path.join(runDir, `${hostId}.json`), JSON.stringify(m));
 }
 
 describe.runIf(process.platform === 'darwin')('session host recovery, end to end', () => {
@@ -361,6 +388,30 @@ describe.runIf(process.platform === 'darwin')('orphan identity, with real proces
     process.kill(owner, 'SIGKILL');
   }, 30_000);
 
+  it("a launchd child no dead host's manifest names is an owner: never signalled, and the resume is refused (#62)", async () => {
+    const id = 'bbbbbbbb-0000-4000-8000-000000000014';
+    // `claude … &` from a shell that has since exited: launchd's child, but not ours.
+    const stray = await spawnOrphan();
+    writeEntry(stray, id);
+    const sup = supervisor();
+
+    // No manifest at all.
+    const none = await sweepOrphans(id, sweepDeps(sup));
+    expect(none).toMatchObject({ swept: [], owners: [stray], clear: false });
+    expect(sweepRefusal(none)).toMatch(/take it over/);
+
+    // A dead host's manifest on the id, recording the same pid with another start time.
+    writeLostManifest('lostreus', id, stray, 'Thu Jan  1 00:00:00 1970');
+    const reused = await sweepOrphans(id, sweepDeps(sup));
+    expect(reused).toMatchObject({ swept: [], owners: [stray], clear: false });
+
+    let historyReads = 0;
+    await expect(runner(sup, () => historyReads++).resume({ cwd: root, resume: id })).rejects.toThrow(/take it over/);
+    expect(historyReads).toBe(0);
+    expect(isPidAlive(stray)).toBe(true);
+    process.kill(stray, 'SIGKILL');
+  }, 30_000);
+
   it('stale entries are ignored: a dead pid, and a live pid whose start time is not the one recorded', async () => {
     const id = 'bbbbbbbb-0000-4000-8000-000000000012';
     // A CLI that was SIGKILLed: its file outlives it.
@@ -384,6 +435,8 @@ describe.runIf(process.platform === 'darwin')('orphan identity, with real proces
     // Like a busy CLI: SIGTERM takes a while to land (S1 saw ~2.8 s).
     const orphan = await spawnOrphan(1500);
     writeEntry(orphan, id);
+    // Its host died without an exit record; the manifest is what proves it is ours to end (#62).
+    writeLostManifest('lostslow', id, orphan);
 
     const sup = supervisor();
     let orphanAliveAtHistory: boolean | undefined;

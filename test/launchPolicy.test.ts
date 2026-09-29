@@ -92,7 +92,11 @@ describe('claudePolicyOptions', () => {
     expect(withConversationDelegation(undefined)).toBe(CONVERSATION_DELEGATION_INSTRUCTIONS);
     expect(withConversationDelegation('Keep answers short.')).toBe(`Keep answers short.\n\n${CONVERSATION_DELEGATION_INSTRUCTIONS}`);
     expect(withConversationDelegation(withConversationDelegation('Keep answers short.'))).toBe(withConversationDelegation('Keep answers short.'));
-    expect(CONVERSATION_DELEGATION_INSTRUCTIONS).toMatch(/explicitly and wait for a clear yes/);
+    expect(CONVERSATION_DELEGATION_INSTRUCTIONS).toMatch(/do not independently repeat that offer/);
+  });
+  it('replaces the old model-driven offer instruction on resume, preserving other guidance', () => {
+    const old = 'Agent Wrangler can take a substantial, separable piece of work out of this conversation and put it in a task or mission with its own review card. For multi-step repository work that can be checked independently, briefly offer to Delegate it. Handle small questions and quick edits here without suggesting delegation. Before running aw delegate, ask the user explicitly and wait for a clear yes. If they agree, run aw delegate with --folder and, when there are acceptance criteria, --criteria. Do not pass --claude or --codex unless the user asks for a harness. Creating a delegation only creates a proposal or plan; Agent Wrangler waits for approval before work starts.';
+    expect(withConversationDelegation(`Keep answers short.\n\n${old}`)).toBe(`Keep answers short.\n\n${CONVERSATION_DELEGATION_INSTRUCTIONS}`);
   });
   it('builds a local-only SDK environment and preserves a simultaneous hosted launch', async () => {
     const inherited = { PATH: '/bin', ANTHROPIC_API_KEY: 'inherited-key', ANTHROPIC_BASE_URL: 'https://old.invalid', ANTHROPIC_MODEL: 'old', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_OAUTH_TOKEN: 'old-oauth', OPENAI_API_KEY: 'other-key' };

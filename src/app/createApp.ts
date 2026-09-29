@@ -24,6 +24,7 @@
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -60,7 +61,7 @@ import { nativeEffortFor, tierRank } from '../shared/orchestration/catalog';
 import { policyContextFor } from '../shared/orchestration/executionPolicy';
 import { editPolicy, type PolicyEditorDeps } from './policyEditor';
 import { Emitter } from '../core/events';
-import type { TelemetryRecord, TurnRecord } from '../shared/orchestration/telemetry';
+import type { DelegationSuggestionRecord, TelemetryRecord, TurnRecord } from '../shared/orchestration/telemetry';
 import { isEndpointSource } from '../shared/orchestration/localEndpoints';
 import { LocalEndpointService } from '../orchestration/local/localEndpointService';
 import { taskQualifier } from '../orchestration/local/taskQualifier';
@@ -417,6 +418,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const sweep = sweepOrphans(sessionId, {
       entries: () => readProcessEntries(sessionsDir()),
       heldAgentPids: () => hostSupervisor?.heldAgentPids() ?? new Set(),
+      // The only processes it may end: agents a dead host's manifest names
+      // (pid + start time, #62). Anything else is take-over, confirmed.
+      lostAgents: (id) => hostSupervisor?.lostAgents(id) ?? [],
       isAlive: isPidAlive,
       startTimeOf,
       parentOf: parentPidOf,
@@ -1308,7 +1312,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // Working in a folder is the strongest possible statement that it belongs
     // in the list, so it also undoes a removal — the same rule as browsing.
     if (remember) projects.add(cwd);
-    const runner = await sessions.launch(launchDefaults.request('claude', cwd, { policy: { claude: { conversationInstructions: CONVERSATION_DELEGATION_INSTRUCTIONS } } }));
+    const runner = await sessions.launch(launchDefaults.request('claude', cwd, { sessionId: randomUUID(), policy: { claude: { conversationInstructions: CONVERSATION_DELEGATION_INSTRUCTIONS } } }));
     surface?.showSession(runner);
     return runner;
   };
@@ -1379,6 +1383,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
    */
   const taskPanes = tasks
     ? {
+        conversationDelegation: {
+          context: (session: AgentSession) => {
+            if (!session.cwd || session.sessionId === 'pending' || isOrchestrationOrigin(sessionRegistry.get(session.sessionId)?.origin)) return undefined;
+            const loaded = orchestration.repoPolicies?.forFolder(session.cwd);
+            return loaded ? { repoRoot: loaded.repo.primaryRoot, policyVersion: loaded.version,
+              verificationCommands: Object.keys(loaded.policy.verification.commands).sort() } : undefined;
+          },
+          delegate: (request: ProposeTaskRequest) => delegate(request, false),
+          record: (record: DelegationSuggestionRecord) => { appendTelemetry(record); },
+        },
         badges: () => taskBadges(tasks.list()),
         viewFor: (sessionKey: string): TaskView | undefined => {
           const badge = taskBadges(tasks.list()).get(sessionKey);
@@ -2014,7 +2028,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * time for the decision so the agent can say what it was; after that the
    * card says it.
    */
-  async function delegate(req: ProposeTaskRequest): Promise<DelegateResult> {
+  async function delegate(req: ProposeTaskRequest, waitForPlan = true): Promise<DelegateResult> {
     if (!tasks) throw new TaskError('Delegating is off. Turn on orchestration ("orchestration.enabled": true in settings.json) first.');
     const runner = tasks;
     const harness = req.harness === 'codex' ? 'codex' : req.harness === 'claude' ? 'claude-code' : undefined;
@@ -2028,7 +2042,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const from = mission.origin ? store.get(originKey(mission.origin)) : undefined;
     dialogs.flash(`Delegated: ${mission.title} (${from ? 'its card is in the conversation' : 'see Tasks and Missions'})`, 6000);
     log(`mission ${mission.id}: delegated through aw`);
-    const outcome = await new Promise<DelegationOutcome>((resolve) => {
+    const outcome = waitForPlan ? await new Promise<DelegationOutcome>((resolve) => {
       const current = () => delegationOutcome(runner.get(mission.id) ?? mission);
       const first = current();
       if (first.decision !== 'planning') return resolve(first);
@@ -2042,7 +2056,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         const o = current();
         if (o.decision !== 'planning') done(o);
       });
-    });
+    }) : delegationOutcome(runner.get(mission.id) ?? mission);
     const now = runner.get(mission.id) ?? mission;
     const { decision, ...rest } = outcome;
     return { task: taskSummary(now), decision, ...rest };

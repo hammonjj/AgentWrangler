@@ -396,7 +396,19 @@ export interface PlanReviewRecord extends RecordBase {
   reviewMs: number;
 }
 
+/** Local calibration of the conversation offer. Never contains request content. */
+export interface DelegationSuggestionRecord extends RecordBase {
+  type: 'delegation-suggestion';
+  provider: 'claude' | 'codex';
+  outcome: 'accepted' | 'declined' | 'ignored';
+  reason: 'bounded-work';
+  assessorVersion: number;
+  repoPolicyVersion: string;
+  durationMs: number;
+}
+
 export type TelemetryRecord =
+  | DelegationSuggestionRecord
   | TurnRecord
   | AttemptRecord
   | RoutingRecord

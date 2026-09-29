@@ -204,6 +204,7 @@ function saneModels(raw: unknown): ModelChoice[] {
       resolved: typeof m.resolved === 'string' ? m.resolved : undefined,
       effortLevels: strings(m.effortLevels),
     };
+    if (typeof m.autoMode === 'boolean') out.autoMode = m.autoMode;
     if (typeof m.description === 'string' && m.description !== '') out.description = m.description;
     const modalities = strings(m.inputModalities);
     if (modalities) out.inputModalities = modalities;

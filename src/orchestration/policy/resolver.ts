@@ -19,6 +19,7 @@
  *   may use never quietly changes capability (§9.4 step 5).
  */
 import {
+  autoModeUnavailable,
   isKnown,
   nativeEffortFor,
   tierRank,
@@ -225,13 +226,17 @@ function hardFilter(
   return { note };
 }
 
-/** Rank keys within one tier (§9.4 step 4): preferences, effort support, price, then catalog order. */
+/** Rank keys within one tier (§9.4 step 4): preferences, unattended fit, effort support, price, then catalog order. */
 function compare(a: Considered, b: Considered, req: RouteRequirement, policy: ResolverPolicy): number {
   const prefer = policy.preferences ?? req.prefer;
   const keys: ((c: Considered) => number)[] = [
     (c) => (prefer?.harness && c.target.harness === prefer.harness ? 0 : 1),
     (c) => (prefer?.source && c.entry.descriptor.source === prefer.source ? 0 : 1),
     (c) => (prefer?.preferLocal || prefer?.strategy === 'prefer-local' ? (c.entry.descriptor.location === 'local' ? 0 : 1) : 0),
+    // An attempt runs unattended. Through Claude Code, a model without `auto`
+    // (Haiku) asks the user about every edit, so a same-tier model that does
+    // not goes first.
+    (c) => (c.target.harness === 'claude-code' && autoModeUnavailable(c.entry) ? 1 : 0),
     (c) => (c.entry.descriptor.location === 'local' ? 0 : 1),
     // A soft preference only (§6.4): a model that can be asked to think harder, when harder is wanted.
     (c) => (req.effort === 'high' || req.effort === 'max' ? (c.entry.effortMap ? 0 : 1) : 0),

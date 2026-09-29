@@ -3573,16 +3573,32 @@ proposal card), #43 and #44.
   task, no planner, hand-planned missions and `aw task` untouched), the edge guard in
   `lifecycles.test.ts`, the planner's input, the socket method and the CLI.
 
-**As built (#84): conversation consent and route neutrality.** Ordinary Agent Wrangler
-conversation launches for Claude Code and Codex carry the same public-safe instruction. It
-suggests Delegate only for substantial separable work, asks for a clear yes before running
-`aw delegate --folder` with optional `--criteria`, and leaves the harness to routing unless
-the user requests one. The instruction is in Claude's system prompt append or Codex's developer
-instructions, persisted in the launch policy for resume and migration. Attempt, planner,
-reviewer and qualification launches do not carry it. The CLI sends no harness from its shell
-environment; `--claude` and `--codex` still set explicit preferences. A plain delegation's
-policy has no harness preference. A single-task delegation uses the resolver's route, and the
-proposal or plan still waits for approval before work starts.
+**As built (#84): deterministic conversation consent.** The earlier shared-instruction-only
+attempt is retained as provider guidance for explicit shortcuts, with assessment now owned by
+the app. `shared/delegationIntent.ts` is a pure, versioned continue/offer rule set, identical for
+Claude and Codex. It requires an action, repository scope, independent verification (in the
+request or repository policy), and background value; discussion, review, quick edits and
+context-dependent/ambiguous objectives stay here. Non-git and orchestration sessions and image
+requests bypass it. Conservative false negatives use the existing explicit shortcuts.
+
+`ConversationHost` holds the send before calling either provider. `DelegationSuggestion` shows
+an explainable card with the original objective, criteria, and primary repository. Only the
+**Delegate** click calls the same application `delegate` function as the control protocol,
+returning once the handoff exists while the existing card follows planning. Origin is preserved;
+no harness/model/effort comes from the conversation. **Keep working here** declines and sends
+the original message; dismissing ignores and sends it. Cancelling, switching or closing ignores
+without sending. Stale or duplicate decisions cannot hand off twice. Handoff failure returns
+the normal send error and preserves the draft. Nothing starts before #82's proposal/plan gate.
+
+The shared provider instruction now avoids duplicate offers and honors explicit “delegate this”
+and CLI shortcuts; old instruction text is replaced on resume. Explicit `--claude` and `--codex`
+remain preferences. `delegation-suggestion` telemetry uses the existing local log and opt-out:
+random id, provider, accepted/declined/ignored, fixed reason code, rule/policy version and wait
+duration only. No prompt, criteria, repository path or conversation title is recorded.
+
+Tests: intent corpus (including repository policy and non-git cases), renderer actions and
+wording, both-provider host sends and cancellation, telemetry payloads, and real planner/runner
+integration proving accepted handoffs preserve origin, omit harness pins and wait for approval.
 
 ### P9: Scheduling, integration and contention
 
