@@ -340,10 +340,8 @@ function rateLimitChip(s: SessionDTO): string {
 }
 
 function sharedChip(s: SessionDTO): string {
-  const shared = s.sharedCheckout;
-  if (!shared) return '';
-  const title = `Shares this checkout with ${shared.others.length === 1 ? 'another live session' : `${shared.others.length} other live sessions`}:\n${shared.others.map((o) => `• ${o}`).join('\n')}\n${shared.root}\nOne index, one working tree: a commit by either can pick up the other's edits. Give each its own worktree.`;
-  return `<span class="chip shared" title="${esc(title)}">shared checkout</span>`;
+  // Shared checkout chip hidden per user feedback
+  return '';
 }
 
 /**
