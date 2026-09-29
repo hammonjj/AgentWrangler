@@ -70,6 +70,7 @@ import { ClaudeCodeHarness } from '../orchestration/harness/claudeCodeHarness';
 import { CONVERSATION_DELEGATION_INSTRUCTIONS, withConversationDelegation } from '../shared/conversationDelegation';
 import { LocalMetricsIndex } from '../core/telemetry/localMetricsIndex';
 import { RoutingEvidenceIndex } from '../core/telemetry/routingEvidenceIndex';
+import { AnalyticsIndex } from '../core/telemetry/telemetryIndex';
 import { comparisonReport, effectiveMode, evaluateGate, type ComparisonReport, type GateResult } from '../shared/orchestration/autoRouting';
 import { CORPUS_STATUS } from '../orchestration/policy/corpusStatus';
 import { ROUTER_VERSION } from '../orchestration/policy/router';
@@ -620,6 +621,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const routingEvidence = new RoutingEvidenceIndex();
   host.subscribe(routingEvidence);
   void routingEvidence.load(telemetryDir).catch((err) => log(`telemetry: could not read routing evidence: ${String(err)}`));
+  // Routing analytics (§17, #49): every record the analytics view reads, read-only.
+  const analyticsIndex = new AnalyticsIndex();
+  host.subscribe(analyticsIndex);
+  void analyticsIndex.load(telemetryDir).catch((err) => log(`telemetry: could not read analytics records: ${String(err)}`));
   const autoRouting = (): { gate: GateResult; report: ComparisonReport } => {
     const input = { records: routingEvidence.records(), tiers: models.catalog.tiers.map((t) => t.name) };
     return {
@@ -633,6 +638,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     if (written) {
       localMetrics.add(record);
       routingEvidence.add(record);
+      analyticsIndex.add(record);
     }
     return written;
   };

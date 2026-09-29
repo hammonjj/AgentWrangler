@@ -15,8 +15,9 @@
  *
  * In `src/shared` because Preferences renders what these return.
  */
+import { compareDecisions, ownDecisions, underRoutedKinds, type DecisionOutcome, type RouteDirection } from './analytics';
 import type { AttemptRecord, RoutingRecord, TelemetryRecord } from './telemetry';
-import { EFFORT_LEVELS, type EffortLevel, type OutcomeCategory, type RouteDimension, type RoutingMode, type TierName } from './types';
+import type { EffortLevel, RouteDimension, RoutingMode, TierName } from './types';
 
 /** What the corpus run said about this build's router (`CORPUS_STATUS`, checked by `npm test`). */
 export interface CorpusStatus {
@@ -92,16 +93,11 @@ export interface GateInput extends EvidenceInput {
 // The comparison report
 // ---------------------------------------------------------------------------
 
-/**
- * How the route that ran compares with the router's, in cost:
- * `router-cheaper` — the router wanted a lower tier (or the same tier with
- * less effort) than ran; `router-dearer` the reverse; `sideways` — same tier
- * and effort, another model or harness; `agreed` — the same route.
- */
-export type RouteDirection = 'agreed' | 'router-cheaper' | 'router-dearer' | 'sideways' | 'unknown';
+/** Defined once, in the analytics layer (#49), which the calibration report reads too. */
+export type { RouteDirection };
 
 /** How the task went from that decision. */
-export type ComparisonOutcome = 'passed-first' | 'needed-escalation' | 'failed-other' | 'cancelled' | 'interrupted' | 'running';
+export type ComparisonOutcome = DecisionOutcome;
 
 export interface ComparisonRow {
   missionId: string;
@@ -151,66 +147,9 @@ export interface ComparisonReport {
   byDimension: { dimension: RouteDimension; count: number; passedFirst: number; neededEscalation: number }[];
 }
 
-/**
- * A failure that says the route was too weak for the work: the result was
- * wrong, empty, went round in circles, or did not fit the context window.
- * Infrastructure, capacity, budget and policy stops say nothing about the
- * route; ambiguity is the task's, not the model's.
- */
-const ROUTE_FAILURES: readonly OutcomeCategory[] = ['quality-new', 'quality-repeat', 'empty', 'stuck', 'context'];
-
-/**
- * Each task's own decision: the routing record of the first attempt it was
- * started on, with that attempt's record once it has ended. One per task, so
- * a resume, a retry or an escalation step does not count the same judgement
- * twice; a record from an escalation step is never a task's first.
- */
-function ownDecisions(input: EvidenceInput): { routing: RoutingRecord; attempt?: AttemptRecord }[] {
-  const attempts = new Map<string, AttemptRecord>();
-  const first = new Map<string, RoutingRecord>();
-  for (const r of input.records) {
-    if (r.type === 'attempt') attempts.set(`${r.missionId}|${r.taskId}|${r.n}`, r);
-  }
-  for (const r of input.records) {
-    if (r.type !== 'routing' || r.escalationStep !== undefined) continue;
-    if (attempts.get(`${r.missionId}|${r.taskId}|${r.attemptN}`)?.escalationStep !== undefined) continue;
-    const key = `${r.missionId}|${r.taskId}`;
-    const had = first.get(key);
-    if (!had || r.attemptN < had.attemptN) first.set(key, r);
-  }
-  return [...first.values()]
-    .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
-    .map((routing) => ({ routing, attempt: attempts.get(`${routing.missionId}|${routing.taskId}|${routing.attemptN}`) }));
-}
-
-function rank(list: readonly string[], v: string | undefined): number {
-  return v === undefined ? -1 : list.indexOf(v);
-}
-
-function directionOf(
-  tiers: readonly TierName[],
-  predicted: { tier: TierName; effort: EffortLevel },
-  ran: { tier: TierName; effort?: EffortLevel },
-  changed: readonly RouteDimension[],
-): RouteDirection {
-  const pt = rank(tiers, predicted.tier);
-  const rt = rank(tiers, ran.tier);
-  if (pt < 0 || rt < 0) return predicted.tier === ran.tier ? (changed.length > 0 ? 'sideways' : 'agreed') : 'unknown';
-  if (pt < rt) return 'router-cheaper';
-  if (pt > rt) return 'router-dearer';
-  const pe = rank(EFFORT_LEVELS, predicted.effort);
-  const re = rank(EFFORT_LEVELS, ran.effort);
-  if (pe >= 0 && re >= 0 && pe !== re) return pe < re ? 'router-cheaper' : 'router-dearer';
-  return changed.length > 0 ? 'sideways' : 'agreed';
-}
-
-function outcomeOf(a: AttemptRecord | undefined): ComparisonOutcome {
-  if (!a) return 'running';
-  if (a.outcome === 'succeeded') return 'passed-first';
-  if (a.outcome === 'cancelled') return 'cancelled';
-  if (a.outcome === 'interrupted') return 'interrupted';
-  return a.category && ROUTE_FAILURES.includes(a.category) ? 'needed-escalation' : 'failed-other';
-}
+// Each task's own decision, the route direction and the outcome are the
+// analytics layer's (`ownDecisions`, `compareDecisions`, #49): one definition,
+// read by this report, the gate and the calibration report alike.
 
 function tally(): ComparisonTally {
   return { decisions: 0, disagreements: 0, routerCheaper: 0, routerDearer: 0, sideways: 0, passedFirst: 0, neededEscalation: 0 };
@@ -234,27 +173,18 @@ function add(t: ComparisonTally, row: ComparisonRow): void {
  * (`needs-human`, `blocked`) has nothing to compare and is left out.
  */
 export function comparisonReport(input: EvidenceInput): ComparisonReport {
-  const rows: ComparisonRow[] = [];
-  for (const { routing: r, attempt: a } of ownDecisions(input)) {
-    if (r.verdict !== 'route' || r.agreement === 'no-recommendation') continue;
-    const predicted = { tier: r.requirement.minTier, effort: r.requirement.effort, ...(r.recommended ? { model: r.recommended.model } : {}) };
-    const ranEffort = a?.target.effortRequested ?? r.ranEffort;
-    const ran = { tier: r.ran.tier, ...(ranEffort ? { effort: ranEffort } : {}), model: r.ran.model };
-    // The requirement's tier is the floor the router asked for; the tier it resolved to is what it picked.
-    const picked = { tier: r.recommended?.tier ?? predicted.tier, effort: predicted.effort };
-    rows.push({
-      missionId: r.missionId,
-      taskId: r.taskId,
-      attemptN: r.attemptN,
-      mode: r.mode,
-      ...(a?.assessment?.dimensions.kind ? { kind: a.assessment.dimensions.kind.value } : {}),
-      predicted: { ...predicted, tier: picked.tier },
-      ran,
-      direction: directionOf(input.tiers, picked, ran, r.changed),
-      changed: [...r.changed],
-      outcome: outcomeOf(a),
-    });
-  }
+  const rows: ComparisonRow[] = compareDecisions(input.records, input.tiers).map((c) => ({
+    missionId: c.routing.missionId,
+    taskId: c.routing.taskId,
+    attemptN: c.routing.attemptN,
+    mode: c.routing.mode,
+    ...(c.kind !== undefined ? { kind: c.kind } : {}),
+    predicted: c.predicted,
+    ran: c.ran,
+    direction: c.direction,
+    changed: [...c.routing.changed],
+    outcome: c.outcome,
+  }));
 
   const total = tally();
   const kinds = new Map<string, ComparisonTally>();
@@ -336,13 +266,11 @@ function pct(n: number): string {
  */
 export function evaluateGate(input: GateInput): GateResult {
   const c = { ...DEFAULT_GATE_CRITERIA, ...input.criteria };
-  const decisions = ownDecisions(input).filter((d) => d.routing.mode !== 'auto' && d.routing.verdict === 'route' && d.routing.agreement !== 'no-recommendation');
+  const decisions = ownDecisions(input.records).filter((d) => d.routing.mode !== 'auto' && d.routing.verdict === 'route' && d.routing.agreement !== 'no-recommendation');
   const assisted = decisions.filter((d) => d.routing.mode === 'assisted');
   const keptTier = assisted.filter((d) => d.routing.agreement !== 'changed-tier').length;
   const report = comparisonReport(input);
-  const underRouted = [
-    ...new Set(report.rows.filter((r) => r.direction === 'router-cheaper' && r.outcome === 'needed-escalation').map((r) => r.kind ?? 'not yet assessed')),
-  ].sort();
+  const underRouted = underRoutedKinds(report.rows);
 
   const checks: GateCheck[] = [];
   const corpus = input.corpus;
