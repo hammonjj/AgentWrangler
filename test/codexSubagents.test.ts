@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { summarizeRolloutLines, type CodexRolloutSummary } from '../src/codex/rollout';
-import { summarizeSubagents, visibleCodexSummaries } from '../src/codex/subagents';
-import { subagentText } from '../src/shared/subagents';
+import { subagentListByParent, summarizeSubagents, visibleCodexSummaries } from '../src/codex/subagents';
+import { sortSubagents, subagentText, summaryFromList } from '../src/shared/subagents';
 import { SessionStore } from '../src/core/sessionStore';
-import type { AgentSession } from '../src/shared/model';
+import type { AgentSession, SubagentInfo } from '../src/shared/model';
 
 const line = (type: string, payload: unknown) => JSON.stringify({ type, payload });
 const summary = (id: string, extra: Partial<CodexRolloutSummary> = {}): CodexRolloutSummary => ({
@@ -100,5 +100,49 @@ describe('Codex subagent discovery', () => {
     expect(store.get('codex:root')).toMatchObject({ status: 'done', lastActivityAt: 200 });
     expect(updates.at(-1)?.becameWaiting).toMatchObject([{ status: 'done' }]);
     store.dispose();
+  });
+
+  it('builds a per-subagent list grouped by parent', () => {
+    const root = summary('root');
+    const rows = [root, child('a', 'ROOT', { turnComplete: false }), child('b', 'a'),
+      child('c', 'root', { failed: true }), child('d', 'root', { turnComplete: false, lastActivityAt: 0 }),
+      child('guardian', 'root', { isGuardian: true }), child('internal', 'guardian')];
+    const lists = subagentListByParent(rows, 110, 50);
+    expect([...lists.entries()].map(([k, v]) => [k, v.length])).toEqual([['root', 4]]);
+    const rootList = lists.get('root')!;
+    expect(rootList.map((s) => s.id)).toEqual(['a', 'b', 'c', 'd']);
+    expect(rootList[0]).toMatchObject({ id: 'a', status: 'working', agentType: undefined });
+    expect(rootList[1]).toMatchObject({ id: 'b', status: 'done' });
+    expect(rootList[2]).toMatchObject({ id: 'c', status: 'attention' });
+  });
+
+  it('builds summary from a subagent list', () => {
+    const list: SubagentInfo[] = [
+      { id: 'a', label: 'test-a', status: 'working' },
+      { id: 'b', label: 'test-b', status: 'working' },
+      { id: 'c', label: 'test-c', status: 'attention' },
+      { id: 'd', label: 'test-d', status: 'done' },
+    ];
+    const summary = summaryFromList(list);
+    expect(summary).toEqual({ working: 2, attention: 1, done: 1 });
+  });
+
+  it('returns undefined for empty subagent list', () => {
+    expect(summaryFromList(undefined)).toBeUndefined();
+    expect(summaryFromList([])).toBeUndefined();
+  });
+
+  it('sorts subagents by status priority then activity', () => {
+    const list: SubagentInfo[] = [
+      { id: 'a', label: 'test-a', status: 'done', lastActivityAt: 100 },
+      { id: 'b', label: 'test-b', status: 'attention', lastActivityAt: 50 },
+      { id: 'c', label: 'test-c', status: 'working', lastActivityAt: 200 },
+      { id: 'd', label: 'test-d', status: 'working', lastActivityAt: 150 },
+      { id: 'e', label: 'test-e', status: 'attention', lastActivityAt: 120 },
+    ];
+    const sorted = sortSubagents(list);
+    // attention first (by priority), then working, then done
+    // Within same status, sort by activity (newest first)
+    expect(sorted.map((s) => s.id)).toEqual(['e', 'b', 'c', 'd', 'a']);
   });
 });
