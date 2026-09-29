@@ -22,6 +22,8 @@ import { sortSubagents, subagentText } from '../../shared/subagents';
 import { taskChips } from '../../shared/orchestration/taskView';
 import type { MissionsSnapshot } from '../../shared/orchestration/missionView';
 import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, type MissionIntent } from './missions';
+import { analyticsClickRef, analyticsFilterChange, analyticsHtml } from './analytics';
+import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestration/analyticsView';
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
 import { canPauseSession, clampMenuPosition, dismissAction, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
@@ -57,13 +59,15 @@ import {
   type UsageWindow,
 } from '../../shared/usage';
 
-/** The table pane's three views: status sections, project sections, and missions (#43). */
-type TableView = 'status' | 'project' | 'missions';
+/** The table pane's views: status sections, project sections, missions (#43) and analytics (#49). */
+type TableView = 'status' | 'project' | 'missions' | 'analytics';
 
 interface WebviewState {
   collapsed?: string[];
   expandedSubagents?: string[];
   tableView?: TableView;
+  /** The Analytics view's filters (#49). */
+  analytics?: AnalyticsSelection;
   /** Hook-health kind whose banner the user hid. A different kind brings the banner back. */
   bannerDismissed?: string;
   /**
@@ -144,6 +148,15 @@ let missionsSnap: MissionsSnapshot | undefined;
 const missionsUi = newMissionsUiState();
 /** A snapshot arrived while a plan-editor text field had focus; draw once it lets go. */
 let missionRenderDeferred = false;
+/** The Analytics view's filters, and the view the host computed for them (#49). */
+let analyticsSel: AnalyticsSelection = saved?.analytics ?? {};
+let analyticsData: AnalyticsView | undefined;
+/** "More metrics" was opened; a repaint must not fold it shut again. */
+let analyticsMoreOpen = false;
+
+function queryAnalytics(): void {
+  post({ type: 'analyticsQuery', selection: analyticsSel });
+}
 
 /** The grouping the session table uses: the Missions view has none of its own. */
 function sessionView(): 'status' | 'project' {
@@ -151,7 +164,7 @@ function sessionView(): 'status' | 'project' {
 }
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], expandedSubagents: [...expandedSubagents], bannerDismissed, project, tableView });
+  vscodeApi.setState({ collapsed: [...collapsed], expandedSubagents: [...expandedSubagents], bannerDismissed, project, tableView, analytics: analyticsSel });
 }
 
 function esc(s: string): string {
@@ -1367,7 +1380,9 @@ function tabsHtml(): string {
   const missions = missionsSnap
     ? tab('missions', `Missions${waiting > 0 ? ` <span class="tabcount">${waiting}</span>` : ''}`, waiting > 0 ? ` title="${waiting} mission${waiting === 1 ? '' : 's'} waiting for you"` : '')
     : '';
-  return `<div class="tabletabs" role="tablist" aria-label="Table view">${tab('status', 'Status')}${tab('project', 'Project')}${missions}</div>`;
+  // Analytics sits beside Missions: both are orchestration's, and there only while it is on.
+  const analytics = missionsSnap ? tab('analytics', 'Analytics') : '';
+  return `<div class="tabletabs" role="tablist" aria-label="Table view">${tab('status', 'Status')}${tab('project', 'Project')}${missions}${analytics}</div>`;
 }
 
 function render(): void {
@@ -1386,7 +1401,16 @@ function render(): void {
 
   renderUsage();
   // Orchestration was turned off (or never on): there is no Missions view to be on.
-  if (tableView === 'missions' && !missionsSnap) tableView = 'status';
+  if ((tableView === 'missions' || tableView === 'analytics') && !missionsSnap) tableView = 'status';
+  if (tableView === 'analytics') {
+    // A filter's dropdown is open: repainting would close it under the pointer.
+    if (document.activeElement instanceof HTMLSelectElement && document.activeElement.closest('.analytics')) return;
+    menuPosition = undefined;
+    rowMenu = undefined;
+    paint(`${bannerHtml()}${tabsHtml()}${analyticsHtml(analyticsData)}`);
+    if (analyticsMoreOpen) app.querySelector<HTMLDetailsElement>('.analytics .an-more')?.setAttribute('open', '');
+    return;
+  }
   if (tableView === 'missions' && missionsSnap) {
     // Typing in the plan editor: a snapshot must not replace the field under the caret.
     const active = document.activeElement;
@@ -1470,6 +1494,11 @@ vscodeApi.onMessage((body) => {
     }
     saveState();
     render();
+    return;
+  }
+  if (m.type === 'analytics') {
+    analyticsData = m.view;
+    if (tableView === 'analytics') render();
     return;
   }
   if (m.type === 'missionError') {
@@ -1712,7 +1741,19 @@ app.addEventListener('click', (e) => {
   if (viewTab) {
     tableView = viewTab.dataset.tableView as TableView;
     saveState();
+    if (tableView === 'analytics') queryAnalytics();
     render();
+    return;
+  }
+
+  if (tableView === 'analytics' && target.closest('.analytics')) {
+    const ref = analyticsClickRef(target);
+    if (ref) {
+      // The detail opens beside the table; mark which item it is about.
+      for (const el of Array.from(app.querySelectorAll('.analytics .an-selected'))) el.classList.remove('an-selected');
+      target.closest('[data-aref]')?.classList.add('an-selected');
+      post({ type: 'analyticsDetail', selection: analyticsSel, ref });
+    }
     return;
   }
 
@@ -1886,6 +1927,31 @@ setInterval(() => {
 }, 10_000);
 
 post({ type: 'ready' });
+// Reopened on the Analytics view: it has nothing to draw until the host answers.
+if (tableView === 'analytics') queryAnalytics();
+
+// ---- the Analytics view (#49) ----
+
+app.addEventListener('change', (event) => {
+  if (tableView !== 'analytics') return;
+  const next = analyticsFilterChange(event.target as HTMLElement, analyticsSel);
+  if (!next) return;
+  analyticsSel = next;
+  saveState();
+  queryAnalytics();
+  // Let go of the select so the answer can repaint the view.
+  (event.target as HTMLElement).blur();
+});
+
+// `toggle` does not bubble: listen in the capture phase for "More metrics".
+app.addEventListener(
+  'toggle',
+  (event) => {
+    const d = event.target as HTMLElement;
+    if (d instanceof HTMLDetailsElement && d.classList.contains('an-more')) analyticsMoreOpen = d.open;
+  },
+  true,
+);
 
 // ---- the Missions view (#43) ----
 

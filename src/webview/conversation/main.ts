@@ -41,6 +41,8 @@ import {
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { resetsInText } from '../../shared/usage';
 import { paneApi } from '../common/paneApi';
+import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
+import { renderAnalyticsDetail } from './analyticsDetail';
 
 // See `common/paneApi.ts`: one acquire, one message envelope and one state slot
 // per pane, so the dashboard can share this webview.
@@ -78,6 +80,7 @@ const MODES: { value: PermissionModeName; label: string }[] = [
 
 const app = document.getElementById('convApp')!;
 app.innerHTML = `
+<div id="analyticsDetail" hidden></div>
 <div id="hdr">
   <span id="pill" class="pill"></span>
   <span id="ttl"></span>
@@ -2609,6 +2612,28 @@ blocksEl.addEventListener('click', (e) => {
   else if (href.startsWith('/')) post({ type: 'openFile', path: href });
 });
 
+// ---- the analytics detail (#49): the pane's one mode that is not a session ----
+
+const analyticsDetailEl = document.getElementById('analyticsDetail')!;
+
+function showAnalyticsDetail(detail: AnalyticsDetail): void {
+  // Back is offered only when there is a conversation under the detail to go back to.
+  renderAnalyticsDetail(analyticsDetailEl, detail, activeSession ? () => {
+    leaveAnalyticsDetail();
+    post({ type: 'closeDetail' });
+  } : undefined);
+  analyticsDetailEl.hidden = false;
+  app.classList.add('detail-mode');
+  analyticsDetailEl.scrollTop = 0;
+}
+
+function leaveAnalyticsDetail(): void {
+  if (!app.classList.contains('detail-mode')) return;
+  app.classList.remove('detail-mode');
+  analyticsDetailEl.hidden = true;
+  analyticsDetailEl.replaceChildren();
+}
+
 vscodeApi.onMessage((body) => {
   const m = body as HostToConversation;
   switch (m.type) {
@@ -2677,7 +2702,11 @@ vscodeApi.onMessage((body) => {
         }
       }
       break;
+    case 'analyticsDetail':
+      showAnalyticsDetail(m.detail);
+      break;
     case 'init':
+      leaveAnalyticsDetail();
       renderDelegationOffer(document.getElementById('convDelegationOffer')!, undefined, () => {});
       if (activeSession !== m.session.key) {
         if (activeSession) drafts.set(activeSession, { text: msgEl.value, images: [...attachments] });

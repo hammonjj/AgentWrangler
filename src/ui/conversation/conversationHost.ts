@@ -26,6 +26,7 @@ import { MAX_IMAGE_BYTES, rememberFullText } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import type { Disposable } from '../../core/events';
 import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../../shared/orchestration/taskView';
+import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
 import type { PaneChannel } from '../paneChannel';
@@ -118,6 +119,8 @@ export class ConversationHost {
   private capsSeq = 0;
   /** This pane started the recording the shared `DictationService` is making. */
   private ownsDictation = false;
+  /** Drawn in place of the conversation until the next session is shown (#49). */
+  private detail?: AnalyticsDetail;
 
   constructor(
     private webview: PaneChannel,
@@ -212,7 +215,11 @@ export class ConversationHost {
    * pane come back blank.
    */
   show(key: string): void {
-    if (this.binding?.kind === 'store' && this.binding.key === key) return;
+    if (this.binding?.kind === 'store' && this.binding.key === key) {
+      // Back from a detail to the conversation it replaced.
+      if (this.leaveDetail() && this.ready) void this.sendInit();
+      return;
+    }
     const session = this.store.get(key);
     if (!session) {
       this.pendingKey = key;
@@ -224,8 +231,29 @@ export class ConversationHost {
 
   /** Point the pane at a session we are running, possibly before it has an id or a store entry. */
   showSession(handle: SessionHandle): void {
-    if (this.binding?.kind === 'live' && this.binding.handle === handle) return;
+    if (this.binding?.kind === 'live' && this.binding.handle === handle) {
+      if (this.leaveDetail() && this.ready) void this.sendInit();
+      return;
+    }
     this.bind({ kind: 'live', handle }, liveSessionRow(handle, this.store));
+  }
+
+  /**
+   * Show something that is not a session: an analytics item's breakdown and
+   * evidence (#49). The binding is kept, so the conversation keeps streaming
+   * underneath and comes back on the next row click; the pane draws the detail
+   * over it until then.
+   */
+  showDetail(detail: AnalyticsDetail): void {
+    this.detail = detail;
+    if (this.ready) this.post({ type: 'analyticsDetail', detail });
+  }
+
+  /** Drop the detail, if one is showing. True when there was one. */
+  private leaveDetail(): boolean {
+    const had = this.detail !== undefined;
+    this.detail = undefined;
+    return had;
   }
 
   dispose(): void {
@@ -241,6 +269,7 @@ export class ConversationHost {
   // ---- internals ----
 
   private bind(binding: Binding, session: AgentSession): void {
+    this.detail = undefined;
     if (this.session?.sessionId !== session.sessionId || this.session?.provider !== session.provider) this.pendingSend?.abort();
     this.archiveText.clear();
     this.subagentFiles.clear();
@@ -419,6 +448,12 @@ export class ConversationHost {
         this.cancelDictation();
         this.ready = true;
         await this.sendInit();
+        // A reloaded pane that was showing a detail shows it again, over the conversation.
+        if (this.detail) this.post({ type: 'analyticsDetail', detail: this.detail });
+        return;
+      case 'closeDetail':
+        // The pane already went back on its own; a reload must not bring the detail back.
+        this.leaveDetail();
         return;
       case 'delegationOfferDecision':
         this.suggestion.decide(m.offerId, m.outcome);

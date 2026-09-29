@@ -26,6 +26,7 @@ import type { AgentWranglerApp } from '../app/createApp';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import { ConversationHost, type ConversationHostUi } from '../ui/conversation/conversationHost';
 import { DashboardHost } from '../ui/dashboardHost';
+import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 import { paneChannel, type EnvelopeTransport } from '../ui/paneChannel';
 import { documentUrl } from './bundleProtocol';
 import { STATE_GET, STATE_SET, TO_HOST, TO_WEBVIEW } from './channels';
@@ -125,6 +126,12 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
   showSession(handle: SessionHandle, options?: { preserveFocus?: boolean }): void {
     this.open({ preserveFocus: options?.preserveFocus ?? false });
     this.conversation?.showSession(handle);
+  }
+
+  showDetail(detail: AnalyticsDetail): void {
+    // A click in the table fills the pane beside it, as a row click does.
+    this.open({ preserveFocus: true });
+    this.conversation?.showDetail(detail);
   }
 
   openInTab(key: string): void {
@@ -251,6 +258,7 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       app.models,
       app.taskPanes,
       app.missions,
+      app.analytics,
     );
     this.conversation = new ConversationHost(
       paneChannel(transport, 'conversation'),
