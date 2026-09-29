@@ -465,8 +465,8 @@ new worktree and branch of the chosen folder's repository:
   branch. **Replan…** on a started mission asks the planner for the rest: done tasks stay
   exactly as they are, unfinished work is set aside on a branch of its own, and the new plan
   goes through review again.
-- **Parallel missions (#46), off by default.** With `"orchestration.parallelTasks": true` in
-  `settings.json`, a plan approved from then on runs its independent tasks **at the same time**,
+- **Parallel missions (#46), off by default.** With *Run a mission's independent tasks at the same
+  time* on in Preferences (`"orchestration.parallelTasks": true` in `settings.json`), a plan approved from then on runs its independent tasks **at the same time**,
   within the scheduler's limits (two per repository by default), each in a worktree of its own
   (`<repo>.aw/<mission>/t1`, `…/t2`) cut from the mission branch's head, so a task that depends
   on another starts with that work already in its tree. A mission approved without the setting

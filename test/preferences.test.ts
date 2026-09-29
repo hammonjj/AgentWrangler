@@ -134,6 +134,7 @@ describe('dependentParentKeys', () => {
   it('lists each switch once, in the order it is first depended on', () => {
     expect(dependentParentKeys(SETTINGS)).toEqual([
       'experimental.sessionHosts',
+      'orchestration.enabled',
       'autoPause.enabled',
       'remote.enabled',
     ]);
