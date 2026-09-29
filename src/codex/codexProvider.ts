@@ -6,7 +6,7 @@ import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import { worktreeFor } from '../core/worktree';
 import { projectNameFor } from '../core/checkout';
 import type { AgentSession } from '../shared/model';
-import { summarizeSubagents, visibleCodexSummaries } from './subagents';
+import { subagentListByParent, summarizeSubagents, visibleCodexSummaries } from './subagents';
 import { codexSessionIndex, codexSessionsDir } from './paths';
 import { findRollouts, readRolloutSummary, rolloutStatus, type CodexRolloutSummary } from './rollout';
 
@@ -75,6 +75,7 @@ export class CodexProvider implements AgentProvider {
     const now = Date.now();
     const summaries = [...this.summaries.values()];
     const subagents = summarizeSubagents(summaries, now, cfg.stuckThresholdSeconds * 1000);
+    const subagentLists = subagentListByParent(summaries, now, cfg.stuckThresholdSeconds * 1000);
     // Subagents are never rows of their own; their counts ride on the parent (`subagents`).
     return visibleCodexSummaries(summaries, false)
       .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
@@ -82,12 +83,14 @@ export class CodexProvider implements AgentProvider {
       .map((summary) => {
         const cwd = summary.cwd;
         const worktree = worktreeFor(cwd);
+        const sessionKey = summary.sessionId.toLowerCase();
         return {
           provider: this.id,
-          subagents: subagents.get(summary.sessionId.toLowerCase()),
+          subagents: subagents.get(sessionKey),
+          subagentList: subagentLists.get(sessionKey),
           sessionId: summary.sessionId,
-          key: `${this.id}:${summary.sessionId.toLowerCase()}`,
-          title: this.threadNames.get(summary.sessionId.toLowerCase()) ?? summary.title ?? summary.subtitle ?? summary.sessionId.slice(0, 8),
+          key: `${this.id}:${sessionKey}`,
+          title: this.threadNames.get(sessionKey) ?? summary.title ?? summary.subtitle ?? summary.sessionId.slice(0, 8),
           subtitle: summary.subtitle,
           cwd,
           projectName: projectNameFor(cwd),

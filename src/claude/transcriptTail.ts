@@ -78,6 +78,12 @@ export interface TranscriptSummary {
    * first tail read is not known, which errs towards today's Done.
    */
   backgroundTasks?: BackgroundTaskRef[];
+  /**
+   * Subagents this session has launched, with id, label, status, and type.
+   * Only what the tail reads covers: older launches may not be known.
+   * Capped at a reasonable size to prevent unbounded growth.
+   */
+  subagentList?: import('../shared/model').SubagentInfo[];
   /** Head-read fallback title, fetched at most once per file. */
   firstUserText?: string;
   headReadDone: boolean;
@@ -145,6 +151,10 @@ export type SummaryPartial = Pick<
   tasksOpened?: BackgroundTaskRef[];
   /** Ids of background tasks this chunk saw end. */
   tasksClosed?: string[];
+  /** Subagents launched in this chunk. */
+  subagentListOpened?: Array<{ id: string; label: string; agentType?: string }>;
+  /** Ids of subagents this chunk saw complete. */
+  subagentListClosed?: string[];
 };
 
 /** Cap on the reply text kept per transcript; `needsReply` only reads the tail anyway. */
@@ -192,6 +202,8 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
         // a local error); it names no model and must not overwrite the real one.
         const model = obj.message?.model;
         if (typeof model === 'string' && model.length > 0 && !model.startsWith('<')) out.model = model;
+        // Extract Agent/Task tool_use calls
+        extractSubagentLaunches(obj.message?.content, out);
         break;
       }
       case 'user': {
@@ -208,6 +220,8 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
         const stopped = stoppedTaskOf(obj.toolUseResult);
         if (stopped) (out.tasksClosed ??= []).push(stopped);
         if (typeof content === 'string') closeTasks(out, content);
+        // Extract tool results and task-notifications to mark subagents done
+        extractSubagentCompletions(content, out);
         break;
       }
       case 'queue-operation':
@@ -218,6 +232,11 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
         // The enqueue is written the moment a task ends, even while the agent
         // is idle; the user line it becomes may come much later.
         if (obj.operation === 'enqueue' && typeof obj.content === 'string') closeTasks(out, obj.content);
+        break;
+      case 'task-notification':
+        if (typeof obj.task_id === 'string') {
+          (out.subagentListClosed ??= []).push(obj.task_id);
+        }
         break;
       case 'ai-title':
         if (typeof obj.aiTitle === 'string' && obj.aiTitle.trim()) out.aiTitle = obj.aiTitle.trim();
@@ -247,9 +266,85 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
   return out;
 }
 
+/** Extract Agent/Task tool_use launches from assistant content. */
+function extractSubagentLaunches(content: unknown, out: SummaryPartial): void {
+  if (!Array.isArray(content)) return;
+  for (const block of content) {
+    if (block?.type === 'tool_use') {
+      const toolName = block.name;
+      if (toolName === 'Agent' || toolName === 'Task') {
+        const input = block.input;
+        if (input && typeof input === 'object') {
+          const id = input.subagent_id ?? input.task_id;
+          if (typeof id === 'string' && id) {
+            const label = input.description ?? id.slice(0, 8);
+            const agentType = input.subagent_type;
+            (out.subagentListOpened ??= []).push({ id, label, agentType });
+          }
+        }
+      }
+    }
+  }
+}
+
+/** Extract tool results and task-notifications to mark subagents complete. */
+function extractSubagentCompletions(content: unknown, out: SummaryPartial): void {
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block?.type === 'tool_result') {
+        const toolUseId = block.tool_use_id;
+        if (typeof toolUseId === 'string') {
+          (out.subagentListClosed ??= []).push(toolUseId);
+        }
+      }
+    }
+  }
+}
+
 function closeTasks(out: SummaryPartial, text: string): void {
   const ids = finishedTaskIdsIn(text);
   if (ids.length > 0) (out.tasksClosed ??= []).push(...ids);
+}
+
+/**
+ * Incrementally update subagent list: add opened subagents as 'working',
+ * mark closed ones as 'done', cap the size, and return the updated list.
+ */
+function applySubagentChanges(
+  prev: import('../shared/model').SubagentInfo[] | undefined,
+  opened: Array<{ id: string; label: string; agentType?: string }>,
+  closed: string[],
+): import('../shared/model').SubagentInfo[] | undefined {
+  const map = new Map((prev ?? []).map((s) => [s.id, s]));
+  const now = Date.now();
+
+  for (const item of opened) {
+    map.set(item.id, {
+      id: item.id,
+      label: item.label,
+      agentType: item.agentType,
+      status: 'working' as const,
+      lastActivityAt: now,
+    });
+  }
+
+  for (const id of closed) {
+    const existing = map.get(id);
+    if (existing && existing.status === 'working') {
+      map.set(id, { ...existing, status: 'done' as const, lastActivityAt: now });
+    }
+  }
+
+  const result = Array.from(map.values());
+  if (result.length === 0) return undefined;
+
+  // Cap the list size to prevent unbounded growth
+  if (result.length > 100) {
+    result.sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0));
+    result.length = 100;
+  }
+
+  return result;
 }
 
 function timestampMs(ts: unknown): number | undefined {
@@ -322,6 +417,8 @@ export function mergeSummaries(
   // The reply text is cleared by a new prompt, so "unset in this chunk" only
   // means "keep the old one" when the chunk saw no prompt or reply at all.
   const sawTurnBoundary = next.lastMeaningful !== undefined;
+  // Apply subagent list updates
+  const subagentList = applySubagentChanges(prev?.subagentList, next.subagentListOpened ?? [], next.subagentListClosed ?? []);
   return {
     lastMeaningful: next.lastMeaningful ?? prev?.lastMeaningful,
     lastAssistantText: sawTurnBoundary ? next.lastAssistantText : prev?.lastAssistantText,
@@ -334,6 +431,7 @@ export function mergeSummaries(
     prLink: next.prLink ?? prev?.prLink,
     lastResultError: next.lastResultError ?? prev?.lastResultError,
     backgroundTasks: applyTaskChanges(prev?.backgroundTasks, next.tasksOpened ?? [], next.tasksClosed ?? []),
+    subagentList,
     firstUserText: prev?.firstUserText,
     headReadDone: stat.headReadDone ?? prev?.headReadDone ?? false,
     byteOffset: stat.byteOffset,

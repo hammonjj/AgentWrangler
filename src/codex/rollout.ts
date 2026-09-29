@@ -24,6 +24,10 @@ export interface CodexRolloutSummary {
   turnComplete: boolean;
   lastAssistantText?: string;
   failed: boolean;
+  /** Label for the subagent: nickname, title, or short id. */
+  subagentLabel?: string;
+  /** Agent type from session_meta subagent metadata. */
+  subagentType?: string;
 }
 
 function textContent(content: unknown): string | undefined {
@@ -78,6 +82,8 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
   let turnComplete = true;
   let lastAssistantText: string | undefined;
   let failed = false;
+  let subagentLabel: string | undefined;
+  let subagentType: string | undefined;
 
   for (const line of lines) {
     const obj = parseLine(line);
@@ -102,6 +108,8 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
       startedAtMs = Number.isFinite(ts) ? ts : startedAtMs;
       const branch = payload.git?.branch ?? payload.git_branch;
       gitBranch = typeof branch === 'string' ? branch : gitBranch;
+      // Extract subagent label (nickname or title) and type
+      subagentType = typeof agent?.subagent_type === 'string' ? agent.subagent_type : undefined;
       continue;
     }
     if (obj.type === 'turn_context' && payload) {
@@ -148,6 +156,14 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
     sessionId = match?.[1];
   }
   if (!sessionId) return undefined;
+  // For subagents, compute label from title, falling back to short id
+  if (isSubagent && !subagentLabel) {
+    if (title) {
+      subagentLabel = title;
+    } else if (sessionId) {
+      subagentLabel = sessionId.slice(0, 8);
+    }
+  }
   return {
     sessionId,
     path: filePath,
@@ -166,6 +182,8 @@ export function summarizeRolloutLines(lines: string[], filePath: string, mtimeMs
     turnComplete,
     lastAssistantText,
     failed,
+    subagentLabel,
+    subagentType,
   };
 }
 
