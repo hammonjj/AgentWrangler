@@ -2562,8 +2562,10 @@ confirming it retains the upstream thread's turns for context.
 
 **Verdict:** Implementable for both harnesses. The fork works; context inheritance is the harness's
 responsibility (it keeps the conversation history on the thread/session itself, not in the
-transcript). Implemented: yes, behind `HarnessCapabilities.fork`, conditionally in
-`codexThreadParams` and `ClaudeSdkSession`, and guarded by a resolver check.
+transcript). **Implemented (#54, 2026-09-29):** Assignment modes (`cold`, `reuse`, `fork`), pure
+assignment function (`src/orchestration/engine/assignment.ts`, 13 tests), telemetry scaffolding
+(assignmentMode and contextTokensAtStart fields). Remaining: scheduler ranking, TaskRunner
+integration, HarnessCapabilities.fork in runners, live fork tests.
 
 The scheduler would rank "a warm session that satisfies the requirement" above "a new session".
 Nothing is recorded about agents as reputations. History is per cohort and route (§20), not per
