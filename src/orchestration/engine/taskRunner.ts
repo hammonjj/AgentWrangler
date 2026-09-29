@@ -3359,6 +3359,13 @@ export class TaskRunner implements Disposable {
     const sid = from.assignment.sessionIds.at(-1);
     if (!sid) return 'the earlier session never had an id';
     if (from.assignment.harness !== route.harness) return `the earlier session runs on ${from.assignment.harness}; the route is ${route.harness}`;
+    // The route as it is now (a pin may have changed since the step): never another source, model or tier.
+    const ran = m.decisions.find((d) => d.id === from.routingDecisionId)?.resolution.target;
+    const want = this.targetFor(route);
+    if (!ran) return 'the earlier session’s route is not on record';
+    if (ran.source !== want.source || ran.model !== want.model || ran.tier !== want.tier) {
+      return `the earlier session ran ${ran.model || 'the default model'} (${ran.tier}); the route is now ${want.model || 'the default model'} (${want.tier})`;
+    }
     if (usedLater(m, from, sid)) return 'a later attempt has used it';
     const tree = m.integration !== 'none' ? m.integration.worktreeId : undefined;
     const sameTree = isPlanned(m) && tree !== undefined && tree === from.worktreeId;
