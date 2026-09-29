@@ -465,6 +465,37 @@ new worktree and branch of the chosen folder's repository:
   branch. **Replan…** on a started mission asks the planner for the rest: done tasks stay
   exactly as they are, unfinished work is set aside on a branch of its own, and the new plan
   goes through review again.
+- **Parallel missions (#46), off by default.** With `"orchestration.parallelTasks": true` in
+  `settings.json`, a plan approved from then on runs its independent tasks **at the same time**,
+  within the scheduler's limits (two per repository by default), each in a worktree of its own
+  (`<repo>.aw/<mission>/t1`, `…/t2`) cut from the mission branch's head, so a task that depends
+  on another starts with that work already in its tree. A mission approved without the setting
+  keeps running one task at a time in the one mission worktree. When a task's own checks pass,
+  Agent Wrangler merges its branch into the mission branch (`aw/<mission>/mission`) in the
+  mission's integration worktree, **one merge at a time** (`--no-ff`), and runs the mission
+  check there after every merge (the policy's `verification.missionDefault`, or every command it
+  names). This is what catches two changes that pass alone and break together:
+  - **A conflict** is aborted. By default (`"integration": { "onConflict": "resolve" }` in the
+    repository policy) the mission branch is merged into the task's branch in the task's own
+    worktree and a *conflict-resolution attempt* resolves it there, then is checked and merged
+    like any attempt; at most `conflictAttempts` (default 1) per task. `"needs-human"` hands the
+    task to you with the conflicting files instead: resolve it on the task's branch and
+    *Accept*, or *Retry*.
+  - **A failed mission check** reverts that merge with a revert commit (the mission branch's
+    history is never rewritten) and sends the task back with the failure as evidence, to the
+    usual escalation ladder. Its branch takes the mission branch and its own work back on top,
+    so the next attempt sees the combination that failed, and the next merge carries all of it.
+  - **A quit or crash mid-merge** is safe: the pre-merge head is saved in the mission before
+    `git merge` runs, and on relaunch the merge is aborted and made again (or, if it was
+    committed, verified).
+  - **Finishing.** *Merge locally* on a planned mission is **gated**: the merge into the base
+    is made first in the integration worktree, the policy's `finish.gate` (or the mission check)
+    runs on that merged result, and only if it passes is the base fast-forwarded to exactly that
+    commit in your checkout; a failure leaves the base where it was. Nothing is installed; the
+    note says a rebuild or reinstall is needed. *Open pull request* pushes the mission branch and
+    runs your `gh`; *Keep* and *Discard* leave the base and the remote alone. Nothing reaches the
+    base or the remote without your click. Each merge, conflict, revert and mission check writes
+    an `integration` usage record (counts and stage names, never file names).
 - **Restarts.** A task's conversation is an ordinary row in the table. It survives quitting and
   reinstalling (Claude tasks need *Keep conversations running when Agent Wrangler quits*, and
   are refused without it). On relaunch the task is picked up where it is. If its session was

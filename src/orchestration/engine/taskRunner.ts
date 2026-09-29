@@ -36,6 +36,16 @@
  * else waits for the user, as a single task does. A fresh retry keeps the
  * rejected work on its own branch and restarts from the pre-task commit on
  * `aw/<mission>/<task>-a<n>`, in the same tree.
+ *
+ * **Parallel missions** (#46, `Mission.parallel`, behind
+ * `orchestration.parallelTasks`): each task runs in a worktree of its own cut
+ * from the mission branch's head, as many at once as the scheduler admits. A
+ * task that passes is merged into the mission branch by the `Integrator`, one
+ * merge at a time (the mission's queue), with the pre-merge head saved first
+ * and the mission check run after each merge. A conflict becomes a
+ * conflict-resolution attempt or `needs-human` by repo policy; a failed
+ * mission check reverts the merge and returns the task to escalation with the
+ * evidence; recovery finishes a merge a restart cut off.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';

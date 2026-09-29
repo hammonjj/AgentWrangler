@@ -109,6 +109,12 @@ describe('resolveRepoPolicy', () => {
     expect(q.worktrees).toEqual({ root: '../<repo>.aw', setup: [{ link: 'node_modules' }] });
   });
 
+  it('takes an integration section (#46) only when a file sets one, and checks its values', () => {
+    expect(resolve().integration).toBeUndefined();
+    expect(resolve({ integration: { onConflict: 'needs-human' } }, { integration: { conflictAttempts: 2 } }).integration).toEqual({ onConflict: 'needs-human', conflictAttempts: 2 });
+    expect(errorsOf({ integration: { onConflict: 'merge', conflictAttempts: 9, extra: 1 } }).sort()).toEqual(['integration.conflictAttempts', 'integration.extra', 'integration.onConflict']);
+  });
+
   it('lets a later layer replace one command and keep the others', () => {
     const p = resolve(
       { verification: { unit: { run: ['npm', 'test'], timeoutSec: 900 }, lint: { run: ['npm', 'run', 'lint'] } } },
