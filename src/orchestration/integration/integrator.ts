@@ -1,322 +1,235 @@
 /**
- * Mission branch integration (`docs/plans/intelligent-orchestration.md` §13.3, §23.2, #46):
- * merging verified task branches into the mission branch one at a time, verifying the
- * mission branch after each merge. A single instance per mission, guarding the mission
- * worktree; never rebases a branch an agent is using.
+ * Mission branch integration (`docs/plans/intelligent-orchestration.md` §13.3,
+ * §23.2–23.3; #46): a verified task branch is merged into the mission branch
+ * in the mission's integration worktree, and the mission branch is verified
+ * after the merge.
  *
- * - `integrate(taskBranch)`: run `git merge --no-ff` after persisting the pre-merge head.
- *   On conflict, abort and return the files. On clean merge, verify the mission branch.
- *   On verification failure, revert with a revert commit (never a reset).
- * - `recover()`: if MERGE_HEAD is present and equals the recorded pre-merge head, abort
- *   and redo. If the merge was already committed, run the missing verification.
- * - Never touches the base or the primary checkout, never rebases.
+ * - **Write-ahead.** `integrate` hands the pre-merge head to `beforeMerge`
+ *   (the caller persists it in the mission store) before `git merge` runs, so
+ *   a crash mid-merge leaves a record that says where the branch was.
+ * - **`merge --no-ff`**, hooks and signing off, as every commit AW makes.
+ * - **Conflict** → `merge --abort`, and the conflicting files are returned.
+ * - **Mission verification** after every clean merge. A failure is blamed on
+ *   that merge and undone with a revert commit (`revert -m 1`), never a reset:
+ *   the mission branch's history is not rewritten.
+ * - **`recover`** takes the persisted record after a restart: a merge still in
+ *   progress is aborted and done again; a merge that was committed but never
+ *   verified is verified now; a revert already made is reported as one.
+ *
+ * One instance per call is fine: nothing is kept in memory. Serialising the
+ * merges of one mission is the caller's job (the task runner's per-mission
+ * queue). Only the integration worktree is written; the base and the primary
+ * checkout are never touched, and nothing is rebased.
  */
 import type { Exec } from '../worktrees/exec';
-
-export type IntegrationOutcome =
-  | { ok: true; outcome: 'merged'; mergeCommit: string }
-  | { ok: true; outcome: 'reverted'; revertCommit: string; evidence: VerificationFailure }
-  | { ok: false; outcome: 'conflict'; conflictingFiles: string[] }
-  | { ok: false; outcome: 'error'; error: string };
 
 export interface VerificationFailure {
   stage: string;
   summary: string;
   exitCode?: number;
   failingTests?: string[];
+  signature?: string;
 }
 
-/** Minimal verifier interface for the integrator's mission-level verification. */
+export interface MissionVerification {
+  passed: boolean;
+  failure?: VerificationFailure;
+}
+
+/** The mission-level check (§13.3 step 4), run in the integration worktree at `headCommit`. */
 export interface MissionVerifier {
-  verifyMission(opts: {
-    worktreePath: string;
-    baseCommit: string;
-    headCommit: string;
-    log?: (msg: string) => void;
-  }): Promise<{
-    passed: boolean;
-    failure?: VerificationFailure;
-  }>;
+  verifyMission(opts: { worktreePath: string; baseCommit: string; headCommit: string }): Promise<MissionVerification>;
+}
+
+export type IntegrationOutcome =
+  | { ok: true; outcome: 'merged'; preMergeHead: string; mergeCommit: string }
+  | { ok: false; outcome: 'reverted'; preMergeHead: string; mergeCommit: string; revertCommit: string; evidence: VerificationFailure }
+  | { ok: false; outcome: 'conflict'; preMergeHead: string; conflictingFiles: string[] }
+  | { ok: false; outcome: 'error'; error: string; preMergeHead?: string };
+
+/** What the caller persisted before the merge ran. */
+export interface PendingMergeRecord {
+  taskBranch: string;
+  message: string;
+  preMergeHead: string;
 }
 
 export interface IntegratorDeps {
   exec: Exec;
   verifier: MissionVerifier;
-  /** The mission branch being integrated into. */
+  /** The mission branch, checked out in `worktreePath`. */
   missionBranch: string;
-  /** Path to the mission's integration worktree. */
+  /** The mission's integration worktree. */
   worktreePath: string;
-  /** Base commit the mission was cut from. */
+  /** The commit the mission was cut from. */
   baseCommit: string;
-  /** Called after meaningful steps. */
+  /** Persist the intent before `git merge` runs (§23.2). A throw stops the merge. */
+  beforeMerge?: (record: PendingMergeRecord) => Promise<void> | void;
   log?: (msg: string) => void;
 }
 
-interface PreMergeRecord {
-  head: string;
-  at: number;
-}
+const MERGE_TIMEOUT_MS = 5 * 60_000;
+const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false'];
 
-/**
- * Manages one mission's branch integration in its `_integration` worktree.
- * Every merge is recorded write-ahead before the command runs, and every
- * verification runs on the mission branch after a clean merge.
- */
 export class Integrator {
   private readonly log: (msg: string) => void;
-  private preMergeRecords = new Map<string, PreMergeRecord>();
 
   constructor(private readonly deps: IntegratorDeps) {
     this.log = deps.log ?? (() => undefined);
   }
 
-  /**
-   * Merge a task branch into the mission branch with `git merge --no-ff`.
-   * Records the pre-merge head first; on conflict, aborts; on clean merge,
-   * verifies the mission branch; on verification failure, reverts.
-   */
+  /** Merge `taskBranch` into the mission branch, then verify the mission branch. */
   async integrate(opts: { taskBranch: string; message: string }): Promise<IntegrationOutcome> {
-    const taskKey = opts.taskBranch;
-
-    // Refuse if already merging
-    const mergeHead = await this.git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
-    if (mergeHead.code === 0) {
-      return {
-        ok: false,
-        outcome: 'error',
-        error: 'MERGE_HEAD is present; call recover() first',
-      };
+    if (!opts.taskBranch.startsWith('aw/')) return { ok: false, outcome: 'error', error: `${opts.taskBranch} is not a branch Agent Wrangler made` };
+    const ready = await this.readyToMerge();
+    if (ready) return { ok: false, outcome: 'error', error: ready };
+    const head = await this.revParse('HEAD');
+    if (!head) return { ok: false, outcome: 'error', error: 'could not read the mission branch head' };
+    try {
+      await this.deps.beforeMerge?.({ taskBranch: opts.taskBranch, message: opts.message, preMergeHead: head });
+    } catch (e) {
+      return { ok: false, outcome: 'error', error: `could not record the merge before making it: ${errorText(e)}`, preMergeHead: head };
     }
-
-    // Persist pre-merge head
-    const before = await this.git(['rev-parse', 'HEAD']);
-    if (before.code !== 0) {
-      return { ok: false, outcome: 'error', error: `Could not read HEAD: ${before.stderr}` };
-    }
-    const preHead = before.stdout.trim();
-    this.preMergeRecords.set(taskKey, { head: preHead, at: Date.now() });
-
-    // Run the merge
-    this.log(`merging ${opts.taskBranch} into ${this.deps.missionBranch}`);
-    const merge = await this.git(
-      [
-        '-c',
-        'core.hooksPath=/dev/null',
-        '-c',
-        'commit.gpgsign=false',
-        'merge',
-        '--no-ff',
-        '--no-edit',
-        '-m',
-        opts.message,
-        '--end-of-options',
-        opts.taskBranch,
-      ],
-      5 * 60_000,
-    );
-
-    if (merge.code === 0) {
-      // Clean merge: verify the mission branch
-      const mergeCommit = await this.git(['rev-parse', 'HEAD']);
-      if (mergeCommit.code !== 0) {
-        return {
-          ok: false,
-          outcome: 'error',
-          error: `Could not read merged HEAD: ${mergeCommit.stderr}`,
-        };
-      }
-
-      this.log(`merged ${opts.taskBranch} at ${mergeCommit.stdout.trim().slice(0, 8)}`);
-
-      // Run verification on the mission branch
-      try {
-        const verifyResult = await this.deps.verifier.verifyMission({
-          worktreePath: this.deps.worktreePath,
-          baseCommit: this.deps.baseCommit,
-          headCommit: mergeCommit.stdout.trim(),
-          log: this.log,
-        });
-
-        if (verifyResult.passed) {
-          // Verification passed: we're done
-          return { ok: true, outcome: 'merged', mergeCommit: mergeCommit.stdout.trim() };
-        }
-
-        // Verification failed: revert the merge
-        this.log(`verification failed after merge; reverting with revert commit`);
-        const revert = await this.git([
-          '-c',
-          'core.hooksPath=/dev/null',
-          '-c',
-          'commit.gpgsign=false',
-          'revert',
-          '-m',
-          '1',
-          '--no-edit',
-          mergeCommit.stdout.trim(),
-        ]);
-
-        if (revert.code !== 0) {
-          return {
-            ok: false,
-            outcome: 'error',
-            error: `Revert of merge failed: ${revert.stderr}`,
-          };
-        }
-
-        const revertCommit = await this.git(['rev-parse', 'HEAD']);
-        this.log(`reverted merge at ${revertCommit.stdout.trim().slice(0, 8)}`);
-
-        const failure: VerificationFailure = verifyResult.failure || {
-          stage: 'unknown',
-          summary: 'Mission-level verification failed',
-        };
-
-        return { ok: true, outcome: 'reverted', revertCommit: revertCommit.stdout.trim(), evidence: failure };
-      } catch (e) {
-        return {
-          ok: false,
-          outcome: 'error',
-          error: `Verification error: ${e instanceof Error ? e.message : String(e)}`,
-        };
-      }
-    }
-
-    // Merge conflict: get conflicting files before aborting
-    const conflictStatus = await this.git(['ls-files', '-u']);
-    const conflictingFiles = new Set<string>();
-    if (conflictStatus.code === 0) {
-      // Parse git ls-files -u output: [stage] filename
-      for (const line of conflictStatus.stdout.split('\n')) {
-        if (line.trim()) {
-          const match = line.match(/^.*\t(.+)$/);
-          if (match) conflictingFiles.add(match[1]);
-        }
-      }
-    }
-
-    const inMerge = await this.git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
-    if (inMerge.code === 0) {
-      // Abort the merge
-      const abort = await this.git(['merge', '--abort']);
-      if (abort.code !== 0) {
-        return {
-          ok: false,
-          outcome: 'error',
-          error: `Merge conflict, and abort failed: ${abort.stderr}`,
-        };
-      }
-    }
-
-    const conflictList = Array.from(conflictingFiles);
-    this.log(`merge conflict in ${opts.taskBranch}: ${conflictList.join(', ')}`);
-    return { ok: false, outcome: 'conflict', conflictingFiles: conflictList };
+    return this.mergeFrom(head, opts);
   }
 
   /**
-   * Recover from a crash mid-merge. If MERGE_HEAD is present and equals the
-   * recorded pre-merge head, abort and redo. If the merge was already committed,
-   * run the missing verification.
+   * Finish a merge the core was making when it stopped, from the persisted
+   * record: abort and redo one still in progress, verify one committed but not
+   * verified, report a revert already made.
    */
-  async recover(opts: { taskBranch: string; message: string }): Promise<IntegrationOutcome | undefined> {
-    const mergeHead = await this.git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
-    const taskKey = opts.taskBranch;
-    const record = this.preMergeRecords.get(taskKey);
-
-    if (mergeHead.code === 0 && record) {
-      // MERGE_HEAD is present: check if it's the recorded pre-merge head
-      const currentHead = await this.git(['rev-parse', 'HEAD']);
-      if (currentHead.code === 0 && currentHead.stdout.trim() === record.head) {
-        // Abort and redo the merge
-        this.log(`recovering from crash: aborting merge of ${opts.taskBranch}`);
-        const abort = await this.git(['merge', '--abort']);
-        if (abort.code !== 0) {
-          return {
-            ok: false,
-            outcome: 'error',
-            error: `Abort failed during recovery: ${abort.stderr}`,
-          };
-        }
-        // Redo the merge
-        return this.integrate(opts);
+  async recover(record: PendingMergeRecord): Promise<IntegrationOutcome> {
+    const pre = record.preMergeHead;
+    if (await this.hasRef('MERGE_HEAD')) {
+      this.log(`recovery: aborting the interrupted merge of ${record.taskBranch}`);
+      const abort = await this.git(['merge', '--abort']);
+      if (abort.code !== 0) return { ok: false, outcome: 'error', error: `could not abort the interrupted merge: ${abort.stderr.trim()}`, preMergeHead: pre };
+    }
+    if (await this.hasRef('REVERT_HEAD')) {
+      const abort = await this.git(['revert', '--abort']);
+      if (abort.code !== 0) return { ok: false, outcome: 'error', error: `could not abort the interrupted revert: ${abort.stderr.trim()}`, preMergeHead: pre };
+    }
+    const head = await this.revParse('HEAD');
+    if (!head) return { ok: false, outcome: 'error', error: 'could not read the mission branch head', preMergeHead: pre };
+    if (head === pre) {
+      // Nothing was committed. Put the tree back as it was (only AW writes in it), then merge again.
+      const clean = await this.git(['reset', '--hard', '--quiet', 'HEAD']);
+      if (clean.code !== 0) return { ok: false, outcome: 'error', error: `could not clean the integration worktree: ${clean.stderr.trim()}`, preMergeHead: pre };
+      this.log(`recovery: merging ${record.taskBranch} again from ${pre.slice(0, 8)}`);
+      return this.mergeFrom(pre, record);
+    }
+    const task = await this.revParse(record.taskBranch);
+    const parents = await this.parents(head);
+    if (parents[0] === pre && parents.length === 2 && parents[1] === task) {
+      // The merge was committed; its verification never finished.
+      this.log(`recovery: ${record.taskBranch} was merged at ${head.slice(0, 8)}; verifying it`);
+      return this.verifyMerge(pre, head);
+    }
+    if (parents.length === 1) {
+      const mergeParents = await this.parents(parents[0]);
+      if (mergeParents[0] === pre && mergeParents[1] === task && (await this.isRevertOf(head, parents[0]))) {
+        return {
+          ok: false,
+          outcome: 'reverted',
+          preMergeHead: pre,
+          mergeCommit: parents[0],
+          revertCommit: head,
+          evidence: { stage: 'mission', summary: 'mission verification failed before the restart; the merge was reverted' },
+        };
       }
     }
+    return { ok: false, outcome: 'error', error: `the mission branch moved past ${pre.slice(0, 8)} in a way the recorded merge does not explain`, preMergeHead: pre };
+  }
 
-    // Check if the merge was already committed: the HEAD is past the recorded pre-merge head
-    if (record) {
-      const ancestor = await this.git(['merge-base', '--is-ancestor', record.head, 'HEAD']);
-      if (ancestor.code === 0) {
-        // The recorded pre-merge head is an ancestor: the merge was committed
-        // Run the missing verification
-        this.log(`recovering from crash: merge was already committed, running verification`);
-        const headCommit = await this.git(['rev-parse', 'HEAD']);
-        if (headCommit.code !== 0) {
-          return {
-            ok: false,
-            outcome: 'error',
-            error: `Could not read HEAD: ${headCommit.stderr}`,
-          };
-        }
-
-        try {
-          const verifyResult = await this.deps.verifier.verifyMission({
-            worktreePath: this.deps.worktreePath,
-            baseCommit: this.deps.baseCommit,
-            headCommit: headCommit.stdout.trim(),
-            log: this.log,
-          });
-
-          if (verifyResult.passed) {
-            return { ok: true, outcome: 'merged', mergeCommit: headCommit.stdout.trim() };
-          }
-
-          // Verification failed: revert the merge
-          this.log(`verification failed during recovery; reverting`);
-          const revert = await this.git([
-            '-c',
-            'core.hooksPath=/dev/null',
-            '-c',
-            'commit.gpgsign=false',
-            'revert',
-            '-m',
-            '1',
-            '--no-edit',
-            headCommit.stdout.trim(),
-          ]);
-
-          if (revert.code !== 0) {
-            return {
-              ok: false,
-              outcome: 'error',
-              error: `Revert of merge failed during recovery: ${revert.stderr}`,
-            };
-          }
-
-          const revertCommit = await this.git(['rev-parse', 'HEAD']);
-          const failure: VerificationFailure = verifyResult.failure || {
-            stage: 'unknown',
-            summary: 'Mission-level verification failed',
-          };
-
-          return { ok: true, outcome: 'reverted', revertCommit: revertCommit.stdout.trim(), evidence: failure };
-        } catch (e) {
-          return {
-            ok: false,
-            outcome: 'error',
-            error: `Verification error during recovery: ${e instanceof Error ? e.message : String(e)}`,
-          };
-        }
-      }
+  private async mergeFrom(pre: string, opts: { taskBranch: string; message: string }): Promise<IntegrationOutcome> {
+    this.log(`merging ${opts.taskBranch} into ${this.deps.missionBranch}`);
+    const merge = await this.git([...NO_HOOKS, 'merge', '--no-ff', '--no-edit', '-m', opts.message, '--end-of-options', opts.taskBranch], MERGE_TIMEOUT_MS);
+    if (merge.code === 0) {
+      const head = await this.revParse('HEAD');
+      if (!head) return { ok: false, outcome: 'error', error: 'could not read the merge commit', preMergeHead: pre };
+      return this.verifyMerge(pre, head);
     }
+    const files = await this.conflictingFiles();
+    if (await this.hasRef('MERGE_HEAD')) {
+      const abort = await this.git(['merge', '--abort']);
+      if (abort.code !== 0) return { ok: false, outcome: 'error', error: `the merge conflicted and could not be aborted: ${abort.stderr.trim()}`, preMergeHead: pre };
+    }
+    if (files.length === 0) {
+      const why = (merge.stderr.trim() || merge.stdout.trim()).split('\n').slice(0, 3).join(' ');
+      return { ok: false, outcome: 'error', error: `the merge did not go through: ${why || `exit ${merge.code}`}`, preMergeHead: pre };
+    }
+    this.log(`merge of ${opts.taskBranch} conflicts in ${files.join(', ')}`);
+    return { ok: false, outcome: 'conflict', preMergeHead: pre, conflictingFiles: files };
+  }
 
-    // No recovery needed
+  private async verifyMerge(pre: string, mergeCommit: string): Promise<IntegrationOutcome> {
+    let v: MissionVerification;
+    try {
+      v = await this.deps.verifier.verifyMission({ worktreePath: this.deps.worktreePath, baseCommit: this.deps.baseCommit, headCommit: mergeCommit });
+    } catch (e) {
+      // Our infrastructure, not the task's: the merge stays, unverified, and the caller decides.
+      return { ok: false, outcome: 'error', error: `mission verification could not run: ${errorText(e)}`, preMergeHead: pre };
+    }
+    if (v.passed) return { ok: true, outcome: 'merged', preMergeHead: pre, mergeCommit };
+    this.log(`mission verification failed after ${mergeCommit.slice(0, 8)}; reverting it`);
+    const revert = await this.git([...NO_HOOKS, 'revert', '-m', '1', '--no-edit', mergeCommit], MERGE_TIMEOUT_MS);
+    if (revert.code !== 0) {
+      if (await this.hasRef('REVERT_HEAD')) await this.git(['revert', '--abort']);
+      return { ok: false, outcome: 'error', error: `mission verification failed, and the revert did not go through: ${revert.stderr.trim()}`, preMergeHead: pre };
+    }
+    const revertCommit = await this.revParse('HEAD');
+    return {
+      ok: false,
+      outcome: 'reverted',
+      preMergeHead: pre,
+      mergeCommit,
+      revertCommit: revertCommit ?? '',
+      evidence: v.failure ?? { stage: 'mission', summary: 'mission verification failed' },
+    };
+  }
+
+  /** Why a merge cannot start now: a merge or revert already in progress, the wrong branch, or a dirty tree. */
+  private async readyToMerge(): Promise<string | undefined> {
+    if (await this.hasRef('MERGE_HEAD')) return 'a merge is already in progress in the integration worktree; recover it first';
+    if (await this.hasRef('REVERT_HEAD')) return 'a revert is already in progress in the integration worktree; recover it first';
+    const on = await this.git(['symbolic-ref', '--quiet', '--short', 'HEAD']);
+    if (on.code !== 0 || on.stdout.trim() !== this.deps.missionBranch) return `the integration worktree is not on ${this.deps.missionBranch}`;
+    const status = await this.git(['status', '--porcelain=v1', '--untracked-files=no']);
+    if (status.code !== 0) return `could not read the integration worktree's status: ${status.stderr.trim()}`;
+    if (status.stdout.trim() !== '') return 'the integration worktree has uncommitted changes';
     return undefined;
   }
 
-  private git(args: string[], timeoutMs?: number) {
-    return this.deps.exec('git', args, {
-      cwd: this.deps.worktreePath,
-      timeoutMs,
-    });
+  private async conflictingFiles(): Promise<string[]> {
+    const r = await this.git(['diff', '--name-only', '--diff-filter=U', '-z']);
+    if (r.code !== 0) return [];
+    return [...new Set(r.stdout.split('\0').filter(Boolean))].sort();
   }
+
+  private async isRevertOf(commit: string, merge: string): Promise<boolean> {
+    const r = await this.git(['log', '-1', '--format=%B', commit]);
+    return r.code === 0 && r.stdout.includes(`This reverts commit ${merge}`);
+  }
+
+  private async parents(commit: string): Promise<string[]> {
+    const r = await this.git(['rev-list', '--parents', '-n', '1', commit]);
+    return r.code === 0 ? r.stdout.trim().split(/\s+/).slice(1) : [];
+  }
+
+  private async hasRef(ref: string): Promise<boolean> {
+    return (await this.git(['rev-parse', '--verify', '--quiet', ref])).code === 0;
+  }
+
+  private async revParse(ref: string): Promise<string | undefined> {
+    const r = await this.git(['rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`]);
+    return r.code === 0 ? r.stdout.trim() || undefined : undefined;
+  }
+
+  private git(args: string[], timeoutMs?: number) {
+    return this.deps.exec('git', args, { cwd: this.deps.worktreePath, timeoutMs });
+  }
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
