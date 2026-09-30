@@ -4,8 +4,10 @@ import {
   addEndpoint,
   endpointEnabled,
   endpointIdOf,
+  endpointIsLocal,
   endpointLocation,
   isLoopbackUrl,
+  isPrivateNetworkUrl,
   localEndpointChange,
   newEndpointId,
   normaliseEndpointUrl,
@@ -38,6 +40,52 @@ describe('defaults', () => {
     expect(endpointEnabled({ url: 'http://10.0.0.5:1', enabled: true })).toBe(true);
     expect(endpointEnabled({ url: 'http://127.0.0.1:1', enabled: false })).toBe(false);
   });
+
+  it('a private-network endpoint declared local is on and local by default', () => {
+    const lan = { url: 'http://192.168.4.20:8080', location: 'local' as const };
+    expect(endpointIsLocal(lan)).toBe(true);
+    expect(endpointEnabled(lan)).toBe(true);
+    expect(endpointLocation(lan)).toBe('local');
+    expect(endpointEnabled({ ...lan, enabled: false })).toBe(false);
+    // Declared on a public host (settings edited by hand, skipping the parser): still hosted.
+    const pub = { url: 'https://api.example.com', location: 'local' as const };
+    expect(endpointIsLocal(pub)).toBe(false);
+    expect(endpointEnabled(pub)).toBe(false);
+    expect(endpointLocation(pub)).toBe('hosted');
+  });
+});
+
+describe('isPrivateNetworkUrl', () => {
+  it.each([
+    ['http://10.0.0.5:8080', true],
+    ['http://172.16.0.1', true],
+    ['http://172.31.255.255', true],
+    ['http://172.15.0.1', false],
+    ['http://172.32.0.1', false],
+    ['http://192.168.4.73:8080', true],
+    ['http://192.169.0.1', false],
+    ['http://100.64.0.1', true],
+    ['http://100.127.255.1', true],
+    ['http://100.128.0.1', false],
+    ['http://[fd12:3456::1]:8080', true],
+    ['http://[fc00::1]', true],
+    ['http://[2001:db8::1]', false],
+    ['http://neuralnexus:8080', true],
+    ['http://box.local:8080', true],
+    ['http://box.lan', true],
+    ['http://box.home.arpa', true],
+    ['http://box.internal', true],
+    ['https://box.tailnet-123.ts.net', true],
+    ['http://.local', false],
+    ['https://api.example.com', false],
+    ['https://ts.net.example.com', false],
+    ['http://127.0.0.1:8080', false],
+    ['http://localhost:8080', false],
+    ['http://8.8.8.8', false],
+    ['not a url', false],
+  ])('%s → %s', (url, expected) => {
+    expect(isPrivateNetworkUrl(url)).toBe(expected);
+  });
 });
 
 describe('normaliseEndpointUrl', () => {
@@ -65,6 +113,23 @@ describe('parseLocalEndpoints', () => {
     ]);
     expect(parseLocalEndpoints('nope')).toEqual([]);
   });
+
+  it('keeps location: local only on a private host', () => {
+    const list = parseLocalEndpoints([
+      { id: 'nexus', url: 'http://192.168.4.73:8080', location: 'local' },
+      { id: 'tail', url: 'https://nexus.tailnet-1.ts.net', location: 'local' },
+      { id: 'cloud', url: 'https://api.example.com', location: 'local' },
+      { id: 'here', url: 'http://127.0.0.1:8080', location: 'local' },
+      { id: 'odd', url: 'http://10.0.0.2:1', location: 'hosted' },
+    ]);
+    expect(list.map((e) => [e.id, e.location])).toEqual([
+      ['nexus', 'local'],
+      ['tail', 'local'],
+      ['cloud', undefined],
+      ['here', undefined],
+      ['odd', undefined],
+    ]);
+  });
 });
 
 describe('addEndpoint and changes', () => {
@@ -87,6 +152,8 @@ describe('addEndpoint and changes', () => {
     expect(localEndpointChange({ op: 'add', url: 'http://127.0.0.1:1' })).toEqual({ op: 'add', url: 'http://127.0.0.1:1' });
     expect(localEndpointChange({ op: 'enable', id: 'box', enabled: true })).toEqual({ op: 'enable', id: 'box', enabled: true });
     expect(localEndpointChange({ op: 'qualify', id: 'box', model: 'm' })).toEqual({ op: 'qualify', id: 'box', model: 'm' });
+    expect(localEndpointChange({ op: 'setLocal', id: 'box', local: true })).toEqual({ op: 'setLocal', id: 'box', local: true });
+    expect(localEndpointChange({ op: 'setLocal', id: 'box', local: 'yes' })).toBeUndefined();
     expect(localEndpointChange({ op: 'enable', id: 'box' })).toBeUndefined();
     expect(localEndpointChange({ op: 'remove', id: '../etc' })).toBeUndefined();
     expect(localEndpointChange({ op: 'run', id: 'box' })).toBeUndefined();

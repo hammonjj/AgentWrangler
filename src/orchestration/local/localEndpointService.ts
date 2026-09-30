@@ -30,7 +30,9 @@ import {
   endpointIdOf,
   endpointKeyRef,
   endpointSource,
+  endpointIsLocal,
   isLoopbackUrl,
+  isPrivateNetworkUrl,
   LOCAL_ENDPOINTS_KEY,
   parseLocalEndpoints,
   type LocalEndpointChange,
@@ -289,7 +291,7 @@ export class LocalEndpointService implements Disposable {
     const id = endpointIdOf(source) ?? source;
     const cfg = this.endpoint(id);
     const st = this.states.get(id);
-    const health = !cfg ? unknownHealth('Not registered') : !endpointEnabled(cfg) ? unknownHealth(isLoopbackUrl(cfg.url) ? 'Off' : `Off (${DATA_LEAVES_MACHINE})`) : (st?.health ?? unknownHealth('Not probed yet'));
+    const health = !cfg ? unknownHealth('Not registered') : !endpointEnabled(cfg) ? unknownHealth(endpointIsLocal(cfg) ? 'Off' : `Off (${DATA_LEAVES_MACHINE})`) : (st?.health ?? unknownHealth('Not probed yet'));
     const slots = this.slotsOf(id);
     const used = (st?.inFlight ?? 0) + busy;
     return {
@@ -405,7 +407,7 @@ export class LocalEndpointService implements Disposable {
       ...(probe && isKnown(probe.runtime) ? { runtime: probe.runtime.value } : {}),
       ...(cfg.device ? { device: cfg.device } : {}),
       ...(report && isKnown(report.descriptor.contextWindow) ? { contextWindow: report.descriptor.contextWindow.value } : {}),
-      ...(isLoopbackUrl(cfg.url) ? {} : { external: true }),
+      ...(endpointIsLocal(cfg) ? {} : { external: true }),
     };
   }
 
@@ -429,7 +431,7 @@ export class LocalEndpointService implements Disposable {
       ...(isKnown(d.contextWindow) ? { contextWindow: d.contextWindow.value } : {}),
       ...(probe && isKnown(probe.runtime) ? { runtime: probe.runtime.value } : {}),
       ...(cfg.device ? { device: cfg.device } : {}),
-      ...(isLoopbackUrl(cfg.url) ? {} : { external: true }),
+      ...(endpointIsLocal(cfg) ? {} : { external: true }),
       key: () => this.key(id),
     };
     return new LocalStructuredCompletion(target, {
@@ -485,8 +487,9 @@ export class LocalEndpointService implements Disposable {
         if (!r.ok) return { ok: false, lines: [`✗  ${r.error}`] };
         await this.write(r.list);
         const e = r.endpoint;
-        if (!isLoopbackUrl(e.url)) {
-          return { ok: true, lines: [`Added ${e.name}. It is not on this machine, so it is off: ${DATA_LEAVES_MACHINE} once you turn it on.`] };
+        if (!endpointIsLocal(e)) {
+          const own = isPrivateNetworkUrl(e.url) ? ' If it is your own machine on this network, mark it as yours to treat it as local.' : '';
+          return { ok: true, lines: [`Added ${e.name}. It is not on this machine, so it is off: ${DATA_LEAVES_MACHINE} once you turn it on.${own}`] };
         }
         await this.probe(e.id);
         return { ok: true, lines: [`Added ${e.name}.`] };
@@ -511,13 +514,29 @@ export class LocalEndpointService implements Disposable {
         const next = list.map((e) => {
           if (e.id !== change.id) return e;
           const { enabled: _e, ...rest } = e;
-          // Stored by absence when it matches the default (loopback on, anything else off).
-          return change.enabled === isLoopbackUrl(e.url) ? rest : { ...rest, enabled: change.enabled };
+          // Stored by absence when it matches the default (local on, anything else off).
+          return change.enabled === endpointIsLocal(e) ? rest : { ...rest, enabled: change.enabled };
         });
         await this.write(next);
         if (change.enabled) await this.probe(change.id);
         else this.changed();
         return { ok: true, lines: [] };
+      }
+      case 'setLocal': {
+        const cfg = list.find((e) => e.id === change.id);
+        if (!cfg) return { ok: false, lines: ['✗  No such endpoint.'] };
+        if (change.local && !isPrivateNetworkUrl(cfg.url)) {
+          return { ok: false, lines: ['✗  Only an endpoint on a private address or home network name can be treated as local.'] };
+        }
+        // On or off stays as it was: the default moves with the location, so store it when it no longer matches.
+        const on = endpointEnabled(cfg);
+        const { location: _l, enabled: _e, ...rest } = cfg;
+        const moved: LocalEndpointConfig = change.local ? { ...rest, location: 'local' } : rest;
+        const next = on === endpointIsLocal(moved) ? moved : { ...moved, enabled: on };
+        await this.write(list.map((e) => (e.id === cfg.id ? next : e)));
+        if (on) await this.probe(cfg.id);
+        else this.changed();
+        return { ok: true, lines: [change.local ? `${cfg.name} is treated as local: its data stays on your network.` : `${cfg.name} is treated as external again: ${DATA_LEAVES_MACHINE}.`] };
       }
       case 'setKey': {
         const cfg = list.find((e) => e.id === change.id);
@@ -634,7 +653,7 @@ export class LocalEndpointService implements Disposable {
               ...(isKnown(probe.runtime) ? { runtime: probe.runtime.value } : {}),
               ...(cfg.device ? { device: cfg.device } : {}),
               ...(progress.done === 1 && queuedMs ? { queueMs: queuedMs } : {}),
-              ...(isLoopbackUrl(cfg.url) ? {} : { external: true }),
+              ...(endpointIsLocal(cfg) ? {} : { external: true }),
             },
           });
           this.changed();
@@ -724,6 +743,7 @@ export class LocalEndpointService implements Disposable {
       const source = endpointSource(e.id);
       const status = this.status(source);
       const loopback = isLoopbackUrl(e.url);
+      const local = endpointIsLocal(e);
       const slots = this.slotsOf(e.id);
       const quals = this.stored.qualifications[e.id] ?? {};
       return {
@@ -733,7 +753,9 @@ export class LocalEndpointService implements Disposable {
         source,
         enabled: endpointEnabled(e),
         loopback,
-        ...(loopback ? {} : { warning: DATA_LEAVES_MACHINE }),
+        ...(!loopback && isPrivateNetworkUrl(e.url) ? { trustable: true } : {}),
+        ...(!loopback && local ? { trustedLocal: true } : {}),
+        ...(local ? {} : { warning: DATA_LEAVES_MACHINE }),
         hasKey: !!e.hasKey,
         health: status.health,
         ...(probe && isKnown(probe.runtime) ? { runtime: `${probe.runtime.value} (${probe.runtime.from})` } : {}),

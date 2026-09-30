@@ -80,6 +80,12 @@ describe('the resolver and a local model', () => {
     expect(r.target).toMatchObject({ harness: 'codex', source: 'local:box', model: 'coder', tier: 'standard', location: 'local', effortNative: 'none' });
   });
 
+  it('a local-only cap keeps a local model (loopback or declared LAN) and rejects a hosted one', () => {
+    const snap = (location: 'local' | 'hosted') => ({ catalog: tiered([localReport({ location })]), sources: { 'local:box': reachable(2) }, now: 0 });
+    expect(resolveRoute(REQ, snap('local'), { caps: { location: 'local-only' } }).target?.source).toBe('local:box');
+    expect(resolveRoute(REQ, snap('hosted'), { caps: { location: 'local-only' } }).outcome).toBe('needs-human');
+  });
+
   it('never gives agentic work to a model whose tool calling is unknown or none', () => {
     const unknown = resolveRoute(REQ, { catalog: tiered([localReport({ toolCalling: UNKNOWN })]), sources: {}, now: 0 });
     expect(unknown.outcome).toBe('needs-human');

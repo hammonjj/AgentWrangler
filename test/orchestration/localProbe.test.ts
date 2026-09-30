@@ -243,4 +243,16 @@ describe('local models in the catalog', () => {
     const on = buildCatalog({ reported: [], local: localModelReports({ ...endpoint, enabled: true }, p), policy: { [`local:box:qwen-coder-q4.gguf`]: { tier: 'standard' } } });
     expect(on.entries[0].routable).toBe(true);
   });
+
+  it('a LAN endpoint declared the user’s own machine is local, on by default, and not labelled', async () => {
+    const endpoint = cfg({ url: 'http://192.168.1.20:8080', location: 'local' });
+    const p = await probe('llama.cpp');
+    const local = localModelReports(endpoint, p);
+    expect(local[0]).toMatchObject({ external: false, endpointEnabled: true });
+    expect(local[0].descriptor.location).toBe('local');
+    expect(local[0].descriptor.description).not.toMatch(/data leaves this machine/);
+    const c = buildCatalog({ reported: [], local, policy: { [`local:box:qwen-coder-q4.gguf`]: { tier: 'standard' } } });
+    expect(c.entries[0]).toMatchObject({ routable: true });
+    expect(c.entries[0].external).toBeUndefined();
+  });
 });
