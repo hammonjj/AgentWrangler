@@ -25,7 +25,7 @@ import { renderReportTab } from './orchReport';
 
 export { onRoutingResult } from './orchRouting';
 export { setLocalEndpointResult } from './orchEndpoints';
-export { initUiPersistence } from './orchUi';
+export { initUiPersistence, onWriteResult } from './orchUi';
 
 export const ORCHESTRATION_GROUP = 'Orchestration';
 

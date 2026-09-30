@@ -16,7 +16,7 @@ import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBri
 import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId } from '../../shared/preferences';
 import { settingGroups, SETTINGS, type SettingSpec } from '../../shared/settings';
 import { orchestrationTabTarget } from '../../shared/orchestration/orchestrationTabs';
-import { ORCHESTRATION_GROUP, consumeWritePending, initUiPersistence, onRoutingResult, openOrchestrationTab, renderOrchestration, setLocalEndpointResult } from './orchestration';
+import { ORCHESTRATION_GROUP, consumeWritePending, initUiPersistence, onRoutingResult, onWriteResult, openOrchestrationTab, renderOrchestration, setLocalEndpointResult } from './orchestration';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
 
@@ -560,6 +560,12 @@ window.addEventListener('message', (event: MessageEvent) => {
     // The section only exists once its switch is on; scroll to it as well as switching tab.
     sections.get(ORCHESTRATION_GROUP)?.scrollIntoView({ block: 'start' });
     openOrchestrationTab(tabTarget);
+    return;
+  }
+  if (message.type === 'orchestrationWriteResult') {
+    // A refusal shows beside its control; the full view follows either way.
+    onWriteResult(message);
+    if (orchestrationBody && !message.ok) renderOrchestration(orchestrationBody, orchestration, post);
     return;
   }
   if (message.type === 'routingResult') {

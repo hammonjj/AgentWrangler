@@ -210,6 +210,7 @@ void app.whenReady().then(() => {
         const routing = parseRoutingSettings(host.settingsStore.get<unknown>(ROUTING_KEY, undefined));
         return {
           catalog: wrangler.models.catalog,
+          prices: wrangler.models.storedPrices(),
           sources: [
             sourceStatus('anthropic', wrangler.usage.usage, Date.now()),
             sourceStatus('openai', wrangler.codexUsage.usage, Date.now()),
@@ -243,7 +244,8 @@ void app.whenReady().then(() => {
         ];
         return { dispose: () => subs.forEach((s) => s.dispose()) };
       },
-      setPolicy: (change) => wrangler.models.setPolicy(change),
+      setPolicy: (change) => wrangler.models.applyPolicy(change),
+      setPrice: (change) => wrangler.models.setPrice(change),
       localEndpoint: (change) => wrangler.localEndpoints.apply(change),
       // Frozen into each mission recorded after this; a started mission keeps what it had (§10.2).
       setRouting: (value) => host.settingsStore.update(ROUTING_KEY, value),

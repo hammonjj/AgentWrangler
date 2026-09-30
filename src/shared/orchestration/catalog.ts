@@ -260,8 +260,33 @@ export interface ModelPolicyChange {
   /** A tier name, or null for unassigned. */
   tier?: TierName | null;
   enabled?: boolean;
+  /** One AW level's native level; `'default'` (or the default level itself) removes it. */
+  effort?: { level: EffortLevel; native: string };
   /** Put this field back to its default. */
   reset?: 'tier' | 'enabled' | 'all';
+}
+
+/** The effort change's word for "back to the shipped mapping". */
+export const EFFORT_DEFAULT = 'default';
+
+/**
+ * Why an effort change cannot be stored, or undefined when it can: the level
+ * must be one of AW's, and the native value one the model has and that is not
+ * reached only by a pin. `'default'` is always allowed.
+ */
+export function effortChangeError(entry: Pick<CatalogEntry, 'descriptor' | 'effortMap'>, change: { level: string; native: string }): string | undefined {
+  if (!(EFFORT_LEVELS as readonly string[]).includes(change.level)) return `"${change.level}" is not an effort level (${EFFORT_LEVELS.join(', ')})`;
+  if (change.native === EFFORT_DEFAULT) return undefined;
+  const nativeLevels = isKnown(entry.descriptor.nativeEffort) ? entry.descriptor.nativeEffort.value : undefined;
+  if (!nativeLevels) return `${entry.descriptor.label}'s effort levels are unknown`;
+  if (!nativeLevels.includes(change.native)) return `${entry.descriptor.label} has no "${change.native}" effort level`;
+  if (PIN_ONLY_EFFORT.includes(change.native)) return `"${change.native}" can only be reached by pinning this model`;
+  return undefined;
+}
+
+/** The levels a model's effort map may be set to: its own, without the pin-only ones, in strength order. */
+export function mappableEffortLevels(native: readonly string[]): string[] {
+  return native.filter((l) => !PIN_ONLY_EFFORT.includes(l)).sort((a, b) => nativeRank(a) - nativeRank(b));
 }
 
 /**
@@ -272,10 +297,11 @@ export interface ModelPolicyChange {
 export function applyPolicyChange(
   policy: ModelPolicy,
   change: ModelPolicyChange,
-  defaults: { tier?: TierName; enabled: boolean },
+  defaults: { tier?: TierName; enabled: boolean; effort?: EffortMap },
 ): ModelPolicy {
   const next: ModelPolicy = { ...policy };
   const entry: ModelPolicyEntry = { ...(next[change.key] ?? {}) };
+  if (entry.effort) entry.effort = { ...entry.effort };
   if (change.reset === 'all') {
     delete next[change.key];
     return next;
@@ -289,6 +315,14 @@ export function applyPolicyChange(
   if (change.enabled !== undefined) {
     if (change.enabled === defaults.enabled) delete entry.enabled;
     else entry.enabled = change.enabled;
+  }
+  if (change.effort !== undefined) {
+    const { level, native } = change.effort;
+    const effort: EffortMap = { ...(entry.effort ?? {}) };
+    if (native === EFFORT_DEFAULT || native === defaults.effort?.[level]) delete effort[level];
+    else effort[level] = native;
+    if (Object.keys(effort).length > 0) entry.effort = effort;
+    else delete entry.effort;
   }
   if (Object.keys(entry).length === 0) delete next[change.key];
   else next[change.key] = entry;
@@ -499,7 +533,10 @@ export function buildCatalog(input: CatalogInputs): CapabilityCatalogView {
 
       const native = isKnown(descriptor.nativeEffort) ? descriptor.nativeEffort.value : [];
       const declaredMap = declaredEffortMap(declared.effort, native);
-      const effortMap = declaredMap ?? defaultEffortMap(native);
+      // Stored levels are only the ones that differ (Preferences deletes a level
+      // set back to its default), so they are laid over the default map.
+      const defaultMap = defaultEffortMap(native);
+      const effortMap = declaredMap && defaultMap ? { ...defaultMap, ...declaredMap } : (declaredMap ?? defaultMap);
 
       let notRoutableBecause: string | undefined;
       if (!enabled) notRoutableBecause = def?.excluded && !enabledDeclared ? def.excluded : 'Disabled';

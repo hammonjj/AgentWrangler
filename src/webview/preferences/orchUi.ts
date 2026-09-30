@@ -28,6 +28,10 @@ export interface OrchUiState {
   showDisabled: Record<string, boolean>;
   /** A model to scroll to and focus on the next draw of the Models tab. One-shot. */
   focusModelKey?: string;
+  /** Why the host refused a write, by `<key>|<field>`, shown beside that control until the next write to it. */
+  writeErrors: Record<string, string>;
+  /** Price text that did not parse, by `<key>|price:<field>`, kept so the field shows what was typed. */
+  priceDrafts: Record<string, string>;
 }
 
 export const ui: OrchUiState = {
@@ -35,7 +39,20 @@ export const ui: OrchUiState = {
   query: '',
   filter: 'all',
   showDisabled: {},
+  writeErrors: {},
+  priceDrafts: {},
 };
+
+export const writeErrorKey = (key: string, field: string) => `${key}|${field}`;
+
+/** The host said how a write went: remember a refusal, forget one a later write fixed. */
+export function onWriteResult(r: { key: string; field: string; ok: boolean; error?: string }): void {
+  const k = writeErrorKey(r.key, r.field);
+  const next = { ...ui.writeErrors };
+  if (r.ok) delete next[k];
+  else next[k] = r.error ?? 'Not saved';
+  ui.writeErrors = next;
+}
 
 interface Persistence {
   load(): unknown;

@@ -684,8 +684,208 @@
 #prefsApp .aw-orch-row-detail {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 18px;
   padding: 6px 14px 18px 44px;
+}
+
+#prefsApp .aw-orch-muted {
+  margin: 0;
+  color: var(--aw-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .aw-orch-caption {
+  margin: 0;
+  color: var(--aw-text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+#prefsApp .aw-orch-field-error {
+  margin: 0;
+  color: var(--aw-error);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .aw-orch-readiness {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+}
+
+#prefsApp .aw-orch-readiness-line {
+  margin: 0;
+  color: var(--aw-warn-text);
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .aw-orch-readiness-line.ready {
+  color: var(--aw-ok-text);
+}
+
+#prefsApp .aw-orch-readiness .aw-orch-btn {
+  margin-top: 4px;
+}
+
+#prefsApp .aw-orch-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin: 0;
+}
+
+#prefsApp .aw-orch-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+#prefsApp .aw-orch-fact-label {
+  color: var(--aw-text-faint);
+  font-size: 11px;
+}
+
+#prefsApp .aw-orch-fact-value {
+  margin: 0;
+  color: var(--aw-text-strong);
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .aw-orch-provenance {
+  color: var(--aw-text-faint);
+  font-size: 11px;
+}
+
+#prefsApp .aw-orch-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#prefsApp .aw-orch-subhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+#prefsApp .aw-orch-subhead-title {
+  margin: 0;
+  color: var(--aw-text-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-subhead-aside {
+  color: var(--aw-text-faint);
+  font-size: 11px;
+}
+
+#prefsApp .aw-orch-effort-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+#prefsApp .aw-orch-effort-level {
+  color: var(--aw-text);
+  font-family: var(--aw-mono);
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+#prefsApp .aw-orch-pill {
+  height: var(--aw-control-h);
+  padding: 0 9px;
+  border: 1px solid var(--aw-border-strong);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--aw-text);
+  font-family: var(--aw-mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-pill.default {
+  border-style: dashed;
+}
+
+#prefsApp .aw-orch-pill[aria-pressed='true'] {
+  border-color: var(--aw-accent);
+  border-style: solid;
+  background: var(--aw-accent);
+  color: var(--aw-accent-text);
+}
+
+#prefsApp .aw-orch-pill:disabled {
+  cursor: default;
+}
+
+#prefsApp .aw-orch-pills[aria-invalid='true'] .aw-orch-pill {
+  border-color: var(--aw-error);
+}
+
+#prefsApp .aw-orch-effort-select {
+  display: none;
+  width: 100%;
+}
+
+#prefsApp .aw-orch-prices {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+#prefsApp .aw-orch-price {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+#prefsApp .aw-orch-price-label {
+  color: var(--aw-text-muted);
+  font-size: 11px;
+}
+
+#prefsApp .aw-orch-price-input {
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+#prefsApp .aw-orch-diff {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--aw-border);
+}
+
+#prefsApp .aw-orch-diff-text {
+  flex: 1 1 200px;
+  color: var(--aw-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 @container aw-orch (max-width: 479px) {
@@ -712,11 +912,27 @@
   #prefsApp .aw-orch-row-detail {
     padding: 6px 12px 16px 12px;
   }
+  #prefsApp .aw-orch-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @container aw-orch (max-width: 399px) {
   #prefsApp .aw-orch-segmented {
     flex: 1 1 100%;
+  }
+  #prefsApp .aw-orch-effort-row {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+  /* Below 400px the pills become a select, for the same choice. */
+  #prefsApp .aw-orch-pills {
+    display: none;
+  }
+  #prefsApp .aw-orch-effort-select {
+    display: block;
+  }
+  #prefsApp .aw-orch-prices {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   #prefsApp .aw-orch-lane-sub {
     font-size: 11px;

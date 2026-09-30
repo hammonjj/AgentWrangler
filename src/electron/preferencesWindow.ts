@@ -21,7 +21,15 @@ import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostSettings } from '../host/hostServices';
 import { settingUpdate, type HostToPreferences, type PreferencesToHost } from '../shared/preferences';
-import { isSettingActionId, modelPolicyChange, routingPolicyUpdate, type OrchestrationPrefsView, type SettingActionId } from '../shared/preferences';
+import {
+  isSettingActionId,
+  modelPolicyChange,
+  modelPriceChange,
+  routingPolicyUpdate,
+  type ModelPriceChange,
+  type OrchestrationPrefsView,
+  type SettingActionId,
+} from '../shared/preferences';
 import type { ModelPolicyChange } from '../shared/orchestration/catalog';
 import { localEndpointChange, type LocalEndpointChange } from '../shared/orchestration/localEndpoints';
 import { SETTINGS } from '../shared/settings';
@@ -53,7 +61,10 @@ export interface PreferencesWindowOptions {
   orchestration?: {
     view(): OrchestrationPrefsView;
     onDidChange(listener: () => void): Disposable;
-    setPolicy(change: ModelPolicyChange): Promise<boolean>;
+    /** One model's tier, enabled flag or effort level, or a reset; refused with a reason the row shows. */
+    setPolicy(change: ModelPolicyChange): Promise<{ ok: true } | { ok: false; error: string }>;
+    /** One price field of one model (`telemetry.prices`). */
+    setPrice?(change: ModelPriceChange): Promise<{ ok: true } | { ok: false; error: string }>;
     /** Orchestration → Local endpoints (#51). */
     localEndpoint?(change: LocalEndpointChange): Promise<{ ok: boolean; lines: string[] }>;
     /** Write the global routing defaults (#40), already checked by `routingPolicyUpdate`. */
@@ -177,10 +188,33 @@ export class PreferencesWindow implements Disposable {
         this.opts.log('preferences: refused a model policy change');
         return;
       }
-      void this.opts.orchestration.setPolicy(change).then((ok) => {
-        if (!ok) this.opts.log(`preferences: refused model policy for ${change.key}`);
-        this.pushOrchestration();
-      });
+      const field = change.effort ? `effort:${change.effort.level}` : change.reset ? 'reset' : change.tier !== undefined ? 'tier' : 'enabled';
+      void this.opts.orchestration
+        .setPolicy(change)
+        .then((r) => {
+          if (!r.ok) this.opts.log(`preferences: refused model policy for ${change.key}: ${r.error}`);
+          this.post({ type: 'orchestrationWriteResult', key: change.key, field, ok: r.ok, ...(r.ok ? {} : { error: r.error }) });
+        })
+        .catch((e) => this.post({ type: 'orchestrationWriteResult', key: change.key, field, ok: false, error: String(e) }))
+        // The full state after every write, whether it landed or not.
+        .finally(() => this.pushOrchestration());
+      return;
+    }
+    if (message.type === 'modelPrice') {
+      const change = modelPriceChange(message);
+      const run = this.opts.orchestration?.setPrice;
+      if (!change || !run) {
+        this.opts.log('preferences: refused a model price change');
+        return;
+      }
+      const field = `price:${change.field}`;
+      void run(change)
+        .then((r) => {
+          if (!r.ok) this.opts.log(`preferences: refused price for ${change.key}: ${r.error}`);
+          this.post({ type: 'orchestrationWriteResult', key: change.key, field, ok: r.ok, ...(r.ok ? {} : { error: r.error }) });
+        })
+        .catch((e) => this.post({ type: 'orchestrationWriteResult', key: change.key, field, ok: false, error: String(e) }))
+        .finally(() => this.pushOrchestration());
       return;
     }
     if (message.type === 'localEndpoint') {

@@ -9,7 +9,21 @@
  * Pure and shared: no Node or DOM here.
  */
 
-import type { CatalogEntry, TierDef } from './catalog';
+import {
+  defaultEffortMap,
+  isKnown,
+  mappableEffortLevels,
+  PIN_ONLY_EFFORT,
+  type CatalogEntry,
+  type FactSource,
+  type Known,
+  type ModelDescriptor,
+  type TierDef,
+} from './catalog';
+import { EFFORT_LEVELS, type EffortLevel } from './types';
+import { harnessLabel } from '../harness';
+import { formatTokens } from '../sessionUsage';
+import type { StoredPrice } from './modelPrices';
 import type { LocalEndpointModelView, LocalEndpointView } from './localEndpoints';
 import { localModelStatus, type LocalModelStatus } from './localReadiness';
 import { laneSubline, tierRoles } from './tierRoles';
@@ -146,6 +160,106 @@ export function tierOptions(entry: Pick<CatalogEntry, 'defaultTier' | 'tier' | '
     return { options, value: storedTier };
   }
   return { options, value: entry.tier ?? '' };
+}
+
+// ---------------------------------------------------------------------------
+// The expanded row
+// ---------------------------------------------------------------------------
+
+export interface ModelFact {
+  label: string;
+  value: string;
+  /** `reported`, `declared`, `measured`, `probed`; absent when unknown or not a fact with a source. */
+  from?: FactSource;
+}
+
+function knownFact<T>(label: string, k: Known<T>, format: (v: T) => string): ModelFact {
+  return isKnown(k) ? { label, value: format(k.value), from: k.from } : { label, value: 'unknown' };
+}
+
+const COST_BASIS: Record<ModelDescriptor['costBasis'], string> = { 'plan-window': 'plan window', 'api-price': 'API price', none: 'none' };
+
+/** Harness, Called as, Context, Max output, Vision, Cost basis. */
+export function modelFacts(entry: Pick<CatalogEntry, 'descriptor' | 'harnesses' | 'aliases' | 'completions'>): ModelFact[] {
+  const d = entry.descriptor;
+  const harness = entry.harnesses.length > 0 ? entry.harnesses.map(harnessLabel).join(', ') : entry.completions ? 'none (structured completions)' : 'none';
+  return [
+    { label: 'Harness', value: harness },
+    { label: 'Called as', value: entry.aliases.join(', ') },
+    knownFact('Context', d.contextWindow, formatTokens),
+    knownFact('Max output', d.maxOutputTokens, formatTokens),
+    knownFact('Vision', d.vision, (v) => (v ? 'yes' : 'no')),
+    { label: 'Cost basis', value: COST_BASIS[d.costBasis] },
+  ];
+}
+
+export interface EffortOption {
+  native: string;
+  selected: boolean;
+  /** The shipped default for this AW level: drawn dashed. */
+  isDefault: boolean;
+  /** Reached only by a pin: never offered, shown only when settings.json already maps to it. */
+  pinOnly?: boolean;
+}
+
+export type EffortEditor =
+  | { kind: 'unknown'; text: string }
+  | { kind: 'none'; text: string }
+  | { kind: 'map'; rows: { level: EffortLevel; options: EffortOption[] }[]; note: string };
+
+/**
+ * The effort map as the editor shows it: one row per AW level, one option per
+ * native level the model has, pin-only levels left out. The default mapping
+ * is marked; a stored mapping to a pin-only level (hand-edited) is shown, so
+ * the control tells the truth, but is not offered.
+ */
+export function effortEditor(entry: Pick<CatalogEntry, 'descriptor' | 'effortMap'>): EffortEditor {
+  const n = entry.descriptor.nativeEffort;
+  if (!isKnown(n)) return { kind: 'unknown', text: 'Effort levels are unknown until the agent reports this model.' };
+  const def = defaultEffortMap(n.value);
+  if (!def) return { kind: 'none', text: 'This model has no effort control. Every level runs the same.' };
+  const levels = mappableEffortLevels(n.value);
+  const pinOnly = n.value.filter((l) => PIN_ONLY_EFFORT.includes(l));
+  if (levels.length === 0) return { kind: 'none', text: `Effort only by pin: ${pinOnly.join(', ')} can only be reached by pinning this model.` };
+  const rows = EFFORT_LEVELS.map((level) => {
+    const current = entry.effortMap?.[level];
+    const options: EffortOption[] = levels.map((native) => ({ native, selected: native === current, isDefault: native === def[level] }));
+    if (current !== undefined && !levels.includes(current)) options.push({ native: current, selected: true, isDefault: false, pinOnly: true });
+    return { level, options };
+  });
+  const note = `Dashed outline = shipped default.${pinOnly.length > 0 ? ` ${pinOnly.join(', ')} can only be reached by pinning this model.` : ''}`;
+  return { kind: 'map', rows, note };
+}
+
+/**
+ * "Differs from defaults: tier frontier (default expert) · disabled (default
+ * on) · effort max→high", or that nothing is stored. Read from what
+ * `orchestration.models` stores, so it names exactly what Reset removes.
+ */
+export function policyDiffText(entry: Pick<CatalogEntry, 'stored' | 'defaultTier' | 'excluded' | 'descriptor'>): string {
+  const s = entry.stored;
+  if (!s) return 'Following shipped defaults. Nothing is stored for this model.';
+  const parts: string[] = [];
+  if ('tier' in s) parts.push(`tier ${s.tier ?? 'unassigned'} (default ${entry.defaultTier ?? 'unassigned'})`);
+  if (s.enabled !== undefined) parts.push(s.enabled ? `enabled (default ${entry.excluded ? 'off' : 'on'})` : `disabled (default ${entry.excluded ? 'off' : 'on'})`);
+  if (s.effort) {
+    const n = entry.descriptor.nativeEffort;
+    const has = (v: string) => isKnown(n) && n.value.includes(v);
+    const mapped = EFFORT_LEVELS.filter((l) => s.effort?.[l] !== undefined).map((l) => `${l}→${s.effort![l]}${has(s.effort![l]!) ? '' : ' (ignored: not a level it has)'}`);
+    if (mapped.length > 0) parts.push(`effort ${mapped.join(', ')}`);
+  }
+  return parts.length > 0 ? `Differs from defaults: ${parts.join(' · ')}` : 'Stored, but nothing in it differs from the defaults.';
+}
+
+/** The line under the price fields: what the fields do for this model today. */
+export function priceNote(entry: Pick<CatalogEntry, 'costReporting' | 'descriptor'>, stored: StoredPrice | undefined): string {
+  const has = stored && Object.keys(stored).length > 0;
+  if (entry.descriptor.location === 'local' && !has) return 'Local: no API cost. A price here only sets what running it would have cost.';
+  if (has && (stored.inPerMTok === undefined || stored.outPerMTok === undefined)) return 'Input and output are both needed before a price counts.';
+  if (entry.costReporting === 'harness-estimate') {
+    return has ? 'The agent reports its own cost; these prices rank models of one tier by price.' : 'No price set: cost is estimated by the agent.';
+  }
+  return has ? 'Cost is worked out from these prices.' : 'No price set: cost shows as plan window only.';
 }
 
 // ---------------------------------------------------------------------------

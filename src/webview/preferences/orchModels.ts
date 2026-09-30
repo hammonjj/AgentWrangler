@@ -10,21 +10,26 @@
  */
 
 import type { OrchestrationPrefsView } from '../../shared/preferences';
-import { effortMapText, type CatalogEntry } from '../../shared/orchestration/catalog';
-import { harnessLabel, sourceLabel } from '../../shared/harness';
-import { formatTokens } from '../../shared/sessionUsage';
+import { EFFORT_DEFAULT, type CatalogEntry } from '../../shared/orchestration/catalog';
+import { sourceLabel } from '../../shared/harness';
 import { DATA_LEAVES_MACHINE, isEndpointSource } from '../../shared/orchestration/localEndpoints';
+import { PRICE_FIELDS, PRICE_KEY, parsePriceText, priceKeyFor, type PriceField } from '../../shared/orchestration/modelPrices';
 import {
   buildBoard,
+  effortEditor,
   localStatusFor,
+  modelFacts,
+  policyDiffText,
+  priceNote,
   rowStatus,
   tierOptions,
   type BoardFilter,
   type BoardLane,
   type BoardRow,
 } from '../../shared/orchestration/tierBoard';
-import { button, el, fact, localContext, option, switchButton, tabHeader, type LocalContext, type Post } from './orchCommon';
-import { ui } from './orchUi';
+import type { EffortLevel } from '../../shared/orchestration/types';
+import { button, el, localContext, option, switchButton, tabHeader, type LocalContext, type Post } from './orchCommon';
+import { ui, writeErrorKey } from './orchUi';
 
 const FILTERS: { id: BoardFilter; label: string }[] = [
   { id: 'all', label: 'All' },
@@ -32,18 +37,11 @@ const FILTERS: { id: BoardFilter; label: string }[] = [
   { id: 'notRouted', label: 'Not routed' },
 ];
 
-function costText(entry: CatalogEntry): string {
-  const basis = entry.descriptor.costBasis === 'plan-window' ? 'plan window' : entry.descriptor.costBasis;
-  switch (entry.costReporting) {
-    case 'harness-estimate':
-      return `${basis} · cost estimated by the agent`;
-    case 'price-table': {
-      const p = entry.descriptor.price!;
-      return `${basis} · priced $${p.inPerMTok}/$${p.outPerMTok} per M tokens`;
-    }
-    default:
-      return `${basis} · no price (add one to telemetry.prices)`;
-  }
+const PRICE_LABEL: Record<PriceField, string> = { input: 'Input', output: 'Output', cachedInput: 'Cached input' };
+
+/** A stable, id-safe form of a catalog key (they carry `:` and `[`). */
+function idPart(key: string): string {
+  return key.replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
 interface Ctx {
@@ -76,39 +74,198 @@ function tierSelect(entry: CatalogEntry, ctx: Ctx): HTMLSelectElement {
   return select;
 }
 
-function renderDetail(entry: CatalogEntry, ctx: Ctx): HTMLElement {
-  const d = entry.descriptor;
-  const detail = el('div', 'aw-orch-row-detail');
-  detail.id = `aw-orch-detail-${entry.key}`;
+/** The host's refusal of a write to this control, as an inline alert; also marks the control. */
+function writeError(entry: CatalogEntry, field: string, control?: HTMLElement): HTMLElement | undefined {
+  const msg = ui.writeErrors[writeErrorKey(entry.key, field)];
+  if (!msg) return undefined;
+  const id = `aw-orch-err-${idPart(entry.key)}-${field.replace(/[^a-z]/gi, '')}`;
+  const p = el('p', 'aw-orch-field-error', msg);
+  p.id = id;
+  p.setAttribute('role', 'alert');
+  if (control) {
+    control.setAttribute('aria-invalid', 'true');
+    control.setAttribute('aria-describedby', id);
+  }
+  return p;
+}
+
+function subhead(title: string, aside?: string): HTMLElement {
+  const h = el('div', 'aw-orch-subhead');
+  h.appendChild(el('h5', 'aw-orch-subhead-title', title));
+  if (aside) h.appendChild(el('span', 'aw-orch-subhead-aside', aside));
+  return h;
+}
+
+/** Local models: what it is ready for, its qualification, and the qualify message the Endpoints tab sends. */
+function renderReadiness(entry: CatalogEntry, ctx: Ctx): HTMLElement | undefined {
   const local = localOf(entry, ctx);
-  if (local) {
-    const ready = local.status.completions.ready || local.status.planning.ready || local.status.agentic.ready;
-    detail.appendChild(el('p', `pf-model-status${ready ? ' ready' : ''}${local.status.agentic.completionOnly ? ' completion-only' : ''}`, local.status.text));
-    detail.appendChild(el('p', 'pf-desc pf-model-fact', `Qualification: ${local.model?.qualification ?? 'stage 1 not run'}`));
-    detail.appendChild(el('p', 'pf-desc pf-model-fact', local.model?.tasksRunning ?? local.model?.tasks ?? 'Tasks: stage 2 not run'));
+  if (!local) return undefined;
+  const s = local.status;
+  const ready = s.completions.ready || s.planning.ready || s.agentic.ready;
+  const box = el('div', 'aw-orch-readiness');
+  const line = el('p', `aw-orch-readiness-line${ready ? ' ready' : ''}`, s.text);
+  box.appendChild(line);
+  const m = local.model;
+  box.appendChild(el('p', 'aw-orch-muted', `Qualification: ${m?.qualification ?? 'stage 1 not run'}`));
+  box.appendChild(el('p', 'aw-orch-muted', m?.tasksRunning ?? m?.tasks ?? 'Tasks: stage 2 not run'));
+  const endpoint = ctx.local.endpoints.get(entry.descriptor.source);
+  if (endpoint && m && (m.harnesses ?? []).includes('codex')) {
+    const again = button(m.qualifying ? 'Qualifying…' : 'Re-run qualification', () => {
+      ctx.post({ type: 'localEndpoint', change: { op: 'qualify', id: endpoint.id, model: m.id, harness: 'codex' } });
+    }, 'aw-orch-btn');
+    again.disabled = !!m.qualifying || !endpoint.enabled;
+    again.dataset.focus = `qualify:${entry.key}`;
+    box.appendChild(again);
   }
-  const where = [
-    sourceLabel(d.source),
-    entry.harnesses.map(harnessLabel).join(', '),
-    `called as ${entry.aliases.join(', ')}`,
-  ].join(' · ');
-  detail.appendChild(el('p', 'pf-desc pf-model-meta', where));
-  if (entry.external) detail.appendChild(el('p', 'pf-endpoint-warning', `External endpoint: ${DATA_LEAVES_MACHINE}`));
-  if (entry.completions && !entry.routable) detail.appendChild(el('p', 'pf-desc pf-model-fact', 'Serves structured completions directly (no harness).'));
-  for (const line of [
-    `Effort: ${effortMapText(entry)}`,
-    `Context: ${fact(d.contextWindow, formatTokens)}`,
-    `Max output: ${fact(d.maxOutputTokens, formatTokens)}`,
-    `Vision: ${fact(d.vision, (v) => (v ? 'yes' : 'no'))}`,
-    `Cost: ${costText(entry)}`,
-  ]) {
-    detail.appendChild(el('p', 'pf-desc pf-model-fact', line));
+  return box;
+}
+
+function renderFacts(entry: CatalogEntry): HTMLElement {
+  const grid = el('dl', 'aw-orch-facts');
+  for (const f of modelFacts(entry)) {
+    const cell = el('div', 'aw-orch-fact');
+    const value = el('dd', 'aw-orch-fact-value', f.value);
+    if (f.from) value.append(' ', el('span', 'aw-orch-provenance', f.from));
+    cell.append(el('dt', 'aw-orch-fact-label', f.label), value);
+    grid.appendChild(cell);
   }
+  return grid;
+}
+
+function renderEffort(entry: CatalogEntry, ctx: Ctx): HTMLElement {
+  const box = el('div', 'aw-orch-block');
+  box.appendChild(subhead('Effort map', 'Agent Wrangler level → model level'));
+  const editor = effortEditor(entry);
+  if (editor.kind !== 'map') {
+    box.appendChild(el('p', 'aw-orch-muted', editor.text));
+    return box;
+  }
+  const send = (level: EffortLevel, native: string, isDefault: boolean) =>
+    ctx.post({ type: 'modelPolicy', change: { key: entry.key, effort: { level, native: isDefault ? EFFORT_DEFAULT : native } } });
+  for (const row of editor.rows) {
+    const line = el('div', 'aw-orch-effort-row');
+    const name = el('span', 'aw-orch-effort-level', row.level);
+    name.id = `aw-orch-eff-${idPart(entry.key)}-${row.level}`;
+    // Pills at 400px and wider; a select below, for the same choice.
+    const pills = el('div', 'aw-orch-pills');
+    pills.setAttribute('role', 'group');
+    pills.setAttribute('aria-labelledby', name.id);
+    const select = el('select', 'aw-orch-select aw-orch-effort-select');
+    select.setAttribute('aria-label', `Effort ${row.level} maps to`);
+    select.dataset.focus = `effortsel:${entry.key}:${row.level}`;
+    for (const o of row.options) {
+      const pill = button(o.native, () => {
+        if (!o.selected && !o.pinOnly) send(row.level, o.native, o.isDefault);
+      }, `aw-orch-pill${o.isDefault ? ' default' : ''}`);
+      pill.setAttribute('aria-pressed', String(o.selected));
+      pill.dataset.focus = `effort:${entry.key}:${row.level}:${o.native}`;
+      if (o.pinOnly) {
+        pill.disabled = true;
+        pill.title = 'Reached only by a pin; set in settings.json';
+      }
+      if (o.isDefault) pill.setAttribute('aria-description', 'shipped default');
+      pills.appendChild(pill);
+      const opt = option(select, o.native, `${o.native}${o.isDefault ? ' — default' : ''}${o.pinOnly ? ' (pin only)' : ''}`);
+      if (o.pinOnly) opt.disabled = true;
+      if (o.selected) select.value = o.native;
+    }
+    select.addEventListener('change', () => {
+      const o = row.options.find((x) => x.native === select.value);
+      if (o) send(row.level, o.native, o.isDefault);
+    });
+    line.append(name, pills, select);
+    box.appendChild(line);
+    const err = writeError(entry, `effort:${row.level}`, pills);
+    if (err) box.appendChild(err);
+  }
+  box.appendChild(el('p', 'aw-orch-caption', editor.note));
+  return box;
+}
+
+function renderPrices(entry: CatalogEntry, ctx: Ctx): HTMLElement {
+  const box = el('div', 'aw-orch-block');
+  box.appendChild(subhead('Price', 'US$ per million tokens · telemetry.prices'));
+  const table = ctx.view.prices ?? {};
+  const stored = table[priceKeyFor(entry, table)];
+  const grid = el('div', 'aw-orch-prices');
+  const errors: HTMLElement[] = [];
+  for (const field of PRICE_FIELDS) {
+    const cell = el('div', 'aw-orch-price');
+    const id = `aw-orch-price-${idPart(entry.key)}-${field}`;
+    const label = el('label', 'aw-orch-price-label', PRICE_LABEL[field]);
+    label.htmlFor = id;
+    const input = el('input', 'aw-orch-input aw-orch-price-input');
+    input.id = id;
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    input.placeholder = 'none';
+    input.dataset.focus = `price:${entry.key}:${field}`;
+    const draftKey = writeErrorKey(entry.key, `price:${field}`);
+    const saved = stored?.[PRICE_KEY[field]];
+    input.value = ui.priceDrafts[draftKey] ?? (saved !== undefined ? String(saved) : '');
+    const commit = () => {
+      const parsed = parsePriceText(input.value);
+      if (!parsed.ok) {
+        ui.priceDrafts = { ...ui.priceDrafts, [draftKey]: input.value };
+        ui.writeErrors = { ...ui.writeErrors, [draftKey]: parsed.error };
+        ctx.redraw();
+        return;
+      }
+      const hadDraft = draftKey in ui.priceDrafts;
+      const drafts = { ...ui.priceDrafts };
+      delete drafts[draftKey];
+      ui.priceDrafts = drafts;
+      const errs = { ...ui.writeErrors };
+      delete errs[draftKey];
+      ui.writeErrors = errs;
+      // An unchanged value is not a write: tabbing through the fields must not rewrite them.
+      if (parsed.value === (saved ?? null)) {
+        if (hadDraft) ctx.redraw();
+        return;
+      }
+      ctx.post({ type: 'modelPrice', change: { key: entry.key, field, usdPerMTok: parsed.value } });
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commit();
+      }
+    });
+    cell.append(label, input);
+    grid.appendChild(cell);
+    const err = writeError(entry, `price:${field}`, input);
+    if (err) errors.push(err);
+  }
+  box.appendChild(grid);
+  for (const e of errors) box.appendChild(e);
+  box.appendChild(el('p', 'aw-orch-caption', priceNote(entry, stored)));
+  return box;
+}
+
+function renderDetail(entry: CatalogEntry, ctx: Ctx): HTMLElement {
+  const detail = el('div', 'aw-orch-row-detail');
+  detail.id = `aw-orch-detail-${idPart(entry.key)}`;
+  const readiness = renderReadiness(entry, ctx);
+  if (readiness) detail.appendChild(readiness);
+  if (entry.external) detail.appendChild(el('p', 'aw-orch-field-error', `External endpoint: ${DATA_LEAVES_MACHINE}`));
+  for (const field of ['tier', 'enabled', 'reset']) {
+    const err = writeError(entry, field);
+    if (err) detail.appendChild(err);
+  }
+  detail.appendChild(renderFacts(entry));
+  detail.appendChild(renderEffort(entry, ctx));
+  detail.appendChild(renderPrices(entry, ctx));
+
+  const footer = el('div', 'aw-orch-diff');
+  footer.appendChild(el('span', 'aw-orch-diff-text', policyDiffText(entry)));
   if (entry.stored) {
+    // Removes this model's orchestration.models entry; its prices stay.
     const reset = button('Reset to default', () => ctx.post({ type: 'modelPolicy', change: { key: entry.key, reset: 'all' } }), 'aw-orch-btn');
     reset.dataset.focus = `reset:${entry.key}`;
-    detail.appendChild(reset);
+    footer.appendChild(reset);
   }
+  detail.appendChild(footer);
   return detail;
 }
 
@@ -126,7 +283,7 @@ function renderRow(row: BoardRow, ctx: Ctx): HTMLElement {
   toggle.type = 'button';
   toggle.dataset.focus = `expand:${entry.key}`;
   toggle.setAttribute('aria-expanded', String(open));
-  if (open) toggle.setAttribute('aria-controls', `aw-orch-detail-${entry.key}`);
+  if (open) toggle.setAttribute('aria-controls', `aw-orch-detail-${idPart(entry.key)}`);
   toggle.addEventListener('click', () => {
     ui.expanded = open ? undefined : entry.key;
     ctx.redraw();
