@@ -299,6 +299,7 @@ describe('qualification (stage 1)', () => {
   it('a model whose tool calls parse is agentic, measured; the record is metadata only', async () => {
     const s = await server({
       models: ['m'],
+      responses: true,
       replies: (body) => {
         if (body.tools?.length === 2) return { toolCall: { name: 'get_weather', arguments: '{"city":"Paris","unit":"c"}' } };
         if (body.tools?.length === 1) return { content: 'The version is 4.17.2.' };
@@ -320,7 +321,7 @@ describe('qualification (stage 1)', () => {
   });
 
   it('a model that writes its call as text is completion-only (§19.6)', async () => {
-    const s = await server({ models: ['m'], replies: [{ content: '<tools>{"name":"get_weather"}</tools>' }] });
+    const s = await server({ models: ['m'], responses: true, replies: [{ content: '<tools>{"name":"get_weather"}</tools>' }] });
     const { svc } = service();
     await svc.apply({ op: 'add', url: s.url, name: 'box' });
     const r = await svc.apply({ op: 'qualify', id: 'box', model: 'm' });

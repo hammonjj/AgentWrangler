@@ -115,6 +115,38 @@ describe('the resolver and a local model', () => {
   });
 });
 
+describe('blocker codes in rejection reasons', () => {
+  it('distinct blockers for local model rejections: missing context, unknown capability, unhealthy, unqualified, policies', () => {
+    const hosted = buildCatalog({ reported: [{ source: 'anthropic', models: [{ value: 'sonnet', label: 'Sonnet', resolved: 'claude-sonnet-5' }], at: 1 }], local: [] });
+    const local = tiered([localReport()]);
+    const catalog = { ...hosted, entries: [...hosted.entries, ...local.entries] };
+
+    // Missing context
+    const noContext = resolveRoute({ ...REQ, needs: ['context:100000'] }, { catalog, sources: { 'local:box': reachable(2) }, now: 0 });
+    expect(noContext.candidates.find((c) => c.target.source === 'local:box')?.blocker).toBe('missing-context');
+
+    // Unknown capability (vision not reported)
+    const noVision = resolveRoute({ ...REQ, needs: ['vision'] }, { catalog, sources: { 'local:box': reachable(2) }, now: 0 });
+    expect(noVision.candidates.find((c) => c.target.source === 'local:box')?.blocker).toBe('unknown-capability');
+
+    // Unhealthy endpoint
+    const down = resolveRoute(REQ, { catalog, sources: { 'local:box': { ...reachable(), health: { state: 'down' as const, reason: 'endpoint stopped' } } }, now: 0 });
+    expect(down.candidates.find((c) => c.target.source === 'local:box')?.blocker).toBe('unhealthy-endpoint');
+
+    // Unqualified harness
+    const unqualified = resolveRoute(REQ, { catalog: { ...catalog, entries: catalog.entries.map((e) => e.descriptor.source === 'local:box' ? { ...e, descriptor: { ...e.descriptor, qualifiedHarnesses: [] } } : e) }, sources: { 'local:box': reachable(2) }, now: 0 });
+    expect(unqualified.candidates.find((c) => c.target.source === 'local:box')?.blocker).toBe('unqualified-harness');
+
+    // Policy pin (harness pinned to different value)
+    const pinnedHarness = resolveRoute(REQ, { catalog, sources: { 'local:box': reachable(2) }, now: 0 }, { pins: { harness: 'claude-code' } });
+    expect(pinnedHarness.candidates.find((c) => c.target.source === 'local:box')?.blocker).toBe('policy-pin');
+
+    // Policy exclusion (local disabled)
+    const noLocal = resolveRoute(REQ, { catalog, sources: { 'local:box': reachable(2) }, now: 0 }, { exclusions: { disableLocal: true } });
+    expect(noLocal.candidates.find((c) => c.target.source === 'local:box')?.blocker).toBe('policy-exclusion');
+  });
+});
+
 describe('the proposal card and a local model', () => {
   it('a card choice of a local model carries its source to the runner', () => {
     const catalog = tiered([localReport()]);

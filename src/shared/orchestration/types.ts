@@ -539,6 +539,15 @@ export interface ResolverCandidate {
   target: ExecutionTarget;
   verdict: 'chosen' | 'fallback' | 'rejected';
   reason: string;
+  /**
+   * A distinct code for rejections, for programmatic handling and routing audit.
+   * Codes: `missing-context`, `unknown-capability`, `unhealthy-endpoint`,
+   * `unqualified-harness`, `policy-pin`, `policy-exclusion`, `policy-cap-tier`,
+   * `policy-cap-effort`, `policy-cap-location`, `policy-cap-usage-window`,
+   * `tier-mismatch`, `unsupported-location` (for external as local-only).
+   * Absent when verdict is 'chosen' or 'fallback', or when the reason is context-specific.
+   */
+  blocker?: string;
 }
 
 /**
