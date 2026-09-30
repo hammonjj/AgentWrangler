@@ -2164,6 +2164,8 @@ model can join later as configuration plus an adapter, with no change to tasks, 
 or stores. The #50 spike (2026-09-25, §19.6) tried that against real runtimes and both harnesses.
 The door fits, with the gaps and the recommendation for #51 recorded there.
 
+**Eligibility and routing audit** (#103/#104, §19.9.1): `docs/plans/qwen-local-eligibility-2026-09-30.md` records measured facts and distinct blocking reasons for Qwen models via Codex. Maps workload + harness → admission/rejection with distinct blocker codes for routing audit. Separates configuration-only remedies from product gaps. Defines whole-task vs assignment-level routing for #105/#106.
+
 What has been built since: #51's endpoint registry, probes, health, direct completions, the
 Codex path and stage 1 of qualification (§19.7), with the live check of the Codex path (§19.7.1);
 local planning (§19.8); and the tier-map status line, the harness-pin warning and qualification
