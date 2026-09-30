@@ -260,6 +260,15 @@ export interface Mission {
   planned?: boolean;
   /** Set when the user approves the plan. `running` requires it, except for a single task started directly. */
   planApprovedAt?: Millis;
+  /**
+   * The start of an unplanned single-task mission, recorded before anything
+   * launches (#100): the user started it directly (`start`), accepted or
+   * changed its proposal (`startProposed`), or `auto` routing launched it
+   * within its gate (`startAuto`). A proposal nobody started has none, and no
+   * path — retry, recovery, the scheduler — may launch it. Absent on records
+   * from before #100; one of those that already has an attempt was started.
+   */
+  startApproval?: { at: Millis; by: 'user' | 'auto' };
   /** Set when the user picks how to finish. `completed` requires it. */
   finish?: MissionFinish;
   /** What finishing left behind: the merge commit, or the pull request's address (#43). */

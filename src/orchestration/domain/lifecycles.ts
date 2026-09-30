@@ -146,6 +146,9 @@ export function transitionMission(mission: Mission, to: MissionState, opts: Tran
     if (mission.tasks.length !== 1 || mission.plannerAttemptId !== undefined || mission.planned) {
       throw new IllegalTransition('mission', mission.state, to, 'only a single task may start without a reviewed plan');
     }
+    // A proposal nobody has started stays a proposal (#100).
+    const why = launchRefusal(mission);
+    if (why) throw new IllegalTransition('mission', mission.state, to, why);
   }
   if (to === 'running' && mission.state === 'plan-review' && mission.planApprovedAt === undefined) {
     throw new IllegalTransition('mission', mission.state, to, 'the plan has not been approved');
@@ -158,6 +161,19 @@ export function transitionMission(mission: Mission, to: MissionState, opts: Tran
     throw new IllegalTransition('mission', mission.state, to, 'the user has not chosen merge, pull request or keep');
   }
   return { ...mission, state: to, stateReason: opts.reason, updatedAt: opts.now };
+}
+
+/**
+ * Why nothing of this mission may launch yet, or undefined when it may
+ * (§7.2, #100): the approval gate every launch path goes through. A planned
+ * mission needs its plan approved; an unplanned one a recorded start (the
+ * user's, or `auto` routing's within its gate). A record from before
+ * `startApproval` existed that already has an attempt was started then.
+ */
+export function launchRefusal(m: Pick<Mission, 'planned' | 'planApprovedAt' | 'startApproval' | 'attempts'>): string | undefined {
+  if (m.planned) return m.planApprovedAt === undefined ? 'Nothing runs before the plan is approved.' : undefined;
+  if (m.startApproval !== undefined || m.attempts.length > 0) return undefined;
+  return 'Nothing runs before the proposal is started.';
 }
 
 /** Whether every dependency of `task` lets it start (§12.3): `code` upstreams done (and so integrated), `order` upstreams done. */
