@@ -385,7 +385,8 @@ export class LocalEndpointService implements Disposable {
     if (!report || !isKnown(report.descriptor.contextWindow)) return undefined;
     return {
       source,
-      baseUrl: `${cfg.url}/v1`,
+      // Claude Code appends /v1/messages to ANTHROPIC_BASE_URL itself.
+      baseUrl: cfg.url,
       model,
       contextWindow: report.descriptor.contextWindow.value,
       ...(isKnown(report.descriptor.maxOutputTokens) ? { maxOutputTokens: report.descriptor.maxOutputTokens.value } : {}),

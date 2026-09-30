@@ -82,6 +82,19 @@ function service(opts: Partial<ConstructorParameters<typeof LocalEndpointService
 }
 
 describe('the endpoint registry', () => {
+  it('uses the server root for Claude Code so its /v1/messages request reaches the endpoint', async () => {
+    const s = await server({ models: ['local-model'], props: { nCtx: 32768 }, messages: true });
+    const { svc } = service();
+    await svc.apply({ op: 'add', url: s.url, name: 'Claude box' });
+
+    expect(svc.claudeProvider('local:claude-box', 'local-model')).toMatchObject({
+      baseUrl: s.url,
+      model: 'local-model',
+      contextWindow: 32768,
+    });
+    expect(svc.codexProvider('local:claude-box', 'local-model')?.baseUrl).toBe(`${s.url}/v1`);
+  });
+
   it('adds a loopback endpoint on and probes it; its models reach the catalog unassigned', async () => {
     const s = await server({ models: ['coder-7b'], props: { totalSlots: 2, nCtx: 32768 }, responses: true });
     const { svc, settings: st } = service();
