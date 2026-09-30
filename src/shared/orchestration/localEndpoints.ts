@@ -9,6 +9,12 @@
  *   hosted OpenAI-compatible API — is treated as hosted/external (§24): it is
  *   **off until the user turns it on**, and it is labelled "data leaves this
  *   machine" wherever it is shown.
+ * - **A LAN box the user owns can be declared local.** `location: 'local'` on
+ *   an endpoint whose host is a private address or a home/tailnet name
+ *   (`isPrivateNetworkUrl`) makes it local in every sense above: on by
+ *   default, no warning, `local` for routing and caps. On any other host the
+ *   field is dropped when settings are read, so a hosted API can never be
+ *   declared local.
  * - **A key is never a setting.** The endpoint records only that it has one;
  *   the key itself is in `safeStorage` under `endpointKeyRef(id)`.
  * - **Declared facts say so.** What the user states about a model (context
@@ -49,8 +55,13 @@ export interface LocalEndpointConfig {
   name: string;
   /** The server's base URL, without `/v1` (it is added per route). */
   url: string;
-  /** Absent: on for loopback, off for anything else. */
+  /** Absent: on for a local endpoint (`endpointIsLocal`), off for anything else. */
   enabled?: boolean;
+  /**
+   * `local`: the user's own machine on their network, treated as local. Kept
+   * only on a private host (`isPrivateNetworkUrl`). Absent: decided by the URL.
+   */
+  location?: 'local';
   /** Absent: detected by the probe. */
   runtime?: LocalRuntime;
   /** A key is stored in `safeStorage` for it. The key is never here. */
@@ -78,7 +89,11 @@ export interface LocalEndpointView {
   source: ModelSourceId;
   enabled: boolean;
   loopback: boolean;
-  /** "data leaves this machine", for a non-loopback endpoint. */
+  /** Not loopback, but on a private host, so it can be declared local. */
+  trustable?: boolean;
+  /** Declared local (`location: 'local'`). */
+  trustedLocal?: boolean;
+  /** "data leaves this machine", for an endpoint that is not local. */
   warning?: string;
   hasKey: boolean;
   health: SourceHealth;
@@ -152,14 +167,51 @@ export function isLoopbackUrl(url: string): boolean {
   return !!v4 && Number(v4[1]) === 127 && v4.slice(1).every((o) => Number(o) <= 255);
 }
 
-/** On, as stored, or by default: loopback on, anything else off. */
-export function endpointEnabled(cfg: Pick<LocalEndpointConfig, 'enabled' | 'url'>): boolean {
-  return cfg.enabled ?? isLoopbackUrl(cfg.url);
+/** Home and tailnet name suffixes: names no public DNS answers for. */
+const PRIVATE_NAME_SUFFIXES = ['.local', '.lan', '.home.arpa', '.internal', '.ts.net'];
+
+/**
+ * Whether a URL names a machine on the user's own network, so it may be
+ * declared local: RFC 1918 IPv4, the CGNAT range Tailscale uses (100.64/10),
+ * IPv6 unique-local (fc00::/7), a single-label name (`neuralnexus`), or a
+ * home/tailnet suffix. By literal host only, like `isLoopbackUrl`. Loopback is
+ * not included: it is local without being declared.
+ */
+export function isPrivateNetworkUrl(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host.startsWith('[') && host.endsWith(']')) {
+    const v6 = host.slice(1, -1);
+    return /^f[cd][0-9a-f]{0,2}:/.test(v6);
+  }
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (!v4.slice(1).every((o) => Number(o) <= 255)) return false;
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (host === 'localhost' || host.endsWith('.localhost')) return false;
+  if (!host.includes('.')) return /^[a-z0-9-]+$/.test(host);
+  return PRIVATE_NAME_SUFFIXES.some((s) => host.endsWith(s) && host.length > s.length);
 }
 
-/** `local` on loopback; anything else is hosted/external as far as routing and caps are concerned. */
-export function endpointLocation(cfg: Pick<LocalEndpointConfig, 'url'>): 'local' | 'hosted' {
-  return isLoopbackUrl(cfg.url) ? 'local' : 'hosted';
+/** On this machine, or declared local on a private host. Everything local-vs-hosted goes through this. */
+export function endpointIsLocal(cfg: Pick<LocalEndpointConfig, 'url' | 'location'>): boolean {
+  return isLoopbackUrl(cfg.url) || (cfg.location === 'local' && isPrivateNetworkUrl(cfg.url));
+}
+
+/** On, as stored, or by default: local on, anything else off. */
+export function endpointEnabled(cfg: Pick<LocalEndpointConfig, 'enabled' | 'url' | 'location'>): boolean {
+  return cfg.enabled ?? endpointIsLocal(cfg);
+}
+
+/** `local` on loopback or when declared; anything else is hosted/external as far as routing and caps are concerned. */
+export function endpointLocation(cfg: Pick<LocalEndpointConfig, 'url' | 'location'>): 'local' | 'hosted' {
+  return endpointIsLocal(cfg) ? 'local' : 'hosted';
 }
 
 /** A base URL as stored: http(s) only, no trailing slash, no trailing `/v1`. Undefined when unusable. */
@@ -220,6 +272,7 @@ export function parseLocalEndpoints(raw: unknown): LocalEndpointConfig[] {
       url,
     };
     if (typeof r.enabled === 'boolean') cfg.enabled = r.enabled;
+    if (r.location === 'local' && isPrivateNetworkUrl(url)) cfg.location = 'local';
     if (typeof r.runtime === 'string' && (LOCAL_RUNTIMES as readonly string[]).includes(r.runtime)) cfg.runtime = r.runtime as LocalRuntime;
     if (r.hasKey === true) cfg.hasKey = true;
     const slots = positiveInt(r.maxConcurrency);
@@ -260,6 +313,8 @@ export type LocalEndpointChange =
   | { op: 'add'; url: string; name?: string }
   | { op: 'remove'; id: string }
   | { op: 'enable'; id: string; enabled: boolean }
+  /** Declare a private-network endpoint the user's own machine (`location: 'local'`), or undo it. */
+  | { op: 'setLocal'; id: string; local: boolean }
   | { op: 'setKey'; id: string }
   | { op: 'clearKey'; id: string }
   | { op: 'probe'; id: string }
@@ -284,6 +339,8 @@ export function localEndpointChange(raw: unknown): LocalEndpointChange | undefin
       return id ? { op: c.op, id } : undefined;
     case 'enable':
       return id && typeof c.enabled === 'boolean' ? { op: 'enable', id, enabled: c.enabled } : undefined;
+    case 'setLocal':
+      return id && typeof c.local === 'boolean' ? { op: 'setLocal', id, local: c.local } : undefined;
     case 'qualify':
     case 'qualifyTasks':
       return id && typeof c.model === 'string' && c.model !== '' && (c.harness === undefined || c.harness === 'codex' || c.harness === 'claude-code')

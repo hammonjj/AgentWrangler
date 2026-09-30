@@ -2211,7 +2211,8 @@ stays unknown:
 The resolver trusts `reported`/`probed` over `declared`, and treats `unknown` as "cannot satisfy
 a hard need". A local model with unknown tool calling is never given an agentic coding task.
 
-Other fields: **hardware location** (`localhost`; a LAN host is treated as external, §24),
+Other fields: **hardware location** (`localhost`; a LAN host is treated as external unless the
+user declares it their own machine with `location: 'local'`, which only a private host accepts, §24),
 **estimated cost** (`basis: none`), **availability** (health + free slots), and optional
 **hardware** (device, memory) for display only. The initial abstraction requires no hardware
 metrics.
@@ -2363,7 +2364,7 @@ types are unchanged. What changed is adapters, settings and the catalog's inputs
 
 | Piece | Where | What it does |
 |---|---|---|
-| Registry | `shared/orchestration/localEndpoints.ts`, setting `orchestration.localEndpoints` | URL, name, optional runtime, slots, device, declared per-model facts. A loopback endpoint is on by default. Anything else is `location: 'hosted'`, off until turned on, never contacted while off, and labelled "data leaves this machine". Keys are in `safeStorage` under `localEndpoint:<id>`; the setting only records `hasKey`. |
+| Registry | `shared/orchestration/localEndpoints.ts`, setting `orchestration.localEndpoints` | URL, name, optional runtime, slots, device, declared per-model facts. A loopback endpoint is on by default, and so is a private-network one the user declares local (`location: 'local'`, kept only when `isPrivateNetworkUrl` holds). Anything else is `location: 'hosted'`, off until turned on, never contacted while off, and labelled "data leaves this machine". Keys are in `safeStorage` under `localEndpoint:<id>`; the setting only records `hasKey`. |
 | Probe | `orchestration/local/probe.ts` | Detects the runtime (Ollama, LM Studio, llama.cpp, vLLM, MLX, generic), or takes a declared one. Reads models, context, vision and slots, plus constrained decoding (`schema` for the four that have it, `none` for MLX). Probes `/v1/responses` and `/v1/messages` with an empty POST: 404/405/501 means absent. |
 | Descriptors | `shared/orchestration/localModels.ts` | `measured` > `probed` > `declared` > unknown, per field. `nativeEffort: []`, `costBasis: 'none'`. Harness `codex` only where `/v1/responses` was probed. |
 | Catalog | `buildCatalog({ local })`, `CapabilityCatalog.setLocal` | Local models are never given a default tier, so they start unassigned. `routable` needs a tier, an enabled model, an endpoint that is on, and a harness. `completions` is the same without the harness. |
@@ -2518,7 +2519,8 @@ Messages-only server may have no chat-completions route. A successful fixture ru
 agentic tool use for that harness. The resolver requires the selected pair to have qualified,
 and Preferences shows both.
 
-Claude local attempts carry a validated launch policy with the named model, `/v1` base URL,
+Claude local attempts carry a validated launch policy with the named model, the server-root base
+URL (Claude Code appends `/v1/messages` itself; a trailing `/v1` is stripped),
 catalog context window, maximum output and `keyRef`. The key is read from safeStorage by the
 core and sent to a session host over its authenticated socket after boot; in-process sessions
 read it directly. The SDK child alone gets the local provider environment. A resume or §7.4
@@ -2925,7 +2927,7 @@ orchestration adds:
 | **Automatic escalation** | could raise cost or capability without asking | bounded (§15.3), capped, pins respected, every step recorded; escalation never changes permission mode or tools |
 | **Repository permissions** | AW writes branches and merges | only in worktrees it created; only into the mission branch; never pushes or merges into the base without a click; never removes a dirty, unmerged or in-use tree |
 | **Provider credentials** | none new for Claude or Codex | they keep their own logins; AW never reads them |
-| **Local inference servers** (future) | a new endpoint AW talks to | loopback is `local`; any other host is treated as **hosted/external**, off by default and labelled "data leaves this machine" (local-first principle); optional API keys in `safeStorage`, never in agent environments unless the harness requires it, and then only for that session |
+| **Local inference servers** (future) | a new endpoint AW talks to | loopback is `local`, and so is a private-network host (RFC 1918, 100.64/10, fc00::/7, home/tailnet names) the user explicitly declares their own machine; any other host is treated as **hosted/external**, off by default and labelled "data leaves this machine" (local-first principle); optional API keys in `safeStorage`, never in agent environments unless the harness requires it, and then only for that session |
 | **GitHub** | issue import (later), PR creation (on click) | opening a PR uses the user's `gh`, on click. **Issue text is untrusted input**: this repo is public, so anyone can file an issue. An imported mission shows its author, is marked untrusted, can never skip plan review, and is never started automatically from a non-owner's issue |
 | **External services** | none in the MVP | orchestration adds no outbound traffic of its own |
 | **Telemetry privacy** | a new local dataset | metadata only, local only; an export redacts paths |
