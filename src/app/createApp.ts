@@ -1664,6 +1664,13 @@ export function createApp(host: HostServices): AgentWranglerApp {
               await tasks.editPlan(missionId, op.edit);
               return;
             case 'approve': {
+              // An open proposal (#81) is one task on a recommended route: Run task starts it as its card's Run does.
+              const proposal = tasks.get(missionId);
+              if (proposal && isOpenProposal(proposal)) {
+                const started = await tasks.startProposed(missionId, proposalChoice(proposal.tasks[0].recommendation!, models.catalog, { kind: 'run' }));
+                dialogs.flash(`Task started on ${started.worktrees.at(-1)?.branch ?? 'its own branch'}`);
+                return;
+              }
               const defaults = launchDefaults.for(provider);
               const approved = await tasks.approvePlan(missionId, { harness: provider === 'codex' ? 'codex' : 'claude-code', model: defaults.model, effort: defaults.effort });
               dialogs.flash(
