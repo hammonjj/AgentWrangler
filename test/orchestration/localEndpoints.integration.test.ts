@@ -126,6 +126,43 @@ describe('the endpoint registry', () => {
     expect(svc.codexProvider('local:lan-box', 'x')).toBeUndefined();
   });
 
+  it('a LAN endpoint marked as the user’s own machine is local, and unmarking it keeps it on', async () => {
+    let calls = 0;
+    const { svc, settings: st } = service({ fetch: async () => (calls++, new Response('{}', { status: 200 })) });
+    const added = await svc.apply({ op: 'add', url: 'http://192.168.1.20:8080', name: 'LAN box' });
+    expect(added.lines.join(' ')).toMatch(/mark it as yours/);
+    expect(svc.view()[0]).toMatchObject({ trustable: true, enabled: false });
+
+    const r = await svc.apply({ op: 'setLocal', id: 'lan-box', local: true });
+    expect(r.ok).toBe(true);
+    // Off stays off: the default is now on, so `enabled: false` is stored.
+    expect(st.doc[LOCAL_ENDPOINTS_KEY]).toEqual([{ id: 'lan-box', name: 'LAN box', url: 'http://192.168.1.20:8080', location: 'local', enabled: false }]);
+    expect(svc.status('local:lan-box').health.reason).toBe('Off');
+
+    await svc.apply({ op: 'enable', id: 'lan-box', enabled: true });
+    // On matches the new default, so it is stored by absence.
+    expect(st.doc[LOCAL_ENDPOINTS_KEY]).toEqual([{ id: 'lan-box', name: 'LAN box', url: 'http://192.168.1.20:8080', location: 'local' }]);
+    expect(calls).toBeGreaterThan(0);
+    const [view] = svc.view();
+    expect(view).toMatchObject({ enabled: true, loopback: false, trustable: true, trustedLocal: true });
+    expect(view.warning).toBeUndefined();
+    expect(svc.runFacts('local:lan-box', 'x')?.external).toBeUndefined();
+
+    await svc.apply({ op: 'setLocal', id: 'lan-box', local: false });
+    expect(st.doc[LOCAL_ENDPOINTS_KEY]).toEqual([{ id: 'lan-box', name: 'LAN box', url: 'http://192.168.1.20:8080', enabled: true }]);
+    expect(svc.view()[0]).toMatchObject({ enabled: true, warning: 'data leaves this machine' });
+    expect(svc.runFacts('local:lan-box', 'x')?.external).toBe(true);
+  });
+
+  it('refuses to mark a public host as local', async () => {
+    const { svc, settings: st } = service({ fetch: async () => new Response('{}', { status: 200 }) });
+    await svc.apply({ op: 'add', url: 'https://api.example.com', name: 'Cloud' });
+    const r = await svc.apply({ op: 'setLocal', id: 'cloud', local: true });
+    expect(r.ok).toBe(false);
+    expect(st.doc[LOCAL_ENDPOINTS_KEY]).toEqual([{ id: 'cloud', name: 'Cloud', url: 'https://api.example.com' }]);
+    expect(svc.view()[0].trustable).toBeUndefined();
+  });
+
   it('stores the key in safeStorage only, and sends it as a bearer token', async () => {
     const s = await server({ key: 'sk-test-local', models: ['m'] });
     const st = settings();

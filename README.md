@@ -518,6 +518,13 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
 - **Loopback or not.** An endpoint on `localhost`, `127.x` or `::1` is on when added. Anything
   else, a LAN box or a hosted API, is treated as external. It is **off** until you turn it on,
   it is not contacted while off, and everywhere it appears it says *data leaves this machine*.
+- **Your own machine on your network.** An endpoint on a private address (`10.x`,
+  `172.16–31.x`, `192.168.x`, Tailscale's `100.64/10`, IPv6 `fc00::/7`) or a home name
+  (`box`, `box.local`, `.lan`, `.home.arpa`, `.internal`, `.ts.net`) can be marked *My own
+  machine on this network: treat as local* on its card, or `"location": "local"` in its entry.
+  It is then local everywhere: on by default, no warning, `local` for routing, `local-only`
+  caps and *prefer local*. On any other host the field is ignored. See
+  [Serving from another machine](#serving-from-another-machine-on-your-network).
 - **Keys** go in the system keychain (`safeStorage`), never in settings. Storing refuses when
   the OS cannot encrypt. A Codex thread on the endpoint gets the key per request, and the key
   is never written to the session registry. For a native `/v1/messages` Claude Code session, the
@@ -632,6 +639,41 @@ What an MLX model can and cannot do in Agent Wrangler:
   An agentic local model needs a GGUF model on `llama-server`, which serves `/v1/responses`
   natively. That path is verified against Codex in plan §19.7, and
   `scripts/local-models/codex-live-check.ts` re-runs the check.
+
+### Serving from another machine on your network
+
+Inference can run on a separate box, such as a PC with an NVIDIA GPU, while Agent Wrangler, the
+agents, worktrees and checks stay on this Mac. Only the HTTP calls to the endpoint URL leave the Mac.
+
+- **The server.** Run `llama-server` with a GGUF model on that box. It serves `chat/completions`,
+  `/v1/responses` (Codex) and `/v1/messages` (Claude Code) natively, and `/props` reports the
+  context it actually runs with. Useful flags:
+  - `--host 0.0.0.0` to accept connections from the Mac;
+  - `--parallel 1`, because `-c` is split across slots and Agent Wrangler reads a slot's `n_ctx`;
+  - `-c 32768` at least, because Claude Code's first turn alone is about 16k tokens;
+  - `--jinja` for tool calls;
+  - `--api-key-file <file>`. Claude Code sends the key as `x-api-key`, which `llama-server` accepts.
+- **Ollama works too, but beware the context window.** Its probe reports the model's trained
+  context, not the `num_ctx` it runs with, and a probed window beats a declared one.
+- **Lock the box down.** Its firewall should admit the port only from the Mac's address, and
+  both machines should have a fixed address (a DHCP reservation).
+- **Register it** once per server, with the app quit, in `orchestration.localEndpoints`. Or
+  add it in Preferences, tick *My own machine on this network*, and turn it on:
+
+  ```json
+  {
+    "id": "gpu-box",
+    "name": "GPU box · Qwen3.5-9B",
+    "url": "http://192.168.1.50:8080",
+    "location": "local",
+    "runtime": "llama.cpp",
+    "maxConcurrency": 1,
+    "device": "RTX GPU, 8 GB"
+  }
+  ```
+
+- **Then:** use *Set key…* for the key, *Probe*, *Qualify* and *Qualify tasks* per harness,
+  and give the model a tier.
 
 ## Repository policies (orchestration)
 

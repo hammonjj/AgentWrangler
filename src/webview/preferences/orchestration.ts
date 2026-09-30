@@ -207,6 +207,17 @@ function renderEndpoint(
   check.addEventListener('change', () => post({ type: 'localEndpoint', change: { op: 'enable', id: e.id, enabled: check.checked } }));
   enabled.append(check, document.createTextNode(e.warning ? `On (${e.warning})` : 'On'));
   controls.appendChild(enabled);
+  if (e.trustable) {
+    const mine = el('label', 'pf-model-enabled');
+    const own = el('input', 'pf-check');
+    own.type = 'checkbox';
+    own.checked = !!e.trustedLocal;
+    own.setAttribute('aria-label', `${e.name} is my own machine`);
+    own.title = 'This is a machine you own on your network: treat it as local for routing, caps and labels.';
+    own.addEventListener('change', () => post({ type: 'localEndpoint', change: { op: 'setLocal', id: e.id, local: own.checked } }));
+    mine.append(own, document.createTextNode('My own machine on this network: treat as local'));
+    controls.appendChild(mine);
+  }
   const probe = button(e.busy ? 'Probing…' : 'Probe', () => post({ type: 'localEndpoint', change: { op: 'probe', id: e.id } }));
   probe.disabled = !!e.busy || !e.enabled;
   controls.appendChild(probe);
@@ -267,7 +278,7 @@ function renderLocal(
     el(
       'p',
       'pf-desc',
-      'OpenAI-compatible servers (Ollama, llama.cpp, vLLM, LM Studio, MLX). Their models appear in the tier map unassigned and are routed to only once you give them a tier. Agentic work goes through Codex and needs a server that serves /v1/responses and a model whose tool calls passed qualification; any model can answer structured completions once it has the weakest tier. An endpoint that is not on this machine is off by default: turning it on means data leaves this machine. Keys go in the system keychain, never in settings.json.',
+      'OpenAI-compatible servers (Ollama, llama.cpp, vLLM, LM Studio, MLX). Their models appear in the tier map unassigned and are routed to only once you give them a tier. Agentic work goes through Codex (needs /v1/responses) or Claude Code (needs /v1/messages), with a model whose tool calls passed qualification; any model can answer structured completions once it has the weakest tier. An endpoint that is not on this machine is off by default: turning it on means data leaves this machine, unless it is on a private address and you mark it as your own machine, which treats it as local. Keys go in the system keychain, never in settings.json.',
     ),
   );
   const form = el('div', 'pf-endpoint-add');
