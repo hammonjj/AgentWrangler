@@ -905,7 +905,9 @@ documented rather than arbitrated.
 
 ## How status is detected
 
-Two sources for status itself, in priority order — hooks are ground truth, the transcript is a fallback — plus a third for classifying *why* a session is rate limited.
+Two sources for status itself, in priority order — hooks are ground truth, the transcript is a fallback — plus a third for classifying *why* a session is rate limited, and a fourth for the work a conversation delegated.
+
+Every row answers three questions: **what is happening** (the primary status: Waiting, Busy, Done, Possibly stuck, Ended, plus an activity such as *Delegating*), **what it is waiting for** (the wait reason: a permission, an answer, your reply, an approval, delegated work, background work, a rate limit), and **whether you need to act** (its section, and whether it counts toward the attention badge). §4 below has the model; `docs/plans/status-contract.md` is the full contract.
 
 ### 1. Hooks (exact, opt-in)
 
@@ -981,6 +983,36 @@ A conversation that handed work off (`aw task`, `aw delegate`, the Delegate butt
 - **Quiet waits are not stalls.** Planning, running children, verification, background work (#60) and rate limits (#75) never become *Possibly stuck* and never send an early Done notification. Attempt sessions send no Done toast at all; their mission's notices say it.
 - **Merged, verified and closed out are three facts.** A merge says where the branch went, not that it was checked; *unverified* stays unverified (and says when no checks are configured). Agent Wrangler closes no GitHub issue: closing out is yours.
 - **Nothing is persisted on the session**, and nothing in the transcript is rewritten: an old reply that says "waiting for your approval" stays as written, with the current state shown beside it.
+
+**Status, activity and wait reason.** The primary status stays one of the six; the reason sits beside it and never changes which section a row is in.
+
+| Row shows | Section | Counts for attention | Click goes to |
+|---|---|---|---|
+| Waiting · *Needs Bash* (the prompt's tool or kind) | Waiting (top) | yes | the conversation, ask card |
+| Waiting · *Asked you something* (full width) / *Your reply* (narrow) | Waiting | yes | the conversation |
+| Waiting · *Delegated: 1 task to start* / *plan of 3 to approve* | Waiting | yes, once: on the mission, not again on the row | the conversation's card |
+| Busy · *Delegated: planning* (narrow: *Delegating*) | Busy | no | the conversation's card |
+| Busy or Done · *Waiting on delegated work · running · 0/1 done* | as its own turn | no: nothing is asked of you | the chip opens the mission in Missions |
+| any · *Delegated: t2 needs you* / *ready to merge* / *failed* | as its own turn | yes, on the mission | Missions → that mission |
+| Done · *Delegated: merged · unverified · closeout: yours* | Done | no | Missions → that mission |
+
+A conversation with several missions shows the most urgent one (needs you before activity, then the newest) and *+N*; the tooltip lists the rest. At about 300 px each chip switches to its short form (`#app.narrow`), on the row's second line.
+
+**Missions.** Each mission's header shows the same phase the row does, so an open proposal reads *Awaiting approval* and never *running*. A finished mission shows three separate chips instead of *completed*: where the branch went (*Merged*, *PR opened*, *Kept on branch*, *Discarded*), whether it was checked (*Verified*, *Unverified*, *Unverified · no checks configured*, *Checks failed*) and *Closeout: yours*. A task row says *completed* for finished work, with its checks as a separate labelled fact beside it. The Missions tab's count is the missions that need you, each counted once.
+
+**The conversation's delegated-work summary.** Under the conversation header, and outside the transcript, a strip lists every mission this conversation delegated: its phase (*Planning*, *Awaiting approval*, *Running*, *Awaiting results*, *Verifying*, *Ready to merge*, or how it ended), its title and progress, the merged/verified/closeout facts once it has finished, and *Open in Missions* (plus *Show card* while there is a card to answer). It updates as a mission is approved, launched, finished or merged. It is sent to the pane as its own message, so nothing already drawn in the transcript is re-rendered. The proposal and plan cards take their headings from the same entries. The strip folds to one line. A started mission stays listed while it runs, and for a day after it ends.
+
+**Uncertainty markers.** A value a provider or Agent Wrangler's own records report has no marker. An estimate carries `~`: a status read from the transcript (also the hollow dot), a Waiting read from the reply's wording, or delegated work tied to a turn whose start is unknown. What no signal can say right now carries `?`, and is never filled in with a guess. A row whose session host is reconnecting keeps its last status with a *? reconnecting* chip and is not counted as needing you. Each tooltip names the source and whether it is verified or estimated.
+
+**Notifications.** Each notice has a dedupe key and is sent once per run of the app, and never for a state that already held when the app started:
+- a permission or question: once per request;
+- becoming Waiting on your reply: as before, with a 30 s cooldown;
+- a proposal or plan to approve: once per mission and plan run. The row's own Waiting toast is suppressed for it;
+- a task needing you: once per task attempt;
+- ready for review: once per mission;
+- merged: once per mission. The notice says whether it was verified, and that the issue was not closed.
+
+There is no Done toast while delegated work is still going, and none for attempt sessions.
 
 ## Settings
 

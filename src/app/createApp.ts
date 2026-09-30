@@ -1467,6 +1467,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
             .reverse(),
         delegationAction: async (missionId: string, action: DelegationAction): Promise<void> => {
           const m = tasks.get(missionId);
+          // Opening Missions decides nothing, so it works for any delegated
+          // mission: the live summary (#101) keeps started ones listed.
+          if (m && action === 'open-mission') {
+            showMissionRequests.fire(missionId);
+            return;
+          }
           if (!m || !isOpenDelegation(m)) throw new TaskError('That delegation has already been started or cancelled.');
           switch (action) {
             case 'approve':

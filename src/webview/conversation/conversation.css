@@ -167,6 +167,144 @@ body,
   background: var(--vscode-button-hoverBackground);
 }
 
+/* ---- the live delegated-work summary (#101) ----
+
+   Under the header, outside the transcript: where the work this conversation
+   delegated is now. Everything wraps, so it works in a 300px pane without a
+   media query; folding it leaves one line. */
+
+#convApp #delegated {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 12px 6px;
+  font-size: 0.9em;
+  border-bottom: 1px solid var(--aw-rule);
+  max-height: 40%;
+  overflow-y: auto;
+}
+#convApp #delegated .dwhead {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--vscode-descriptionForeground);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+#convApp #delegated .dwlist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#convApp #delegated .dw {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 3px 0 3px 8px;
+  border-left: 3px solid var(--aw-rule);
+  min-width: 0;
+}
+#convApp #delegated .dw.lt-needs {
+  border-left-color: var(--aw-waiting);
+}
+#convApp #delegated .dw.lt-activity {
+  border-left-color: var(--aw-busy);
+  border-left-style: dashed;
+}
+#convApp #delegated .dw.lt-terminal {
+  border-left-color: var(--aw-done);
+}
+#convApp #delegated .dw.lt-failed {
+  border-left-color: var(--aw-stuck);
+}
+#convApp #delegated .dw.lt-unknown {
+  border-left-style: dotted;
+}
+#convApp #delegated .dwline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  flex: 1 1 14em;
+  min-width: 0;
+}
+#convApp #delegated .dwphase {
+  flex: 0 0 auto;
+  font-weight: 600;
+  white-space: nowrap;
+}
+#convApp #delegated .lt-needs .dwphase {
+  color: var(--aw-waiting);
+}
+#convApp #delegated .lt-activity .dwphase {
+  color: var(--aw-busy);
+}
+#convApp #delegated .lt-failed .dwphase {
+  color: var(--aw-stuck);
+}
+#convApp #delegated .dwtitle {
+  flex: 0 1 auto;
+  min-width: 4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#convApp #delegated .dwtext {
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+#convApp #delegated .dwfacts,
+#convApp #delegated .dwacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+/* C1–C3, one chip each: merged (green) is not verified (a dashed amber
+   "unverified" beside it), and closeout stays the user's. */
+#convApp #delegated .dwfact {
+  padding: 0 6px;
+  border: 1px solid var(--aw-rule);
+  border-radius: 9px;
+  font-size: 0.85em;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+#convApp #delegated .dwfact.ft-ok {
+  border-color: var(--aw-done);
+  color: var(--aw-done);
+}
+#convApp #delegated .dwfact.ft-warn {
+  border-style: dashed;
+  border-color: var(--aw-waiting);
+  color: var(--aw-waiting);
+}
+#convApp #delegated .dwfact.ft-bad {
+  border-color: var(--aw-stuck);
+  color: var(--aw-stuck);
+}
+#convApp #delegated .dwbtn {
+  padding: 0 8px;
+  border: 1px solid var(--vscode-button-secondaryBackground, var(--aw-rule));
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, inherit);
+  font: inherit;
+  font-size: 0.85em;
+  cursor: pointer;
+}
+#convApp #delegated .dwbtn.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+#convApp .pill.unknown {
+  opacity: 0.7;
+  border-style: dotted;
+}
+
 /* ---- the task strip (#34) ----
 
    Above the transcript and below the header: what this conversation is an

@@ -1036,6 +1036,62 @@ button.pbtn:disabled {
   position: relative;
 }
 
+/* Delegated work and wait reasons (#101), from the shared derivation. Tone
+   says whether it needs you: `needs` is the Waiting colour, `activity` is
+   quiet and dashed (work going on elsewhere, nothing for you), `terminal` is
+   plain, `failed` red, `unknown` dotted. Each chip has a full and a short
+   text; `#app.narrow` swaps them, so the pane never measures itself. */
+#app .chip.linked,
+#app .chip.wreason {
+  white-space: nowrap;
+}
+#app .chip .short {
+  display: none;
+}
+#app.narrow .chip .full {
+  display: none;
+}
+#app.narrow .chip .short {
+  display: inline;
+}
+#app .chip.lt-needs {
+  border-color: var(--aw-waiting);
+  color: var(--aw-waiting);
+}
+#app .chip.lt-activity {
+  border-style: dashed;
+  border-color: var(--aw-busy);
+  color: var(--aw-busy);
+}
+#app .chip.lt-terminal {
+  color: var(--vscode-foreground);
+}
+#app .chip.lt-failed {
+  border-color: var(--aw-stuck);
+  color: var(--aw-stuck);
+}
+#app .chip.lt-unknown,
+#app .chip.unknown {
+  border-style: dotted;
+  color: var(--vscode-descriptionForeground);
+}
+#app .chip[data-open-mission] {
+  cursor: pointer;
+}
+#app .chip[data-open-mission]:hover {
+  text-decoration: underline;
+}
+/* §8: `~` estimated, `?` unknown. A marker of its own, before the text, so it
+   survives the narrow form too. */
+#app .umark {
+  margin-right: 3px;
+  font-weight: 700;
+}
+/* Status unknown (a host reconnecting): the dot keeps its colour, dimmed. */
+#app tr.row.unc .dot {
+  opacity: 0.45;
+}
+
 /* ETA is a comparison against past turns, never a prediction of this one. The
    colour says how far past typical the turn has run. */
 .c-eta {
@@ -1736,6 +1792,44 @@ body:has(#app.narrow) #usage {
   border-color: var(--aw-done);
   color: var(--aw-done);
 }
+/* The shared phase (#101): needs you in the Waiting colour, activity in the
+   Busy colour, and C1–C3 as three separate facts, so merged never reads as
+   verified. */
+#app .missions .mchip.phase.lt-needs {
+  border-color: var(--aw-waiting);
+  color: var(--aw-waiting);
+}
+#app .missions .mchip.phase.lt-activity {
+  border-color: var(--aw-busy);
+  color: var(--aw-busy);
+}
+#app .missions .mchip.phase.lt-failed {
+  border-color: var(--aw-stuck);
+  color: var(--aw-stuck);
+}
+#app .missions .mchip.phase.lt-unknown {
+  border-style: dotted;
+}
+#app .missions .mchip.fact.ft-ok {
+  border-color: var(--aw-done);
+  color: var(--aw-done);
+}
+#app .missions .mchip.fact.ft-warn {
+  border-style: dashed;
+  border-color: var(--aw-waiting);
+  color: var(--aw-waiting);
+}
+#app .missions .mchip.fact.ft-bad {
+  border-color: var(--aw-stuck);
+  color: var(--aw-stuck);
+}
+#app .missions .mchip.fact-closeout {
+  border-style: dotted;
+}
+#app .missions .umark {
+  margin-right: 3px;
+  font-weight: 700;
+}
 #app .missions .mchip.health {
   border-color: transparent;
 }
@@ -1895,8 +1989,25 @@ body:has(#app.narrow) #usage {
   white-space: nowrap;
   color: var(--vscode-descriptionForeground);
 }
-#app .missions .ts-needs-human .tstate {
+#app .missions .ts-needs-human .tstate,
+#app .missions .mtask.needs .tstate {
   color: var(--aw-waiting);
+}
+#app .missions .tp-done .tstate {
+  color: var(--aw-done);
+}
+/* Whether it was checked is a separate, labelled fact (C2). */
+#app .missions .tverify .tvlabel {
+  opacity: 0.75;
+}
+#app .missions .tverify.ft-ok {
+  color: var(--aw-done);
+}
+#app .missions .tverify.ft-warn {
+  color: var(--aw-waiting);
+}
+#app .missions .tverify.ft-bad {
+  color: var(--aw-stuck);
 }
 #app .missions .tline2,
 #app .missions .pline2 {

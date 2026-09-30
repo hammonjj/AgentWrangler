@@ -38,6 +38,16 @@ import {
   type TaskProposalView,
   type TaskView,
 } from '../../shared/orchestration/taskView';
+import { linkedWorkText, type LinkedWork, type WaitInfo } from '../../shared/orchestration/delegatedState';
+import {
+  certaintyMark,
+  certaintyText,
+  drillsToConversation,
+  LINKED_PHASE_LABEL,
+  linkedTone,
+  outcomeFacts,
+  waitReasonText,
+} from '../../shared/orchestration/delegatedLabels';
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { resetsInText } from '../../shared/usage';
 import { paneApi } from '../common/paneApi';
@@ -92,6 +102,7 @@ app.innerHTML = `
   <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
 </div>
 <div id="taskStrip" hidden></div>
+<div id="delegated" class="delegated" hidden></div>
 <div id="banner" hidden></div>
 <form id="findbar"><input id="find" type="search" placeholder="Find in conversation" aria-label="Find in conversation"><button>Find</button><button type="button" id="clearfind">Clear</button></form>
 <div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div><div id="convDelegationOffer" hidden></div><div id="proposals" hidden></div></div>
@@ -999,10 +1010,23 @@ function followAfterAnswer(): void {
 
 // ---- header / composer ----
 
-function setStatus(status: SessionStatus, estimated: boolean): void {
-  pill.className = `pill st-${status}`;
-  pill.textContent = estimated ? `~ ${STATUS_LABEL[status]}` : STATUS_LABEL[status];
-  pill.title = estimated ? 'Estimated from the transcript: install the status hooks for exact status.' : '';
+let pillBase = '';
+function setStatus(status: SessionStatus, estimated: boolean, uncertain?: string): void {
+  pill.className = `pill st-${status}${uncertain ? ' unknown' : ''}`;
+  // §8: `~` estimated, `?` unknown (a host reconnecting), never a guess.
+  pill.textContent = uncertain ? `? ${STATUS_LABEL[status]}` : estimated ? `~ ${STATUS_LABEL[status]}` : STATUS_LABEL[status];
+  pillBase = uncertain
+    ? `Status unknown: ${uncertain}. Shown as last known.`
+    : estimated
+      ? 'Estimated from the transcript: install the status hooks for exact status.'
+      : '';
+  setPillReason();
+}
+
+/** The pill's tooltip names what the row waits for, from the store's derivation (§3). */
+function setPillReason(): void {
+  const why = convWait ? `Why: ${waitReasonText(convWait)}\n${certaintyText(convWait.certainty, convWait.source)}` : '';
+  pill.title = [pillBase, why].filter(Boolean).join('\n\n');
 }
 
 function setMeta(session: SessionDTO): void {
@@ -1284,24 +1308,19 @@ function renderProposals(): void {
   // Busy entries are per card (`p:` or `d:` and the mission), so a delegation that became a proposal is pressable at once.
   const live = new Set([...proposals.map((p) => `p:${p.missionId}`), ...delegations.map((d) => `d:${d.missionId}`)]);
   for (const [id, at] of [...proposalBusy]) if (!live.has(id) || Date.now() - at >= BUSY_MS) proposalBusy.delete(id);
+  // The summary's "Show card" buttons follow the cards that exist now.
+  renderDelegated();
 }
 
 function proposalCard(p: TaskProposalView): HTMLElement {
   const el = document.createElement('div');
   el.className = 'blk ask proposal st-pending';
+  el.dataset.card = p.missionId;
   const head = document.createElement('div');
   head.className = 'askhead';
   // Delegate (#82) is the handoff's name; the explicit `aw task` shortcut keeps its own.
-  setText(
-    head,
-    p.delegated
-      ? p.verdict === 'route'
-        ? 'Delegated: one task, waiting for you'
-        : 'Delegated: one task, pick a route'
-      : p.verdict === 'route'
-        ? 'Task proposal: waiting for you'
-        : 'Task proposal: pick a route',
-  );
+  const routeNote = p.verdict === 'route' ? '' : ' · pick a route';
+  setText(head, `${cardHead(p.missionId, p.delegated ? 'Delegated: 1 task to start' : 'Task proposal: 1 task to start')}${routeNote}`);
   const title = document.createElement('div');
   title.className = 'qtext proptitle';
   setText(title, p.title);
@@ -1429,11 +1448,21 @@ function setProposals(next: TaskProposalView[] | undefined, nextDelegations: Del
 
 let delegations: DelegationView[] = [];
 
-const DELEGATION_HEAD: Record<DelegationView['state'], string> = {
-  planning: 'Delegated: deciding whether it is one task or several',
-  failed: 'Delegated: it could not be planned',
-  review: 'Delegated: a plan, waiting for you',
-};
+/**
+ * A card's heading, from the live summary entry for its mission (#101) when
+ * the host sent one, so the card and the summary strip cannot disagree. The
+ * fallback is for a host that sends no summary.
+ */
+function cardHead(missionId: string, fallback: string): string {
+  const w = linked.find((x) => x.missionId === missionId);
+  return w ? linkedWorkText(w) : fallback;
+}
+
+function delegationFallbackHead(d: DelegationView): string {
+  if (d.state === 'planning') return 'Delegated: planning';
+  if (d.state === 'failed') return 'Delegated: could not be planned';
+  return `Delegated: plan of ${d.tasks.length} to approve`;
+}
 
 /**
  * Work this conversation delegated (`aw delegate`) that the planner is
@@ -1444,9 +1473,10 @@ const DELEGATION_HEAD: Record<DelegationView['state'], string> = {
 function delegationCard(d: DelegationView): HTMLElement {
   const el = document.createElement('div');
   el.className = 'blk ask proposal delegation st-pending';
+  el.dataset.card = d.missionId;
   const head = document.createElement('div');
   head.className = 'askhead';
-  setText(head, d.state === 'review' ? `Delegated: a plan of ${d.tasks.length} tasks, waiting for you` : DELEGATION_HEAD[d.state]);
+  setText(head, cardHead(d.missionId, delegationFallbackHead(d)));
   const title = document.createElement('div');
   title.className = 'qtext proptitle';
   setText(title, d.title);
@@ -1530,6 +1560,116 @@ function delegationCard(d: DelegationView): HTMLElement {
   button('Cancel', 'cancel');
   el.appendChild(row);
   return el;
+}
+
+// ---- the live delegated-work summary (#101, status contract L3) ----
+
+const delegatedEl = document.getElementById('delegated')!;
+/** What this conversation delegated, one entry per mission id, as the store derived it. */
+let linked: LinkedWork[] = [];
+/** What the conversation's own row waits for (§3). */
+let convWait: WaitInfo | undefined;
+/** Whether the strip is folded to its one-line form. Per pane, not per conversation. */
+let delegatedOpen = true;
+
+/**
+ * The strip under the header: one line per mission this conversation
+ * delegated, saying where that work is now (planning, awaiting approval,
+ * running, awaiting results, verifying, or how it ended). It lives outside
+ * `#scroll`, so it is never a message in the transcript, and it never edits
+ * one: an old reply that says "waiting for your approval" stays as written,
+ * and this is the current truth beside it (H1). Every word comes from the
+ * derivation the table and Missions read; the pane computes nothing.
+ */
+function renderDelegated(): void {
+  delegatedEl.replaceChildren();
+  delegatedEl.hidden = linked.length === 0;
+  if (linked.length === 0) return;
+  const needs = linked.filter((w) => w.needsYou).length;
+  const head = document.createElement('button');
+  head.className = 'dwhead';
+  head.setAttribute('aria-expanded', String(delegatedOpen));
+  setText(head, `${delegatedOpen ? '▾' : '▸'} Delegated work · ${linked.length}${needs > 0 ? ` · ${needs} need${needs === 1 ? 's' : ''} you` : ''}`);
+  head.title = delegatedOpen ? 'Fold the summary' : 'Show what this conversation delegated';
+  head.addEventListener('click', () => {
+    delegatedOpen = !delegatedOpen;
+    renderDelegated();
+  });
+  delegatedEl.append(head);
+  if (!delegatedOpen) return;
+  const list = document.createElement('div');
+  list.className = 'dwlist';
+  for (const w of linked) list.append(delegatedEntry(w));
+  delegatedEl.append(list);
+}
+
+function delegatedEntry(w: LinkedWork): HTMLElement {
+  const el = document.createElement('div');
+  el.className = `dw lt-${linkedTone(w)}${w.terminal ? ' terminal' : ''}`;
+  el.dataset.mission = w.missionId;
+  const certainty = w.certainty === 'unknown' ? 'unknown' : w.keyed && w.keyedEstimated ? 'inferred' : w.certainty;
+  const mark = certaintyMark(certainty);
+
+  const line = document.createElement('div');
+  line.className = 'dwline';
+  const phase = document.createElement('span');
+  phase.className = 'dwphase';
+  setText(phase, `${mark ? `${mark} ` : ''}${LINKED_PHASE_LABEL[w.phase]}`);
+  phase.title = certaintyText(certainty, 'mission') + (w.keyed && w.keyedEstimated ? ' Which turn of this conversation it belongs to is estimated.' : '');
+  const title = document.createElement('span');
+  title.className = 'dwtitle';
+  setText(title, w.title);
+  title.title = w.title;
+  const text = document.createElement('span');
+  text.className = 'dwtext';
+  setText(text, w.text);
+  text.title = w.why;
+  line.append(phase, title, text);
+  el.append(line);
+
+  // C1–C3 for a finished mission: three facts, never one "done".
+  if (w.outcome) {
+    const facts = document.createElement('div');
+    facts.className = 'dwfacts';
+    for (const f of outcomeFacts(w.outcome)) {
+      const chip = document.createElement('span');
+      chip.className = `dwfact ft-${f.tone}`;
+      setText(chip, f.text);
+      chip.title = f.title;
+      facts.append(chip);
+    }
+    el.append(facts);
+  }
+
+  const acts = document.createElement('div');
+  acts.className = 'dwacts';
+  // §10: planning and approvals are answered on their card in this pane;
+  // everything else drills into Missions.
+  const cardFor = () => proposalsEl.querySelector<HTMLElement>(`[data-card="${CSS.escape(w.missionId)}"]`);
+  if (drillsToConversation(w.phase) && cardFor()) {
+    const show = document.createElement('button');
+    show.className = 'dwbtn primary';
+    setText(show, 'Show card');
+    show.title = 'Scroll to its card in this conversation';
+    show.addEventListener('click', () => cardFor()?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+    acts.append(show);
+  }
+  const open = document.createElement('button');
+  open.className = 'dwbtn';
+  setText(open, 'Open in Missions');
+  open.title = 'Show this mission in the Missions view';
+  open.addEventListener('click', () => post({ type: 'delegationAction', missionId: w.missionId, action: 'open-mission' }));
+  acts.append(open);
+  el.append(acts);
+  return el;
+}
+
+function setLinked(next: LinkedWork[] | undefined, wait: WaitInfo | undefined): void {
+  linked = next ?? [];
+  convWait = wait;
+  // The cards' headings read the same entries; it redraws the strip too.
+  renderProposals();
+  setPillReason();
 }
 
 function bulletList(items: readonly string[]): HTMLElement {
@@ -2729,7 +2869,8 @@ vscodeApi.onMessage((body) => {
       currentWork = undefined;
       notch.hidden = !m.truncated;
       setMeta(m.session);
-      setStatus(m.session.status, m.caps.estimated);
+      convWait = m.wait ?? m.session.wait;
+      setStatus(m.session.status, m.caps.estimated, m.session.statusUncertain);
       setCaps(m.caps);
       if (m.composer) setComposer(m.composer);
       else clearComposer();
@@ -2742,6 +2883,9 @@ vscodeApi.onMessage((body) => {
       renderTask();
       proposals = [];
       delegations = [];
+      // A different conversation delegated different work: the strip starts open.
+      delegatedOpen = true;
+      linked = m.linked ?? [];
       setProposals(m.proposals, m.delegations);
       stick = true;
       appendBlocks(m.blocks);
@@ -2775,9 +2919,13 @@ vscodeApi.onMessage((body) => {
         vscodeApi.setState({ key: activeSession });
       }
       setMeta(m.session);
-      setStatus(m.session.status, m.caps.estimated);
+      setStatus(m.session.status, m.caps.estimated, m.session.statusUncertain);
       setCaps(m.caps);
       setBanner(m.caps);
+      break;
+    case 'linked':
+      // Beside the transcript, never into it (H1): nothing already drawn is touched.
+      setLinked(m.linked, m.wait);
       break;
     case 'task':
       if (task?.missionId !== m.task?.missionId) attemptsOpen = assessmentOpen = routingOpen = policyOpen = false;
