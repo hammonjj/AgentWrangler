@@ -60,7 +60,7 @@ export class SimulatedHarness implements AgentHarness {
     this.inner = new ClaudeCodeHarness({
       sessions: opts.sessions,
       models: () => models,
-      localProvider: (source, model) => ({ source, model, baseUrl: 'http://127.0.0.1:18080/v1', contextWindow: 65536 }),
+      localProvider: (source, model) => ({ source, model, baseUrl: 'http://127.0.0.1:18080', contextWindow: 65536 }),
     });
   }
 

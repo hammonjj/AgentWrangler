@@ -10,6 +10,7 @@ import { LocalStructuredCompletion, RoutedCompletion } from '../../src/orchestra
 import { SimulatedCompletion } from '../../src/orchestration/completion/simulatedCompletion';
 import type { CompletionRequest } from '../../src/orchestration/completion/structuredCompletion';
 import { LocalEndpointService, type EndpointSecrets, type EndpointSettings } from '../../src/orchestration/local/localEndpointService';
+import { parseLaunchPolicy } from '../../src/shared/launchPolicy';
 import { buildCatalog } from '../../src/shared/orchestration/catalog';
 import { LOCAL_ENDPOINTS_KEY } from '../../src/shared/orchestration/localEndpoints';
 import type { LocalCallRecord, TelemetryRecord } from '../../src/shared/orchestration/telemetry';
@@ -92,6 +93,8 @@ describe('the endpoint registry', () => {
       model: 'local-model',
       contextWindow: 32768,
     });
+    // The session reads it back through the launch policy; dropping it there sent the model to Anthropic.
+    expect(parseLaunchPolicy({ claude: { localProvider: svc.claudeProvider('local:claude-box', 'local-model') } })?.claude?.localProvider?.baseUrl).toBe(s.url);
     expect(svc.codexProvider('local:claude-box', 'local-model')?.baseUrl).toBe(`${s.url}/v1`);
   });
 
