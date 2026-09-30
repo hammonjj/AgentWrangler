@@ -143,6 +143,8 @@ export interface MissionView {
   /** At most this many tasks (default 8, never above 12). */
   cap: number;
   canApprove: boolean;
+  /** An open task proposal (#81): one task waiting on a go-ahead, run on its recommended route. */
+  canRunProposal?: boolean;
   /** Mission review (§18.4): what the result adds up to, and the buttons. */
   review?: { commits: number; insertions: number; deletions: number; finishes: MissionFinish[]; recommended?: MissionFinish };
   finish?: MissionFinish;

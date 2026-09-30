@@ -1642,8 +1642,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         snapshot: () => ({
           missions: tasks
             .list()
-            // A proposal waiting on its card (#81) is not a mission yet.
-            .filter((m) => !isOpenProposal(m))
+            // Open proposals (#81) are listed too: the tab's badge counts them, so the list must show them.
             .map((m) =>
               missionViewOf(m, {
                 actions: (taskId) => tasks.actions(m.id, taskId),
@@ -1651,7 +1650,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
                 canPlan: tasks.canPlan,
               }),
             ),
-          // A3: each ask once. Open proposals count too, though they are not drawn here (#101).
+          // A3: each ask once, over the same missions the list draws (#101).
           attention: attentionCount([], tasks.list()),
           tiers: models.catalog.tiers.map((t) => t.name),
           harnesses: [
@@ -1665,6 +1664,13 @@ export function createApp(host: HostServices): AgentWranglerApp {
               await tasks.editPlan(missionId, op.edit);
               return;
             case 'approve': {
+              // An open proposal (#81) is one task on a recommended route: Run task starts it as its card's Run does.
+              const proposal = tasks.get(missionId);
+              if (proposal && isOpenProposal(proposal)) {
+                const started = await tasks.startProposed(missionId, proposalChoice(proposal.tasks[0].recommendation!, models.catalog, { kind: 'run' }));
+                dialogs.flash(`Task started on ${started.worktrees.at(-1)?.branch ?? 'its own branch'}`);
+                return;
+              }
               const defaults = launchDefaults.for(provider);
               const approved = await tasks.approvePlan(missionId, { harness: provider === 'codex' ? 'codex' : 'claude-code', model: defaults.model, effort: defaults.effort });
               dialogs.flash(
