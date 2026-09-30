@@ -888,6 +888,545 @@
   line-height: 1.4;
 }
 
+/* ---- Sections and cards shared by Routing, Endpoints, Report ------------------ */
+
+#prefsApp .aw-orch-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+#prefsApp .aw-orch-h {
+  margin: 0;
+  color: var(--aw-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-panelcard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+  background: var(--aw-surface);
+}
+
+#prefsApp .aw-orch-panelcard-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 3px 12px;
+}
+
+#prefsApp .aw-orch-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+
+/* ---- Routing -------------------------------------------------------------------- */
+
+#prefsApp .aw-orch-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+#prefsApp .aw-orch-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+  background: var(--aw-surface);
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-mode[aria-checked='true'] {
+  border-color: var(--aw-link);
+  background: color-mix(in srgb, var(--aw-link) 12%, var(--aw-surface));
+}
+
+#prefsApp .aw-orch-mode.locked .aw-orch-mode-name,
+#prefsApp .aw-orch-mode.locked .aw-orch-mode-desc {
+  color: var(--aw-text-muted);
+}
+
+#prefsApp .aw-orch-mode-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#prefsApp .aw-orch-radio {
+  display: inline-flex;
+  flex: 0 0 14px;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--aw-text-faint);
+  border-radius: 50%;
+}
+
+#prefsApp .aw-orch-mode[aria-checked='true'] .aw-orch-radio {
+  border-color: var(--aw-link);
+}
+
+#prefsApp .aw-orch-mode[aria-checked='true'] .aw-orch-radio::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--aw-link);
+}
+
+#prefsApp .aw-orch-mode-name {
+  color: var(--aw-text-strong);
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-mode-desc {
+  color: var(--aw-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+#prefsApp .aw-orch-mode-lock {
+  color: var(--aw-warn-text);
+  font-size: 11px;
+}
+
+#prefsApp .aw-orch-mode-gate {
+  color: var(--aw-text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+#prefsApp .aw-orch-fieldgroup {
+  margin: 4px 0 0;
+  color: var(--aw-text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+#prefsApp .aw-orch-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+#prefsApp .aw-orch-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+#prefsApp .aw-orch-field-label {
+  color: var(--aw-text);
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-field-control {
+  width: 100%;
+}
+
+#prefsApp .aw-orch-fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+#prefsApp .aw-orch-fieldset legend {
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+#prefsApp .aw-orch-gate-verdict {
+  color: var(--aw-warn-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-gate-verdict.met {
+  color: var(--aw-ok-text);
+}
+
+#prefsApp .aw-orch-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#prefsApp .aw-orch-gate-check {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-gate-mark {
+  color: var(--aw-error);
+}
+
+#prefsApp .aw-orch-gate-check.met .aw-orch-gate-mark {
+  color: var(--aw-ok-text);
+}
+
+#prefsApp .aw-orch-gate-value {
+  color: var(--aw-text-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+#prefsApp .aw-orch-gate-detail {
+  grid-column: 2 / -1;
+}
+
+#prefsApp .aw-orch-gate-line {
+  font-family: var(--aw-mono);
+  font-size: 11px;
+}
+
+/* ---- Sources & endpoints -------------------------------------------------------- */
+
+#prefsApp .aw-orch-sources {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+  list-style: none;
+}
+
+#prefsApp .aw-orch-source {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 160px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 6px 14px;
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-source + .aw-orch-source {
+  border-top: 1px solid var(--aw-divider);
+}
+
+#prefsApp .aw-orch-source-name {
+  color: var(--aw-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .aw-orch-source-detail {
+  color: var(--aw-text-muted);
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .aw-orch-source-word {
+  color: var(--aw-text-muted);
+  text-align: right;
+}
+
+#prefsApp .aw-orch-source[data-state='reachable'] .aw-orch-source-word {
+  color: var(--aw-ok-text);
+}
+
+#prefsApp .aw-orch-source[data-state='degraded'] .aw-orch-source-word {
+  color: var(--aw-warn-text);
+}
+
+#prefsApp .aw-orch-source[data-state='down'] .aw-orch-source-word {
+  color: var(--aw-error);
+}
+
+#prefsApp .aw-orch-health-dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--aw-text-faint);
+}
+
+#prefsApp .aw-orch-health-dot[data-state='reachable'] { background: var(--aw-ok); }
+#prefsApp .aw-orch-health-dot[data-state='degraded'] { background: var(--aw-warn); }
+#prefsApp .aw-orch-health-dot[data-state='down'] { background: var(--aw-error); }
+#prefsApp .aw-orch-health-dot[data-state='off'] {
+  border: 1.5px solid var(--aw-text-faint);
+  background: none;
+}
+
+#prefsApp .aw-orch-addform {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#prefsApp .aw-orch-ep-url {
+  flex: 2 1 200px;
+  font-family: var(--aw-mono);
+}
+
+#prefsApp .aw-orch-ep-name {
+  flex: 1 1 120px;
+}
+
+#prefsApp .aw-orch-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#prefsApp .aw-orch-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+  background: var(--aw-surface);
+}
+
+#prefsApp .aw-orch-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#prefsApp .aw-orch-card-titles {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+#prefsApp .aw-orch-card-title {
+  margin: 0;
+  color: var(--aw-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-card-meta {
+  color: var(--aw-text-faint);
+  font-family: var(--aw-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .aw-orch-card-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-fact-value[data-tone='ok'] { color: var(--aw-ok-text); }
+#prefsApp .aw-orch-fact-value[data-tone='warn'] { color: var(--aw-warn-text); }
+#prefsApp .aw-orch-fact-value[data-tone='faint'] { color: var(--aw-text-faint); }
+
+#prefsApp .aw-orch-card-model {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--aw-radius);
+  background: var(--aw-bg);
+}
+
+#prefsApp .aw-orch-card-model-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+#prefsApp .aw-orch-qual {
+  display: grid;
+  grid-template-columns: minmax(0, 140px) minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-qual-label {
+  color: var(--aw-text-muted);
+}
+
+#prefsApp .aw-orch-qual-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .aw-orch-qual-text[data-tone='ok'] { color: var(--aw-ok-text); }
+#prefsApp .aw-orch-qual-text[data-tone='warn'] { color: var(--aw-warn-text); }
+#prefsApp .aw-orch-qual-text[data-tone='faint'] { color: var(--aw-text-faint); }
+
+#prefsApp .aw-orch-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+#prefsApp .aw-orch-card-footer {
+  padding-top: 10px;
+  border-top: 1px solid var(--aw-divider);
+}
+
+/* ---- Shadow report -------------------------------------------------------------- */
+
+#prefsApp .aw-orch-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+#prefsApp .aw-orch-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+  background: var(--aw-surface);
+}
+
+#prefsApp .aw-orch-tile-value {
+  color: var(--aw-text-strong);
+  font-size: 22px;
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-tile-name {
+  color: var(--aw-text-strong);
+  font-family: var(--aw-mono);
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-tile-label {
+  color: var(--aw-text-muted);
+  font-size: 12px;
+}
+
+/* A table scrolls inside its own box on a narrow pane; the page never scrolls sideways. */
+#prefsApp .aw-orch-tablewrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+}
+
+#prefsApp .aw-orch-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+#prefsApp .aw-orch-table thead th {
+  height: 32px;
+  padding: 0 10px;
+  background: var(--aw-surface-raised);
+  color: var(--aw-text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+#prefsApp .aw-orch-table tbody th,
+#prefsApp .aw-orch-table td {
+  padding: 8px 10px;
+  border-top: 1px solid var(--aw-divider);
+  font-weight: normal;
+  text-align: left;
+  vertical-align: top;
+}
+
+#prefsApp .aw-orch-table tbody th {
+  color: var(--aw-text-strong);
+}
+
+#prefsApp .aw-orch-table .num {
+  text-align: right;
+}
+
+#prefsApp .aw-orch-table .none {
+  color: var(--aw-text-faint);
+}
+
+#prefsApp .aw-orch-cell-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+#prefsApp .aw-orch-cell-note {
+  color: var(--aw-text-muted);
+}
+
+@container aw-orch (max-width: 559px) {
+  #prefsApp .aw-orch-modes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  #prefsApp .aw-orch-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  #prefsApp .aw-orch-card-facts,
+  #prefsApp .aw-orch-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  #prefsApp .aw-orch-source {
+    grid-template-columns: 10px minmax(0, 1fr) auto;
+  }
+  #prefsApp .aw-orch-source-word {
+    grid-column: 3;
+    grid-row: 1;
+  }
+  #prefsApp .aw-orch-source-detail {
+    grid-column: 2 / -1;
+    grid-row: 2;
+  }
+  #prefsApp .aw-orch-qual {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ---- Tiers editor --------------------------------------------------------------- */
 
 #prefsApp .aw-orch-tierhead,

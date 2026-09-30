@@ -59,6 +59,18 @@ describe('Preferences webview under its CSP', () => {
     }
   });
 
+  it('gives the report real tables with header cells, and the routing mode a radio group', () => {
+    const report = fs.readFileSync(path.join(DIR, 'orchReport.ts'), 'utf8');
+    expect(report).toMatch(/el\('table'/);
+    expect(report).toMatch(/el\('th'/);
+    expect(report).toMatch(/scope = 'col'/);
+    const routing = fs.readFileSync(path.join(DIR, 'orchRouting.ts'), 'utf8');
+    expect(routing).toMatch(/'role', 'radiogroup'/);
+    expect(routing).toMatch(/'role', 'radio'/);
+    const endpoints = fs.readFileSync(path.join(DIR, 'orchEndpoints.ts'), 'utf8');
+    expect(endpoints).toMatch(/switchButton\(/);
+  });
+
   it('sizes the Orchestration section off its container, not the viewport', () => {
     const css = fs.readFileSync(path.join(DIR, 'orchestration.css'), 'utf8');
     expect(css).toMatch(/container:\s*aw-orch\s*\/\s*inline-size/);

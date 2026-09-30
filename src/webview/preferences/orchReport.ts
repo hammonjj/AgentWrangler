@@ -1,62 +1,126 @@
 /**
  * Orchestration → Shadow report (#42): what the router predicted, what ran,
- * and how it went. Read-only; it sends nothing.
+ * and how it went. Read-only; it sends nothing. The same `ComparisonReport`
+ * as before, laid out as stat tiles and real tables.
  */
 
 import type { OrchestrationPrefsView } from '../../shared/preferences';
-import type { ComparisonReport } from '../../shared/orchestration/autoRouting';
-import { el } from './orchCommon';
+import type { ComparisonReport, ComparisonTally } from '../../shared/orchestration/autoRouting';
+import { el, tabHeader } from './orchCommon';
 
-function tallyText(t: { decisions: number; disagreements: number; routerCheaper: number; routerDearer: number; sideways: number; passedFirst: number; neededEscalation: number }): string {
-  if (t.disagreements === 0) return `${t.decisions} decided · no disagreement`;
-  return `${t.decisions} decided · ${t.disagreements} disagreed (router cheaper ${t.routerCheaper}, dearer ${t.routerDearer}, sideways ${t.sideways}) · of those ${t.passedFirst} passed first time, ${t.neededEscalation} needed escalation`;
+const DASH = '—';
+
+function tile(value: string, label: string, mono = false): HTMLElement {
+  const t = el('div', 'aw-orch-tile');
+  t.append(el('span', mono ? 'aw-orch-tile-name' : 'aw-orch-tile-value', value), el('span', 'aw-orch-tile-label', label));
+  return t;
+}
+
+/** A table with a caption, `<th scope="col">` headers and a scroll wrapper so a narrow pane scrolls the table, not the page. */
+function table(caption: string, headers: string[], rows: (string | HTMLElement)[][], numericFrom = 1): HTMLElement {
+  const wrap = el('div', 'aw-orch-tablewrap');
+  const t = el('table', 'aw-orch-table');
+  t.appendChild(el('caption', 'aw-orch-sr', caption));
+  const thead = el('thead');
+  const hr = el('tr');
+  headers.forEach((h, i) => {
+    const th = el('th', i >= numericFrom ? 'num' : undefined, h);
+    th.scope = 'col';
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  t.appendChild(thead);
+  const tbody = el('tbody');
+  for (const r of rows) {
+    const tr = el('tr');
+    r.forEach((cell, i) => {
+      const c = i === 0 ? el('th') : el('td', i >= numericFrom ? 'num' : undefined);
+      if (i === 0) (c as HTMLTableCellElement).scope = 'row';
+      if (typeof cell === 'string') {
+        c.textContent = cell;
+        if (cell === DASH) c.classList.add('none');
+      } else c.appendChild(cell);
+      tr.appendChild(c);
+    });
+    tbody.appendChild(tr);
+  }
+  t.appendChild(tbody);
+  wrap.appendChild(t);
+  return wrap;
+}
+
+function labelled(label: string, reading?: string): HTMLElement {
+  const s = el('span', 'aw-orch-cell-stack');
+  s.appendChild(el('span', undefined, label));
+  if (reading) s.appendChild(el('span', 'aw-orch-cell-note', reading));
+  return s;
 }
 
 export function renderReportTab(host: HTMLElement, view: OrchestrationPrefsView): void {
+  host.appendChild(
+    tabHeader(
+      'Shadow report',
+      'What the router predicted, what ran, and how it went, for every task with a recommendation. In manual mode the prediction is the shadow; in assisted mode it is the proposal.',
+    ),
+  );
   const report = view.routing?.report;
   if (!report) {
-    host.appendChild(el('h3', 'pf-subhead', 'Shadow comparison'));
-    host.appendChild(el('p', 'pf-desc pf-empty', 'The shadow report is not available.'));
+    host.appendChild(el('p', 'aw-orch-muted', 'The shadow report is not available.'));
+    return;
+  }
+  if (report.rows.length === 0) {
+    host.appendChild(el('p', 'aw-orch-empty', 'No routed tasks on record yet.'));
     return;
   }
   renderReport(host, report);
 }
 
 function renderReport(host: HTMLElement, report: ComparisonReport): void {
-  host.appendChild(el('h3', 'pf-subhead', 'Shadow comparison'));
-  host.appendChild(
-    el('p', 'pf-desc', 'What the router predicted, what ran, and how it went, for every task with a recommendation. In manual mode the prediction is the shadow; in assisted mode it is the proposal.'),
+  const t = report.total;
+  const tiles = el('div', 'aw-orch-tiles');
+  tiles.append(
+    tile(String(t.decisions), 'Decided'),
+    tile(String(t.disagreements), 'Disagreed with what ran'),
+    tile(String(t.passedFirst), 'Of those passed first time'),
+    tile(String(t.neededEscalation), 'Needed escalation'),
   );
-  if (report.rows.length === 0) {
-    host.appendChild(el('p', 'pf-desc pf-empty', 'No routed tasks on record yet.'));
-    return;
-  }
-  host.appendChild(el('p', 'pf-desc', tallyText(report.total)));
-  const patterns = el('div', 'pf-report');
-  for (const p of report.patterns) {
-    const row = el('div', 'pf-report-row');
-    row.append(el('span', 'pf-label', p.label), el('span', 'pf-desc pf-report-value', p.count === 0 ? 'none' : `${p.count} · ${p.passedFirst} passed first time · ${p.neededEscalation} needed escalation · ${p.other} other`));
-    patterns.appendChild(row);
-    if (p.count > 0) patterns.appendChild(el('p', 'pf-desc pf-gate-detail', p.reading));
-  }
-  host.appendChild(patterns);
+  host.appendChild(tiles);
 
-  host.appendChild(el('div', 'pf-policy-group', 'By kind'));
-  const kinds = el('div', 'pf-report');
-  for (const k of report.byKind) {
-    const row = el('div', 'pf-report-row');
-    row.append(el('span', 'pf-label', k.kind), el('span', 'pf-desc pf-report-value', tallyText(k)));
-    kinds.appendChild(row);
-  }
+  const where = el('section', 'aw-orch-section');
+  where.appendChild(el('h4', 'aw-orch-h', 'Where they disagreed'));
+  const patternRows = report.patterns.map((p) => [
+    labelled(p.label, p.count > 0 ? p.reading : undefined),
+    String(p.count),
+    p.count === 0 ? DASH : String(p.passedFirst),
+    p.count === 0 ? DASH : String(p.neededEscalation),
+    p.count === 0 ? DASH : String(p.other),
+  ]);
+  patternRows.push([labelled('Sideways, same cost'), String(t.sideways), DASH, DASH, DASH]);
+  where.appendChild(table('Where the router and what ran disagreed', ['Router wanted', 'Tasks', 'Passed 1st', 'Escalated', 'Other'], patternRows));
+  host.appendChild(where);
+
+  const kinds = el('section', 'aw-orch-section');
+  kinds.appendChild(el('h4', 'aw-orch-h', 'By task kind'));
+  const kindRow = (k: { kind: string } & ComparisonTally) => {
+    const none = k.disagreements === 0;
+    const v = (n: number) => (none ? DASH : String(n));
+    return [k.kind, String(k.decisions), String(k.disagreements), v(k.routerCheaper), v(k.routerDearer), v(k.sideways), v(k.passedFirst), v(k.neededEscalation)];
+  };
+  kinds.appendChild(
+    table('By task kind', ['Kind', 'Decided', 'Disagreed', 'Cheaper', 'Dearer', 'Sideways', 'Passed 1st', 'Escalated'], report.byKind.map(kindRow)),
+  );
+  kinds.appendChild(
+    el('p', 'aw-orch-caption', 'Cheaper, dearer and sideways describe the router’s pick compared with the route that ran. Passed and escalated count the disagreements only.'),
+  );
   host.appendChild(kinds);
 
-  host.appendChild(el('div', 'pf-policy-group', 'By dimension changed'));
-  const dims = el('div', 'pf-report');
-  if (report.byDimension.length === 0) dims.appendChild(el('p', 'pf-desc pf-empty', 'No route was changed from the recommendation.'));
-  for (const d of report.byDimension) {
-    const row = el('div', 'pf-report-row');
-    row.append(el('span', 'pf-label', d.dimension), el('span', 'pf-desc pf-report-value', `${d.count} changed · ${d.passedFirst} passed first time · ${d.neededEscalation} needed escalation`));
-    dims.appendChild(row);
+  const dims = el('section', 'aw-orch-section');
+  dims.appendChild(el('h4', 'aw-orch-h', 'By what changed'));
+  if (report.byDimension.length === 0) dims.appendChild(el('p', 'aw-orch-muted', 'No route was changed from the recommendation.'));
+  else {
+    const grid = el('div', 'aw-orch-tiles');
+    for (const d of report.byDimension) grid.appendChild(tile(d.dimension, `${d.count} changed · ${d.passedFirst} passed · ${d.neededEscalation} escalated`, true));
+    dims.appendChild(grid);
   }
   host.appendChild(dims);
 }

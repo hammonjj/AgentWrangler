@@ -2,8 +2,9 @@
  * Orchestration → Routing: the routing mode, the global scope of pins and caps
  * (#40), and automatic routing's gate (#42).
  *
- * Moved here unchanged from the single long section; every message it sends
- * and every check it runs are the ones it had.
+ * Restyled, not changed: every message it sends and every check it runs are
+ * the ones it had. The mode is a radio group rather than a dropdown; picking
+ * Automatic over an unmet gate still stops at "Enable anyway" with the numbers.
  */
 
 import { routingPolicyUpdate, type OrchestrationPrefsView } from '../../shared/preferences';
@@ -11,7 +12,7 @@ import { POLICY_FIELDS, fieldValue, withField, type LauncherRoutingMode, type Po
 import { effectiveMode } from '../../shared/orchestration/autoRouting';
 import { EFFORT_LEVELS, type ExecutionPolicy } from '../../shared/orchestration/types';
 import { harnessLabel } from '../../shared/harness';
-import { button, crossLink, el, localContext, option, tierLabel, type Post } from './orchCommon';
+import { button, crossLink, el, localContext, option, tabHeader, tierLabel, type Post } from './orchCommon';
 
 type RoutingDraft = { mode: LauncherRoutingMode; policy: ExecutionPolicy };
 
@@ -39,26 +40,26 @@ export function onRoutingResult(ok: boolean, errors: string[], needsOverride = f
   }
 }
 
+/** The launcher's routing modes, in the words the code has always used for them. */
+const MODES: { id: LauncherRoutingMode; label: string; desc: string }[] = [
+  { id: 'manual', label: 'Manual', desc: 'Run on the launcher’s route. The router still records its pick as a shadow for the report.' },
+  { id: 'assisted', label: 'Assisted', desc: 'Propose a route, and wait for a click to accept or change it.' },
+  { id: 'auto', label: 'Automatic', desc: 'The router decides, within the caps, and starts the route on its own.' },
+];
+
 export function renderRoutingTab(host: HTMLElement, view: OrchestrationPrefsView, post: Post, redraw: () => void, openReport: () => void): void {
-  renderRouting(host, view, post, redraw);
-  host.appendChild(crossLink('See how the router’s picks compare in the shadow report', openReport));
+  host.appendChild(tabHeader('Routing', 'How much the router decides on its own, and the limits every task starts from.'));
+  renderRouting(host, view, post, redraw, openReport);
+  host.appendChild(el('p', 'aw-orch-caption', 'Changes apply to tasks that start afterwards. A running task keeps the policy it started with.'));
 }
 
-function renderRouting(host: HTMLElement, view: OrchestrationPrefsView, post: Post, redraw: () => void): void {
+function renderRouting(host: HTMLElement, view: OrchestrationPrefsView, post: Post, redraw: () => void, openReport: () => void): void {
   const stored = view.routing;
   if (!stored) {
-    host.appendChild(el('p', 'pf-desc pf-empty', 'Routing defaults are not available.'));
+    host.appendChild(el('p', 'aw-orch-muted', 'Routing defaults are not available.'));
     return;
   }
   const current: RoutingDraft = routingDraft ?? { mode: stored.mode, policy: stored.policy };
-  host.appendChild(el('h3', 'pf-subhead', 'Routing defaults'));
-  host.appendChild(
-    el(
-      'p',
-      'pf-desc',
-      'The global scope. A repository’s policy, a mission and a task can each override these: the more specific scope wins, but a cap can only be tightened, never loosened. A pin that breaks a cap is refused when it is set. Each task freezes these when it starts.',
-    ),
-  );
 
   const commit = (next: RoutingDraft, overrideGate = false) => {
     routingDraft = next;
@@ -93,65 +94,141 @@ function renderRouting(host: HTMLElement, view: OrchestrationPrefsView, post: Po
     commit({ mode: current.mode, policy });
   };
 
-  const form = el('div', 'pf-policy');
-  const modeRow = el('div', 'pf-policy-row');
-  const modeSelect = el('select', 'pf-input pf-select');
-  modeSelect.setAttribute('aria-label', 'Routing mode');
-  modeSelect.dataset.focus = 'routing:mode';
-  option(modeSelect, 'manual', 'Manual — run on the launcher’s route');
-  option(modeSelect, 'assisted', 'Assisted — propose a route, wait for a click');
-  option(modeSelect, 'auto', `Automatic — the router decides, within the caps${stored.gate && !stored.gate.met ? ' (gate not met)' : ''}`);
-  // A pending override shows what was asked for, not what is stored.
-  modeSelect.value = current.mode;
-  modeSelect.addEventListener('change', () => {
-    const v = modeSelect.value;
-    commit({ mode: v === 'assisted' || v === 'auto' ? v : 'manual', policy: current.policy });
-  });
-  modeRow.append(el('span', 'pf-label pf-policy-label', 'Mode'), modeSelect);
-  form.appendChild(modeRow);
-  if (overridePending) form.appendChild(renderOverridePrompt(overridePending, () => commit({ mode: 'auto', policy: current.policy }, true), () => {
+  // ---- Mode: radio cards. Automatic is locked while its gate is unmet, but
+  // picking it still opens the "Enable anyway" prompt with the numbers (#42).
+  const modes = el('section', 'aw-orch-section');
+  modes.appendChild(el('h4', 'aw-orch-h', 'Mode'));
+  const group = el('div', 'aw-orch-modes');
+  group.setAttribute('role', 'radiogroup');
+  group.setAttribute('aria-label', 'Routing mode');
+  const gate = stored.gate;
+  const overrideStands = stored.mode === 'auto' && stored.autoOverride !== undefined;
+  const cards: HTMLElement[] = [];
+  const pick = (mode: LauncherRoutingMode) => {
+    if (mode !== current.mode) commit({ mode, policy: current.policy });
+  };
+  for (const m of MODES) {
+    const locked = m.id === 'auto' && gate !== undefined && !gate.met && !overrideStands;
+    const checked = current.mode === m.id;
+    const card = el('div', `aw-orch-mode${locked ? ' locked' : ''}`);
+    card.setAttribute('role', 'radio');
+    card.setAttribute('aria-checked', String(checked));
+    if (locked) card.setAttribute('aria-disabled', 'true');
+    card.tabIndex = checked ? 0 : -1;
+    card.dataset.focus = `routing:mode:${m.id}`;
+    const title = el('span', 'aw-orch-mode-title');
+    title.append(el('span', 'aw-orch-radio'), el('span', 'aw-orch-mode-name', m.label));
+    card.append(title, el('span', 'aw-orch-mode-desc', m.desc));
+    if (locked && gate) {
+      const met = gate.checks.filter((c) => c.met).length;
+      card.append(el('span', 'aw-orch-mode-lock', 'Locked until the auto-routing gate passes'), el('span', 'aw-orch-mode-gate', `${met} of ${gate.checks.length} gate checks met`));
+    }
+    card.addEventListener('click', () => pick(m.id));
+    card.addEventListener('keydown', (e) => {
+      const i = MODES.indexOf(m);
+      let next = -1;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % MODES.length;
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + MODES.length) % MODES.length;
+      else if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        pick(m.id);
+        return;
+      }
+      if (next < 0) return;
+      // Arrows move focus; Space or Enter picks. Each pick is a settings write, so arrowing past a mode must not make one.
+      e.preventDefault();
+      cards.forEach((c, j) => (c.tabIndex = j === next ? 0 : -1));
+      cards[next].focus();
+    });
+    cards.push(card);
+    group.appendChild(card);
+  }
+  // If the checked mode is the locked one (asked for, awaiting the override), keep one card tabbable.
+  if (!cards.some((c) => c.tabIndex === 0)) cards[0].tabIndex = 0;
+  modes.appendChild(group);
+  if (overridePending) modes.appendChild(renderOverridePrompt(overridePending, () => commit({ mode: 'auto', policy: current.policy }, true), () => {
     overridePending = undefined;
     routingDraft = undefined;
     redraw();
   }));
+  modes.appendChild(crossLink('See how the router’s picks compare in the shadow report', openReport));
+  host.appendChild(modes);
 
-  let group = '';
+  // ---- Global defaults: the same fields and checks as before, in a card.
+  const card = el('section', 'aw-orch-panelcard');
+  const head = el('div', 'aw-orch-panelcard-head');
+  head.append(el('h4', 'aw-orch-h', 'Global defaults'), el('span', 'aw-orch-muted', 'The widest scope. Repos, missions and tasks can only tighten these.'));
+  card.appendChild(head);
+  card.appendChild(
+    el(
+      'p',
+      'aw-orch-muted',
+      'A repository’s policy, a mission and a task can each override these: the more specific scope wins, but a cap can only be tightened, never loosened. Each task freezes these when it starts.',
+    ),
+  );
+  let groupName = '';
+  let grid: HTMLElement | undefined;
   for (const spec of POLICY_FIELDS) {
-    if (spec.group !== group) {
-      group = spec.group;
-      form.appendChild(el('div', 'pf-policy-group', group));
+    if (spec.group !== groupName || !grid) {
+      groupName = spec.group;
+      card.appendChild(el('h5', 'aw-orch-fieldgroup', groupName));
+      grid = el('div', 'aw-orch-fields');
+      card.appendChild(grid);
     }
-    const row = el('div', 'pf-policy-row');
+    const id = `aw-orch-policy-${spec.field.replace(/\./g, '-')}`;
     const value = fieldValue(current.policy, spec.field);
-    row.appendChild(el('span', 'pf-label pf-policy-label', spec.label));
-    row.appendChild(policyControl(spec, value, view, set));
-    row.appendChild(el('span', 'pf-desc pf-policy-help', spec.help));
-    form.appendChild(row);
+    const cell = el('div', 'aw-orch-field');
+    const control = policyControl(spec, value, view, set, id);
+    if (spec.kind === 'harnesses') {
+      const fs = el('fieldset', 'aw-orch-fieldset');
+      fs.append(el('legend', 'aw-orch-field-label', spec.label), control);
+      cell.appendChild(fs);
+    } else if (spec.kind === 'flag') {
+      const label = el('label', 'aw-orch-check');
+      label.htmlFor = id;
+      label.append(control, document.createTextNode(spec.label));
+      cell.appendChild(label);
+    } else {
+      const label = el('label', 'aw-orch-field-label', spec.label);
+      label.htmlFor = id;
+      cell.append(label, control);
+    }
+    cell.appendChild(el('span', 'aw-orch-caption', spec.help));
+    grid.appendChild(cell);
   }
-  host.appendChild(form);
-
+  card.appendChild(el('p', 'aw-orch-muted', 'A pin above the cap is refused. Pinned models are never raised by escalation.'));
   const harnessWarning = localContext(view).harnessWarning;
-  if (harnessWarning) host.appendChild(el('p', 'pf-policy-error pf-harness-warning', harnessWarning));
-  for (const e of routingErrors) host.appendChild(el('p', 'pf-policy-error', e));
-  for (const e of stored.ignored) host.appendChild(el('p', 'pf-policy-error', `Ignored in settings.json — ${e}`));
-  if (routingStatus) host.appendChild(el('p', 'pf-desc pf-policy-status', routingStatus));
+  if (harnessWarning) card.appendChild(el('p', 'aw-orch-field-error', harnessWarning));
+  for (const e of routingErrors) card.appendChild(el('p', 'aw-orch-field-error', e));
+  for (const e of stored.ignored) card.appendChild(el('p', 'aw-orch-field-error', `Ignored in settings.json — ${e}`));
+  if (routingStatus) {
+    const status = el('p', 'aw-orch-muted', routingStatus);
+    status.setAttribute('role', 'status');
+    card.appendChild(status);
+  }
+  host.appendChild(card);
+  host.appendChild(el('p', 'aw-orch-caption', 'Scopes apply global → repo → mission → task. Repo limits come from the repository’s policy; mission and task limits are set where the mission or task is created.'));
+
   renderGate(host, stored);
 }
 
 /** "Enable anyway" with the numbers in front of the user: the only way to turn `auto` on over an unmet gate. */
 function renderOverridePrompt(lines: string[], confirm: () => void, cancel: () => void): HTMLElement {
-  const box = el('div', 'pf-gate-override');
-  box.appendChild(el('p', 'pf-policy-error', 'Automatic routing’s gate is not met. The record so far:'));
-  for (const l of lines) box.appendChild(el('p', 'pf-desc pf-gate-line', l));
+  const box = el('div', 'aw-orch-alert');
+  box.setAttribute('role', 'alert');
+  box.appendChild(el('strong', undefined, 'Automatic routing’s gate is not met. The record so far:'));
+  for (const l of lines) box.appendChild(el('span', 'aw-orch-gate-line', l));
   box.appendChild(
     el(
-      'p',
-      'pf-desc',
+      'span',
+      undefined,
       'Enabling it anyway lets the router pick every new launcher task’s route, within your caps, without asking. Each decision still records its reasons, and escalation may raise the tier within the caps. The numbers above are saved with the override.',
     ),
   );
-  const row = el('div', 'pf-model-controls');
-  row.append(button('Enable anyway', confirm, 'pf-action danger'), button('Keep the current mode', cancel));
+  const row = el('div', 'aw-orch-card-actions');
+  const yes = button('Enable anyway', confirm, 'aw-orch-btn danger');
+  yes.dataset.focus = 'routing:override';
+  row.append(yes, button('Keep the current mode', cancel, 'aw-orch-btn'));
   box.appendChild(row);
   return box;
 }
@@ -159,39 +236,50 @@ function renderOverridePrompt(lines: string[], confirm: () => void, cancel: () =
 function renderGate(host: HTMLElement, stored: NonNullable<OrchestrationPrefsView['routing']>): void {
   const gate = stored.gate;
   if (!gate) return;
-  host.appendChild(el('h3', 'pf-subhead', 'Automatic routing'));
-  host.appendChild(
+  const section = el('section', 'aw-orch-panelcard');
+  const head = el('div', 'aw-orch-panelcard-head');
+  head.append(el('h4', 'aw-orch-h', 'Automatic routing gate'), el('span', `aw-orch-gate-verdict${gate.met ? ' met' : ''}`, gate.met ? 'Gate met' : 'Gate not met'));
+  section.appendChild(head);
+  section.appendChild(
     el(
       'p',
-      'pf-desc',
+      'aw-orch-muted',
       'Automatic routing can be switched on once the record supports it: the routing corpus is green, the router has been shadowed or proposed for enough tasks, its proposals are mostly taken without a tier change, and no kind of task shows it under-routing. Counted from the telemetry log, one decision per task.',
     ),
   );
-  const checks = el('div', `pf-gate ${gate.met ? 'met' : 'unmet'}`);
-  checks.appendChild(el('p', 'pf-label pf-gate-verdict', gate.met ? 'Gate met' : 'Gate not met'));
+  const list = el('ul', 'aw-orch-gate');
   for (const c of gate.checks) {
-    const row = el('div', `pf-gate-check ${c.met ? 'met' : 'unmet'}`);
-    row.append(el('span', 'pf-gate-mark', c.met ? '✓' : '✗'), el('span', 'pf-label', c.label), el('span', 'pf-desc pf-gate-value', c.value));
-    checks.appendChild(row);
-    if (c.detail) checks.appendChild(el('p', 'pf-desc pf-gate-detail', c.detail));
+    const row = el('li', `aw-orch-gate-check${c.met ? ' met' : ''}`);
+    row.append(el('span', 'aw-orch-gate-mark', c.met ? '✓' : '✗'), el('span', 'aw-orch-gate-label', c.label), el('span', 'aw-orch-gate-value', c.value));
+    row.firstElementChild?.setAttribute('aria-label', c.met ? 'met' : 'not met');
+    if (c.detail) row.appendChild(el('span', 'aw-orch-caption aw-orch-gate-detail', c.detail));
+    list.appendChild(row);
   }
-  host.appendChild(checks);
+  section.appendChild(list);
   const eff = effectiveMode(stored.mode, gate, stored.autoOverride);
   if (stored.mode === 'auto' && stored.autoOverride) {
-    host.appendChild(el('p', 'pf-policy-error', `On by override since ${new Date(stored.autoOverride.at).toLocaleString()}. Shown then:`));
-    for (const l of stored.autoOverride.shown) host.appendChild(el('p', 'pf-desc pf-gate-line', l));
-  } else if (eff.note) host.appendChild(el('p', 'pf-policy-error', eff.note));
+    section.appendChild(el('p', 'aw-orch-field-error', `On by override since ${new Date(stored.autoOverride.at).toLocaleString()}. Shown then:`));
+    for (const l of stored.autoOverride.shown) section.appendChild(el('p', 'aw-orch-caption', l));
+  } else if (eff.note) section.appendChild(el('p', 'aw-orch-field-error', eff.note));
+  host.appendChild(section);
 }
 
 const POLICY_HARNESSES = ['claude-code', 'codex'] as const;
 
-function policyControl(spec: PolicyFieldSpec, value: PolicyValue | undefined, view: OrchestrationPrefsView, set: (field: string, v: PolicyValue | undefined) => void): HTMLElement {
-  const label = `${spec.group}: ${spec.label}`;
+/** What an empty choice says, per kind of field. */
+function unsetLabel(spec: PolicyFieldSpec): string {
+  if (spec.kind === 'tier') return 'No cap';
+  if (spec.kind === 'model') return 'No pin: let the router choose';
+  return '— not set';
+}
+
+/** One field's control, with `id` for the `<label>` beside it. The values and writes are the ones it always had. */
+function policyControl(spec: PolicyFieldSpec, value: PolicyValue | undefined, view: OrchestrationPrefsView, set: (field: string, v: PolicyValue | undefined) => void, id: string): HTMLElement {
   const select = (options: [string, string][]) => {
-    const s = el('select', 'pf-input pf-select');
-    s.setAttribute('aria-label', label);
+    const s = el('select', 'aw-orch-select aw-orch-field-control');
+    s.id = id;
     s.dataset.focus = `routing:${spec.field}`;
-    option(s, '', '— not set');
+    option(s, '', unsetLabel(spec));
     for (const [v, text] of options) option(s, v, text);
     s.value = value === undefined ? '' : String(value);
     s.addEventListener('change', () => set(spec.field, s.value === '' ? undefined : s.value));
@@ -219,17 +307,18 @@ function policyControl(spec: PolicyFieldSpec, value: PolicyValue | undefined, vi
     case 'flag': {
       const c = el('input', 'pf-check');
       c.type = 'checkbox';
+      c.id = id;
       c.checked = value === true;
-      c.setAttribute('aria-label', label);
       c.dataset.focus = `routing:${spec.field}`;
       c.addEventListener('change', () => set(spec.field, c.checked ? true : undefined));
       return c;
     }
     case 'harnesses': {
-      const box = el('span', 'pf-policy-checks');
+      const box = el('span', 'aw-orch-checks');
+      box.id = id;
       const now = Array.isArray(value) ? value.map(String) : [];
       for (const h of POLICY_HARNESSES) {
-        const item = el('label', 'pf-model-enabled');
+        const item = el('label', 'aw-orch-check');
         const c = el('input', 'pf-check');
         c.type = 'checkbox';
         c.checked = now.includes(h);
@@ -242,14 +331,14 @@ function policyControl(spec: PolicyFieldSpec, value: PolicyValue | undefined, vi
       return box;
     }
     default: {
-      const input = el('input', 'pf-input pf-number');
+      const input = el('input', 'aw-orch-input aw-orch-field-control');
+      input.id = id;
       input.type = 'number';
       if (spec.min !== undefined) input.min = String(spec.min);
       if (spec.max !== undefined) input.max = String(spec.max);
       input.step = spec.kind === 'usd' ? '0.01' : '1';
       input.placeholder = 'not set';
       input.value = value === undefined ? '' : String(value);
-      input.setAttribute('aria-label', label);
       input.dataset.focus = `routing:${spec.field}`;
       input.addEventListener('change', () => {
         const t = input.value.trim();
