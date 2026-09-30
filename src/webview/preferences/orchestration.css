@@ -1,0 +1,245 @@
+/*
+ * Preferences → Orchestration.
+ *
+ * Tokens as custom properties on the section's root, mapped onto the theme's
+ * `--vscode-*` values so both themes hold; the hex after each is the dark
+ * theme's value, used only where the theme defines nothing. Colours with no
+ * theme equivalent (the tinted backgrounds) are mixed from ones that have.
+ *
+ * Sized off the section, never the viewport: `.aw-orch` is a size container
+ * and every narrow rule is a `@container` query, down to a 300px pane.
+ *
+ * State is a class or an ARIA attribute (`[aria-pressed="true"]`,
+ * `[aria-selected="true"]`, `[aria-invalid="true"]`, `[data-expanded]`):
+ * the CSP forbids inline styles, and nothing here needs one.
+ */
+
+[hidden] {
+  display: none !important;
+}
+
+#prefsApp .aw-orch {
+  --aw-bg: var(--vscode-editor-background, #1f1f1f);
+  --aw-surface: var(--vscode-editorWidget-background, #232323);
+  --aw-surface-raised: color-mix(in srgb, var(--aw-surface) 92%, var(--aw-text));
+  --aw-input: var(--vscode-input-background, #2b2b2b);
+  --aw-border: var(--vscode-panel-border, #333333);
+  --aw-border-strong: var(--vscode-input-border, #474747);
+  --aw-divider: color-mix(in srgb, var(--aw-border) 80%, transparent);
+  --aw-text: var(--vscode-foreground, #d4d4d4);
+  --aw-text-strong: color-mix(in srgb, var(--aw-text) 85%, var(--vscode-editor-foreground, #ececec));
+  --aw-text-muted: var(--vscode-descriptionForeground, #a8a8a8);
+  --aw-text-faint: var(--vscode-descriptionForeground, #9a9a9a);
+  --aw-accent: var(--vscode-button-background, #0e639c);
+  --aw-accent-text: var(--vscode-button-foreground, #ffffff);
+  --aw-link: var(--vscode-textLink-foreground, #4ea1f3);
+  --aw-focus: var(--vscode-focusBorder, #4ea1f3);
+  --aw-selected: var(--vscode-list-activeSelectionBackground, #37373d);
+  --aw-selected-text: var(--vscode-list-activeSelectionForeground, #ffffff);
+  --aw-ok: var(--vscode-charts-green, #4fc27b);
+  --aw-ok-text: var(--vscode-charts-green, #6fd39a);
+  --aw-warn: var(--vscode-charts-yellow, #d7ba7d);
+  --aw-warn-text: var(--vscode-charts-yellow, #e2c98f);
+  --aw-warn-bg: color-mix(in srgb, var(--aw-warn) 14%, var(--aw-surface));
+  --aw-warn-border: color-mix(in srgb, var(--aw-warn) 45%, var(--aw-surface));
+  --aw-error: var(--vscode-errorForeground, #f48771);
+  --aw-error-bg: color-mix(in srgb, var(--aw-error) 14%, var(--aw-surface));
+  --aw-error-border: color-mix(in srgb, var(--aw-error) 45%, var(--aw-surface));
+  --aw-changed-bg: color-mix(in srgb, var(--vscode-charts-blue, #4ea1f3) 25%, var(--aw-surface));
+  --aw-changed-text: var(--vscode-charts-blue, #9fcbf5);
+  --aw-mono: var(--vscode-editor-font-family, 'SF Mono', Menlo, Consolas, monospace);
+  --aw-control-h: 28px;
+  --aw-radius: 4px;
+  --aw-lane-radius: 6px;
+
+  container: aw-orch / inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--aw-text);
+}
+
+/* ---- Shared bits ---------------------------------------------------------- */
+
+#prefsApp .aw-orch-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+#prefsApp .aw-orch :is(button, select, input, a, [tabindex]):focus-visible {
+  outline: 1px solid var(--aw-focus);
+  outline-offset: 1px;
+}
+
+#prefsApp .aw-orch-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#prefsApp .aw-orch-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--aw-text-strong);
+}
+
+#prefsApp .aw-orch-lede {
+  margin: 0;
+  max-width: 62ch;
+  line-height: 1.5;
+  color: var(--aw-text-muted);
+}
+
+#prefsApp .aw-orch-link {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--aw-link);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-link:hover {
+  text-decoration: underline;
+}
+
+/* An on/off switch: `<button aria-pressed>`, knob drawn from the attribute. */
+#prefsApp .aw-orch-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--aw-border-strong);
+  border-radius: 10px;
+  background: var(--aw-input);
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--aw-text-faint);
+  transition: left 120ms ease;
+}
+
+#prefsApp .aw-orch-switch[aria-pressed='true'] {
+  border-color: var(--aw-accent);
+  background: var(--aw-accent);
+}
+
+#prefsApp .aw-orch-switch[aria-pressed='true'] .aw-orch-switch-knob {
+  left: 16px;
+  background: var(--aw-accent-text);
+}
+
+#prefsApp .aw-orch-switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #prefsApp .aw-orch-switch-knob {
+    transition: none;
+  }
+}
+
+/* ---- The tab row ------------------------------------------------------------ */
+
+#prefsApp .aw-orch-tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--aw-border);
+  scrollbar-width: thin;
+}
+
+#prefsApp .aw-orch-tab {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  margin-bottom: -1px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--aw-text-muted);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-tab:hover {
+  color: var(--aw-text);
+}
+
+#prefsApp .aw-orch-tab[aria-selected='true'] {
+  border-bottom-color: var(--aw-link);
+  color: var(--aw-text-strong);
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-tab:focus-visible {
+  outline-offset: -2px;
+}
+
+#prefsApp .aw-orch-tab-short {
+  display: none;
+}
+
+#prefsApp .aw-orch-badge {
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--aw-warn-bg);
+  color: var(--aw-warn-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+#prefsApp .aw-orch-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+#prefsApp .aw-orch-panel:focus-visible {
+  outline: 1px solid var(--aw-focus);
+  outline-offset: 4px;
+}
+
+#prefsApp .aw-orch-tierlist-ro {
+  margin: 0;
+  padding-left: 20px;
+}
+
+@container aw-orch (max-width: 399px) {
+  #prefsApp .aw-orch-tab {
+    padding: 0 7px;
+    font-size: 12px;
+  }
+  #prefsApp .aw-orch-tab-long {
+    display: none;
+  }
+  #prefsApp .aw-orch-tab-short {
+    display: inline;
+  }
+}

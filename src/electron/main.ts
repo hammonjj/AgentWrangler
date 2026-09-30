@@ -198,6 +198,11 @@ void app.whenReady().then(() => {
     parentWindow: () => window?.browserWindow,
     runAction: (id) => wrangler.runSettingAction(id),
     onDidChangeOpen: () => syncDock(),
+    // Which Orchestration tab was open, beside the workbench's own pane state.
+    state: {
+      get: () => paneState.get<unknown>('preferences', undefined),
+      set: (value) => paneState.update('preferences', value),
+    },
     // Orchestration → tier map (#29): the catalog, and each source's health
     // from the same usage reads the dashboard cards use.
     orchestration: {

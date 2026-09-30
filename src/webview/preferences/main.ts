@@ -15,12 +15,16 @@ import './preferences.css';
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
 import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId } from '../../shared/preferences';
 import { settingGroups, SETTINGS, type SettingSpec } from '../../shared/settings';
-import { ORCHESTRATION_GROUP, onRoutingResult, renderOrchestration, setLocalEndpointResult } from './orchestration';
+import { orchestrationTabTarget } from '../../shared/orchestration/orchestrationTabs';
+import { ORCHESTRATION_GROUP, initUiPersistence, onRoutingResult, openOrchestrationTab, renderOrchestration, setLocalEndpointResult } from './orchestration';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
 
 // See `paneApi.ts` for why this is a lambda and not the bare identifier.
 const host = createWebviewBridge<unknown>(() => acquireVsCodeApi());
+
+// Which Orchestration tab was open last time; this window's own state (the host claims it for this renderer).
+initUiPersistence({ load: () => host.getState(), save: (state) => host.setState(state) });
 
 const post = (message: PreferencesToHost) => host.postMessage(message);
 
@@ -549,6 +553,13 @@ window.addEventListener('message', (event: MessageEvent) => {
   if (message.type === 'localEndpointResult') {
     setLocalEndpointResult(message);
     if (orchestrationBody) renderOrchestration(orchestrationBody, orchestration, post);
+    return;
+  }
+  const tabTarget = orchestrationTabTarget(message);
+  if (tabTarget) {
+    // The section only exists once its switch is on; scroll to it as well as switching tab.
+    sections.get(ORCHESTRATION_GROUP)?.scrollIntoView({ block: 'start' });
+    openOrchestrationTab(tabTarget);
     return;
   }
   if (message.type === 'routingResult') {

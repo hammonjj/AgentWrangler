@@ -24,6 +24,7 @@ import type { SourceStatus } from './orchestration/sourceHealth';
 import type { LocalEndpointChange, LocalEndpointView } from './orchestration/localEndpoints';
 import type { LocalModelSummary } from './orchestration/localMetrics';
 import type { ExecutionPolicy } from './orchestration/types';
+import type { OPEN_TAB_MESSAGE, OrchestrationTabTarget } from './orchestration/orchestrationTabs';
 
 export type PreferencesToHost =
   /** The window has rendered and wants the current values. */
@@ -165,7 +166,9 @@ export type HostToPreferences =
   /** What a local endpoint change did, shown beside the endpoints. */
   | { type: 'localEndpointResult'; ok: boolean; lines: string[] }
   /** The routing defaults the window sent were saved, or refused and why (#40). */
-  | { type: 'routingResult'; ok: boolean; errors: string[]; needsOverride?: boolean };
+  | { type: 'routingResult'; ok: boolean; errors: string[]; needsOverride?: boolean }
+  /** Open Orchestration on a tab, optionally focusing one model on the Models tab. */
+  | ({ type: typeof OPEN_TAB_MESSAGE } & OrchestrationTabTarget);
 
 /**
  * What a `set` or `reset` should actually write, or nothing.

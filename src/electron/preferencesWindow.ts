@@ -25,8 +25,10 @@ import { isSettingActionId, modelPolicyChange, routingPolicyUpdate, type Orchest
 import type { ModelPolicyChange } from '../shared/orchestration/catalog';
 import { localEndpointChange, type LocalEndpointChange } from '../shared/orchestration/localEndpoints';
 import { SETTINGS } from '../shared/settings';
+import { OPEN_TAB_MESSAGE, type OrchestrationTabTarget } from '../shared/orchestration/orchestrationTabs';
 import { documentUrl } from './bundleProtocol';
 import { TO_HOST, TO_WEBVIEW } from './channels';
+import { claimRendererState, type RendererStateStore } from './rendererState';
 
 export interface PreferencesWindowOptions {
   settings: HostSettings;
@@ -42,6 +44,11 @@ export interface PreferencesWindowOptions {
   runAction?(id: SettingActionId): Promise<{ ok: boolean; lines: string[] }>;
   /** Told when the window is created and when it has closed, for the Dock icon. */
   onDidChangeOpen?(open: boolean): void;
+  /**
+   * The window's own saved state (which Orchestration tab was open). Absent:
+   * the renderer is answered as it was before it had any.
+   */
+  state?: RendererStateStore;
   /** Orchestration → tier map. Absent: the section says there is nothing to show. */
   orchestration?: {
     view(): OrchestrationPrefsView;
@@ -59,6 +66,9 @@ const BY_KEY = new Map(SETTINGS.map((s) => [s.key, s]));
 export class PreferencesWindow implements Disposable {
   private window?: BrowserWindow;
   private readonly subs: Disposable[] = [];
+  private stateClaim?: Disposable;
+  /** A tab to open once the document says it is ready. */
+  private pendingTab?: OrchestrationTabTarget;
 
   constructor(private opts: PreferencesWindowOptions) {
     const onMessage = (event: IpcMainEvent, raw: unknown) => {
@@ -78,13 +88,15 @@ export class PreferencesWindow implements Disposable {
     if (opts.orchestration) this.subs.push(opts.orchestration.onDidChange(() => this.pushOrchestration()));
   }
 
-  /** Open it, or bring the open one forward. */
-  open(): void {
+  /** Open it, or bring the open one forward; with a target, on that Orchestration tab. */
+  open(target?: OrchestrationTabTarget): void {
     if (this.window && !this.window.isDestroyed()) {
       this.window.show();
       this.window.focus();
+      if (target) this.post({ type: OPEN_TAB_MESSAGE, ...target });
       return;
     }
+    this.pendingTab = target;
 
     const parent = this.opts.parentWindow();
     const win = new BrowserWindow({
@@ -110,6 +122,8 @@ export class PreferencesWindow implements Disposable {
       },
     });
     this.window = win;
+    // Claimed before the document loads: the preload reads state synchronously while it starts.
+    if (this.opts.state) this.stateClaim = claimRendererState(win.webContents.id, this.opts.state);
 
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', (event) => event.preventDefault());
@@ -120,6 +134,8 @@ export class PreferencesWindow implements Disposable {
 
     win.once('ready-to-show', () => win.show());
     win.on('closed', () => {
+      this.stateClaim?.dispose();
+      this.stateClaim = undefined;
       this.window = undefined;
       this.opts.onDidChangeOpen?.(false);
     });
@@ -138,6 +154,7 @@ export class PreferencesWindow implements Disposable {
 
   dispose(): void {
     for (const s of this.subs) s.dispose();
+    this.stateClaim?.dispose();
     this.window?.destroy();
     this.window = undefined;
   }
@@ -147,6 +164,9 @@ export class PreferencesWindow implements Disposable {
     if (message.type === 'ready') {
       this.push();
       this.pushOrchestration();
+      const target = this.pendingTab;
+      this.pendingTab = undefined;
+      if (target) this.post({ type: OPEN_TAB_MESSAGE, ...target });
       return;
     }
     if (message.type === 'modelPolicy') {

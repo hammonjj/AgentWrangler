@@ -30,6 +30,7 @@ import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 import { paneChannel, type EnvelopeTransport } from '../ui/paneChannel';
 import { documentUrl } from './bundleProtocol';
 import { STATE_GET, STATE_SET, TO_HOST, TO_WEBVIEW } from './channels';
+import { claimedRendererState } from './rendererState';
 import { shouldReloadRenderer } from './rendererRecovery';
 
 /** What the renderer saves, so a restart comes back on the same conversation. */
@@ -78,13 +79,20 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
 
     // Synchronous, because `paneApi` reads state while the bundle is still
     // evaluating. See the preload for why that round trip exists.
+    // A window that keeps state of its own (Preferences) has claimed its renderer.
     const onStateGet = (event: IpcMainEvent) => {
-      event.returnValue = this.opts.state.get() ?? null;
+      const claimed = claimedRendererState(event.sender.id);
+      event.returnValue = (claimed ? claimed.get() : this.opts.state.get()) ?? null;
     };
     ipcMain.on(STATE_GET, onStateGet);
     this.ipcSubs.push({ dispose: () => ipcMain.removeListener(STATE_GET, onStateGet) });
 
     const onStateSet = (event: IpcMainEvent, value: unknown) => {
+      const claimed = claimedRendererState(event.sender.id);
+      if (claimed) {
+        claimed.set(value);
+        return;
+      }
       if (event.sender.id !== this.window?.webContents.id) return;
       this.opts.state.set(value);
     };
