@@ -371,6 +371,12 @@ export interface CatalogEntry {
   completions?: boolean;
   /** A registered endpoint that is not on this machine: "data leaves this machine". */
   external?: boolean;
+  /**
+   * What `orchestration.models` stores for this model, as parsed. Absent when
+   * nothing is stored: the model follows the shipped defaults. Preferences
+   * shows it ("Changed", and what differs); resolution never reads it.
+   */
+  stored?: ModelPolicyEntry;
 }
 
 export interface CapabilityCatalogView {
@@ -517,6 +523,7 @@ export function buildCatalog(input: CatalogInputs): CapabilityCatalogView {
         routable: notRoutableBecause === undefined,
         notRoutableBecause,
         reportedAt: at,
+        ...(policy[key] ? { stored: { ...policy[key] } } : {}),
       });
     }
   }
@@ -561,6 +568,7 @@ export function buildCatalog(input: CatalogInputs): CapabilityCatalogView {
       reportedAt: report.reportedAt,
       completions,
       ...(report.external ? { external: true } : {}),
+      ...(policy[key] ? { stored: { ...policy[key] } } : {}),
     });
   }
 

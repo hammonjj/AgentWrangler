@@ -35,6 +35,21 @@ let pendingFocus: string | undefined;
 /** The last arguments, so a cross-link or the host can redraw without a new view. */
 let last: { host: HTMLElement; view: OrchestrationPrefsView | undefined; post: Post } | undefined;
 
+/**
+ * A control here sent a write, and the view that answers it should be drawn
+ * at once even though that control still has focus: the row has to move lanes
+ * and show what was stored. (Other views wait for focus to leave a dropdown or
+ * a text field, so a usage read never redraws under someone mid-edit.)
+ */
+let writePending = false;
+
+/** Whether the view that just arrived answers a write from here; clears the flag. */
+export function consumeWritePending(): boolean {
+  const was = writePending;
+  writePending = false;
+  return was;
+}
+
 /** Switch tab (a cross-link, or the host's open-tab message) and redraw. */
 export function openOrchestrationTab(target: OrchestrationTabTarget): void {
   applyTabTarget(target);
@@ -46,18 +61,40 @@ function focusKeyOf(node: Element | null): string | undefined {
   return node instanceof HTMLElement ? node.dataset.focus : undefined;
 }
 
-function restoreFocus(host: HTMLElement, key: string | undefined): void {
+function restoreFocus(host: HTMLElement, key: string | undefined, caret?: [number, number]): void {
   if (!key) return;
   const target = host.querySelector<HTMLElement>(`[data-focus="${CSS.escape(key)}"]`);
   target?.focus({ preventScroll: true });
+  if (caret && target instanceof HTMLInputElement) {
+    try {
+      target.setSelectionRange(caret[0], caret[1]);
+    } catch {
+      // Not a text input (number, checkbox): nothing to put back.
+    }
+  }
+}
+
+function caretOf(node: Element | null): [number, number] | undefined {
+  if (!(node instanceof HTMLInputElement)) return undefined;
+  try {
+    return node.selectionStart !== null && node.selectionEnd !== null ? [node.selectionStart, node.selectionEnd] : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Fill `host` (the section's body) from the view, replacing what was there. */
-export function renderOrchestration(host: HTMLElement, view: OrchestrationPrefsView | undefined, post: Post): void {
-  last = { host, view, post };
+export function renderOrchestration(host: HTMLElement, view: OrchestrationPrefsView | undefined, hostPost: Post): void {
+  last = { host, view, post: hostPost };
+  const post: Post = (m) => {
+    writePending = true;
+    hostPost(m);
+  };
   const scroller = host.closest('.pf-main');
   const scrollTop = scroller?.scrollTop;
-  const hadFocus = host.contains(document.activeElement) ? focusKeyOf(document.activeElement) : undefined;
+  const active = host.contains(document.activeElement) ? document.activeElement : null;
+  const hadFocus = focusKeyOf(active);
+  const caret = caretOf(active);
 
   host.textContent = '';
   if (!view) {
@@ -70,7 +107,7 @@ export function renderOrchestration(host: HTMLElement, view: OrchestrationPrefsV
   const models = needsTierBadge(needsTierCount(view.catalog.entries));
   if (models) badges.models = models;
 
-  const redraw = () => renderOrchestration(host, view, post);
+  const redraw = () => renderOrchestration(host, view, hostPost);
   const select = (id: OrchestrationTabId) => {
     selectTab(id);
     pendingFocus = `tab:${id}`;
@@ -87,7 +124,7 @@ export function renderOrchestration(host: HTMLElement, view: OrchestrationPrefsV
         renderRoutingTab(panel, view, post, redraw, () => openOrchestrationTab({ tab: 'report' }));
         break;
       case 'models':
-        renderModelsTab(panel, view, post);
+        renderModelsTab(panel, view, post, redraw);
         break;
       case 'tiers':
         renderTiersTab(panel, view);
@@ -109,6 +146,7 @@ export function renderOrchestration(host: HTMLElement, view: OrchestrationPrefsV
     const row = host.querySelector<HTMLElement>(`[data-model-key="${CSS.escape(focusModel)}"]`);
     row?.scrollIntoView({ block: 'center' });
     restoreFocus(host, `tier:${focusModel}`);
-  } else restoreFocus(host, pendingFocus ?? hadFocus);
+  } else if (pendingFocus) restoreFocus(host, pendingFocus);
+  else restoreFocus(host, hadFocus, caret);
   pendingFocus = undefined;
 }

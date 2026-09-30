@@ -1,18 +1,36 @@
 /**
- * Orchestration → Models: the tier map (#29).
+ * Orchestration → Models: the tier board.
  *
- * One row per model the CLIs have reported. Each change goes to the host as
- * one `modelPolicy` message; the host writes settings and sends the rebuilt
- * catalog back, so what is on screen is always what was stored.
+ * Lanes by tier, weakest first, after a "Needs a tier" lane for models with
+ * none. Everything shown is derived by `tierBoard.ts` from the catalog the
+ * host sent — routability and its reasons are the catalog's and
+ * `localModelStatus`'s, never worked out here. Each change is one
+ * `modelPolicy` message; the host writes settings and sends the rebuilt
+ * catalog, and the board redraws from what was stored.
  */
 
 import type { OrchestrationPrefsView } from '../../shared/preferences';
-import { effortMapText, type CatalogEntry, type TierDef } from '../../shared/orchestration/catalog';
+import { effortMapText, type CatalogEntry } from '../../shared/orchestration/catalog';
 import { harnessLabel, sourceLabel } from '../../shared/harness';
 import { formatTokens } from '../../shared/sessionUsage';
 import { DATA_LEAVES_MACHINE, isEndpointSource } from '../../shared/orchestration/localEndpoints';
-import { localModelStatus } from '../../shared/orchestration/localReadiness';
-import { el, fact, localContext, tierLabel, type LocalContext, type Post } from './orchCommon';
+import {
+  buildBoard,
+  localStatusFor,
+  rowStatus,
+  tierOptions,
+  type BoardFilter,
+  type BoardLane,
+  type BoardRow,
+} from '../../shared/orchestration/tierBoard';
+import { button, el, fact, localContext, option, switchButton, tabHeader, type LocalContext, type Post } from './orchCommon';
+import { ui } from './orchUi';
+
+const FILTERS: { id: BoardFilter; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'routable', label: 'Routable' },
+  { id: 'notRouted', label: 'Not routed' },
+];
 
 function costText(entry: CatalogEntry): string {
   const basis = entry.descriptor.costBasis === 'plan-window' ? 'plan window' : entry.descriptor.costBasis;
@@ -28,125 +46,218 @@ function costText(entry: CatalogEntry): string {
   }
 }
 
-function tierSelect(entry: CatalogEntry, tiers: TierDef[], post: Post): HTMLSelectElement {
-  const select = el('select', 'pf-input pf-select pf-tier');
+interface Ctx {
+  view: OrchestrationPrefsView;
+  post: Post;
+  redraw: () => void;
+  local: LocalContext;
+}
+
+function localOf(entry: CatalogEntry, ctx: Ctx) {
+  return isEndpointSource(entry.descriptor.source)
+    ? localStatusFor(entry, ctx.view.catalog.tiers, ctx.local.endpoints.get(entry.descriptor.source), ctx.local.harnessWarning)
+    : undefined;
+}
+
+function tierSelect(entry: CatalogEntry, ctx: Ctx): HTMLSelectElement {
+  const select = el('select', 'aw-orch-select aw-orch-tier');
   select.setAttribute('aria-label', `Tier for ${entry.descriptor.label}`);
   select.dataset.focus = `tier:${entry.key}`;
-  const options: { value: string; label: string }[] = [
-    { value: '', label: 'Unassigned' },
-    ...tiers.map((t) => ({ value: t.name, label: tierLabel(t) })),
-  ];
-  const defaultValue = entry.defaultTier ?? '';
+  const { options, value } = tierOptions(entry, ctx.view.catalog.tiers);
   for (const o of options) {
-    const option = el('option', undefined, o.value === defaultValue ? `${o.label} — default` : o.label);
-    option.value = o.value;
-    select.appendChild(option);
+    const opt = option(select, o.value, o.label);
+    if (o.disabled) opt.disabled = true;
   }
-  select.value = entry.tier ?? '';
+  select.value = value;
   select.addEventListener('change', () => {
-    post({ type: 'modelPolicy', change: { key: entry.key, tier: select.value === '' ? null : select.value } });
+    // Unassigned is `null`; the host stores it only where it differs from the default.
+    ctx.post({ type: 'modelPolicy', change: { key: entry.key, tier: select.value === '' ? null : select.value } });
   });
   return select;
 }
 
-/**
- * Beside a local model's tier picker: what it still needs for completions,
- * planning and agentic work (`localModelStatus`), then both qualification
- * stages' results. They inform the choice; nothing sets a tier from them.
- */
-function renderLocalStatus(row: HTMLElement, entry: CatalogEntry, tiers: TierDef[], local: LocalContext): void {
-  const endpoint = local.endpoints.get(entry.descriptor.source);
-  if (!endpoint) return;
-  const model = endpoint.models.find((m) => m.key === entry.key);
-  const status = localModelStatus({
-    entry,
-    tiers,
-    facts: {
-      endpointOn: endpoint.enabled,
-      health: endpoint.health.state,
-      ...(endpoint.responses !== undefined ? { responses: endpoint.responses } : {}),
-      ...(endpoint.messages !== undefined ? { messages: endpoint.messages } : {}),
-      ...(model?.stage1 ? { stage1: model.stage1 } : {}),
-      ...(model?.plannerWindowFits !== undefined ? { plannerWindowFits: model.plannerWindowFits } : {}),
-    },
-    ...(local.harnessWarning ? { harnessBlocked: local.harnessWarning } : {}),
-  });
-  const ready = status.completions.ready || status.planning.ready || status.agentic.ready;
-  row.appendChild(el('p', `pf-model-status${ready ? ' ready' : ''}${status.agentic.completionOnly ? ' completion-only' : ''}`, status.text));
-  row.appendChild(el('p', 'pf-desc pf-model-fact', `Qualification: ${model?.qualification ?? 'stage 1 not run'}`));
-  row.appendChild(el('p', 'pf-desc pf-model-fact', model?.tasksRunning ?? model?.tasks ?? 'Tasks: stage 2 not run'));
-}
-
-function renderEntry(entry: CatalogEntry, tiers: TierDef[], post: Post, local: LocalContext): HTMLElement {
+function renderDetail(entry: CatalogEntry, ctx: Ctx): HTMLElement {
   const d = entry.descriptor;
-  const declared = entry.tierDeclared || entry.enabledDeclared;
-  const row = el('div', `pf-model${entry.routable ? '' : ' notroutable'}${declared ? ' changed' : ''}`);
-  row.dataset.modelKey = entry.key;
-
-  const head = el('div', 'pf-model-head');
-  const name = el('span', 'pf-label pf-model-name', d.label);
-  const id = el('code', 'pf-key', d.resolvedId ?? d.modelId);
-  id.title = d.description ?? '';
-
-  const enabled = el('label', 'pf-model-enabled');
-  const check = el('input', 'pf-check');
-  check.type = 'checkbox';
-  check.checked = entry.enabled;
-  check.setAttribute('aria-label', `Route to ${d.label}`);
-  check.dataset.focus = `enabled:${entry.key}`;
-  check.addEventListener('change', () => post({ type: 'modelPolicy', change: { key: entry.key, enabled: check.checked } }));
-  enabled.append(check, document.createTextNode('Enabled'));
-
-  const reset = el('button', 'pf-reset', 'Reset');
-  reset.type = 'button';
-  reset.title = `Back to ${entry.defaultTier ?? 'unassigned'}${entry.excluded ? ', disabled' : ''}`;
-  reset.addEventListener('click', () => post({ type: 'modelPolicy', change: { key: entry.key, reset: 'all' } }));
-
-  head.append(name, id, reset);
-
-  const controls = el('div', 'pf-model-controls');
-  controls.append(tierSelect(entry, tiers, post), enabled);
-
+  const detail = el('div', 'aw-orch-row-detail');
+  detail.id = `aw-orch-detail-${entry.key}`;
+  const local = localOf(entry, ctx);
+  if (local) {
+    const ready = local.status.completions.ready || local.status.planning.ready || local.status.agentic.ready;
+    detail.appendChild(el('p', `pf-model-status${ready ? ' ready' : ''}${local.status.agentic.completionOnly ? ' completion-only' : ''}`, local.status.text));
+    detail.appendChild(el('p', 'pf-desc pf-model-fact', `Qualification: ${local.model?.qualification ?? 'stage 1 not run'}`));
+    detail.appendChild(el('p', 'pf-desc pf-model-fact', local.model?.tasksRunning ?? local.model?.tasks ?? 'Tasks: stage 2 not run'));
+  }
   const where = [
     sourceLabel(d.source),
     entry.harnesses.map(harnessLabel).join(', '),
-    entry.aliases.length > 1 ? `called as ${entry.aliases.join(', ')}` : `called as ${entry.aliases[0]}`,
+    `called as ${entry.aliases.join(', ')}`,
   ].join(' · ');
-
-  const facts = [
+  detail.appendChild(el('p', 'pf-desc pf-model-meta', where));
+  if (entry.external) detail.appendChild(el('p', 'pf-endpoint-warning', `External endpoint: ${DATA_LEAVES_MACHINE}`));
+  if (entry.completions && !entry.routable) detail.appendChild(el('p', 'pf-desc pf-model-fact', 'Serves structured completions directly (no harness).'));
+  for (const line of [
     `Effort: ${effortMapText(entry)}`,
     `Context: ${fact(d.contextWindow, formatTokens)}`,
     `Max output: ${fact(d.maxOutputTokens, formatTokens)}`,
     `Vision: ${fact(d.vision, (v) => (v ? 'yes' : 'no'))}`,
     `Cost: ${costText(entry)}`,
-  ];
-
-  row.append(head, controls);
-  if (isEndpointSource(d.source)) renderLocalStatus(row, entry, tiers, local);
-  row.appendChild(el('p', 'pf-desc pf-model-meta', where));
-  if (entry.external) row.appendChild(el('p', 'pf-endpoint-warning', `External endpoint: ${DATA_LEAVES_MACHINE}`));
-  if (entry.completions && !entry.routable) row.appendChild(el('p', 'pf-desc pf-model-fact', 'Serves structured completions directly (no harness).'));
-  for (const line of facts) row.appendChild(el('p', 'pf-desc pf-model-fact', line));
-  if (!entry.routable) row.appendChild(el('p', 'pf-model-why', `Not routed: ${entry.notRoutableBecause ?? 'Unassigned'}`));
-  return row;
+  ]) {
+    detail.appendChild(el('p', 'pf-desc pf-model-fact', line));
+  }
+  if (entry.stored) {
+    const reset = button('Reset to default', () => ctx.post({ type: 'modelPolicy', change: { key: entry.key, reset: 'all' } }), 'aw-orch-btn');
+    reset.dataset.focus = `reset:${entry.key}`;
+    detail.appendChild(reset);
+  }
+  return detail;
 }
 
-export function renderModelsTab(host: HTMLElement, view: OrchestrationPrefsView, post: Post): void {
+function renderRow(row: BoardRow, ctx: Ctx): HTMLElement {
+  const { entry, status } = row;
+  const d = entry.descriptor;
+  const open = ui.expanded === entry.key;
+  const wrap = el('div', 'aw-orch-row');
+  wrap.dataset.modelKey = entry.key;
+  wrap.dataset.expanded = String(open);
+  wrap.dataset.enabled = String(entry.enabled);
+
+  const main = el('div', 'aw-orch-row-main');
+  const toggle = el('button', 'aw-orch-row-toggle');
+  toggle.type = 'button';
+  toggle.dataset.focus = `expand:${entry.key}`;
+  toggle.setAttribute('aria-expanded', String(open));
+  if (open) toggle.setAttribute('aria-controls', `aw-orch-detail-${entry.key}`);
+  toggle.addEventListener('click', () => {
+    ui.expanded = open ? undefined : entry.key;
+    ctx.redraw();
+  });
+  const dot = el('span', 'aw-orch-dot');
+  dot.dataset.tone = status.tone;
+  dot.setAttribute('aria-hidden', 'true');
+  const text = el('span', 'aw-orch-row-text');
+  const line1 = el('span', 'aw-orch-row-line1');
+  line1.append(el('span', 'aw-orch-row-label', d.label), el('span', 'aw-orch-chip', sourceLabel(d.source)));
+  if (row.changed) line1.appendChild(el('span', 'aw-orch-chip aw-orch-chip-changed', 'Changed'));
+  text.append(line1, el('span', 'aw-orch-row-id', d.resolvedId ?? d.modelId));
+  if (status.reason) {
+    const reason = el('span', 'aw-orch-row-reason', status.reason);
+    reason.dataset.tone = status.tone;
+    text.appendChild(reason);
+  }
+  toggle.append(el('span', 'aw-orch-chevron'), dot, text);
+
+  const controls = el('div', 'aw-orch-row-controls');
+  controls.append(
+    tierSelect(entry, ctx),
+    switchButton({
+      label: `Enabled: ${d.label}`,
+      pressed: entry.enabled,
+      focusKey: `enabled:${entry.key}`,
+      onToggle: () => ctx.post({ type: 'modelPolicy', change: { key: entry.key, enabled: !entry.enabled } }),
+    }),
+  );
+  main.append(toggle, controls);
+  wrap.appendChild(main);
+  if (open) wrap.appendChild(renderDetail(entry, ctx));
+  return wrap;
+}
+
+function renderLane(lane: BoardLane, ctx: Ctx): HTMLElement {
+  const section = el('section', `aw-orch-lane${lane.kind === 'inbox' ? ' aw-orch-lane-inbox' : ''}${lane.escalation ? ' aw-orch-lane-escalation' : ''}`);
+  section.setAttribute('aria-label', lane.kind === 'inbox' ? 'Needs a tier' : `Tier ${lane.title}`);
+  const head = el('div', 'aw-orch-lane-head');
+  if (lane.bars) {
+    const meter = el('span', 'aw-orch-meter');
+    meter.setAttribute('aria-hidden', 'true');
+    lane.bars.forEach((lit, i) => {
+      const bar = el('span', 'aw-orch-meter-bar');
+      bar.dataset.bar = String(i);
+      bar.dataset.lit = String(lit);
+      meter.appendChild(bar);
+    });
+    head.appendChild(meter);
+  } else {
+    const inbox = el('span', 'aw-orch-inbox-icon');
+    inbox.setAttribute('aria-hidden', 'true');
+    head.appendChild(inbox);
+  }
+  const titles = el('div', 'aw-orch-lane-titles');
+  const titleRow = el('div', 'aw-orch-lane-titlerow');
+  titleRow.appendChild(el('h4', 'aw-orch-lane-title', lane.title));
+  if (lane.escalation) titleRow.appendChild(el('span', 'aw-orch-tag', 'escalation only'));
+  titles.append(titleRow, el('div', 'aw-orch-lane-sub', lane.sub));
+  const count = el('div', `aw-orch-lane-count${lane.warn ? ' aw-orch-warn-text' : ''}`, lane.countText);
+  head.append(titles, count);
+  section.appendChild(head);
+  if (lane.warn) section.appendChild(el('div', 'aw-orch-lane-warn', lane.warn));
+
+  const rows = el('div', 'aw-orch-rows');
+  for (const r of lane.rows) rows.appendChild(renderRow(r, ctx));
+  section.appendChild(rows);
+  if (lane.toggleText) {
+    const more = button(lane.toggleText, () => {
+      ui.showDisabled = { ...ui.showDisabled, [lane.key]: !lane.hiddenOpen };
+      ctx.redraw();
+    }, 'aw-orch-lane-more');
+    more.setAttribute('aria-expanded', String(lane.hiddenOpen));
+    more.dataset.focus = `more:${lane.key}`;
+    section.appendChild(more);
+  }
+  return section;
+}
+
+function renderToolbar(counts: Record<BoardFilter, number>, redraw: () => void): HTMLElement {
+  const bar = el('div', 'aw-orch-toolbar');
+  const label = el('label', 'aw-orch-sr', 'Filter models');
+  label.htmlFor = 'aw-orch-search';
+  const search = el('input', 'aw-orch-input aw-orch-search');
+  search.id = 'aw-orch-search';
+  search.type = 'search';
+  search.placeholder = 'Filter by name, id or alias';
+  search.value = ui.query;
+  search.dataset.focus = 'models:search';
+  search.addEventListener('input', () => {
+    ui.query = search.value;
+    redraw();
+  });
+  const seg = el('div', 'aw-orch-segmented');
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', 'Show');
+  for (const f of FILTERS) {
+    const b = button(`${f.label} ${counts[f.id]}`, () => {
+      ui.filter = f.id;
+      redraw();
+    }, 'aw-orch-seg');
+    b.setAttribute('aria-pressed', String(ui.filter === f.id));
+    b.dataset.focus = `filter:${f.id}`;
+    seg.appendChild(b);
+  }
+  bar.append(label, search, seg);
+  return bar;
+}
+
+export function renderModelsTab(host: HTMLElement, view: OrchestrationPrefsView, post: Post, redraw: () => void): void {
   host.appendChild(
-    el(
-      'p',
-      'pf-desc',
-      'Every model the agents have reported, the capability tier Agent Wrangler gives it, and how its effort levels map. Routing only ever picks an enabled model with a tier; an unassigned one is never picked automatically. A tier is your policy, stored in settings.json under orchestration.models: changing it affects future routing only.',
+    tabHeader(
+      'Models by tier',
+      'A tier is your policy, not a fact about the model. The router works out the tier a task needs, then picks an enabled model in it. Changes apply to tasks that start afterwards.',
     ),
   );
-  host.appendChild(el('h3', 'pf-subhead', 'Tier map'));
   if (view.catalog.entries.length === 0) {
     host.appendChild(el('p', 'pf-desc pf-empty', 'No models reported yet. Start a Claude or Codex conversation and its models appear here.'));
     return;
   }
-  const local = localContext(view);
-  const list = el('div', 'pf-models');
-  for (const entry of view.catalog.entries) list.appendChild(renderEntry(entry, view.catalog.tiers, post, local));
-  host.appendChild(list);
-  host.appendChild(el('p', 'pf-desc pf-version', `Catalog version ${view.catalog.version}`));
+  const ctx: Ctx = { view, post, redraw, local: localContext(view) };
+  const board = buildBoard(view.catalog.entries, view.catalog.tiers, (e) => rowStatus(e, localOf(e, ctx)?.status), {
+    query: ui.query,
+    filter: ui.filter,
+    showDisabled: ui.showDisabled,
+    expanded: ui.expanded,
+  });
+  host.appendChild(renderToolbar(board.counts, redraw));
+  const lanes = el('div', 'aw-orch-lanes');
+  for (const lane of board.lanes) lanes.appendChild(renderLane(lane, ctx));
+  if (board.lanes.length === 0) lanes.appendChild(el('p', 'aw-orch-empty', 'No models match this filter.'));
+  host.appendChild(lanes);
+  host.appendChild(el('p', 'aw-orch-version', `Catalog version ${view.catalog.version}`));
 }

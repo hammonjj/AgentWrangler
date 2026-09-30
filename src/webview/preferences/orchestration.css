@@ -164,6 +164,7 @@
   display: flex;
   gap: 2px;
   overflow-x: auto;
+  overflow-y: hidden;
   border-bottom: 1px solid var(--aw-border);
   scrollbar-width: thin;
 }
@@ -229,6 +230,497 @@
 #prefsApp .aw-orch-tierlist-ro {
   margin: 0;
   padding-left: 20px;
+}
+
+/* ---- Controls ---------------------------------------------------------------- */
+
+#prefsApp .aw-orch-input,
+#prefsApp .aw-orch-select {
+  box-sizing: border-box;
+  min-width: 0;
+  height: var(--aw-control-h);
+  padding: 0 8px;
+  border: 1px solid var(--aw-border-strong);
+  border-radius: var(--aw-radius);
+  background: var(--aw-input);
+  color: var(--aw-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-select {
+  padding-right: 4px;
+}
+
+#prefsApp .aw-orch-input::placeholder {
+  color: var(--aw-text-faint);
+}
+
+#prefsApp .aw-orch-input[aria-invalid='true'] {
+  border-color: var(--aw-error);
+}
+
+#prefsApp .aw-orch-btn {
+  height: var(--aw-control-h);
+  padding: 0 10px;
+  border: 1px solid var(--aw-border-strong);
+  border-radius: var(--aw-radius);
+  background: var(--aw-input);
+  color: var(--aw-text);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-btn:hover:not(:disabled) {
+  background: var(--aw-surface-raised);
+}
+
+#prefsApp .aw-orch-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#prefsApp .aw-orch-btn.primary {
+  border-color: var(--aw-accent);
+  background: var(--aw-accent);
+  color: var(--aw-accent-text);
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-btn.danger {
+  border-color: var(--aw-error-border);
+  background: none;
+  color: var(--aw-error);
+}
+
+#prefsApp .aw-orch-btn.quiet {
+  border-color: transparent;
+  background: none;
+  color: var(--aw-link);
+}
+
+#prefsApp .aw-orch-chip {
+  padding: 0 5px;
+  border: 1px solid var(--aw-border-strong);
+  border-radius: 3px;
+  color: var(--aw-text-muted);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+#prefsApp .aw-orch-chip-changed {
+  border-color: transparent;
+  background: var(--aw-changed-bg);
+  color: var(--aw-changed-text);
+}
+
+#prefsApp .aw-orch-tag {
+  padding: 1px 6px;
+  border: 1px dashed var(--aw-border-strong);
+  border-radius: 3px;
+  color: var(--aw-text-muted);
+  font-size: 11px;
+}
+
+#prefsApp .aw-orch-warn-text {
+  color: var(--aw-warn-text);
+}
+
+#prefsApp .aw-orch-empty {
+  margin: 0;
+  padding: 32px 16px;
+  border: 1px dashed var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+  color: var(--aw-text-muted);
+  text-align: center;
+}
+
+#prefsApp .aw-orch-version {
+  margin: 0;
+  color: var(--aw-text-faint);
+  font-size: 11px;
+}
+
+/* ---- Models: toolbar ---------------------------------------------------------- */
+
+#prefsApp .aw-orch-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+#prefsApp .aw-orch-search {
+  flex: 1 1 180px;
+}
+
+#prefsApp .aw-orch-segmented {
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--aw-border-strong);
+  border-radius: var(--aw-radius);
+}
+
+#prefsApp .aw-orch-seg {
+  flex: 1 1 auto;
+  height: calc(var(--aw-control-h) - 2px);
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--aw-text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-seg[aria-pressed='true'] {
+  background: var(--aw-selected);
+  color: var(--aw-selected-text);
+}
+
+#prefsApp .aw-orch-seg:focus-visible {
+  outline-offset: -2px;
+}
+
+/* ---- Models: lanes ------------------------------------------------------------ */
+
+#prefsApp .aw-orch-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+#prefsApp .aw-orch-lane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+  background: var(--aw-surface);
+}
+
+#prefsApp .aw-orch-lane-inbox {
+  border-color: var(--aw-warn-border);
+}
+
+#prefsApp .aw-orch-lane-escalation {
+  border-style: dashed;
+}
+
+#prefsApp .aw-orch-lane-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+#prefsApp .aw-orch-meter {
+  display: flex;
+  flex: 0 0 22px;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+}
+
+#prefsApp .aw-orch-meter-bar {
+  width: 4px;
+  border-radius: 1px;
+  background: var(--aw-border-strong);
+}
+
+#prefsApp .aw-orch-meter-bar[data-bar='0'] { height: 4px; }
+#prefsApp .aw-orch-meter-bar[data-bar='1'] { height: 8px; }
+#prefsApp .aw-orch-meter-bar[data-bar='2'] { height: 12px; }
+#prefsApp .aw-orch-meter-bar[data-bar='3'] { height: 16px; }
+
+#prefsApp .aw-orch-meter-bar[data-lit='true'] {
+  background: var(--aw-text);
+}
+
+/* An inbox tray, drawn with borders: no image, no inline SVG. */
+#prefsApp .aw-orch-inbox-icon {
+  position: relative;
+  flex: 0 0 22px;
+  height: 14px;
+  border: 1.5px solid var(--aw-warn);
+  border-top-width: 0;
+  border-radius: 0 0 3px 3px;
+}
+
+#prefsApp .aw-orch-inbox-icon::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  top: 4px;
+  height: 3px;
+  border: 1.5px solid var(--aw-warn);
+  border-top-width: 0;
+  border-radius: 0 0 2px 2px;
+}
+
+#prefsApp .aw-orch-lane-titles {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+#prefsApp .aw-orch-lane-titlerow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+#prefsApp .aw-orch-lane-title {
+  margin: 0;
+  color: var(--aw-text-strong);
+  font-family: var(--aw-mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-lane-inbox .aw-orch-lane-title {
+  color: var(--aw-warn-text);
+  font-family: inherit;
+}
+
+#prefsApp .aw-orch-lane-sub {
+  color: var(--aw-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+#prefsApp .aw-orch-lane-count {
+  flex: 0 0 auto;
+  color: var(--aw-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+#prefsApp .aw-orch-lane-count.aw-orch-warn-text {
+  color: var(--aw-warn-text);
+}
+
+#prefsApp .aw-orch-lane-warn {
+  margin: 0 14px 10px;
+  padding: 6px 10px;
+  border-radius: var(--aw-radius);
+  background: var(--aw-warn-bg);
+  color: var(--aw-warn-text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+#prefsApp .aw-orch-lane-warn::before {
+  content: '⚠ ';
+}
+
+#prefsApp .aw-orch-lane-more {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 0;
+  border-top: 1px solid var(--aw-divider);
+  border-radius: 0 0 var(--aw-lane-radius) var(--aw-lane-radius);
+  background: none;
+  color: var(--aw-text-muted);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-lane-more:hover {
+  color: var(--aw-text);
+}
+
+/* ---- Models: rows ------------------------------------------------------------- */
+
+#prefsApp .aw-orch-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+#prefsApp .aw-orch-row {
+  border-top: 1px solid var(--aw-divider);
+}
+
+#prefsApp .aw-orch-row[data-expanded='true'] {
+  background: var(--aw-surface-raised);
+}
+
+#prefsApp .aw-orch-row-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  min-height: 48px;
+  padding: 7px 14px;
+}
+
+#prefsApp .aw-orch-row-toggle {
+  display: flex;
+  flex: 1 1 200px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-chevron {
+  flex: 0 0 10px;
+  width: 10px;
+  height: 10px;
+  transition: transform 120ms ease;
+}
+
+#prefsApp .aw-orch-chevron::before {
+  content: '';
+  display: block;
+  width: 5px;
+  height: 5px;
+  margin: 2px 0 0 1px;
+  border-right: 1.5px solid var(--aw-text-faint);
+  border-bottom: 1.5px solid var(--aw-text-faint);
+  transform: rotate(-45deg);
+}
+
+#prefsApp .aw-orch-row[data-expanded='true'] .aw-orch-chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #prefsApp .aw-orch-chevron {
+    transition: none;
+  }
+}
+
+#prefsApp .aw-orch-dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--aw-ok);
+}
+
+#prefsApp .aw-orch-dot[data-tone='caution'],
+#prefsApp .aw-orch-dot[data-tone='warn'] {
+  background: var(--aw-warn);
+}
+
+#prefsApp .aw-orch-dot[data-tone='off'] {
+  border: 1.5px solid var(--aw-text-faint);
+  background: none;
+}
+
+#prefsApp .aw-orch-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+#prefsApp .aw-orch-row-line1 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+#prefsApp .aw-orch-row-label {
+  color: var(--aw-text-strong);
+  font-weight: 600;
+}
+
+#prefsApp .aw-orch-row[data-enabled='false'] .aw-orch-row-label {
+  color: var(--aw-text-muted);
+}
+
+#prefsApp .aw-orch-row-id {
+  overflow: hidden;
+  color: var(--aw-text-faint);
+  font-family: var(--aw-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#prefsApp .aw-orch-row-reason {
+  color: var(--aw-warn-text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+#prefsApp .aw-orch-row-reason[data-tone='off'],
+#prefsApp .aw-orch-row-reason[data-tone='note'] {
+  color: var(--aw-text-muted);
+}
+
+#prefsApp .aw-orch-row-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+}
+
+#prefsApp .aw-orch-tier {
+  width: 196px;
+}
+
+#prefsApp .aw-orch-row-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 14px 18px 44px;
+}
+
+@container aw-orch (max-width: 479px) {
+  /* Two lines: the label and its chips, then the tier and the switch under the label. */
+  #prefsApp .aw-orch-row-main {
+    padding: 10px 12px;
+  }
+  #prefsApp .aw-orch-row-toggle {
+    flex-basis: 100%;
+  }
+  #prefsApp .aw-orch-row-controls {
+    flex: 1 1 100%;
+    min-width: 0;
+    padding-left: 38px;
+  }
+  #prefsApp .aw-orch-tier {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+  }
+  #prefsApp .aw-orch-lane-head {
+    padding: 10px 12px;
+  }
+  #prefsApp .aw-orch-row-detail {
+    padding: 6px 12px 16px 12px;
+  }
+}
+
+@container aw-orch (max-width: 399px) {
+  #prefsApp .aw-orch-segmented {
+    flex: 1 1 100%;
+  }
+  #prefsApp .aw-orch-lane-sub {
+    font-size: 11px;
+  }
 }
 
 @container aw-orch (max-width: 399px) {

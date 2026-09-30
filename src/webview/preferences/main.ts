@@ -16,7 +16,7 @@ import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBri
 import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId } from '../../shared/preferences';
 import { settingGroups, SETTINGS, type SettingSpec } from '../../shared/settings';
 import { orchestrationTabTarget } from '../../shared/orchestration/orchestrationTabs';
-import { ORCHESTRATION_GROUP, initUiPersistence, onRoutingResult, openOrchestrationTab, renderOrchestration, setLocalEndpointResult } from './orchestration';
+import { ORCHESTRATION_GROUP, consumeWritePending, initUiPersistence, onRoutingResult, openOrchestrationTab, renderOrchestration, setLocalEndpointResult } from './orchestration';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
 
@@ -574,7 +574,9 @@ window.addEventListener('message', (event: MessageEvent) => {
     const active = document.activeElement;
     const editing =
       active instanceof HTMLSelectElement || (active instanceof HTMLInputElement && active.type !== 'checkbox' && active.type !== 'radio');
-    if (orchestrationBody?.contains(active) && editing) {
+    // Unless the view answers a change made here: then the row moves at once, and focus follows it.
+    const answersWrite = consumeWritePending();
+    if (orchestrationBody?.contains(active) && editing && !answersWrite) {
       orchestrationStale = true;
       return;
     }
