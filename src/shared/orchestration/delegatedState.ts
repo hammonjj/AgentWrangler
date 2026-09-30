@@ -144,7 +144,10 @@ export interface MissionPhaseView {
 /** (b) One entry of an origin's linked-work summary. */
 export interface LinkedWork extends MissionPhaseView {
   missionId: string;
+  /** The mission's title. (It replaces the phase's tooltip, which is kept as `why`.) */
   title: string;
+  /** The reason behind the phase: `MissionPhaseView.title`. */
+  why: string;
   createdAt: number;
   /** The record's own sequence stamp: its last write. */
   updatedAt: number;
@@ -444,6 +447,7 @@ export function linkedWorkFor(session: SessionEvidence, missions: readonly Missi
       ...p,
       missionId: m.id,
       title: m.title,
+      why: p.title,
       createdAt: m.createdAt,
       updatedAt: m.updatedAt,
       keyed: k.keyed,

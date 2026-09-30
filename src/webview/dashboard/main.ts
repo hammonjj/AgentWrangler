@@ -20,6 +20,7 @@ import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../sh
 import { modelLabel } from '../../shared/modelName';
 import { sortSubagents, subagentText } from '../../shared/subagents';
 import { taskChips } from '../../shared/orchestration/taskView';
+import { certaintyText, linkedChip, waitingReasonChip, waitReasonText, type RowChip } from '../../shared/orchestration/delegatedLabels';
 import type { MissionsSnapshot } from '../../shared/orchestration/missionView';
 import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, type MissionIntent } from './missions';
 import { analyticsClickRef, analyticsFilterChange, analyticsHtml } from './analytics';
@@ -380,6 +381,37 @@ function taskChipsHtml(s: SessionDTO): string {
     .join('');
 }
 
+/**
+ * A chip from the shared derivation (#101). It carries both its full-width and
+ * its ≈300 px text; `#app.narrow` picks one in CSS, so the row never measures
+ * anything itself. `~` and `?` are the contract's uncertainty markers (§8).
+ */
+function rowChipHtml(c: RowChip, kind: string): string {
+  const mark = c.mark ? `<span class="umark" aria-label="${c.mark === '?' ? 'unknown' : 'estimated'}">${c.mark}</span>` : '';
+  const open = c.missionId ? ` data-open-mission="${esc(c.missionId)}" role="link"` : '';
+  return `<span class="chip ${kind} lt-${c.tone}${c.mark ? ' uncertain' : ''}"${open} title="${esc(c.title)}">${mark}<span class="full">${esc(c.text)}</span><span class="short">${esc(c.short)}</span></span>`;
+}
+
+/**
+ * What the row waits for and what it delegated, straight from `s.wait` and
+ * `s.linked` (status contract §3, §4, A4). Nothing is recomputed here: the
+ * store already decided the status, the reason and each mission's phase.
+ */
+function delegatedChips(s: SessionDTO): string {
+  const out: string[] = [];
+  const reason = waitingReasonChip(s.status, s.wait);
+  if (reason) out.push(rowChipHtml(reason, 'wreason'));
+  const linked = linkedChip(s.linked, s.wait);
+  if (linked) out.push(rowChipHtml(linked, 'linked'));
+  return out.join('');
+}
+
+/** U1: the status cannot be known now (a host reconnecting): a `?`, never a guess. */
+function unknownChip(s: SessionDTO): string {
+  if (!s.statusUncertain) return '';
+  return `<span class="chip unknown" title="${esc(`Status unknown: ${s.statusUncertain}. The row keeps its last status and is not counted as needing you.`)}">? ${esc(s.statusUncertain)}</span>`;
+}
+
 function statusChip(s: SessionDTO): string {
   if (s.status === 'blocked' && s.blockedReason) {
     return `<span class="chip blk">${esc(capitalize(`needs ${s.blockedReason}`))}</span>`;
@@ -599,11 +631,17 @@ function rowTitle(s: SessionDTO): string {
       ? `\n\nNo transcript or hook activity for ${formatAge(Date.now(), s.lastActivityAt)}. A long think or a large file write is silent like this too — check the session before assuming it is wedged.`
       : '';
   // Done vs Waiting is read off the reply text; say so, since it is a judgment.
+  // A Done that W3 resolved (#101): the reply asked about delegated work that
+  // has since moved on. The reply is left as written; the chip is the truth.
   const done =
     s.status === 'done'
-      ? '\n\nFinished its turn without asking you anything — the last message reads as a report. Waiting would mean it ended on a question or a choice.'
+      ? s.linked?.some((w) => w.keyed)
+        ? '\n\nFinished its turn. Anything its last reply asked about delegated work has since been answered by the mission record: the Delegated chip says where that work is now.'
+        : '\n\nFinished its turn without asking you anything — the last message reads as a report. Waiting would mean it ended on a question or a choice.'
       : '';
-  return `${hint}${more}${renamed}${est}${paused}${stuck}${done}${progressTooltip(s)}`;
+  const why = s.wait && s.status !== 'blocked' ? `\n\nWhy: ${waitReasonText(s.wait)}\n${certaintyText(s.wait.certainty, s.wait.source)}` : '';
+  const unknown = s.statusUncertain ? `\n\nStatus unknown (${s.statusUncertain}): shown as last known.` : '';
+  return `${hint}${more}${renamed}${est}${paused}${stuck}${done}${why}${unknown}${progressTooltip(s)}`;
 }
 
 /** Branch, minus the detached-HEAD placeholder, which names nothing. */
@@ -760,10 +798,11 @@ function rowHtml(s: SessionDTO, span: number): string {
   const secondLine = meta ? `<div class="sub"><span class="meta">${meta}</span></div>` : '';
 
   const est = s.statusIsEstimated && s.status !== 'ended' ? ' est' : '';
-  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
+  const unc = s.statusUncertain ? ' unc' : '';
+  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}${unc}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title">${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${rateLimitChip(s)}${statusChip(s)}</span></div>
+    <div class="title">${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${unknownChip(s)}${rateLimitChip(s)}${statusChip(s)}${delegatedChips(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -1376,13 +1415,28 @@ renderControls();
 function tabsHtml(): string {
   const tab = (view: TableView, label: string, extra = '') =>
     `<button role="tab" aria-selected="${tableView === view}" data-table-view="${view}"${extra}>${label}</button>`;
-  const waiting = missionsSnap?.missions.filter((m) => m.state === 'plan-review' || m.state === 'review' || m.metrics.waiting > 0).length ?? 0;
+  // The host's count (status contract A3: each ask once, open proposals
+  // included); the mission phases are the fallback for an older host.
+  const waiting = missionsSnap?.attention ?? missionsSnap?.missions.filter((m) => m.phase?.needsYou).length ?? 0;
   const missions = missionsSnap
     ? tab('missions', `Missions${waiting > 0 ? ` <span class="tabcount">${waiting}</span>` : ''}`, waiting > 0 ? ` title="${waiting} mission${waiting === 1 ? '' : 's'} waiting for you"` : '')
     : '';
   // Analytics sits beside Missions: both are orchestration's, and there only while it is on.
   const analytics = missionsSnap ? tab('analytics', 'Analytics') : '';
   return `<div class="tabletabs" role="tablist" aria-label="Table view">${tab('status', 'Status')}${tab('project', 'Project')}${missions}${analytics}</div>`;
+}
+
+/** Switch to Missions, open one mission and scroll to it: the drill-down for delegated work (§10). */
+function showMission(missionId: string | undefined): void {
+  if (!missionsSnap) return;
+  tableView = 'missions';
+  if (missionId) {
+    missionsUi.collapsed.delete(missionId);
+    missionsUi.expanded.add(missionId);
+    missionsUi.reveal = missionId;
+  }
+  saveState();
+  render();
 }
 
 function render(): void {
@@ -1485,15 +1539,7 @@ function render(): void {
 vscodeApi.onMessage((body) => {
   const m = body as HostToDashboard;
   if (m.type === 'showMissions') {
-    if (!missionsSnap) return;
-    tableView = 'missions';
-    if (m.missionId) {
-      missionsUi.collapsed.delete(m.missionId);
-      missionsUi.expanded.add(m.missionId);
-      missionsUi.reveal = m.missionId;
-    }
-    saveState();
-    render();
+    showMission(m.missionId);
     return;
   }
   if (m.type === 'analytics') {
@@ -1886,6 +1932,14 @@ app.addEventListener('click', (e) => {
   }
   if (pr) {
     post({ type: 'openExternal', url: pr.dataset.url! });
+    e.stopPropagation();
+    return;
+  }
+  // A delegated-work chip goes to its mission; planning and approval chips
+  // carry no mission, so the row opens the conversation and its card instead.
+  const missionChip = target.closest<HTMLElement>('[data-open-mission]');
+  if (missionChip && missionsSnap) {
+    showMission(missionChip.dataset.openMission);
     e.stopPropagation();
     return;
   }
