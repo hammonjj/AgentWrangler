@@ -11,6 +11,7 @@
  */
 import { harnessLabel } from '../../shared/harness';
 import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
+import { isOpenDelegation, isOpenProposal } from '../../shared/orchestration/delegatedState';
 import { nativeEffortFor, tierRank, type CapabilityCatalogView, type CatalogEntry } from '../../shared/orchestration/catalog';
 import type { DelegationView, ProposalDecision, ProposalModelOption, TaskProposalView } from '../../shared/orchestration/taskView';
 import { EFFORT_LEVELS, type Mission, type RouteRecommendation } from '../../shared/orchestration/types';
@@ -25,11 +26,9 @@ function entryFor(catalog: CapabilityCatalogView, source: string, model: string)
   return catalog.entries.find((e) => e.descriptor.source === source && (e.aliases.includes(model) || e.descriptor.modelId === model));
 }
 
-/** Whether a mission's task is a proposal nobody has started or dropped yet. */
-export function isOpenProposal(m: Mission): boolean {
-  const task = m.tasks[0];
-  return !!task?.recommendation && task.attemptIds.length === 0 && ['routed', 'needs-human'].includes(task.state);
-}
+// One definition of each, shared with the status derivation (#101), so a card
+// and the row's "awaiting approval" can never disagree about what is open.
+export { isOpenDelegation, isOpenProposal };
 
 export function proposalViewOf(m: Mission, rec: RouteRecommendation, catalog: CapabilityCatalogView): TaskProposalView {
   const task = m.tasks[0];
@@ -62,15 +61,6 @@ export function proposalViewOf(m: Mission, rec: RouteRecommendation, catalog: Ca
     options,
     ...(m.delegation ? { delegated: true } : {}),
   };
-}
-
-/**
- * Whether a mission is a delegation (#82) whose card is a plan's: the planner
- * has not answered, could not plan it, or planned several tasks that wait
- * for review. One kept as one task is an open proposal instead.
- */
-export function isOpenDelegation(m: Mission): boolean {
-  return !!m.delegation && m.planned === true && ['planning', 'planning-failed', 'plan-review'].includes(m.state);
 }
 
 /**

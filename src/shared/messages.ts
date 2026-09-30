@@ -14,6 +14,7 @@ import type {
 } from './conversation';
 import type { HookHealth, ProjectDTO, SessionDTO } from './model';
 import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from './orchestration/taskView';
+import type { LinkedWork, WaitInfo } from './orchestration/delegatedState';
 import type { MissionOp, MissionsSnapshot } from './orchestration/missionView';
 import type { AnalyticsDetail, AnalyticsRef, AnalyticsSelection, AnalyticsView } from './orchestration/analyticsView';
 import type { UsageState } from './usage';
@@ -211,6 +212,15 @@ export type HostToConversation =
       proposals?: TaskProposalView[];
       /** Work this conversation delegated that is being planned or is a plan to review (#82). */
       delegations?: DelegationView[];
+      /**
+       * The live delegated-work summary (#101, status contract L3): one entry
+       * per mission this conversation delegated, from the same derivation the
+       * table and Missions use. A separate payload, never a transcript block:
+       * historical replies are shown as written (H1).
+       */
+      linked?: LinkedWork[];
+      /** What the conversation's own row is waiting for, with source and certainty (§3). */
+      wait?: WaitInfo;
     }
   | { type: 'append'; blocks: ConvBlock[] }
   /** In-place update of one block: a tool's result, a streaming reply, an ask being settled. */
@@ -226,6 +236,12 @@ export type HostToConversation =
   | { type: 'task'; task?: TaskView }
   /** The proposal or delegation cards changed: one arrived, was decided, started or cancelled (#81, #82). */
   | { type: 'proposals'; proposals: TaskProposalView[]; delegations?: DelegationView[] }
+  /**
+   * The delegated-work summary moved (#101): a mission was approved, launched,
+   * finished or merged. Sent on its own, beside the transcript, so nothing
+   * already written is re-rendered or amended (H1).
+   */
+  | { type: 'linked'; linked: LinkedWork[]; wait?: WaitInfo }
   | { type: 'composer'; composer: ComposerState }
   /**
    * The whole of a block the pane only got the start of — the answer to

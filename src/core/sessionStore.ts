@@ -1,5 +1,7 @@
 import type { AgentSession } from '../shared/model';
 import { compareSessions, needsUser } from '../shared/model';
+import { toastAllowed, withDerivedState } from '../shared/orchestration/delegatedState';
+import type { Mission } from '../shared/orchestration/types';
 import { Emitter, type Disposable, type Listener } from './events';
 import type { AgentProvider } from './provider';
 
@@ -67,7 +69,26 @@ function materialFingerprint(s: AgentSession): string {
     s.progress?.pace?.band ?? '',
     // Usage grows with every turn record, which a provider scan never sees.
     s.usage ? `${s.usage.turns}:${s.usage.lastAt}` : '',
+    // Derived orchestration state (#101): a mission moving changes nothing a
+    // provider scan sees, so it has to be material here or the row, the tray
+    // and the conversation would keep showing the old phase.
+    s.turnStartedAt ?? '',
+    s.statusUncertain ?? '',
+    s.wait ? `${s.wait.reason}:${s.wait.certainty}:${s.wait.source}:${s.wait.ref?.missionId ?? ''}:${s.wait.ref?.planRunId ?? ''}:${s.wait.ref?.taskId ?? ''}:${s.wait.detail ?? ''}` : '',
+    s.linked ? s.linked.map((w) => `${w.missionId}:${w.phase}:${w.text}:${w.keyed ? 1 : 0}:${w.updatedAt}`).join(',') : '',
+    s.rateLimit ? `${s.rateLimit.category}:${s.rateLimit.resetAtMs ?? ''}` : '',
+    s.pendingQuestion?.requestId ?? '',
+    s.pendingPlan?.requestId ?? '',
   ].join('\u0000');
+}
+
+/**
+ * Working → notable, and worth telling the human about given what the row is
+ * waiting for (#101): a Done whose delegated work is still going is not news
+ * yet, and an approval the mission already announced is not announced twice.
+ */
+function becameNotable(prev: AgentSession, next: AgentSession): boolean {
+  return !notable(prev.status) && prev.status !== 'ended' && notable(next.status) && toastAllowed(next);
 }
 
 export class SessionStore implements Disposable {
@@ -93,6 +114,10 @@ export class SessionStore implements Disposable {
   private nicknameFor: (key: string) => string | undefined = () => undefined;
   private liveSessionFor: (session: AgentSession) => AgentSession | undefined = () => undefined;
   private usageFor: (sessionId: string) => AgentSession['usage'] = () => undefined;
+  /** The missions a session delegated (by origin key), for the derived orchestration state (#101). */
+  private missionsFor: (key: string) => readonly Mission[] = () => [];
+  /** What each provider last said, before decoration: every re-derivation starts from this, never from its own output. */
+  private raw = new Map<string, AgentSession>();
 
   readonly onDidUpdate = (listener: Listener<StoreUpdate>): Disposable => this.emitter.event(listener);
 
@@ -118,6 +143,18 @@ export class SessionStore implements Disposable {
   }
 
   /**
+   * The missions each conversation delegated, by its session key (#101). The
+   * store is where the derived status, wait reason and linked-work summary
+   * are applied (`shared/orchestration/delegatedState.ts`), for the same
+   * reason nicknames are: the table, the tray, the toasts and the
+   * conversation all read from here, so there is one derivation, not one per
+   * surface.
+   */
+  useLinkedWork(lookup: (key: string) => readonly Mission[]): void {
+    this.missionsFor = lookup;
+  }
+
+  /**
    * The nickname for a key the store may not hold — the conversation pane
    * builds a session of its own for a runner that has not registered yet, and
    * it should not be the one surface that ignores a rename.
@@ -138,12 +175,35 @@ export class SessionStore implements Disposable {
           blockedReason: live.blockedReason,
           blockedAsk: live.blockedAsk,
           permissionRequestId: live.permissionRequestId,
+          ...(live.turnStartedAt !== undefined ? { turnStartedAt: live.turnStartedAt } : {}),
         }
       : s;
     const nickname = this.nicknameFor(s.key);
     const usage = this.usageFor(s.sessionId);
-    if (nickname === undefined && usage === undefined) return current;
-    return { ...current, ...(nickname === undefined ? {} : { nickname }), ...(usage === undefined ? {} : { usage }) };
+    const named = nickname === undefined && usage === undefined
+      ? current
+      : { ...current, ...(nickname === undefined ? {} : { nickname }), ...(usage === undefined ? {} : { usage }) };
+    // Last, over the provider's own reading of the turn: §5.1 of the status contract.
+    return withDerivedState(named, this.missionsFor(s.key), Date.now());
+  }
+
+  /**
+   * Re-decorate every held row from its raw provider reading and fire for the
+   * rows that changed. `edge` also reports working → notable transitions, for
+   * a change that can move a status (a mission resolving a wait).
+   */
+  private redecorate(edge = false): void {
+    const changed: AgentSession[] = [];
+    const becameWaiting: AgentSession[] = [];
+    for (const [key, prev] of this.byKey) {
+      const next = this.decorate(this.raw.get(key) ?? prev);
+      if (materialFingerprint(next) === materialFingerprint(prev)) continue;
+      this.byKey.set(key, next);
+      changed.push(next);
+      if (edge && becameNotable(prev, next)) becameWaiting.push(next);
+    }
+    if (changed.length === 0) return;
+    this.emitter.fire({ sessions: this.sessions, upserted: changed, removedKeys: [], becameWaiting });
   }
 
   /**
@@ -151,15 +211,7 @@ export class SessionStore implements Disposable {
    * turn record touches nothing a provider scan would notice.
    */
   usageApplied(): void {
-    const changed: AgentSession[] = [];
-    for (const [key, prev] of this.byKey) {
-      const next = this.decorate({ ...prev, usage: undefined });
-      if (materialFingerprint(next) === materialFingerprint(prev)) continue;
-      this.byKey.set(key, next);
-      changed.push(next);
-    }
-    if (changed.length === 0) return;
-    this.emitter.fire({ sessions: this.sessions, upserted: changed, removedKeys: [], becameWaiting: [] });
+    this.redecorate();
   }
 
   /**
@@ -168,15 +220,16 @@ export class SessionStore implements Disposable {
    * new name would not appear until the session next did something.
    */
   renameApplied(): void {
-    const changed: AgentSession[] = [];
-    for (const [key, prev] of this.byKey) {
-      const next = this.decorate({ ...prev, nickname: undefined });
-      if (next.nickname === prev.nickname) continue;
-      this.byKey.set(key, next);
-      changed.push(next);
-    }
-    if (changed.length === 0) return;
-    this.emitter.fire({ sessions: this.sessions, upserted: changed, removedKeys: [], becameWaiting: [] });
+    this.redecorate();
+  }
+
+  /**
+   * Re-derive after a mission changed (#101): an approval, a launch, a merge.
+   * Nothing a provider scan sees moved, but a wait may have resolved or a
+   * summary moved on.
+   */
+  linkedWorkApplied(): void {
+    this.redecorate(true);
   }
 
   get sessions(): AgentSession[] {
@@ -233,7 +286,13 @@ export class SessionStore implements Disposable {
 
   private applySnapshot(all: AgentSession[]): void {
     const next = new Map<string, AgentSession>();
-    for (const s of all) next.set(s.key, this.decorate(s)); // last write wins on (impossible) dup keys
+    const raw = new Map<string, AgentSession>();
+    for (const s of all) {
+      // last write wins on (impossible) dup keys
+      raw.set(s.key, s);
+      next.set(s.key, this.decorate(s));
+    }
+    this.raw = raw;
 
     const upserted: AgentSession[] = [];
     const becameWaiting: AgentSession[] = [];
@@ -247,9 +306,7 @@ export class SessionStore implements Disposable {
       // Working → notable. `blocked` counts: a permission prompt is the most
       // urgent case there is, since the agent is frozen mid-task until you act.
       // `done` counts too — a finished agent is news, even if it asks nothing.
-      if (prev && !notable(prev.status) && prev.status !== 'ended' && notable(session.status)) {
-        becameWaiting.push(session);
-      }
+      if (prev && becameNotable(prev, session)) becameWaiting.push(session);
     }
     for (const key of this.byKey.keys()) {
       if (!next.has(key)) removedKeys.push(key);

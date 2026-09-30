@@ -6,6 +6,7 @@ import type { SessionUsage } from './sessionUsage';
 import type { SessionProvider } from './harness';
 import type { TaskBadge } from './orchestration/taskView';
 import type { RateLimitStoppage } from './rateLimitClassification';
+import type { LinkedWork, WaitInfo } from './orchestration/delegatedState';
 
 /**
  * `waiting` and `done` both mean the agent has finished its turn and is idle at
@@ -260,6 +261,32 @@ export interface AgentSession {
    * whenever the session is not being held for it.
    */
   backgroundTasks?: BackgroundTaskCounts;
+  /**
+   * When this conversation's current (or, between turns, most recent) turn
+   * began: a hook `UserPromptSubmit`, a Codex `turn/started` or the rollout's
+   * `task_started`. Absent when no signal says, e.g. a transcript-only session
+   * or a turn start replayed from a hook backlog. Used to tie a finished turn
+   * to the missions it delegated (status contract K2).
+   */
+  turnStartedAt?: number;
+  /**
+   * The status cannot be known now, and why (e.g. `reconnecting` to a session
+   * host). The row keeps its last status and shows `?` rather than a guess
+   * (status contract §7, U1).
+   */
+  statusUncertain?: string;
+  /**
+   * What this row is waiting for, with where that came from and how sure it
+   * is (status contract §3). Derived in the store by
+   * `shared/orchestration/delegatedState.ts`; never persisted.
+   */
+  wait?: WaitInfo;
+  /**
+   * The work this conversation delegated, one entry per mission id, oldest
+   * first (status contract §4). Derived, never persisted, and never part of
+   * the transcript: historical replies are left as written (H1).
+   */
+  linked?: LinkedWork[];
 }
 
 /** Background work a session is waiting on, by kind. */
