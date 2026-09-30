@@ -187,6 +187,14 @@ export interface HookSessionState {
    * it change to feed the pace baseline; nothing else reads it.
    */
   lastTurnMs?: number;
+  /**
+   * Receipt time of the latest `UserPromptSubmit`, kept after the turn ends
+   * (unlike `turnStartedAtMs`): a finished turn is tied to the missions it
+   * delegated by when it began (status contract K2, #101).
+   */
+  lastPromptAtMs?: number;
+  /** `lastPromptAtMs` came from a backlog replay, so it is a read time, not the prompt's. */
+  lastPromptUncertain?: boolean;
 }
 
 /**
@@ -370,6 +378,8 @@ export function reduceHookEvent(prev: HookSessionState | undefined, e: HookEvent
         blockedSinceMs: undefined,
         turnStartUncertain: false,
         todo: undefined,
+        lastPromptAtMs: e.receivedAtMs,
+        lastPromptUncertain: false,
       };
 
     case 'PreToolUse': {

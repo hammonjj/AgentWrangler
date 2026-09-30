@@ -341,6 +341,8 @@ export class HookLog implements Disposable {
       // A turn whose start we only inferred from the backlog has an unknowable
       // age; flagged here so nothing downstream renders it as elapsed time.
       if (backlog && after.turnStartedAtMs !== undefined) after.turnStartUncertain = true;
+      // The same for the prompt stamp that ties a turn to its missions (#101).
+      if (backlog && after.lastPromptAtMs !== undefined) after.lastPromptUncertain = true;
       // The prompt this marker belonged to is no longer open: tell its hook
       // script to stop waiting, so it does not sit in the process table until
       // its ceiling.

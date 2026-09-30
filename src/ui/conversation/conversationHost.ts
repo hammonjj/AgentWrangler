@@ -161,6 +161,23 @@ export class ConversationHost {
     if (!this.ready) return;
     this.post({ type: 'task', task: this.taskView() });
     this.post({ type: 'proposals', proposals: this.proposals(), delegations: this.delegations() });
+    this.pushLinked();
+  }
+
+  /**
+   * The delegated-work summary (#101), as the store derived it for this
+   * conversation's row: the pane never computes a status of its own. Sent only
+   * when it changed, and always beside the transcript, never into it (H1).
+   */
+  private lastLinked?: string;
+  private pushLinked(): void {
+    if (!this.ready) return;
+    const linked = this.session?.linked ?? [];
+    const wait = this.session?.wait;
+    const sig = JSON.stringify([linked, wait ?? null]);
+    if (sig === this.lastLinked) return;
+    this.lastLinked = sig;
+    this.post({ type: 'linked', linked, ...(wait ? { wait } : {}) });
   }
 
   /** Every key the pane's conversation has been known by. */
@@ -345,7 +362,10 @@ export class ConversationHost {
       task: this.taskView(),
       proposals: this.proposals(),
       delegations: this.delegations(),
+      ...(session.linked ? { linked: session.linked } : {}),
+      ...(session.wait ? { wait: session.wait } : {}),
     });
+    this.lastLinked = JSON.stringify([session.linked ?? [], session.wait ?? null]);
     this.post({ type: 'delegationOffer', offer: this.suggestion.offer });
   }
 
@@ -394,6 +414,7 @@ export class ConversationHost {
     this.source?.setSession(next);
     if (titleChanged) this.onTitle(displayTitle(next));
     void this.pushSession(next);
+    this.pushLinked();
   }
 
   private async pushSession(session: AgentSession): Promise<void> {
@@ -778,14 +799,20 @@ function liveSessionRow(handle: SessionHandle, store: SessionStore): AgentSessio
   if (handle.liveSession) return handle.liveSession;
   const id = handle.sessionId ?? 'pending';
   const key = `${handle.provider}:${id.toLowerCase()}`;
+  // A host link that is down says nothing about the conversation (status
+  // contract §7): keep the last status the store had, marked unknown, and
+  // never read it as Waiting or Possibly stuck.
+  const linkDown = handle.lifecycle === 'connecting' || handle.lifecycle === 'unreachable';
   const status: SessionStatus =
-    handle.lifecycle === 'running'
-      ? 'busy'
-      : handle.lifecycle === 'ended' || handle.lifecycle === 'ending'
-        ? 'ended'
-        : handle.lifecycle === 'error' || handle.lifecycle === 'unreachable'
-          ? 'stuck'
-          : 'waiting';
+    linkDown
+      ? (store.get(key)?.status ?? 'busy')
+      : handle.lifecycle === 'running'
+        ? 'busy'
+        : handle.lifecycle === 'ended' || handle.lifecycle === 'ending'
+          ? 'ended'
+          : handle.lifecycle === 'error'
+            ? 'stuck'
+            : 'waiting';
   return {
     provider: handle.provider,
     sessionId: id,
@@ -795,6 +822,7 @@ function liveSessionRow(handle: SessionHandle, store: SessionStore): AgentSessio
     cwd: handle.cwd,
     projectName: projectNameFor(handle.cwd),
     status,
+    ...(linkDown ? { statusUncertain: handle.lifecycle === 'connecting' ? 'reconnecting' : 'host not responding' } : {}),
     lastActivityAt: Date.now(),
     startedAt: handle.startedAt,
   };

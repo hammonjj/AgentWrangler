@@ -14,6 +14,7 @@
  */
 import { formatDuration } from '../model';
 import { formatTokens, formatUsd } from '../sessionUsage';
+import type { MissionPhaseView, TaskPhase } from './delegatedState';
 import type { PlanEdit, PlanIssueLevel } from './plan';
 import type { TaskRouteView, TaskVerificationView, TaskViewAction } from './taskView';
 import { routeChipText, taskStateLabel } from './taskView';
@@ -94,6 +95,9 @@ export interface MissionTaskView {
   preview?: TaskPreviewView;
   /** Plan review may change it: the plan is under review and nothing of this task has run. */
   editable: boolean;
+  /** The task's row state, from the one derivation the table and the conversation use too (#101). */
+  phase: TaskPhase;
+  needsYou: boolean;
 }
 
 export interface MissionIssueView {
@@ -155,6 +159,14 @@ export interface MissionView {
   canWritePlan: boolean;
   /** Replan a started mission (§11.4): nothing running, something left to do. */
   canReplan: boolean;
+  /**
+   * Where the mission is (planning, awaiting approval, running, verifying,
+   * merged/verified/closeout …), from the same derivation the origin row and
+   * the conversation's summary read (#101), so the three cannot disagree.
+   */
+  phase: MissionPhaseView;
+  /** The conversation that delegated it, as a session key, when there is one. */
+  originKey?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -162,6 +174,8 @@ export interface MissionView {
 /** Everything the Missions view needs. `tiers` and `harnesses` fill plan review's pin and cap menus. */
 export interface MissionsSnapshot {
   missions: MissionView[];
+  /** Missions that need the user, each counted once (status contract A3). */
+  attention?: number;
   tiers: string[];
   harnesses: { id: HarnessId; label: string }[];
 }

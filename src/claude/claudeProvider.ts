@@ -15,7 +15,7 @@ import { isSessionJsonlName, projectsDir, sessionsDir } from './paths';
 import { readRegistry, type RegistryEntry } from './registry';
 import { countTasks, liveTranscriptTasks, type BackgroundTaskRef } from './backgroundTasks';
 import { claudeRateLimitFromTranscript } from './rateLimit';
-import { blockClearedByClaude, deriveStatus, holdForBackground, turnOver } from './status';
+import { blockClearedByClaude, deriveStatus, holdForBackground, turnOver, turnStartFor } from './status';
 import { TranscriptIndex, type IndexedTranscript } from './transcriptIndex';
 import type { TranscriptSummary } from './transcriptTail';
 
@@ -257,6 +257,7 @@ export class ClaudeProvider implements AgentProvider {
       // process may be the third one to pick up a conversation that began
       // yesterday, and the age of the conversation is what the column is for.
       conversationStartedAt: s?.startedAtMs,
+      turnStartedAt: turnStartFor(hook),
     };
   }
 

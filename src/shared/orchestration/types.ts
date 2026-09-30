@@ -293,7 +293,18 @@ export interface Mission {
    * never the session that does the work. Absent for a task started from the
    * Tasks menu.
    */
-  origin?: { provider: 'claude' | 'codex'; sessionId: string };
+  origin?: {
+    provider: 'claude' | 'codex';
+    sessionId: string;
+    /**
+     * When the origin's turn that created this began, if the origin reported
+     * it (status contract K2, #101): a later reply of that same turn is about
+     * this mission; one after a new user prompt is not. Absent on records from
+     * before #101 and for origins with no turn signal; the mission's
+     * `createdAt` stands in, and the keying is then estimated.
+     */
+    turnStartedAt?: Millis;
+  };
   /**
    * Handed off with Delegate (#82): the user gave an outcome, and the planner
    * decides whether it is one task or several. While it is planning, failed

@@ -89,6 +89,19 @@ export function holdForBackground(status: SessionStatus, backgroundTasks: number
   return status === 'done' && backgroundTasks > 0 ? 'busy' : status;
 }
 
+/**
+ * When the session's current or latest turn began, for tying a finished turn
+ * to the missions it delegated (status contract K2, #101). Only a prompt we
+ * watched arrive counts: a backlog replay stamps every line with the time it
+ * was read, which would make a turn look newer than the missions it created
+ * and untie them. Unknown is returned as unknown, and the derivation then
+ * marks its keying estimated (U1).
+ */
+export function turnStartFor(hook: { lastPromptAtMs?: number; lastPromptUncertain?: boolean } | undefined): number | undefined {
+  if (!hook || hook.lastPromptAtMs === undefined || hook.lastPromptUncertain) return undefined;
+  return hook.lastPromptAtMs;
+}
+
 /** A finished turn is `waiting` if its reply asks for something, else `done`. */
 export function turnOver(replyText: string | undefined): SessionStatus {
   return finishedTurnStatus(replyText);

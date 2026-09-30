@@ -166,6 +166,8 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
   private streamingKind: 'assistant' | 'thinking' = 'assistant';
   private turnAssistantText = '';
   private turnOutcome: 'completed' | 'failed' | 'interrupted' = 'completed';
+  /** When the latest turn began (`turn/start` sent or `turn/started` seen): status contract K2, #101. */
+  private turnStartedAt?: number;
   /** The last `thread/tokenUsage/updated`: `total` is cumulative per thread, `last` one turn's worth. */
   private tokenUsage?: { turnId?: string; tokenUsage: unknown };
   /** The context of the running turn's first and last request, from its usage updates (#54). */
@@ -221,6 +223,7 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
       lastActivityAt: this.lastActivityAt,
       startedAt: this.startedAt,
       runnerOwned: true,
+      ...(this.turnStartedAt !== undefined ? { turnStartedAt: this.turnStartedAt } : {}),
     };
   }
 
@@ -278,6 +281,7 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
     this.add({ kind: 'user', id: this.id(), text: text.trim(), imageCount: images.length || undefined });
     this.turnAssistantText = '';
     this.turnOutcome = 'completed';
+    this.turnStartedAt = Date.now();
     const result = await this.server.request<any>('turn/start', {
       threadId: this.threadId,
       input: content,
@@ -390,6 +394,8 @@ export class CodexRunner extends SessionViewBase implements SessionHandle {
       return;
     }
     if (event.method === 'turn/started') {
+      // A turn this window did not send (another client, a queued input) starts here.
+      if (this.activeTurnId !== params.turn?.id || this.turnStartedAt === undefined) this.turnStartedAt = Date.now();
       this.activeTurnId = params.turn?.id;
       this.turnRequests = {};
       this.setBusy(true);

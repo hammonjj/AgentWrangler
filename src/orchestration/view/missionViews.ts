@@ -7,6 +7,7 @@
  * mission's cost is always the sum of what its attempts reported, with the
  * basis the weakest of them had, and absent when none reported one.
  */
+import { missionPhase, missionTaskCounts, originKeyOf, taskPhase } from '../../shared/orchestration/delegatedState';
 import { summariseVerification } from '../../shared/orchestration/verification';
 import { planDiffText, type MissionMetricsView, type MissionPlannerView, type MissionTaskView, type MissionView, type TaskPreviewView } from '../../shared/orchestration/missionView';
 import { formatUsd } from '../../shared/sessionUsage';
@@ -46,7 +47,6 @@ function combineBasis(bases: CostBasis[]): CostBasis {
 
 /** The mission-level aggregates (§16.2, §18.2), from its tasks and attempts. */
 export function missionMetrics(m: Mission): MissionMetricsView {
-  const count = (states: string[]) => m.tasks.filter((t) => states.includes(t.state)).length;
   const attempts = m.attempts;
   const costed = attempts.filter((a) => a.usage?.costUsd !== undefined && a.usage.costBasis !== 'none');
   const launched = attempts.map((a) => a.launchedAt).filter((x): x is number => x !== undefined);
@@ -75,15 +75,18 @@ export function missionMetrics(m: Mission): MissionMetricsView {
     byModel.set(key, cur);
   }
 
+  // The task counts come from the shared derivation (#101, L4), so the origin
+  // row, the conversation's summary and this header show the same numbers.
+  const counts = missionTaskCounts(m);
   return {
-    total: m.tasks.length,
-    done: count(['done']),
-    running: count(['ready', 'assessing', 'routed', 'queued', 'running', 'verifying', 'integrating']),
-    waiting: count(['needs-human']),
-    blocked: count(['blocked']),
-    failed: count(['failed']),
-    skipped: count(['skipped']),
-    pending: count(['pending']),
+    total: counts.total,
+    done: counts.done,
+    running: counts.running,
+    waiting: counts.needsYou,
+    blocked: counts.blocked,
+    failed: counts.failed,
+    skipped: counts.skipped,
+    pending: counts.pending,
     activeAgents: attempts.filter((a) => WORKING.has(a.state)).length,
     attempts: attempts.length,
     ...(launched.length > 0 ? { startedAt: Math.min(...launched) } : {}),
@@ -199,6 +202,7 @@ function taskRowOf(m: Mission, t: Task, ctx: MissionViewContext): MissionTaskVie
     ...(t.overrides?.caps ? { caps: { maxTier: t.overrides.caps.maxTier, maxEffort: t.overrides.caps.maxEffort } } : {}),
     ...(previewOf(m, t) ? { preview: previewOf(m, t) } : {}),
     editable,
+    ...taskPhase(m, t),
   };
 }
 
@@ -254,6 +258,8 @@ export function missionViewOf(m: Mission, ctx: MissionViewContext): MissionView 
       m.state === 'running' &&
       !m.attempts.some((a) => LIVE_ATTEMPT.has(a.state)) &&
       m.tasks.some((t) => t.state !== 'done'),
+    phase: missionPhase(m),
+    ...(m.origin ? { originKey: originKeyOf(m.origin) } : {}),
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
   };
