@@ -1048,8 +1048,9 @@ function setMeta(session: SessionDTO): void {
   // reset time when the source gave one. Shown even mid-turn — the session
   // can still be `busy` on the evidence's last known state.
   const rl = session.rateLimit;
-  rateLimitEl.hidden = !rl;
-  if (rl) {
+  const showRateLimit = !!rl && rl.category !== 'claude-weekly';
+  rateLimitEl.hidden = !showRateLimit;
+  if (rl && showRateLimit) {
     rateLimitEl.className = `chip ratelimit ${rl.category}`;
     rateLimitEl.textContent = rl.reason;
     rateLimitEl.title =
