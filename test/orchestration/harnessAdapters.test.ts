@@ -49,13 +49,20 @@ function recorder() {
 describe('ClaudeCodeHarness', () => {
   it('puts a native local provider on each attempt and resume, with a named model', async () => {
     const r = recorder();
-    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080/v1', model: 'qwen', contextWindow: 65536, keyRef: 'localEndpoint:box' };
+    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080', model: 'qwen', contextWindow: 65536, keyRef: 'localEndpoint:box' };
     const h = new ClaudeCodeHarness({ sessions: r.sessions, models: () => MODELS, localProvider: () => provider });
     await h.launch(req({ target: { harness: 'claude-code', source: 'local:box', model: 'qwen', effortNative: 'none' } }));
     await h.launch(req({ resume: 'old', target: { harness: 'claude-code', source: 'local:box', model: 'qwen', effortNative: 'none' } }));
     expect(r.requests.map((x) => x.policy?.claude?.localProvider)).toEqual([provider, provider]);
     expect(JSON.stringify(r.requests)).not.toContain('synthetic-secret');
     await expect(h.launch(req({ target: { harness: 'claude-code', source: 'local:box', model: '', effortNative: 'none' } }))).rejects.toThrow(/named/);
+  });
+  it('refuses to launch a local model whose provider the launch policy would drop, rather than send it to Anthropic', async () => {
+    const r = recorder();
+    const provider = { source: 'local:box', baseUrl: 'not a url', model: 'qwen', contextWindow: 65536 };
+    const h = new ClaudeCodeHarness({ sessions: r.sessions, models: () => MODELS, localProvider: () => provider });
+    await expect(h.launch(req({ target: { harness: 'claude-code', source: 'local:box', model: 'qwen', effortNative: 'none' } }))).rejects.toThrow(/does not accept/);
+    expect(r.requests).toHaveLength(0);
   });
   const req = (over: Partial<AttemptLaunch> = {}): AttemptLaunch => ({
     cwd: '/Users/test/proj-wt',

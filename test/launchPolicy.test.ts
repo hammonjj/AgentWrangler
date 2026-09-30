@@ -47,11 +47,20 @@ function memento(initial: Record<string, unknown> = {}) {
 
 describe('parseLaunchPolicy', () => {
   it('keeps only a validated local Claude provider and never serializes a key', () => {
-    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080/v1', model: 'qwen', contextWindow: 65536, maxOutputTokens: 4096, keyRef: 'localEndpoint:box' };
+    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080', model: 'qwen', contextWindow: 65536, maxOutputTokens: 4096, keyRef: 'localEndpoint:box' };
     expect(parseLaunchPolicy({ claude: { localProvider: { ...provider, key: 'synthetic-secret' } } })?.claude?.localProvider).toEqual(provider);
     expect(JSON.stringify(parseLaunchPolicy({ claude: { localProvider: { ...provider, key: 'synthetic-secret' } } }))).not.toContain('synthetic-secret');
     expect(parseLaunchPolicy({ claude: { localProvider: { ...provider, model: '' } } })).toBeUndefined();
     expect(parseLaunchPolicy({ claude: { localProvider: { ...provider, keyRef: 'localEndpoint:other' } } })).toBeUndefined();
+  });
+  it('keeps a local Claude provider at the server root, since Claude Code appends /v1/messages itself', () => {
+    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080', model: 'qwen', contextWindow: 65536 };
+    const baseUrlOf = (baseUrl: unknown) => parseLaunchPolicy({ claude: { localProvider: { ...provider, baseUrl } } })?.claude?.localProvider?.baseUrl;
+    expect(baseUrlOf('http://127.0.0.1:18080')).toBe('http://127.0.0.1:18080');
+    expect(baseUrlOf('http://127.0.0.1:18080/')).toBe('http://127.0.0.1:18080');
+    expect(baseUrlOf('http://127.0.0.1:18080/v1')).toBe('http://127.0.0.1:18080');
+    expect(baseUrlOf('https://box.test/proxy')).toBe('https://box.test/proxy');
+    for (const bad of ['', 'ftp://box.test', 'http://user@box.test', 'http://', 3]) expect(baseUrlOf(bad)).toBeUndefined();
   });
   it('keeps a well-formed policy as it is', () => {
     expect(parseLaunchPolicy(JSON.parse(JSON.stringify(POLICY)))).toEqual(POLICY);
@@ -101,7 +110,7 @@ describe('claudePolicyOptions', () => {
   it('builds a local-only SDK environment and preserves a simultaneous hosted launch', async () => {
     const inherited = { PATH: '/bin', ANTHROPIC_API_KEY: 'inherited-key', ANTHROPIC_BASE_URL: 'https://old.invalid', ANTHROPIC_MODEL: 'old', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_OAUTH_TOKEN: 'old-oauth', OPENAI_API_KEY: 'other-key' };
     const processBefore = { ...process.env };
-    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080/v1', model: 'qwen', contextWindow: 65536, maxOutputTokens: 4096, keyRef: 'localEndpoint:box' };
+    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080', model: 'qwen', contextWindow: 65536, maxOutputTokens: 4096, keyRef: 'localEndpoint:box' };
     const seen: any[] = [];
     const query: QueryFn = ({ options }) => { seen.push(options); return (async function* () {})() as any; };
     new ClaudeSdkSession({ cwd: '/Users/test/proj', model: 'qwen', policy: { localProvider: provider } }, { query, binary: '/fake/claude', log: () => undefined, sdkOptions: { env: inherited }, localKey: async () => 'synthetic-secret' }).start();

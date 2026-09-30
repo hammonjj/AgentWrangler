@@ -85,7 +85,7 @@ function sink(now = () => 1_790_000_000_000, local = false): TurnTelemetry {
     enabled: () => enabled,
     appliedEffort: (id) => applied[id],
     registry: {
-      get: (id) => ({ v: 1, sessionId: id ?? '', provider: 'claude', cwd: '/Users/test/proj', launch: { effort: 'high', ...(local ? { policy: { claude: { localProvider: { source: 'local:box', baseUrl: 'http://127.0.0.1:18080/v1', model: 'qwen', contextWindow: 65536 } } } } : {}) }, state: 'live', createdAt: 0, lastShownAt: 0, updatedAt: 0 }),
+      get: (id) => ({ v: 1, sessionId: id ?? '', provider: 'claude', cwd: '/Users/test/proj', launch: { effort: 'high', ...(local ? { policy: { claude: { localProvider: { source: 'local:box', baseUrl: 'http://127.0.0.1:18080', model: 'qwen', contextWindow: 65536 } } } } : {}) }, state: 'live', createdAt: 0, lastShownAt: 0, updatedAt: 0 }),
       noteApplied: (id, a) => void notes.push({ id, ...a }),
     },
     now,

@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import type { SessionExecutors } from '../../core/session/sessionExecutors';
 import type { SessionHandle } from '../../core/session/sessionHandle';
 import type { ModelChoice } from '../../shared/conversation';
-import type { ClaudeLocalProvider } from '../../shared/launchPolicy';
+import { parseLaunchPolicy, type ClaudeLocalProvider } from '../../shared/launchPolicy';
 import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import type { ModelSourceId } from '../../shared/orchestration/types';
 import { assertTarget, nativeEffort, type AgentHarness, type AttemptLaunch, type HarnessCapabilities } from './types';
@@ -59,7 +59,11 @@ export class ClaudeCodeHarness implements AgentHarness {
       if (!req.target.model) throw new Error('A local model has to be named: there is no default model on an endpoint.');
       const provider = this.deps.localProvider?.(req.target.source, req.target.model);
       if (!provider) throw new Error(`The endpoint for ${req.target.source} is not registered, is off, or has no native /v1/messages route and known context window.`);
-      policy = { ...policy, claude: { ...policy?.claude, localProvider: provider } };
+      // Every later reader parses the policy. A provider the parser drops would
+      // send the local model's name to Anthropic, so it cannot leave here.
+      const parsed = parseLaunchPolicy({ claude: { localProvider: provider } })?.claude?.localProvider;
+      if (!parsed) throw new Error(`The endpoint for ${req.target.source} gave a provider the launch policy does not accept.`);
+      policy = { ...policy, claude: { ...policy?.claude, localProvider: parsed } };
     }
     const handle = await this.deps.sessions.launch({
       provider: 'claude',

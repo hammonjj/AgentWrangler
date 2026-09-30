@@ -142,12 +142,15 @@ function parseClaude(raw: unknown): ClaudeLaunchPolicy | undefined {
 
 function parseClaudeLocalProvider(raw: unknown): ClaudeLocalProvider | undefined {
   if (!isObject(raw)) return undefined;
-  if (typeof raw.baseUrl !== 'string' || !/^https?:\/\/[^\s@]+\/v1$/.test(raw.baseUrl)) return undefined;
+  // The server root: Claude Code appends /v1/messages to ANTHROPIC_BASE_URL itself.
+  // A record from before that was known ends in /v1, which would request /v1/v1/messages.
+  const baseUrl = typeof raw.baseUrl === 'string' ? raw.baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '') : undefined;
+  if (!baseUrl || !/^https?:\/\/[^\s@/]+(\/[^\s@]*)?$/.test(baseUrl)) return undefined;
   if (typeof raw.source !== 'string' || !/^local:[a-z0-9-]+$/.test(raw.source)) return undefined;
   if (typeof raw.model !== 'string' || !raw.model.trim()) return undefined;
   const contextWindow = typeof raw.contextWindow === 'number' && Number.isInteger(raw.contextWindow) && raw.contextWindow > 0 ? raw.contextWindow : undefined;
   if (!contextWindow) return undefined;
-  const out: ClaudeLocalProvider = { source: raw.source, baseUrl: raw.baseUrl, model: raw.model.trim(), contextWindow };
+  const out: ClaudeLocalProvider = { source: raw.source, baseUrl, model: raw.model.trim(), contextWindow };
   if (typeof raw.maxOutputTokens === 'number' && Number.isInteger(raw.maxOutputTokens) && raw.maxOutputTokens > 0) out.maxOutputTokens = raw.maxOutputTokens;
   if (typeof raw.keyRef === 'string') {
     if (raw.keyRef !== `localEndpoint:${out.source.slice('local:'.length)}`) return undefined;
