@@ -1642,8 +1642,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         snapshot: () => ({
           missions: tasks
             .list()
-            // A proposal waiting on its card (#81) is not a mission yet.
-            .filter((m) => !isOpenProposal(m))
+            // Open proposals (#81) are listed too: the tab's badge counts them, so the list must show them.
             .map((m) =>
               missionViewOf(m, {
                 actions: (taskId) => tasks.actions(m.id, taskId),
@@ -1651,7 +1650,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
                 canPlan: tasks.canPlan,
               }),
             ),
-          // A3: each ask once. Open proposals count too, though they are not drawn here (#101).
+          // A3: each ask once, over the same missions the list draws (#101).
           attention: attentionCount([], tasks.list()),
           tiers: models.catalog.tiers.map((t) => t.name),
           harnesses: [
