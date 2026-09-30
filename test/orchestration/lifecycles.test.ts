@@ -117,10 +117,16 @@ describe('transition tables', () => {
 });
 
 describe('mission guards (§7.2)', () => {
-  it('a single task may start directly from draft', () => {
-    const m = transitionMission(mission(), 'running', opts);
+  it('a single task may start directly from draft, once its start is recorded', () => {
+    const m = transitionMission(mission({ startApproval: { at: T0, by: 'user' } }), 'running', opts);
     expect(m.state).toBe('running');
     expect(m.updatedAt).toBe(T0 + 1);
+  });
+
+  it('a proposal nobody started may not leave draft for running (#100)', () => {
+    expect(() => transitionMission(mission(), 'running', opts)).toThrow(/proposal is started/);
+    // A record from before `startApproval` that already launched was started then.
+    expect(transitionMission(mission({ attempts: [attempt('a1', 't1')] }), 'running', opts).state).toBe('running');
   });
 
   it('several tasks may not start without a reviewed plan', () => {

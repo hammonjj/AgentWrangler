@@ -98,7 +98,7 @@ import {
   type WorktreeAssignment,
 } from '../../shared/orchestration/types';
 import { ulid } from '../domain/ids';
-import { taskMachine,transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
+import { launchRefusal, taskMachine, transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
 import { applyPlanEdit, executionOrder, nextTaskKey, planIssues, planTask, taskCap, tasksFromDraft, type PlanContext } from '../domain/plan';
 import type { PlannedTask, PlanResult, Planner, ReplanContext } from '../policy/planner';
 import { MissionFinisher } from './missionFinish';
@@ -551,7 +551,9 @@ export class TaskRunner implements Disposable {
       mode: 'manual',
     }, { pins: routePins(req.route) });
     await this.queue(id, async () => {
-      const m = this.need(id);
+      // Started directly by the user: that is its approval, recorded before anything launches (#100).
+      const m: Mission = { ...this.need(id), startApproval: { at: this.now(), by: 'user' } };
+      this.put(m);
       const task = this.currentTask(m);
       // Admitted by the scheduler like any other start (#45): when it has to
       // wait (the fleet paused, a usage window full, every slot taken), the
@@ -695,6 +697,8 @@ export class TaskRunner implements Disposable {
       this.put(this.patchTask(m, task.id, (t) => ({ ...t, overrides })));
       if (!accepted) this.writeProposalOverride(m, rec, route);
     }
+    // The approval, recorded before the launch it allows (#100): a person's, or `auto` routing's within its gate.
+    this.put({ ...this.need(missionId), startApproval: { at: this.now(), by: offered ? 'user' : 'auto' } });
     await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, routing: { recommendation: rec, offered, accepted } });
     return this.need(missionId);
   }
@@ -1045,6 +1049,9 @@ export class TaskRunner implements Disposable {
       const task = this.taskFor(m, taskId);
       const prev = this.currentAttempt(m, task.id);
       if (task.state !== 'needs-human') throw new TaskError('The task is not waiting for a decision.');
+      // A proposal waiting on its card is `needs-human` too: it is started from there, never retried into running (#100).
+      const unapproved = launchRefusal(m);
+      if (unapproved) throw new TaskError(unapproved);
       if (prev && LIVE.includes(prev.state)) {
         // Held by something this build cannot follow: give it up, without touching it.
         m = this.endAttempt(m, prev.id, 'cancelled', { status: 'cancelled' }, 'given up for a fresh retry');
@@ -2933,8 +2940,10 @@ export class TaskRunner implements Disposable {
     const taskId = prevAttempt ? prevAttempt.taskId : (opts as { taskId?: string }).taskId ?? this.currentTask(m).id;
     const task = m.tasks.find((t) => t.id === taskId);
     if (!task) throw new TaskError('That task is no longer in the mission.');
-    // The one gate that holds whatever called this: a planned mission's work waits for Approve and start.
-    if (m.planned && m.planApprovedAt === undefined) throw new TaskError('Nothing runs before the plan is approved.');
+    // The one gate that holds whatever called this (#100): a planned mission's work waits for Approve
+    // and start, a proposal's for its start. Refused before anything is recorded or changed.
+    const unapproved = launchRefusal(m);
+    if (unapproved) throw new TaskError(unapproved);
     const shared = sharedTree(m);
     const resolves = opts.mode === 'fresh' ? opts.resolves : undefined;
     const n = task.attemptIds.length + 1;
