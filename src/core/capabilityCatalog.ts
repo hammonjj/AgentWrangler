@@ -36,7 +36,7 @@ import {
   MODEL_POLICY_KEY,
   parseModelPolicy,
   parseTiers,
-  tierRank,
+  canonicalTier,
   TIERS_KEY,
   type CapabilityCatalogView,
   type ModelPolicyChange,
@@ -45,6 +45,8 @@ import {
   type ReportedModels,
 } from '../shared/orchestration/catalog';
 import type { LocalModelReport } from '../shared/orchestration/localModels';
+import { planTierListSave, type TierListDraftEntry, type TierRename } from '../shared/orchestration/tierListSave';
+import { ROUTING_KEY } from '../shared/orchestration/executionPolicy';
 
 const LEGACY_KEY = 'agentWrangler.modelCatalog';
 const STORAGE_KEY = 'agentWrangler.capabilityCatalog';
@@ -62,6 +64,8 @@ interface Stored {
 export interface CatalogSettings {
   get<T>(key: string, defaultValue: T): T;
   update(key: string, value: unknown): Promise<void>;
+  /** Several keys in one write, where the store can. */
+  updateMany?(entries: Record<string, unknown>): Promise<void>;
   onDidChange(listener: (affects: (key: string) => boolean) => void): Disposable;
 }
 
@@ -176,8 +180,11 @@ export class CapabilityCatalog implements Disposable {
     const view = this.catalog;
     const entry = view.entries.find((e) => e.key === change.key);
     if (!entry) return { ok: false, error: `No model ${change.key} has been reported` };
-    if (change.tier !== undefined && change.tier !== null && tierRank(view.tiers, change.tier) < 0) {
-      return { ok: false, error: `Tier "${change.tier}" is not defined` };
+    if (change.tier !== undefined && change.tier !== null) {
+      const tier = canonicalTier(view.tiers, change.tier);
+      if (tier === undefined) return { ok: false, error: `Tier "${change.tier}" is not defined` };
+      // Stored by its current name, even when asked for by an old one.
+      change = { ...change, tier };
     }
     if (change.effort) {
       const error = effortChangeError(entry, change.effort);
@@ -207,6 +214,35 @@ export class CapabilityCatalog implements Disposable {
     const raw = this.settings.get<unknown>(PRICES_KEY, undefined);
     const table = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
     await this.settings.update(PRICES_KEY, applyPriceChange(table, priceKeyFor(entry, table), change.field, change.usdPerMTok));
+    return { ok: true };
+  }
+
+  /**
+   * Replace the tier list (or, with `'default'`, delete it so the shipped one
+   * applies), applying renames: the old name stays on the renamed tier as an
+   * alias, and `tier` in `orchestration.models` and the global `caps.maxTier`
+   * are rewritten to the new name. Checked with the loader's own rules first;
+   * nothing is written unless all of it can be.
+   *
+   * With a settings store that writes several keys at once (the app's JSON
+   * file) this is one write and one change event. Without one, the keys are
+   * written in turn — and because the alias keeps the old name resolving, a
+   * reader between two of those writes still sees every model on the tier it
+   * was on.
+   */
+  async setTierList(change: { tiers: TierListDraftEntry[] | 'default'; renames: TierRename[] }): Promise<{ ok: true } | { ok: false; errors: string[] }> {
+    if (!this.settings) return { ok: false, errors: ['Settings are not available'] };
+    const r = planTierListSave({
+      current: parseTiers(this.settings.get<unknown>(TIERS_KEY, undefined)),
+      tiers: change.tiers,
+      renames: change.renames,
+      models: this.settings.get<unknown>(MODEL_POLICY_KEY, undefined),
+      routing: this.settings.get<unknown>(ROUTING_KEY, undefined),
+    });
+    if (!r.ok) return { ok: false, errors: r.errors.map((e) => (e.index >= 0 ? `Tier ${e.index + 1}: ${e.message}` : e.message)) };
+    const writes = r.plan.writes;
+    if (this.settings.updateMany) await this.settings.updateMany(writes);
+    else for (const [key, value] of Object.entries(writes)) await this.settings.update(key, value);
     return { ok: true };
   }
 

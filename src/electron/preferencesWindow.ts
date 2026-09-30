@@ -34,6 +34,7 @@ import type { ModelPolicyChange } from '../shared/orchestration/catalog';
 import { localEndpointChange, type LocalEndpointChange } from '../shared/orchestration/localEndpoints';
 import { SETTINGS } from '../shared/settings';
 import { OPEN_TAB_MESSAGE, type OrchestrationTabTarget } from '../shared/orchestration/orchestrationTabs';
+import { tierListMessage, type TierListDraftEntry, type TierRename } from '../shared/orchestration/tierListSave';
 import { documentUrl } from './bundleProtocol';
 import { TO_HOST, TO_WEBVIEW } from './channels';
 import { claimRendererState, type RendererStateStore } from './rendererState';
@@ -65,6 +66,8 @@ export interface PreferencesWindowOptions {
     setPolicy(change: ModelPolicyChange): Promise<{ ok: true } | { ok: false; error: string }>;
     /** One price field of one model (`telemetry.prices`). */
     setPrice?(change: ModelPriceChange): Promise<{ ok: true } | { ok: false; error: string }>;
+    /** The whole tier list and its renames, validated with the loader's rules before anything is written. */
+    setTierList?(change: { tiers: TierListDraftEntry[] | 'default'; renames: TierRename[] }): Promise<{ ok: true } | { ok: false; errors: string[] }>;
     /** Orchestration → Local endpoints (#51). */
     localEndpoint?(change: LocalEndpointChange): Promise<{ ok: boolean; lines: string[] }>;
     /** Write the global routing defaults (#40), already checked by `routingPolicyUpdate`. */
@@ -197,6 +200,23 @@ export class PreferencesWindow implements Disposable {
         })
         .catch((e) => this.post({ type: 'orchestrationWriteResult', key: change.key, field, ok: false, error: String(e) }))
         // The full state after every write, whether it landed or not.
+        .finally(() => this.pushOrchestration());
+      return;
+    }
+    if (message.type === 'setTierList') {
+      const change = tierListMessage(message);
+      const run = this.opts.orchestration?.setTierList;
+      if (!change || !run) {
+        this.opts.log('preferences: refused a tier list');
+        this.post({ type: 'tierListResult', ok: false, errors: ['The tier list could not be read.'] });
+        return;
+      }
+      void run(change)
+        .then((r) => {
+          if (!r.ok) this.opts.log(`preferences: refused a tier list: ${r.errors.join('; ')}`);
+          this.post({ type: 'tierListResult', ok: r.ok, errors: r.ok ? [] : r.errors });
+        })
+        .catch((e) => this.post({ type: 'tierListResult', ok: false, errors: [String(e)] }))
         .finally(() => this.pushOrchestration());
       return;
     }

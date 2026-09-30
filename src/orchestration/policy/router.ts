@@ -28,7 +28,7 @@ import {
   RISK_LEVELS,
   VERIFIABILITY_LEVELS,
 } from './assessment';
-import type { TierDef } from '../../shared/orchestration/catalog';
+import { canonicalTier, type TierDef } from '../../shared/orchestration/catalog';
 import { namedTiers, routeTierNames, type NamedTiers } from '../../shared/orchestration/tierRoles';
 import {
   EFFORT_LEVELS,
@@ -334,7 +334,8 @@ export function routeTask(assessment: TaskAssessment, policy: RouterPolicy): Rou
   // ---- Caps (§9.3 rule 6): never exceeded ----
   let verdict: RouterResult['verdict'] = 'route';
   let needsHuman: string | undefined;
-  const capTier = policy.caps?.maxTier;
+  // A cap written with a tier's old name (alias) means that tier.
+  const capTier = policy.caps?.maxTier === undefined ? undefined : (canonicalTier(policy.tiers, policy.caps.maxTier) ?? policy.caps.maxTier);
   const capRank = capTier !== undefined ? tiers.indexOf(capTier) : -1;
   // A cap naming a tier the list does not have caps nothing it can express; it is ignored, and said so.
   let maxTier = tiers[named.top] ?? minTier;

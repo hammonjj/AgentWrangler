@@ -25,6 +25,7 @@ import type { LocalEndpointChange, LocalEndpointView } from './orchestration/loc
 import type { LocalModelSummary } from './orchestration/localMetrics';
 import { EFFORT_LEVELS, type EffortLevel, type ExecutionPolicy } from './orchestration/types';
 import { PRICE_FIELDS, type PriceField, type StoredPrice } from './orchestration/modelPrices';
+import type { TierListDraftEntry, TierRename } from './orchestration/tierListSave';
 import type { OPEN_TAB_MESSAGE, OrchestrationTabTarget } from './orchestration/orchestrationTabs';
 
 export type PreferencesToHost =
@@ -45,6 +46,12 @@ export type PreferencesToHost =
   | { type: 'modelPolicy'; change: ModelPolicyChange }
   /** One price field of one model, US$ per million tokens; `null` deletes it (`telemetry.prices`). */
   | { type: 'modelPrice'; change: ModelPriceChange }
+  /**
+   * The whole tier list from Orchestration → Tiers, in one message because the
+   * loader takes it all or nothing. `'default'` deletes `orchestration.tiers`.
+   * `renames` are applied with it (`planTierListSave`).
+   */
+  | { type: 'setTierList'; tiers: TierListDraftEntry[] | 'default'; renames: TierRename[] }
   /** Add, remove, turn on or off, key, probe or qualify a local endpoint (#51). */
   | { type: 'localEndpoint'; change: LocalEndpointChange }
   /**
@@ -209,6 +216,8 @@ export type HostToPreferences =
    * `price:<field>`, `reset`). `ok` clears an earlier refusal.
    */
   | { type: 'orchestrationWriteResult'; key: string; field: string; ok: boolean; error?: string }
+  /** The tier list was saved, or refused and why. */
+  | { type: 'tierListResult'; ok: boolean; errors: string[] }
   /** Open Orchestration on a tab, optionally focusing one model on the Models tab. */
   | ({ type: typeof OPEN_TAB_MESSAGE } & OrchestrationTabTarget);
 

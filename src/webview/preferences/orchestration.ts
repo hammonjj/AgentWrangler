@@ -25,6 +25,7 @@ import { renderReportTab } from './orchReport';
 
 export { onRoutingResult } from './orchRouting';
 export { setLocalEndpointResult } from './orchEndpoints';
+export { onTierListResult } from './orchTiers';
 export { initUiPersistence, onWriteResult } from './orchUi';
 
 export const ORCHESTRATION_GROUP = 'Orchestration';
@@ -127,7 +128,7 @@ export function renderOrchestration(host: HTMLElement, view: OrchestrationPrefsV
         renderModelsTab(panel, view, post, redraw);
         break;
       case 'tiers':
-        renderTiersTab(panel, view);
+        renderTiersTab(panel, view, post, redraw, (key) => restoreFocus(host, key));
         break;
       case 'endpoints':
         renderEndpointsTab(panel, view, post, (key) => openOrchestrationTab({ tab: 'models', focusModelKey: key }));

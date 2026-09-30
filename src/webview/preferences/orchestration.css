@@ -888,6 +888,206 @@
   line-height: 1.4;
 }
 
+/* ---- Tiers editor --------------------------------------------------------------- */
+
+#prefsApp .aw-orch-tierhead,
+#prefsApp .aw-orch-tierrow-main {
+  display: grid;
+  grid-template-columns: 24px 22px minmax(0, 1fr) 190px 64px 84px;
+  align-items: center;
+  gap: 10px;
+}
+
+#prefsApp .aw-orch-tierhead {
+  padding: 0 12px;
+  color: var(--aw-text-faint);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+#prefsApp .aw-orch-tierlist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: -6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+#prefsApp .aw-orch-tierrow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+  background: var(--aw-surface);
+}
+
+#prefsApp .aw-orch-tierrow.escalation {
+  border-style: dashed;
+}
+
+#prefsApp .aw-orch-tierpos {
+  color: var(--aw-text-faint);
+  font-family: var(--aw-mono);
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-tiername-cell {
+  min-width: 0;
+}
+
+#prefsApp .aw-orch-tiername {
+  width: 100%;
+  font-family: var(--aw-mono);
+  font-size: 13px;
+}
+
+#prefsApp .aw-orch-reach .aw-orch-seg {
+  flex: 1 1 0;
+}
+
+#prefsApp .aw-orch-tiercount {
+  color: var(--aw-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+#prefsApp .aw-orch-tiermoves {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+#prefsApp .aw-orch-iconbtn {
+  width: 28px;
+  height: var(--aw-control-h);
+  padding: 0;
+  border: 0;
+  border-radius: var(--aw-radius);
+  background: none;
+  color: var(--aw-text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-iconbtn:hover:not(:disabled) {
+  background: var(--aw-surface-raised);
+}
+
+#prefsApp .aw-orch-iconbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#prefsApp .aw-orch-tierrow-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding-left: 66px;
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-rename-note {
+  color: var(--aw-changed-text);
+}
+
+#prefsApp .aw-orch-addtier {
+  height: 36px;
+  border: 1px dashed var(--aw-border-strong);
+  border-radius: var(--aw-lane-radius);
+  background: none;
+  color: var(--aw-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#prefsApp .aw-orch-alert,
+#prefsApp .aw-orch-impact,
+#prefsApp .aw-orch-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-lane-radius);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#prefsApp .aw-orch-alert {
+  border-color: var(--aw-error-border);
+  background: var(--aw-error-bg);
+  color: var(--aw-error);
+}
+
+#prefsApp .aw-orch-impact {
+  border-color: var(--aw-warn-border);
+  background: var(--aw-warn-bg);
+  color: var(--aw-warn-text);
+}
+
+#prefsApp .aw-orch-note {
+  color: var(--aw-text-muted);
+}
+
+#prefsApp .aw-orch-note strong {
+  color: var(--aw-text);
+}
+
+#prefsApp .aw-orch-tierfooter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--aw-border);
+}
+
+#prefsApp .aw-orch-spacer {
+  flex: 1 1 auto;
+}
+
+#prefsApp .aw-orch-tierstatus {
+  color: var(--aw-text-faint);
+  font-size: 12px;
+}
+
+#prefsApp .aw-orch-tierstatus.dirty {
+  color: var(--aw-warn-text);
+}
+
+#prefsApp .aw-orch-tierstatus.bad {
+  color: var(--aw-error);
+}
+
+@container aw-orch (max-width: 599px) {
+  /* The row wraps: position, meter and name on one line; reach, count and moves on the next. */
+  #prefsApp .aw-orch-tierhead {
+    display: none;
+  }
+  #prefsApp .aw-orch-tierrow-main {
+    grid-template-columns: 20px 22px minmax(0, 1fr);
+  }
+  #prefsApp .aw-orch-reach {
+    grid-column: 1 / -1;
+  }
+  #prefsApp .aw-orch-tiercount {
+    grid-column: 1 / 3;
+  }
+  #prefsApp .aw-orch-tiermoves {
+    grid-column: 3;
+  }
+  #prefsApp .aw-orch-tierrow-sub {
+    padding-left: 0;
+  }
+}
+
 @container aw-orch (max-width: 479px) {
   /* Two lines: the label and its chips, then the tier and the switch under the label. */
   #prefsApp .aw-orch-row-main {

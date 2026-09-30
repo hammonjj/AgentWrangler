@@ -246,6 +246,7 @@ void app.whenReady().then(() => {
       },
       setPolicy: (change) => wrangler.models.applyPolicy(change),
       setPrice: (change) => wrangler.models.setPrice(change),
+      setTierList: (change) => wrangler.models.setTierList(change),
       localEndpoint: (change) => wrangler.localEndpoints.apply(change),
       // Frozen into each mission recorded after this; a started mission keeps what it had (§10.2).
       setRouting: (value) => host.settingsStore.update(ROUTING_KEY, value),

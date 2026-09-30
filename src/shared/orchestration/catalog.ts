@@ -62,6 +62,13 @@ export function isKnown<T>(k: Known<T>): k is { value: T; from: FactSource } {
 export interface TierDef {
   name: TierName;
   reachableBy: 'route' | 'escalation';
+  /**
+   * Old names that still mean this tier. Renaming `expert` to `pro` keeps
+   * `expert` here, so a shipped default, a model override or a cap written
+   * with the old name — in settings, a repository's policy or a recorded
+   * mission — resolves to `pro` rather than to no tier at all.
+   */
+  aliases?: TierName[];
 }
 
 /** Weakest first. Ordered data, so a tier can be inserted later without touching any record. */
@@ -72,30 +79,70 @@ export const DEFAULT_TIERS: readonly TierDef[] = [
   { name: 'frontier', reachableBy: 'escalation' },
 ];
 
-/** Position in the order, weakest 0; -1 for a tier the list does not have. */
+/** Position in the order, weakest 0; -1 for a tier the list does not have. An old name (alias) counts as its tier. */
 export function tierRank(tiers: readonly TierDef[], name: TierName | undefined): number {
   if (name === undefined) return -1;
-  return tiers.findIndex((t) => t.name === name);
+  const exact = tiers.findIndex((t) => t.name === name);
+  return exact >= 0 ? exact : tiers.findIndex((t) => t.aliases?.includes(name) === true);
+}
+
+/** The tier's current name for a name or an old name of it; undefined when the list has neither. */
+export function canonicalTier(tiers: readonly TierDef[], name: TierName | undefined): TierName | undefined {
+  const r = tierRank(tiers, name);
+  return r >= 0 ? tiers[r].name : undefined;
+}
+
+/** One thing wrong with a tier list, on the row it is about (`index` -1: the list itself). */
+export interface TierListError {
+  index: number;
+  message: string;
+}
+
+/**
+ * The rules a tier list must meet to be used at all, shared by the loader,
+ * the host's save and the Tiers editor: at least one tier; every name
+ * non-blank and unique after trimming (both rows of a duplicate are marked);
+ * an old name (alias) never equal to a name or to another tier's old name.
+ * Names and aliases come back trimmed.
+ */
+export function validateTierList(raw: unknown): { ok: true; tiers: TierDef[] } | { ok: false; errors: TierListError[] } {
+  if (!Array.isArray(raw) || raw.length === 0) return { ok: false, errors: [{ index: -1, message: 'A tier list needs at least one tier' }] };
+  const errors: TierListError[] = [];
+  const tiers: TierDef[] = raw.map((item, index) => {
+    const t = (item && typeof item === 'object' ? item : {}) as Partial<Record<keyof TierDef, unknown>>;
+    const name = typeof t.name === 'string' ? t.name.trim() : '';
+    if (!name) errors.push({ index, message: 'Name is required' });
+    const aliases = Array.isArray(t.aliases)
+      ? [...new Set(t.aliases.filter((a): a is string => typeof a === 'string').map((a) => a.trim()).filter((a) => a !== '' && a !== name))]
+      : [];
+    return { name, reachableBy: t.reachableBy === 'escalation' ? 'escalation' : 'route', ...(aliases.length > 0 ? { aliases } : {}) };
+  });
+  const names = tiers.map((t) => t.name);
+  tiers.forEach((t, index) => {
+    if (t.name && names.indexOf(t.name) !== names.lastIndexOf(t.name)) errors.push({ index, message: 'Duplicate name' });
+  });
+  tiers.forEach((t, index) => {
+    for (const alias of t.aliases ?? []) {
+      const named = names.indexOf(alias);
+      if (named >= 0) {
+        errors.push({ index: named, message: `Already an old name of "${t.name}"` });
+        continue;
+      }
+      const other = tiers.findIndex((o, j) => j !== index && o.aliases?.includes(alias) === true);
+      if (other >= 0) errors.push({ index, message: `Old name "${alias}" also belongs to "${tiers[other].name}"` });
+    }
+  });
+  return errors.length > 0 ? { ok: false, errors } : { ok: true, tiers };
 }
 
 /**
  * The tier list from settings (`orchestration.tiers`), or the defaults when it
- * is absent or malformed. All or nothing: half a tier list would silently
- * re-order the rest.
+ * is absent or breaks any rule of `validateTierList`. All or nothing: half a
+ * tier list would silently re-order the rest.
  */
 export function parseTiers(raw: unknown): TierDef[] {
-  if (!Array.isArray(raw) || raw.length === 0) return DEFAULT_TIERS.map((t) => ({ ...t }));
-  const out: TierDef[] = [];
-  const seen = new Set<string>();
-  for (const item of raw) {
-    const t = item as Partial<TierDef> | null;
-    if (!t || typeof t.name !== 'string' || t.name.trim() === '' || seen.has(t.name)) {
-      return DEFAULT_TIERS.map((d) => ({ ...d }));
-    }
-    seen.add(t.name);
-    out.push({ name: t.name, reachableBy: t.reachableBy === 'escalation' ? 'escalation' : 'route' });
-  }
-  return out;
+  const r = validateTierList(raw);
+  return r.ok ? r.tiers : DEFAULT_TIERS.map((t) => ({ ...t }));
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +548,7 @@ function descriptorFor(
 
 /** Build the catalog from what the harnesses reported and what the user declared. */
 export function buildCatalog(input: CatalogInputs): CapabilityCatalogView {
-  const tiers = (input.tiers ?? DEFAULT_TIERS).map((t) => ({ ...t }));
+  const tiers = (input.tiers ?? DEFAULT_TIERS).map((t) => ({ ...t, ...(t.aliases ? { aliases: [...t.aliases] } : {}) }));
   const policy = input.policy ?? {};
   const entries: CatalogEntry[] = [];
 
@@ -518,7 +565,8 @@ export function buildCatalog(input: CatalogInputs): CapabilityCatalogView {
       const descriptor = descriptorFor(source, primary, input.observed?.[key], input.prices);
       const declared = policy[key] ?? {};
       const def = defaultFor(source, primary.resolved ?? primary.value);
-      const defaultTier = def?.tier !== undefined && tierRank(tiers, def.tier) >= 0 ? def.tier : undefined;
+      // A default or a choice written with a tier's old name means that tier.
+      const defaultTier = canonicalTier(tiers, def?.tier);
 
       const tierDeclared = 'tier' in declared;
       let tier = tierDeclared ? (declared.tier ?? undefined) : defaultTier;
@@ -527,6 +575,7 @@ export function buildCatalog(input: CatalogInputs): CapabilityCatalogView {
         undefinedTier = tier;
         tier = undefined;
       }
+      tier = canonicalTier(tiers, tier);
 
       const enabledDeclared = declared.enabled !== undefined;
       const enabled = declared.enabled ?? def?.excluded === undefined;
@@ -581,6 +630,7 @@ export function buildCatalog(input: CatalogInputs): CapabilityCatalogView {
       undefinedTier = tier;
       tier = undefined;
     }
+    tier = canonicalTier(tiers, tier);
     const enabledDeclared = declared.enabled !== undefined;
     const enabled = declared.enabled ?? true;
     let notRoutableBecause: string | undefined;

@@ -56,6 +56,11 @@ export interface HostSettings {
   get<T>(key: string, defaultValue: T): T;
   update(key: string, value: unknown): Promise<void>;
   /**
+   * Several keys in one write and one change event, where the host can (the
+   * app's JSON file). Absent: the caller writes them one by one.
+   */
+  updateMany?(entries: Record<string, unknown>): Promise<void>;
+  /**
    * Fired when any setting changes. `affects('showUsage')` answers whether a
    * particular one did, which is what the callers actually want and what
    * VSCode's own event gives; a host with no finer information may answer
