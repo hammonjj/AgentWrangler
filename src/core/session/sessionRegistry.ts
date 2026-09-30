@@ -76,6 +76,8 @@ export interface SessionRecord {
    * run that started at or after this; an older host's record is history.
    */
   liveSince?: number;
+  /** Last lifecycle transition; unlike updatedAt, opening the pane does not advance it. */
+  stateChangedAt?: number;
   updatedAt: number;
 }
 
@@ -158,6 +160,7 @@ export class SessionRegistry {
       state: 'live',
       // Kept while it stays live (an id re-announced mid-run is the same run).
       liveSince: existing?.state === 'live' && existing.liveSince !== undefined ? existing.liveSince : Math.min(input.liveSince ?? now, now),
+      stateChangedAt: existing?.state === 'live' ? existing.stateChangedAt ?? now : now,
       createdAt: existing?.createdAt ?? now,
       lastShownAt: now,
       updatedAt: now,
@@ -172,7 +175,12 @@ export class SessionRegistry {
   }
 
   setState(sessionId: string, state: SessionRecordState, endedReason?: string): void {
-    this.patch(sessionId, { state, endedReason });
+    const current = this.get(sessionId);
+    if (!current) return;
+    this.patch(sessionId, {
+      state, endedReason,
+      stateChangedAt: current.state === state ? current.stateChangedAt ?? current.updatedAt : this.now(),
+    });
   }
 
   /** Record what the agent says it applied, as distinct from what was asked for. */

@@ -132,7 +132,9 @@ export class SessionStore implements Disposable {
       ? {
           ...s,
           status: live.status,
+          statusIsEstimated: live.statusIsEstimated,
           lastActivityAt: live.lastActivityAt,
+          progress: live.progress,
           blockedReason: live.blockedReason,
           blockedAsk: live.blockedAsk,
           permissionRequestId: live.permissionRequestId,

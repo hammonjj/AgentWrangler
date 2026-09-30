@@ -230,10 +230,15 @@ describe('SessionRegistry', () => {
     expect(reg.get('s1')).toMatchObject({
       sessionId: 'S1',
       state: 'stopped',
+      stateChangedAt: t,
       lastShownAt: t,
       repoRoot: '/Users/test/proj',
       launch: { model: 'opus', effort: 'high', applied: { effort: 'medium' } },
     });
+    const stoppedAt = t;
+    t += 10;
+    reg.touch('s1');
+    expect(reg.get('s1')).toMatchObject({ stateChangedAt: stoppedAt, updatedAt: t });
   });
 
   it('brings a record back to live on resume, keeping when it was first created and how it was launched', () => {

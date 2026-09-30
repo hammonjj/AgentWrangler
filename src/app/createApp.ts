@@ -44,6 +44,7 @@ import { bootTimeMs, parentPidOf, startTimeOf } from '../core/procStart';
 import { sweepOrphans, sweepRefusal, type SweepResult } from '../core/session/orphanSweep';
 import { endProcess } from '../claude/runner/adopt';
 import { SessionRegistry, type SessionRecord } from '../core/session/sessionRegistry';
+import { stoppedCodexSession } from '../codex/stoppedStatus';
 import { autoResumeCandidate, outcomesFromDeadHosts, recordFromManifest } from '../core/session/recovery';
 import { checkoutFor } from '../core/checkout';
 import { RunnerService } from '../claude/runner/runnerService';
@@ -469,7 +470,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
     endpointKey: (ref) => localEndpoints.keyByRef(ref),
   });
   host.subscribe(codexRunners);
-  store.useLiveSessions((session) => session.provider === 'codex' ? codexRunners.get(session.sessionId)?.session : undefined);
+  store.useLiveSessions((session) => {
+    if (session.provider !== 'codex') return undefined;
+    return codexRunners.get(session.sessionId)?.session
+      ?? stoppedCodexSession(session, sessionRegistry.get(session.sessionId));
+  });
   host.subscribe(codexRunners.onDidChange(() => void store.refresh()));
   const archive = new ArchiveService(host.globalState);
   // Which agents are frozen. Nothing is persisted: the answer is the process
