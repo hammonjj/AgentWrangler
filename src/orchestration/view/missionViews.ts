@@ -7,7 +7,7 @@
  * mission's cost is always the sum of what its attempts reported, with the
  * basis the weakest of them had, and absent when none reported one.
  */
-import { missionPhase, missionTaskCounts, originKeyOf, taskPhase } from '../../shared/orchestration/delegatedState';
+import { isOpenProposal, missionPhase, missionTaskCounts, originKeyOf, taskPhase } from '../../shared/orchestration/delegatedState';
 import { summariseVerification } from '../../shared/orchestration/verification';
 import { planDiffText, type MissionMetricsView, type MissionPlannerView, type MissionTaskView, type MissionView, type TaskPreviewView } from '../../shared/orchestration/missionView';
 import { formatUsd } from '../../shared/sessionUsage';
@@ -233,6 +233,7 @@ export function missionViewOf(m: Mission, ctx: MissionViewContext): MissionView 
     issues: reviewing ? planIssues(m).map((i) => ({ level: i.level, text: i.text, ...(i.taskId ? { taskId: i.taskId } : {}) })) : [],
     cap: taskCap(m.policy),
     canApprove: m.state === 'plan-review' && m.planned === true && canApprove(m),
+    ...(isOpenProposal(m) ? { canRunProposal: true } : {}),
     ...(inReview
       ? {
           review: {

@@ -261,6 +261,9 @@ function footerHtml(v: MissionView): string {
       `<button class="mbtn primary" data-mission-op="approve"${v.canApprove ? '' : ' disabled'} title="${v.canApprove ? 'Start the first task on the launcher’s model; the rest follow in order' : 'Fix what the plan review lists first'}">Approve and start</button>`,
     );
   }
+  if (v.canRunProposal) {
+    parts.push(`<button class="mbtn primary" data-mission-op="approve" title="Start the task on the route the router recommended">Run task</button>`);
+  }
   if (v.review) {
     const stat = `<span class="mstat">${esc(reviewStatText(v.review))}</span>`;
     const buttons = v.review.finishes
