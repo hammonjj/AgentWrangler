@@ -132,6 +132,8 @@ interface Considered {
   tierRank: number;
   /** Why not, when it fails a hard filter. */
   rejected?: string;
+  /** Optional blocker code for the rejection. */
+  blocker?: string;
   /** Failed only on capacity: it would do once a window resets. */
   capacityOnly?: boolean;
   /** A soft note that rides along with a candidate that passed (e.g. an assumed window). */
@@ -144,43 +146,46 @@ function hardFilter(
   req: RouteRequirement,
   snap: ResolverSnapshot,
   policy: ResolverPolicy,
-): { reason: string; capacity?: boolean; note?: string } | { note?: string } {
+): { reason: string; blocker?: string; capacity?: boolean; note?: string } | { note?: string } {
   const e = c.entry;
   const d = e.descriptor;
   const label = d.label;
   const tiers = snap.catalog.tiers;
 
   // 1. In the pool at all (§6.3).
-  if (!e.routable) return { reason: `${label}: ${e.notRoutableBecause ?? 'not routable'}` };
+  if (!e.routable) {
+    const blocker = e.notRoutableBecause?.startsWith('disabled') ? 'policy-cap-tier' : 'unroutable';
+    return { reason: `${label}: ${e.notRoutableBecause ?? 'not routable'}`, blocker };
+  }
 
   // 2. Policy: exclusions and location caps.
   const ex = policy.exclusions;
-  if (ex?.harnesses?.includes(c.target.harness)) return { reason: `${label}: ${harnessLabel(c.target.harness)} is excluded` };
-  if (ex?.sources?.includes(d.source)) return { reason: `${label}: its source is excluded` };
-  if (d.location === 'local' && (ex?.disableLocal || policy.caps?.location === 'hosted-only')) return { reason: `${label}: local models are off` };
-  if (d.location === 'hosted' && policy.caps?.location === 'local-only') return { reason: `${label}: the mission is local-only` };
+  if (ex?.harnesses?.includes(c.target.harness)) return { reason: `${label}: ${harnessLabel(c.target.harness)} is excluded`, blocker: 'policy-exclusion' };
+  if (ex?.sources?.includes(d.source)) return { reason: `${label}: its source is excluded`, blocker: 'policy-exclusion' };
+  if (d.location === 'local' && (ex?.disableLocal || policy.caps?.location === 'hosted-only')) return { reason: `${label}: local models are off`, blocker: 'policy-exclusion' };
+  if (d.location === 'hosted' && policy.caps?.location === 'local-only') return { reason: `${label}: the mission is local-only`, blocker: 'unsupported-location' };
 
   // 2b. Pins (§10.2, #40): the dimensions the user fixed.
   const pins = policy.pins;
-  if (pins?.harness && c.target.harness !== pins.harness) return { reason: `${label} on ${harnessLabel(c.target.harness)}: the harness is pinned to ${harnessLabel(pins.harness)}` };
-  if (pins?.source && d.source !== pins.source) return { reason: `${label}: the source is pinned to ${pins.source}` };
-  if (pins?.model && !isPinnedModel(e, pins.model)) return { reason: `${label}: the model is pinned to ${pins.model}` };
+  if (pins?.harness && c.target.harness !== pins.harness) return { reason: `${label} on ${harnessLabel(c.target.harness)}: the harness is pinned to ${harnessLabel(pins.harness)}`, blocker: 'policy-pin' };
+  if (pins?.source && d.source !== pins.source) return { reason: `${label}: the source is pinned to ${pins.source}`, blocker: 'policy-pin' };
+  if (pins?.model && !isPinnedModel(e, pins.model)) return { reason: `${label}: the model is pinned to ${pins.model}`, blocker: 'policy-pin' };
 
   // 3. Tier fit.
   const r = c.tierRank;
   const def = tiers[r];
-  if (def && def.reachableBy !== 'route' && !policy.allowEscalationTiers) return { reason: `${label}: ${def.name} is reached only by escalation` };
+  if (def && def.reachableBy !== 'route' && !policy.allowEscalationTiers) return { reason: `${label}: ${def.name} is reached only by escalation`, blocker: 'policy-cap-tier' };
   const lo = tierRank(tiers, req.minTier);
   const hi = tierRank(tiers, req.maxTier);
-  if (hi >= 0 && r > hi) return { reason: `${label}: ${e.tier} is above the ${req.maxTier} cap` };
+  if (hi >= 0 && r > hi) return { reason: `${label}: ${e.tier} is above the ${req.maxTier} cap`, blocker: 'policy-cap-tier' };
   // A pinned model is the user's choice of capability: it is not held to the assessed floor.
-  if (lo >= 0 && r < lo && !pins?.model) return { reason: `${label}: ${e.tier} is below the required ${req.minTier}` };
+  if (lo >= 0 && r < lo && !pins?.model) return { reason: `${label}: ${e.tier} is below the required ${req.minTier}`, blocker: 'tier-mismatch' };
 
   // 4. Hard needs the model has to meet. Tool needs (edit, shell, network) are
   // the harness's, and both harnesses are agentic; `exclusive:` is a lease (#68).
   if (req.needs.includes('vision')) {
-    if (!isKnown(d.vision)) return { reason: `${label}: nothing has reported whether it takes images` };
-    if (!d.vision.value) return { reason: `${label}: does not take images` };
+    if (!isKnown(d.vision)) return { reason: `${label}: nothing has reported whether it takes images`, blocker: 'unknown-capability' };
+    if (!d.vision.value) return { reason: `${label}: does not take images`, blocker: 'unknown-capability' };
   }
 
   // 4b. A registered endpoint's model does agentic work only once something
@@ -188,10 +193,10 @@ function hardFilter(
   // probe, or the user. Unknown is "cannot satisfy a hard need".
   const endpoint = isEndpointSource(d.source);
   if (endpoint) {
-    if (!isKnown(d.contextWindow)) return { reason: `${label}: local context window is unknown; probe or declare it before routing` };
-    if (!d.qualifiedHarnesses?.includes(c.target.harness)) return { reason: `${label} on ${harnessLabel(c.target.harness)}: this model has not qualified through that harness` };
-    if (!isKnown(d.toolCalling)) return { reason: `${label}: tool calling not measured yet; run its qualification in Preferences → Orchestration` };
-    if (d.toolCalling.value === 'none') return { reason: `${label}: its tool calls do not parse (completion only)` };
+    if (!isKnown(d.contextWindow)) return { reason: `${label}: local context window is unknown; probe or declare it before routing`, blocker: 'unknown-capability' };
+    if (!d.qualifiedHarnesses?.includes(c.target.harness)) return { reason: `${label} on ${harnessLabel(c.target.harness)}: this model has not qualified through that harness`, blocker: 'unqualified-harness' };
+    if (!isKnown(d.toolCalling)) return { reason: `${label}: tool calling not measured yet; run its qualification in Preferences → Orchestration`, blocker: 'unknown-capability' };
+    if (d.toolCalling.value === 'none') return { reason: `${label}: its tool calls do not parse (completion only)`, blocker: 'unqualified-harness' };
   }
 
   // 5. Context window, with headroom already in the need.
@@ -199,11 +204,11 @@ function hardFilter(
   const need = contextNeedOf(req.needs);
   if (need !== undefined) {
     if (isKnown(d.contextWindow)) {
-      if (d.contextWindow.value < need) return { reason: `${label}: context ${fmtTokens(d.contextWindow.value)} < needed ${fmtTokens(need)}` };
+      if (d.contextWindow.value < need) return { reason: `${label}: context ${fmtTokens(d.contextWindow.value)} < needed ${fmtTokens(need)}`, blocker: 'missing-context' };
     } else if (d.location === 'hosted' && !endpoint && need <= ASSUMED_HOSTED_WINDOW) {
       note = `context window not reported yet; ${fmtTokens(need)} needed is within the ${fmtTokens(ASSUMED_HOSTED_WINDOW)} every hosted model has`;
     } else {
-      return { reason: `${label}: context window not reported, and ${fmtTokens(need)} is needed` };
+      return { reason: `${label}: context window not reported, and ${fmtTokens(need)} is needed`, blocker: 'missing-context' };
     }
   }
 
@@ -212,15 +217,15 @@ function hardFilter(
   if (status) {
     const backoff = status.capacity.backoffUntil;
     if (status.health.state === 'down' || (backoff !== undefined && backoff > snap.now)) {
-      return { reason: `${label}: ${status.health.reason}`, capacity: status.health.state === 'down' && backoff !== undefined };
+      return { reason: `${label}: ${status.health.reason}`, blocker: 'unhealthy-endpoint', capacity: status.health.state === 'down' && backoff !== undefined };
     }
     // Server slots are concurrency (§19.2): none free means wait, not a worse model.
     const free = status.capacity.freeSlots;
-    if (isKnown(free) && free.value <= 0) return { reason: `${label}: every server slot is busy`, capacity: true };
+    if (isKnown(free) && free.value <= 0) return { reason: `${label}: every server slot is busy`, blocker: 'unhealthy-endpoint', capacity: true };
     const threshold = policy.caps?.maxUsageWindowPercent ?? DEFAULT_ADMISSION_PERCENT;
     const pct = status.capacity.windowPercent;
     if (isKnown(pct) && pct.value >= threshold) {
-      return { reason: `${label}: usage window ${Math.round(pct.value)}% (admits below ${threshold}%)`, capacity: true };
+      return { reason: `${label}: usage window ${Math.round(pct.value)}% (admits below ${threshold}%)`, blocker: 'policy-cap-usage-window', capacity: true };
     }
   }
   return { note };
@@ -273,6 +278,7 @@ export function resolveRoute(req: RouteRequirement, snap: ResolverSnapshot, poli
     const f = hardFilter(c, req, snap, policy);
     if ('reason' in f) {
       c.rejected = f.reason;
+      c.blocker = f.blocker;
       c.capacityOnly = f.capacity;
     } else {
       c.note = f.note;
@@ -314,10 +320,10 @@ export function resolveRoute(req: RouteRequirement, snap: ResolverSnapshot, poli
       c.tierRank > (chosen?.tierRank ?? lo)
         ? `${c.entry.descriptor.label}: ${c.entry.tier} is above the ${req.minTier} this needs`
         : `${c.entry.descriptor.label}: ${c.entry.tier} is below the required ${req.minTier}`;
-    candidates.push({ target: c.target, verdict: 'rejected', reason: why });
+    candidates.push({ target: c.target, verdict: 'rejected', reason: why, blocker: 'tier-mismatch' });
   }
   for (const c of all) {
-    if (c.rejected) candidates.push({ target: c.target, verdict: 'rejected', reason: c.rejected });
+    if (c.rejected) candidates.push({ target: c.target, verdict: 'rejected', reason: c.rejected, ...(c.blocker ? { blocker: c.blocker } : {}) });
   }
 
   if (chosen) return { outcome: 'resolved', target: chosen.target, candidates, note, catalogVersion: snap.catalog.version };
