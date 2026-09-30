@@ -592,6 +592,53 @@ describe('TaskRunner', () => {
       expect(view.route?.why).toMatch(/Standard because Score 1 from complexity routine/);
     });
 
+    // ---- the approval gate (#100): no harness session before a recorded approval ----
+
+    it('approval gate: a proposal waiting for a route cannot be retried into running; its start is recorded first', async () => {
+      const r = routed(shared(), {
+        assessor: new Assessor({ completion: new SimulatedCompletion([{ output: { ...ANSWER, kind: { value: 'architecture', confidence: 'high', evidence: 'a redesign' } } }]) }),
+      });
+      // `needs-human` with no attempt: the state `retry` accepts.
+      const { mission } = await r.runner.propose({ ...DRAFT, folder: repo, policy: { caps: { maxTier: 'standard' } } });
+      expect(mission.tasks[0].state).toBe('needs-human');
+      expect(mission.startApproval).toBeUndefined();
+      await expect(r.runner.retry(mission.id)).rejects.toThrow(/proposal is started/);
+      await expect(r.runner.resume(mission.id)).rejects.toThrow(/no interrupted attempt/);
+      const after = r.runner.get(mission.id)!;
+      expect(r.harness.launches).toHaveLength(0);
+      expect(after).toMatchObject({ state: 'draft', attempts: [], worktrees: [] });
+      expect(after.tasks[0].state).toBe('needs-human');
+
+      // Started from its card: recorded as the user's, before the session.
+      await r.runner.startProposed(mission.id, { route: { harness: 'claude-code', model: 'sonnet', effort: 'medium' } });
+      const started = r.runner.get(mission.id)!;
+      expect(r.harness.launches).toHaveLength(1);
+      expect(started.startApproval).toMatchObject({ by: 'user' });
+      expect(started.startApproval!.at).toBeLessThanOrEqual(attemptOf(started)!.launchedAt!);
+    });
+
+    it('approval gate: a restart launches no proposal nobody started', async () => {
+      const s = shared();
+      const r = routed(s);
+      const { mission } = await r.runner.propose({ ...DRAFT, folder: repo });
+      r.runner.dispose();
+      const b = routed(s);
+      await b.runner.recover();
+      await new Promise((res) => setTimeout(res, 50));
+      expect(b.harness.launches).toHaveLength(0);
+      expect(b.runner.get(mission.id)).toMatchObject({ state: 'draft', attempts: [] });
+      expect(b.runner.get(mission.id)!.startApproval).toBeUndefined();
+    });
+
+    it('approval gate: auto routing records its own start; a direct start records the user’s', async () => {
+      const r = routed();
+      const auto = await r.runner.startAuto({ ...DRAFT, folder: repo });
+      expect(auto.started).toBe(true);
+      expect(r.runner.get(auto.mission.id)!.startApproval).toMatchObject({ by: 'auto' });
+      const direct = await r.runner.start({ ...TASK, folder: repo });
+      expect(r.runner.get(direct.id)!.startApproval).toMatchObject({ by: 'user' });
+    });
+
     it('assisted: a change is recorded as a labelled disagreement, naming what changed', async () => {
       const r = routed();
       const { mission } = await r.runner.propose({ ...DRAFT, folder: repo });

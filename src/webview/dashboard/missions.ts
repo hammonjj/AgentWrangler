@@ -25,6 +25,7 @@ import {
   type MissionView,
   type MissionsSnapshot,
 } from '../../shared/orchestration/missionView';
+import { certaintyMark, certaintyText, LINKED_PHASE_LABEL, linkedTone, outcomeFacts, TASK_PHASE_LABEL } from '../../shared/orchestration/delegatedLabels';
 import type { PlanEdit, PlanOverrides } from '../../shared/orchestration/plan';
 import { TASK_ACTION_LABEL, TASK_STRIP_ACTIONS, routeChipTitle, type TaskViewAction } from '../../shared/orchestration/taskView';
 import { EFFORT_LEVELS, TASK_KINDS, type DependencyKind, type TaskKind } from '../../shared/orchestration/types';
@@ -62,8 +63,10 @@ function isOpen(v: MissionView, ui: MissionsUiState): boolean {
 
 /** The whole view. Missions that need the user first, then running, then the rest by recency. */
 export function missionsHtml(snap: MissionsSnapshot, ui: MissionsUiState, nowMs: number): string {
-  const rank = (v: MissionView) =>
-    v.state === 'plan-review' || v.state === 'review' || v.state === 'planning-failed' || v.metrics.waiting > 0 ? 0 : TERMINAL.has(v.state) ? 2 : 1;
+  // Needs-you first, from the shared phase (#101), so the order agrees with the tab's count.
+  const needsYou = (v: MissionView) =>
+    v.phase ? v.phase.needsYou : v.state === 'plan-review' || v.state === 'review' || v.state === 'planning-failed' || v.metrics.waiting > 0;
+  const rank = (v: MissionView) => (needsYou(v) ? 0 : TERMINAL.has(v.state) ? 2 : 1);
   const missions = [...snap.missions].sort((a, b) => rank(a) - rank(b) || b.updatedAt - a.updatedAt);
   const head = `<div class="mbar"><button class="mnew" data-mission-new title="A mission is a plan of tasks, written by you or proposed by the read-only planner. Nothing runs until you approve it.">+ New mission</button><span class="mhint">A plan of tasks that run one after another on one branch, after you approve it.</span></div>`;
   if (missions.length === 0) {
@@ -72,11 +75,33 @@ export function missionsHtml(snap: MissionsSnapshot, ui: MissionsUiState, nowMs:
   return `<div class="missions">${head}${missions.map((v) => missionHtml(v, snap, ui, nowMs)).join('')}</div>`;
 }
 
+/**
+ * The mission's phase, from the shared derivation (#101), in place of the raw
+ * record state: an open proposal reads "Awaiting approval", never "running",
+ * and a finished mission reads as three separate facts (merged, verified,
+ * closeout) rather than one "completed" (status contract C1–C3).
+ */
+function phaseChipsHtml(v: MissionView): string {
+  const p = v.phase;
+  if (!p) return '';
+  const mark = certaintyMark(p.certainty);
+  const markHtml = mark ? `<span class="umark" aria-label="${mark === '?' ? 'unknown' : 'estimated'}">${mark}</span>` : '';
+  const facts = p.outcome && p.phase === 'integrated' ? outcomeFacts(p.outcome) : [];
+  const phase = facts.length > 0
+    ? ''
+    : `<span class="mchip phase lt-${linkedTone(p)}${p.needsYou ? ' needs' : ''}" title="${esc(`${p.title}\n${certaintyText(p.certainty, 'mission')}`)}">${markHtml}${esc(LINKED_PHASE_LABEL[p.phase])}</span>`;
+  return phase + facts.map((f) => `<span class="mchip fact fact-${f.kind} ft-${f.tone}" title="${esc(f.title)}">${esc(f.text)}</span>`).join('');
+}
+
 function missionHtml(v: MissionView, snap: MissionsSnapshot, ui: MissionsUiState, nowMs: number): string {
   const open = isOpen(v, ui);
-  const chips = missionChips(v, nowMs)
-    .map((c) => `<span class="mchip ${c.kind}${c.tone ? ` tone-${esc(c.tone)}` : ''}" title="${esc(c.title)}">${esc(c.text)}</span>`)
-    .join('');
+  const chips =
+    phaseChipsHtml(v) +
+    missionChips(v, nowMs)
+      // The phase chips say what the state chip did, without its ambiguity.
+      .filter((c) => !(v.phase && c.kind === 'state'))
+      .map((c) => `<span class="mchip ${c.kind}${c.tone ? ` tone-${esc(c.tone)}` : ''}" title="${esc(c.title)}">${esc(c.text)}</span>`)
+      .join('');
   const where = [v.repo, v.branch ? `${v.baseRef} → ${v.branch}` : `from ${v.baseRef}`].join(' · ');
   const error = ui.errors.get(v.id);
   let body = '';
@@ -121,8 +146,15 @@ function planIssuesHtml(v: MissionView): string {
 
 /** One row of a running or finished mission (§18.2). The title opens the task's conversation. */
 function taskRowHtml(t: MissionTaskView, nowMs: number): string {
-  const state = taskRowState(t);
-  const verify = t.verification ? `<span class="tverify" title="${esc(t.verification.title)}">${esc(`${t.verification.glyph} ${t.verification.text}`)}</span>` : '';
+  // The row's state comes from the shared task phase (#101): a finished task
+  // reads "completed", and whether it was checked is its own labelled fact
+  // beside it, so it never reads as one ambiguous "done · ? unverified" (C2).
+  const raw = taskRowState(t);
+  const state = t.phase ? { text: TASK_PHASE_LABEL[t.phase], title: t.stateReason ? `${TASK_PHASE_LABEL[t.phase]}: ${t.stateReason}` : raw.title } : raw;
+  const verdictTone = t.verification ? (t.verification.verdict === 'passed' ? 'ok' : t.verification.verdict === 'failed' ? 'bad' : 'warn') : '';
+  const verify = t.verification
+    ? `<span class="tverify ft-${verdictTone}" title="${esc(t.verification.title)}"><span class="tvlabel">checks</span> ${esc(`${t.verification.glyph} ${t.verification.text}`)}</span>`
+    : '';
   const figures = taskRowFigures(t, nowMs);
   const deps = dependencyText(t.deps);
   const line2 = [
@@ -135,7 +167,7 @@ function taskRowHtml(t: MissionTaskView, nowMs: number): string {
   const acts = t.actions.filter((a) => a !== 'show-session' && TASK_STRIP_ACTIONS.includes(a));
   const buttons = acts.length > 0 ? `<div class="tacts">${acts.map((a) => actionButton(a)).join('')}</div>` : '';
   const openable = t.sessionKey !== undefined;
-  return `<li class="mtask ts-${esc(t.state)}" data-task="${esc(t.taskId)}">
+  return `<li class="mtask ts-${esc(t.state)}${t.phase ? ` tp-${esc(t.phase)}` : ''}${t.needsYou ? ' needs' : ''}" data-task="${esc(t.taskId)}">
 <div class="trow${openable ? ' openable' : ''}"${openable ? ' data-task-open title="Show this task’s conversation"' : ''}><span class="tdot" aria-hidden="true"></span><span class="tkey">${esc(t.key)}</span><span class="ttitle">${esc(t.title)}</span><span class="tstate" title="${esc(state.title)}">${esc(state.text)}</span>${verify}</div>
 ${line2 ? `<div class="tline2">${line2}</div>` : ''}${buttons}</li>`;
 }

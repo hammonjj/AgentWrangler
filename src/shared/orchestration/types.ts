@@ -260,6 +260,15 @@ export interface Mission {
   planned?: boolean;
   /** Set when the user approves the plan. `running` requires it, except for a single task started directly. */
   planApprovedAt?: Millis;
+  /**
+   * The start of an unplanned single-task mission, recorded before anything
+   * launches (#100): the user started it directly (`start`), accepted or
+   * changed its proposal (`startProposed`), or `auto` routing launched it
+   * within its gate (`startAuto`). A proposal nobody started has none, and no
+   * path — retry, recovery, the scheduler — may launch it. Absent on records
+   * from before #100; one of those that already has an attempt was started.
+   */
+  startApproval?: { at: Millis; by: 'user' | 'auto' };
   /** Set when the user picks how to finish. `completed` requires it. */
   finish?: MissionFinish;
   /** What finishing left behind: the merge commit, or the pull request's address (#43). */
@@ -284,7 +293,18 @@ export interface Mission {
    * never the session that does the work. Absent for a task started from the
    * Tasks menu.
    */
-  origin?: { provider: 'claude' | 'codex'; sessionId: string };
+  origin?: {
+    provider: 'claude' | 'codex';
+    sessionId: string;
+    /**
+     * When the origin's turn that created this began, if the origin reported
+     * it (status contract K2, #101): a later reply of that same turn is about
+     * this mission; one after a new user prompt is not. Absent on records from
+     * before #101 and for origins with no turn signal; the mission's
+     * `createdAt` stands in, and the keying is then estimated.
+     */
+    turnStartedAt?: Millis;
+  };
   /**
    * Handed off with Delegate (#82): the user gave an outcome, and the planner
    * decides whether it is one task or several. While it is planning, failed

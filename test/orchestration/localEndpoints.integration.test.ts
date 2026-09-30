@@ -297,6 +297,7 @@ describe('the direct completion client', () => {
 
 describe('qualification (stage 1)', () => {
   it('a model whose tool calls parse is agentic, measured; the record is metadata only', async () => {
+    // Qualification runs on Codex by default, which needs the endpoint's native `/v1/responses`.
     const s = await server({
       models: ['m'],
       responses: true,

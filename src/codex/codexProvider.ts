@@ -104,6 +104,8 @@ export class CodexProvider implements AgentProvider {
           transcriptPath: summary.path,
           statusIsEstimated: true,
           client: summary.source,
+          // The latest turn's start, kept after it completes: ties a finished turn to its missions (#101, K2).
+          turnStartedAt: summary.turnStartedAtMs,
           progress: !summary.turnComplete && summary.turnStartedAtMs
             ? { startedAtMs: summary.turnStartedAtMs, blockedMs: 0, toolCalls: 0 }
             : undefined,

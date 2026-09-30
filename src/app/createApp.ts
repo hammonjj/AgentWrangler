@@ -78,6 +78,7 @@ import { CORPUS_STATUS } from '../orchestration/policy/corpusStatus';
 import { ROUTER_VERSION } from '../orchestration/policy/router';
 import { ASSESSOR_VERSION } from '../orchestration/policy/assessment';
 import type { Mission } from '../shared/orchestration/types';
+import { attentionCount, linkedNotices, originKeyOf } from '../shared/orchestration/delegatedState';
 import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../shared/orchestration/taskView';
 import { harnessLabel } from '../shared/harness';
 import { modelLabel } from '../shared/modelName';
@@ -1466,6 +1467,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
             .reverse(),
         delegationAction: async (missionId: string, action: DelegationAction): Promise<void> => {
           const m = tasks.get(missionId);
+          // Opening Missions decides nothing, so it works for any delegated
+          // mission: the live summary (#101) keeps started ones listed.
+          if (m && action === 'open-mission') {
+            showMissionRequests.fire(missionId);
+            return;
+          }
           if (!m || !isOpenDelegation(m)) throw new TaskError('That delegation has already been started or cancelled.');
           switch (action) {
             case 'approve':
@@ -1510,7 +1517,69 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
   /** The session key of the conversation a proposal came from. */
   function originKey(origin: NonNullable<Mission['origin']>): string {
-    return `${origin.provider}:${origin.sessionId}`.toLowerCase();
+    return originKeyOf(origin);
+  }
+
+  /**
+   * K2 (#101): record which turn of the origin a new mission belongs to, so a
+   * later reply of that turn resolves against this mission and one after a
+   * new prompt does not. The origin is inside `aw delegate`/`aw task` or has
+   * just pressed Delegate, so its current turn is the one.
+   */
+  function withTurnStart(origin: ProposeTaskRequest['origin']): Mission['origin'] | undefined {
+    if (!origin) return undefined;
+    const s = store.get(originKeyOf(origin));
+    const turnStartedAt = s?.progress?.startedAtMs ?? s?.turnStartedAt;
+    return { ...origin, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) };
+  }
+
+  /**
+   * The derived orchestration state (#101): every mission, indexed by the
+   * conversation that delegated it, handed to the store, which applies the
+   * one derivation (`shared/orchestration/delegatedState.ts`) to every row.
+   * The table, the tray, the toasts and the conversation read the result from
+   * the store; the Missions view reads the same module's mission phase. A
+   * mission change re-derives: an approval, a launch or a merge resolves the
+   * origin's wait with nothing in its transcript changing.
+   */
+  if (tasks) {
+    let byOrigin = new Map<string, Mission[]>();
+    const reindex = () => {
+      const next = new Map<string, Mission[]>();
+      for (const m of tasks.list()) {
+        if (!m.origin) continue;
+        const k = originKeyOf(m.origin);
+        next.set(k, [...(next.get(k) ?? []), m]);
+      }
+      byOrigin = next;
+    };
+    reindex();
+    store.useLinkedWork((key) => byOrigin.get(key.toLowerCase()) ?? []);
+    // N1: one notice per key; nothing for a state that held at startup (§7).
+    const startedAt = Date.now();
+    let noticed = linkedNotices(tasks.list(), new Set(), { initial: true }).seen;
+    host.subscribe(
+      tasks.onDidChange(() => {
+        reindex();
+        store.linkedWorkApplied();
+        const { notices, seen } = linkedNotices(tasks.list(), noticed, { sinceMs: startedAt });
+        noticed = seen;
+        for (const n of notices) {
+          const m = tasks.get(n.missionId);
+          const origin = m?.origin ? store.get(originKeyOf(m.origin)) : undefined;
+          host.notify?.({
+            title: n.title,
+            body: n.body,
+            onClick: () => (origin ? surface?.show(origin.key, { preserveFocus: false }) : showMissionRequests.fire(n.missionId)),
+          });
+        }
+      }),
+    );
+  }
+
+  /** N2 (#101): an orchestrated attempt's session sends no Done toast; its mission's notices say it. */
+  function isAttemptSession(s: AgentSession): boolean {
+    return isOrchestrationOrigin(sessionRegistry.get(s.sessionId)?.origin) || (taskPanes?.badges().has(s.key) ?? false);
   }
 
   /**
@@ -1582,6 +1651,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
                 canPlan: tasks.canPlan,
               }),
             ),
+          // A3: each ask once. Open proposals count too, though they are not drawn here (#101).
+          attention: attentionCount([], tasks.list()),
           tiers: models.catalog.tiers.map((t) => t.name),
           harnesses: [
             { id: 'claude-code', label: 'Claude Code' },
@@ -2033,7 +2104,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       objective: req.objective,
       acceptanceCriteria: req.acceptanceCriteria ?? [],
       ...(harness ? { policy: { preferences: { harness } } } : {}),
-      ...(req.origin ? { origin: req.origin } : {}),
+      ...(req.origin ? { origin: withTurnStart(req.origin) } : {}),
     });
     const target = recommendation.resolution.target;
     const route = target && recommendation.verdict !== 'blocked' ? targetLabel(target) : undefined;
@@ -2081,7 +2152,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       objective: req.objective,
       acceptanceCriteria: req.acceptanceCriteria ?? [],
       ...(harness ? { policy: { preferences: { harness } } } : {}),
-      ...(req.origin ? { origin: req.origin } : {}),
+      ...(req.origin ? { origin: withTurnStart(req.origin) } : {}),
     });
     const from = mission.origin ? store.get(originKey(mission.origin)) : undefined;
     dialogs.flash(`Delegated: ${mission.title} (${from ? 'its card is in the conversation' : 'see Tasks and Missions'})`, 6000);
@@ -2735,6 +2806,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const now = Date.now();
       for (const s of u.becameWaiting) {
         if (archive.isArchived(s.key)) continue; // archived sessions stay quiet
+        if (s.status === 'done' && isAttemptSession(s)) continue; // N2: the mission's notices say it
         if (now - (lastToastAt.get(s.key) ?? 0) < 30_000) continue;
         lastToastAt.set(s.key, now);
         if (host.notify) {
@@ -2783,6 +2855,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const now = Date.now();
       for (const s of u.becameWaiting) {
         if (archive.isArchived(s.key)) continue; // archived sessions stay quiet
+        if (s.status === 'done' && isAttemptSession(s)) continue; // N2
         const notice = doneNoticeFor(s);
         // Logged rather than silent: "it finished and Discord said nothing" is
         // otherwise impossible to tell apart from "it never looked finished".

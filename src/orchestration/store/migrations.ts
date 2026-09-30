@@ -7,6 +7,11 @@
  * - **v1**: `assignment.sessionIds[]`, because a session's id can change
  *   during its life (§7.2), plus `v` and defaults for every list.
  *
+ * Optional fields added since v1 need no step, because a record without them
+ * reads correctly as it is: `startApproval` (#100) and `origin.turnStartedAt`
+ * (#101, status contract K2; absent means the mission's `createdAt` stands in
+ * and the turn keying is estimated).
+ *
  * A migration never throws on a field it does not know; it keeps it.
  */
 import type { Mission } from '../../shared/orchestration/types';
