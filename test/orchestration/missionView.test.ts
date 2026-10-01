@@ -290,6 +290,16 @@ describe('the planner in the Missions view (#44)', () => {
     expect(missionViewOf(m, { actions: () => [] }).canPlanAgain).toBe(false);
   });
 
+  it('a local planner is named by its model, not its path; the tooltip keeps the path (#99)', () => {
+    const path = '/Users/test/Models/Qwen3.5-4B-MLX-4bit';
+    const m = mission({ state: 'plan-review', planned: true, tasks: [task('t1')], planning: [run({ model: path, source: 'local:mlx' })] });
+    const v = missionViewOf(m, { actions: () => [], canPlan: true });
+    expect(v.planner?.text).toBe('Planned by Qwen3.5-4B-MLX-4bit (local) · 1 task · 2 rounds · $0.30');
+    expect(v.planner?.title).toContain(path);
+    const running = mission({ state: 'planning', planned: true, tasks: [task('t1')], planning: [run({ model: path, state: 'running', rounds: [], endedAt: undefined })] });
+    expect(missionViewOf(running, { actions: () => [] }).planner?.text).toBe('Planning with Qwen3.5-4B-MLX-4bit…');
+  });
+
   it('while planning, the stand-in task is not drawn; a failure offers Plan again and Write it myself', () => {
     const planning = mission({ state: 'planning', planned: true, tasks: [task('t1')], planning: [run({ state: 'running', rounds: [], endedAt: undefined })] });
     let html = missionsHtml(snapOf(planning), newMissionsUiState(), T0);

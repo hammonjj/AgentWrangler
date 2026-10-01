@@ -10,6 +10,7 @@
 import { isOpenProposal, missionPhase, missionTaskCounts, originKeyOf, taskPhase } from '../../shared/orchestration/delegatedState';
 import { summariseVerification } from '../../shared/orchestration/verification';
 import { planDiffText, type MissionMetricsView, type MissionPlannerView, type MissionTaskView, type MissionView, type TaskPreviewView } from '../../shared/orchestration/missionView';
+import { localModelName } from '../../shared/modelName';
 import { formatUsd } from '../../shared/sessionUsage';
 import type { TaskViewAction } from '../../shared/orchestration/taskView';
 import type { CostBasis, ExecutionAttempt, Mission, MissionFinish, Task } from '../../shared/orchestration/types';
@@ -135,12 +136,14 @@ export function plannerViewOf(m: Mission): MissionPlannerView | undefined {
   if (!run) return undefined;
   const cost = sum(run.rounds.map((r) => r.costUsd));
   const verb = run.kind === 'replan' ? 'Replanned' : 'Planned';
+  // The tooltip below keeps the run's raw model id; the line shows its name.
+  const modelName = localModelName(run.model) ?? run.model;
   const text =
     run.state === 'running'
-      ? `${run.kind === 'replan' ? 'Replanning' : 'Planning'} with ${run.model}…`
+      ? `${run.kind === 'replan' ? 'Replanning' : 'Planning'} with ${modelName}…`
       : run.state === 'proposed'
         ? [
-            `${verb} by ${run.model}${run.source ? ' (local)' : ''}`,
+            `${verb} by ${modelName}${run.source ? ' (local)' : ''}`,
             `${run.proposed ?? 0} ${run.kind === 'replan' ? 'new ' : ''}task${run.proposed === 1 ? '' : 's'}`,
             `${run.rounds.length} round${run.rounds.length === 1 ? '' : 's'}`,
             ...(cost !== undefined ? [formatUsd(cost)] : []),

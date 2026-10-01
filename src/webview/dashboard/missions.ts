@@ -25,6 +25,7 @@ import {
   type MissionView,
   type MissionsSnapshot,
 } from '../../shared/orchestration/missionView';
+import { localModelName } from '../../shared/modelName';
 import { certaintyMark, certaintyText, LINKED_PHASE_LABEL, linkedTone, outcomeFacts, TASK_PHASE_LABEL } from '../../shared/orchestration/delegatedLabels';
 import type { PlanEdit, PlanOverrides } from '../../shared/orchestration/plan';
 import { TASK_ACTION_LABEL, TASK_STRIP_ACTIONS, routeChipTitle, type TaskViewAction } from '../../shared/orchestration/taskView';
@@ -198,7 +199,7 @@ function planTaskHtml(v: MissionView, t: MissionTaskView, index: number, snap: M
 function routeSummary(t: MissionTaskView): string {
   const parts: string[] = [];
   if (t.pins?.harness) parts.push(t.pins.harness === 'codex' ? 'Codex' : 'Claude Code');
-  if (t.pins?.model) parts.push(t.pins.model);
+  if (t.pins?.model) parts.push(localModelName(t.pins.model) ?? t.pins.model);
   if (t.pins?.effort) parts.push(t.pins.effort);
   if (t.caps?.maxTier) parts.push(`≤ ${t.caps.maxTier}`);
   if (t.caps?.maxEffort) parts.push(`effort ≤ ${t.caps.maxEffort}`);
