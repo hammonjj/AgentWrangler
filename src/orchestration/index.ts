@@ -17,6 +17,7 @@ import type { TelemetryRecord, TurnRecord } from '../shared/orchestration/teleme
 import { parseRoutingSettings, ROUTING_KEY } from '../shared/orchestration/executionPolicy';
 import type { HarnessId, ModelSourceId } from '../shared/orchestration/types';
 import type { ResolverSnapshot } from './policy/resolver';
+import type { LearnedRule } from '../shared/orchestration/routingProposals';
 import { ClaudeStructuredCompletion, type CompletionQueryFn, type CompletionResult, type StructuredCompletion } from './completion/structuredCompletion';
 import { RoutedCompletion } from './completion/localCompletion';
 import type { LocalEndpointService } from './local/localEndpointService';
@@ -88,6 +89,8 @@ export interface OrchestrationDeps {
   completion?: { query: CompletionQueryFn; binary: () => string | undefined };
   /** The catalog and source health, read fresh for each recommendation (#38). Absent: no routing. */
   routingSnapshot?: () => ResolverSnapshot;
+  /** Proposals a person accepted (#52), read fresh for each recommendation. */
+  learnedRules?: () => readonly LearnedRule[];
   /**
    * The registered local endpoints (#51) and the catalog they are in. Codex
    * reaches their models through a model provider; completions go to one
@@ -253,7 +256,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     tierOf: deps.tierOf,
     // The global scope (§10.2), read when a mission is recorded and frozen into it.
     globalPolicy: () => parseRoutingSettings(deps.settings.get<unknown>(ROUTING_KEY, undefined)).policy,
-    ...(deps.routingSnapshot ? { routing: { snapshot: deps.routingSnapshot } } : {}),
+    ...(deps.routingSnapshot ? { routing: { snapshot: deps.routingSnapshot, ...(deps.learnedRules ? { learnedRules: deps.learnedRules } : {}) } } : {}),
     ...(local
       ? {
           local: {

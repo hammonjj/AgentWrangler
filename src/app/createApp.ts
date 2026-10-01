@@ -76,6 +76,11 @@ import { comparisonReport, effectiveMode, evaluateGate, type ComparisonReport, t
 import { analyticsDetail, analyticsView, type AnalyticsSelection } from '../shared/orchestration/analyticsView';
 import { CORPUS_STATUS } from '../orchestration/policy/corpusStatus';
 import { ROUTER_VERSION } from '../orchestration/policy/router';
+import { LearnedRuleStore, learnedRulesFile } from '../orchestration/policy/learnedRuleStore';
+import { proposalVeto } from '../orchestration/policy/learnedVeto';
+import { buildDataset } from '../shared/orchestration/analytics';
+import { currentProposals, type RoutingProposalDecision } from '../shared/orchestration/proposalsView';
+import type { LearnedRule } from '../shared/orchestration/routingProposals';
 import { ASSESSOR_VERSION } from '../orchestration/policy/assessment';
 import type { Mission } from '../shared/orchestration/types';
 import { attentionCount, linkedNotices, originKeyOf } from '../shared/orchestration/delegatedState';
@@ -654,8 +659,43 @@ export function createApp(host: HostServices): AgentWranglerApp {
       repos ??= new Map((orchestration.store?.list() ?? []).map((e) => [e.id, e.repoRoot]));
       return repos.get(missionId);
     };
-    return { records: analyticsIndex.records(), tiers: models.catalog.tiers.map((t) => t.name), repoOf, selection, now: Date.now() };
+    return {
+      records: analyticsIndex.records(),
+      tiers: models.catalog.tiers.map((t) => t.name),
+      repoOf,
+      selection,
+      now: Date.now(),
+      // Routing proposals (§20, #52): the router asks for the routable tiers only, so the cohorts are measured against those.
+      proposals: {
+        rules: learnedRules.rules(),
+        rejected: learnedRules.rejected(),
+        tiers: models.catalog.tiers.filter((t) => t.reachableBy === 'route').map((t) => t.name),
+        veto: (rule: LearnedRule) => proposalVeto(rule, models.catalog.tiers),
+      },
+    };
   };
+  /** A person's click on a proposal or an accepted rule. Only a proposal the history supports right now can be accepted or rejected. */
+  const decideProposal = (id: string, decision: RoutingProposalDecision): void => {
+    if (decision === 'revoke') {
+      if (learnedRules.revoke(id)) log(`routing: revoked learned rule ${id}`);
+      return;
+    }
+    const input = analyticsInput({});
+    const ds = buildDataset({ records: input.records, tiers: input.tiers, repoOf: input.repoOf });
+    const proposal = currentProposals(ds, input.proposals, input.now).find((p) => p.id === id);
+    if (!proposal) {
+      log(`routing: proposal ${id} is no longer supported by the data`);
+      return;
+    }
+    if (decision === 'reject') {
+      learnedRules.reject(id, input.now);
+      return;
+    }
+    const accepted = learnedRules.accept(proposal, input.now);
+    log(accepted.ok ? `routing: accepted proposal ${id}` : `routing: refused ${id}: ${accepted.reasons[0]}`);
+  };
+  // What a person decided on routing proposals (§20, #52): the accepted rules the router reads, and the rejections.
+  const learnedRules = new LearnedRuleStore(learnedRulesFile(host.dataDir), undefined, log);
   const autoRouting = (): { gate: GateResult; report: ComparisonReport } => {
     const input = { records: routingEvidence.records(), tiers: models.catalog.tiers.map((t) => t.name) };
     return {
@@ -714,6 +754,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     models: () => models.value,
     completion: { query: sdkQuery, binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath) },
     // What the resolver decides against (#38): the catalog as it stands, and each source's usage window.
+    learnedRules: () => learnedRules.rules(),
     routingSnapshot: () => {
       const now = Date.now();
       return {
@@ -3188,7 +3229,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
         const detail = analyticsDetail(analyticsInput(selection), ref);
         if (detail) surface?.showDetail(detail);
       },
-      onDidChange: (listener) => analyticsIndex.onDidChange(listener),
+      decideProposal,
+      onDidChange: (listener) => {
+        const subs = [analyticsIndex.onDidChange(listener), learnedRules.onDidChange(listener)];
+        return { dispose: () => subs.forEach((s) => s.dispose()) };
+      },
     },
     pause,
     usage,

@@ -2531,7 +2531,7 @@ the policy, registry, manifest, boot line, telemetry, events and logs. Hosted se
 their ordinary environment. Local turns ignore Claude's API cost estimate and use the
 catalog's context window in the conversation display.
 
-## 20. Historical and adaptive routing (design only; not built)
+## 20. Historical and adaptive routing (proposals built by #52; automatic adjustment not built)
 
 ### 20.1 Shape: learned proposes, deterministic disposes
 
@@ -2582,6 +2582,48 @@ cheaper route on a copy of a low-risk task, deliberately and within a budget.
 Pooling upward; priors; minimum counts; one-step changes; the corpus veto; proposals expire if the
 cohort's recent success drops; and every accepted proposal records the data window it was based on
 so it can be re-evaluated.
+
+### 20.6 As built (#52, 2026-10-01)
+
+Proposals, acceptance and learned rules. Bounded automatic adjustment (§20.1's later step) is **not**
+built.
+
+| Piece | Where |
+|---|---|
+| Statistics, cohorts, thresholds, proposals, decisions, rule re-check | `src/shared/orchestration/routingProposals.ts` (pure) |
+| Section of the Analytics view, and each proposal's detail | `src/shared/orchestration/proposalsView.ts`, drawn by `src/webview/dashboard/analytics.ts` |
+| A rule inside the router | `src/orchestration/policy/learnedRules.ts`, read by `routeTask` as `RouterPolicy.learnedRules` |
+| Corpus veto | `src/orchestration/policy/learnedVeto.ts`, judging `src/orchestration/policy/egregious.ts` (moved out of the test helper) |
+| Accepted rules and rejections | `src/orchestration/policy/learnedRuleStore.ts`, `<dataDir>/orchestration/learned-rules.json` |
+
+- **Thresholds are §20.3's, unchanged:** downgrade needs ≥ 20 observations of the next cheaper tier
+  in the cohort, a 90% lower bound ≥ 0.80 (prior centred on 0.5, worth 4 observations), `risk ≤
+  moderate` and verifiability partial or strong. Upgrade needs ≥ 10 observations of the current tier
+  and a 90% upper bound under 0.60 (prior centred on 0.8). 23 of 25 does **not** clear the downgrade
+  bar (the lower bound is about 0.78); the issue's example is a question the data has to answer, not
+  a threshold.
+- **Cohorts:** kind × complexity bucket × verifiability bucket, pooled across repositories and, where
+  one repository alone has enough, narrowed to it. **Domain is not a cohort dimension yet:** the
+  attempt record carries only the assessment's levels, not its `domains`.
+- **A success** is first-attempt verified, no rescue (`rescueEvidence`) and no `reverted` integration
+  record, and it counts only once it has stood 14 days. A failure counts at once; a failure that is
+  not the route's fault (capacity, infrastructure) counts for nothing.
+- **A rule is data the router reads:** it fires only when the deterministic tiers land on exactly its
+  `fromTier`, moves one step, never overrides a `floor.*` rule or low confidence when lowering, and
+  needs the task's own risk ≤ moderate. Each firing is a `learned.downgrade` / `learned.upgrade`
+  reason carrying the counts and interval.
+- **The veto** routes every assessment a cohort can contain (all breadth, ambiguity, risk, the
+  cohort's complexity and verifiability levels, both confidence extremes) through the rule and
+  refuses it if any result is on the egregious list. The app cannot read the corpus fixtures (they
+  run in `npm test`), so the same list is judged over a superset; `routingProposals.test.ts` also
+  routes every corpus card through a rule. The store re-checks on load, so a hand-edited rule the
+  veto refuses is never applied.
+- **Decisions:** Accept makes a rule and clears a rejection; Reject snoozes the proposal 30 days;
+  Revoke removes the rule and the deterministic policy applies again. A proposal not decided lapses
+  after 30 days and returns only if the data still supports it. An accepted rule is re-checked against
+  the last 90 days and flagged *Review* if its route now passes first time too rarely.
+- **Telemetry:** nothing new is written; proposals are computed from existing records, and the
+  decisions live in the store above. Writing decision records to the telemetry log is a follow-up.
 
 ---
 

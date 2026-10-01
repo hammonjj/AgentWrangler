@@ -29,6 +29,8 @@ import {
   VERIFIABILITY_LEVELS,
 } from './assessment';
 import type { TierDef } from '../../shared/orchestration/catalog';
+import type { LearnedRule } from '../../shared/orchestration/routingProposals';
+import { applyLearnedRule, LEARNED_RULE_PREFIX } from './learnedRules';
 import {
   EFFORT_LEVELS,
   type ContextLoad,
@@ -59,6 +61,10 @@ export interface RouterPolicy {
   /** The mission's caps. Only `maxTier` and `maxEffort` are read here (#40 does the rest). */
   caps?: RouteCaps;
   preferences?: RoutePreferences;
+  /** Proposals a person accepted (§20, #52), applied after the tier rules. Absent: none. */
+  learnedRules?: readonly LearnedRule[];
+  /** The task's repository, for the rules that are specific to one. */
+  repository?: string;
 }
 
 export interface RouterResult {
@@ -328,6 +334,20 @@ export function routeTask(assessment: TaskAssessment, policy: RouterPolicy): Rou
     reasons.push({ ruleId: rule.id, text: rule.text(f, s, name, next), inputs: rule.inputs(f) });
     s.tier = next;
     s.setBy.push(rule.id);
+  }
+  // Accepted proposals (§20): data, applied in the order they were accepted, each moving the tier one step.
+  for (const learned of policy.learnedRules ?? []) {
+    const fired = applyLearnedRule(
+      learned,
+      { kind: f.kind, complexity: f.values.complexity, verifiability: f.values.verifiability, risk: f.values.risk },
+      s,
+      tiers,
+      policy.repository,
+    );
+    if (!fired) continue;
+    reasons.push({ ruleId: `${LEARNED_RULE_PREFIX}${learned.direction}`, text: fired.text, inputs: fired.inputs });
+    s.tier = fired.tier;
+    s.setBy.push(`${LEARNED_RULE_PREFIX}${learned.direction}`);
   }
   // No rule produces an escalation-only tier: the list above is only the routable ones (§6.3 rule 7).
   const minTier = name(Math.min(s.tier, named.top));

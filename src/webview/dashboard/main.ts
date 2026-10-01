@@ -23,7 +23,7 @@ import { taskChips } from '../../shared/orchestration/taskView';
 import { certaintyText, linkedChip, waitingReasonChip, waitReasonText, type RowChip } from '../../shared/orchestration/delegatedLabels';
 import type { MissionsSnapshot } from '../../shared/orchestration/missionView';
 import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, type MissionIntent } from './missions';
-import { analyticsClickRef, analyticsFilterChange, analyticsHtml } from './analytics';
+import { analyticsClickRef, analyticsDecision, analyticsFilterChange, analyticsHtml } from './analytics';
 import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestration/analyticsView';
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
@@ -1793,6 +1793,11 @@ app.addEventListener('click', (e) => {
   }
 
   if (tableView === 'analytics' && target.closest('.analytics')) {
+    const decided = analyticsDecision(target);
+    if (decided) {
+      post({ type: 'analyticsProposal', ...decided });
+      return;
+    }
     const ref = analyticsClickRef(target);
     if (ref) {
       // The detail opens beside the table; mark which item it is about.
