@@ -1,0 +1,6 @@
+{
+  "name": "crash-asks-a-person",
+  "tasks": [{ "id": "a" }],
+  "scenario": { "tasks": { "a": [{ "behaviour": "crash", "delayMs": 2000 }] }, "default": { "behaviour": "edit" } },
+  "expect": { "mission": "stuck", "attempts": { "a": 1 } }
+}
