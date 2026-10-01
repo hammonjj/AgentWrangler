@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { modelChoiceLabel, modelLabel, normalizeModelId } from '../src/shared/modelName';
+import { localModelName, modelChoiceLabel, modelLabel, normalizeModelId } from '../src/shared/modelName';
 
 describe('modelLabel', () => {
   it('shortens the ids that actually appear in transcripts', () => {
@@ -42,6 +42,46 @@ describe('modelLabel', () => {
   it('normalizes without inventing a name', () => {
     expect(normalizeModelId('CLAUDE-Opus-5')).toBe('opus-5');
     expect(normalizeModelId('claude-')).toBeUndefined();
+  });
+});
+
+describe('modelLabel for local paths', () => {
+  it('shows the model directory, not the machine path', () => {
+    expect(modelLabel('/Users/test/Models/Qwen3.5-4B-MLX-4bit')).toBe('Qwen3.5-4B-MLX-4bit');
+    expect(modelLabel('local:/Users/test/Models/Qwen3.5-4B-MLX-4bit')).toBe('Qwen3.5-4B-MLX-4bit');
+    expect(modelLabel('~/models/llama-3-8b-q4_k_m.gguf')).toBe('llama-3-8b-q4_k_m.gguf');
+  });
+
+  it('handles trailing separators and Windows paths', () => {
+    expect(modelLabel('/Users/test/Models/qwen-4bit/')).toBe('qwen-4bit');
+    expect(modelLabel('C:\\models\\qwen-4bit')).toBe('qwen-4bit');
+    expect(modelLabel('C:/models/qwen-4bit\\')).toBe('qwen-4bit');
+    expect(modelLabel('\\\\nas\\share\\qwen-4bit')).toBe('qwen-4bit');
+  });
+
+  it('keeps variant and quantization, which tell two builds apart', () => {
+    expect(modelLabel('/m/qwen-4bit')).not.toBe(modelLabel('/m/qwen-8bit'));
+  });
+
+  it('leaves hosted ids, repo ids and URLs to the normal rules', () => {
+    expect(modelLabel('gpt-4o')).toBe('gpt-4o');
+    expect(modelLabel('anthropic/claude-sonnet-5')).toBe('Sonnet 5');
+    expect(modelLabel('mlx-community/Qwen-4bit')).toBe('mlx-community/qwen-4bit');
+    expect(modelLabel('https://example.test/models/qwen')).toBe('https://example.test/models/qwen');
+    expect(localModelName('gpt-4o')).toBeUndefined();
+  });
+
+  it('does not invent a name for a bare root or an empty value', () => {
+    expect(localModelName('/')).toBeUndefined();
+    expect(localModelName('C:\\')).toBeUndefined();
+    expect(localModelName('local:')).toBeUndefined();
+    expect(localModelName(undefined)).toBeUndefined();
+    expect(modelLabel('')).toBeUndefined();
+  });
+
+  it('shares the label for same-named models in different directories', () => {
+    // Deliberate: the tooltip carries the full path, which is what tells them apart.
+    expect(modelLabel('/a/qwen')).toBe(modelLabel('/b/qwen'));
   });
 });
 
