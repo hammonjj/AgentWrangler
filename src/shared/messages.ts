@@ -184,7 +184,9 @@ export type DashboardToHost =
   /** The Analytics view is showing, or its filters changed: send the view for this selection (#49). */
   | { type: 'analyticsQuery'; selection: AnalyticsSelection }
   /** A metric, the split or a calibration row was clicked: show its detail in the conversation pane. */
-  | { type: 'analyticsDetail'; selection: AnalyticsSelection; ref: AnalyticsRef };
+  | { type: 'analyticsDetail'; selection: AnalyticsSelection; ref: AnalyticsRef }
+  /** Accept or reject a routing proposal, or revoke an accepted rule (#52). The ids come from the view the pane was sent. */
+  | { type: 'analyticsProposal'; id: string; decision: 'accept' | 'reject' | 'revoke' };
 
 // ---- Conversation pane ----
 

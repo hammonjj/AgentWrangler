@@ -137,6 +137,7 @@ import {
 } from '../../shared/orchestration/executionPolicy';
 import { resolveRoute, type ResolverSnapshot } from '../policy/resolver';
 import { compareRoutes, recommendRoute } from '../policy/recommend';
+import type { LearnedRule } from '../../shared/orchestration/routingProposals';
 import { changesRoute, decideEscalation, limitsFor, pendingEscalation, type EscalationInput, type EscalationLimits, type ProbeAnswer, type ProbeRequest } from '../policy/escalation';
 import { classifyOutcome, type Classification } from '../policy/outcome';
 import { attemptRecord, addTurnContext, addTurnUsage, escalationRecord, routingRecord, waitedMs } from './attemptRecord';
@@ -281,7 +282,8 @@ export interface TaskRunnerDeps {
    * fresh for every recommendation. Absent: no recommendations — `manual`
    * attempts record no shadow and `propose` refuses.
    */
-  routing?: { snapshot(): ResolverSnapshot };
+  /** `learnedRules`: proposals a person accepted (#52); the router reads them as data. */
+  routing?: { snapshot(): ResolverSnapshot; learnedRules?(): readonly LearnedRule[] };
   /**
    * The registered local endpoints (#51). A running attempt on one whose
    * server stops answering is ended as `infra` and, where the route allows,
@@ -3302,7 +3304,8 @@ export class TaskRunner implements Disposable {
       const mode = m.policy.mode ?? 'manual';
       const forTask = task && mode === 'manual' && task.overrides?.pins ? { overrides: { ...task.overrides, pins: undefined } } : task;
       const policy = { ...resolveEffectivePolicy(missionLayers(m, forTask), this.policyContext()).policy, mode };
-      return recommendRoute(assessment, policy, this.deps.routing.snapshot(), this.now());
+      const learnedRules = this.deps.routing.learnedRules?.() ?? [];
+      return recommendRoute(assessment, policy, this.deps.routing.snapshot(), this.now(), { rules: learnedRules, repository: m.repoRoot });
     } catch (e) {
       this.log(`task ${m.id}: could not route: ${errorText(e)}`);
       return undefined;

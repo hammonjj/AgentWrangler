@@ -13,6 +13,7 @@
  * No inline styles: bars are `<progress>` elements, sized by their values.
  */
 import type { AnalyticsRef, AnalyticsSelection, AnalyticsView, BarView, CandidateView, MetricCardView, SelectionField } from '../../shared/orchestration/analyticsView';
+import type { ProposalCardView, ProposalsView, RoutingProposalDecision, RuleCardView } from '../../shared/orchestration/proposalsView';
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -38,6 +39,31 @@ function candidateHtml(c: CandidateView, heuristicLabel: string): string {
   return `<button type="button" class="an-cand"${refAttr(c.ref)} title="Show the evidence">
 <span class="an-candtop"><span class="an-candtitle">${esc(c.title)}</span>${c.heuristic ? `<span class="an-heuristic">${esc(heuristicLabel)}</span>` : ''}<span class="an-evcount">${esc(c.evidence)}</span></span>
 <span class="an-reason">${esc(c.reason)}</span><span class="an-triggers">${esc(c.triggers)}</span></button>`;
+}
+
+function decideButton(id: string, decision: RoutingProposalDecision, label: string): string {
+  return `<button type="button" class="an-decide" data-an-decide="${decision}" data-an-id="${esc(id)}">${esc(label)}</button>`;
+}
+
+function proposalHtml(p: ProposalCardView): string {
+  return `<div class="an-prop"><button type="button" class="an-cand"${refAttr(p.ref)} title="Show the evidence">
+<span class="an-candtop"><span class="an-candtitle">${esc(p.title)}</span></span>
+<span class="an-reason">${esc(p.cohort)}</span><span class="an-triggers">${esc(p.counts)} · ${esc(p.interval)} · ${esc(p.window)}</span></button>
+${p.refused ? `<div class="an-note an-refused">Cannot be accepted: ${esc(p.refused.join('; '))}</div>` : ''}
+<div class="an-actions">${p.refused ? '' : decideButton(p.id, 'accept', 'Accept')}${decideButton(p.id, 'reject', 'Reject')}</div></div>`;
+}
+
+function ruleHtml(r: RuleCardView): string {
+  return `<div class="an-prop"><button type="button" class="an-cand${r.health === 'review' ? ' an-review' : ''}"${refAttr(r.ref)} title="Show the evidence it was accepted on">
+<span class="an-candtop"><span class="an-candtitle">${esc(r.title)}</span><span class="an-evcount">${esc(r.accepted)}</span></span>
+<span class="an-reason">${esc(r.cohort)}</span><span class="an-triggers">${esc(r.evidence)}</span><span class="an-triggers">${esc(r.healthText)}</span></button>
+<div class="an-actions">${decideButton(r.id, 'revoke', 'Revoke')}</div></div>`;
+}
+
+function proposalsHtml(p: ProposalsView): string {
+  const pending = p.pending.length > 0 ? `<div class="an-cands">${p.pending.map(proposalHtml).join('')}</div>` : '';
+  const rules = p.rules.length > 0 ? `<h4>Accepted rules</h4><div class="an-cands">${p.rules.map(ruleHtml).join('')}</div>` : '';
+  return `<section class="an-sec"><h3>Routing proposals</h3><div class="an-note">${esc(p.note)}</div>${pending}${rules}</section>`;
 }
 
 function filtersHtml(view: AnalyticsView): string {
@@ -72,8 +98,18 @@ ${view.empty ? `<div class="an-empty">${esc(view.empty)}</div>` : ''}
 <h4>Over-routing <span class="an-heuristic">${esc(cal.heuristicLabel)}</span></h4><div class="an-note">${esc(cal.heuristicNote)}</div>${list(cal.over, 'No candidates.')}
 <h4>Assessor agreement</h4>${agreement}
 </section>
+${proposalsHtml(view.proposals)}
 <details class="an-sec an-more"><summary>More metrics</summary><div class="an-cards">${view.more.map(cardHtml).join('')}</div></details>
 </div>`;
+}
+
+/** A click on Accept, Reject or Revoke: which proposal or rule, and what was decided. */
+export function analyticsDecision(target: HTMLElement): { id: string; decision: RoutingProposalDecision } | undefined {
+  const el = target.closest<HTMLElement>('.analytics [data-an-decide]');
+  const decision = el?.dataset.anDecide;
+  const id = el?.dataset.anId;
+  if (!id || (decision !== 'accept' && decision !== 'reject' && decision !== 'revoke')) return undefined;
+  return { id, decision };
 }
 
 /** The item a click in the view is about, if it was on one. */

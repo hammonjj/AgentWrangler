@@ -9,6 +9,7 @@ import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardToHost, HostToDashboard } from '../shared/messages';
 import type { TaskBadge } from '../shared/orchestration/taskView';
 import type { MissionOp, MissionsSnapshot } from '../shared/orchestration/missionView';
+import { parseDecision, type RoutingProposalDecision } from '../shared/orchestration/proposalsView';
 import { parseRef, parseSelection, type AnalyticsRef, type AnalyticsSelection, type AnalyticsView } from '../shared/orchestration/analyticsView';
 import { displayTitle, GLOBAL_PROJECT_DIR, type AgentSession, type HookHealth, type ProjectDTO } from '../shared/model';
 import { checkoutRootFor } from '../core/checkout';
@@ -120,6 +121,12 @@ export interface AnalyticsSource {
   view(selection: AnalyticsSelection): AnalyticsView;
   /** Open this item's breakdown and evidence in the conversation pane. */
   showDetail(selection: AnalyticsSelection, ref: AnalyticsRef): void;
+  /**
+   * A person's decision on a routing proposal or an accepted rule (#52). The
+   * only write the view makes, and only ever from a click. Accepting a
+   * proposal the corpus veto refuses does nothing.
+   */
+  decideProposal(id: string, decision: RoutingProposalDecision): void;
   /** The telemetry grew: a view on screen is stale. */
   onDidChange(listener: () => void): Disposable;
 }
@@ -481,6 +488,11 @@ export class DashboardHost {
       case 'analyticsDetail': {
         const ref = parseRef(m.ref);
         if (ref) this.analytics?.showDetail(parseSelection(m.selection), ref);
+        break;
+      }
+      case 'analyticsProposal': {
+        const decision = parseDecision(m.decision);
+        if (decision && typeof m.id === 'string') this.analytics?.decideProposal(m.id, decision);
         break;
       }
     }

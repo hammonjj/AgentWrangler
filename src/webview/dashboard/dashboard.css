@@ -2376,6 +2376,34 @@ body:has(#app.narrow) #usage {
   font-size: 0.8em;
   color: var(--vscode-descriptionForeground);
 }
+#app .analytics .an-prop {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#app .analytics .an-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#app .analytics .an-decide {
+  padding: 2px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, inherit);
+  cursor: pointer;
+}
+#app .analytics .an-decide[data-an-decide='accept'] {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+#app .analytics .an-review {
+  border-color: var(--aw-waiting);
+}
+#app .analytics .an-refused {
+  color: var(--aw-waiting);
+}
 #app .analytics .an-heuristic {
   padding: 0 5px;
   border: 1px solid var(--aw-waiting);
