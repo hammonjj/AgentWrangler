@@ -3126,6 +3126,21 @@ under a real `RunnerService` (`createSimulatedExecutors`). In a real host, `fake
 validation and the retry are exercised as well. The fake clock and the seeded mission generator
 arrive with the scheduler (#45).
 
+**As built (#48).** `test/orchestration/missionSim.ts` runs a whole mission, a dependency graph
+plus a `SimScenario` of scripted attempts, on a fake clock against the real `schedule`,
+`decideEscalation`, `attemptRecord` and `escalationRecord`, and checks the invariants at every step:
+no start before `code` dependencies are integrated and `order` ones done, no start on a rate-limited
+source or before a retry's backoff, one live attempt per task, one task at a time in a shared tree,
+every concurrency limit, attempts within `hardMaxAttempts` and `caps.maxAttempts`, no launching step
+past the quality, tier, effort or harness limit, caps or a pin, one taken step (and an event) per
+failed attempt, and a complete, unique telemetry record for every attempt and decision. Overlapping
+`scope.paths` are not checked: the scheduler does not hold them back yet (§13.4). A lost attempt's
+one auto-resume is a continuation, so no attempt cap applies to it (§23.3).
+`generateSpec(seed)` makes a random mission; `missionSimulation.test.ts` runs 1000 of them (well
+under a second) and the named scenarios in `test/orchestration/fixtures/mission-sims/*.json`. A
+failure names its seed; `AW_SIM_SEED=<n>` reruns it alone. No bug has been found yet, so there are
+no regression scenarios beyond the hand-written ones; add each one as a JSON file when one is.
+
 This is what answers "can we test orchestration without spending API credits" (yes) and "can we
 simulate provider failures" (yes, all of them in the brief's list).
 

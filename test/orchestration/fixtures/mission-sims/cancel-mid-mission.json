@@ -1,0 +1,10 @@
+{
+  "name": "cancel-mid-mission",
+  "tasks": [
+    { "id": "a" },
+    { "id": "b", "dependsOn": [{ "task": "a", "kind": "code" }] }
+  ],
+  "scenario": { "default": { "behaviour": "edit", "delayMs": 60000 } },
+  "cancelAtSec": 30,
+  "expect": { "mission": "cancelled", "tasks": { "a": "cancelled", "b": "cancelled" }, "attempts": { "a": 1, "b": 0 } }
+}
