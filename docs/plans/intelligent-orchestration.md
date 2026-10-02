@@ -2773,6 +2773,19 @@ own hierarchy is planner → tasks. A lead agent that supervises workers and rep
 deferred behind a gate: only if telemetry shows that missions fail because plans cannot adapt, and
 that replanning by the user (§11.4) is the bottleneck.
 
+**Decision (2026-10-02, #102, parent #111): accountable ownership stays with the delegating
+conversation; no permanent supervisor is added.** `docs/plans/delegation-ownership-contract.md`
+finalizes the result-handback and closeout contract the status contract (§16's `status-contract.md`
+§15) left for #102: any ordinary conversation that delegates keeps accountable ownership of the
+outcome (no new "orchestrator mode"); a meaningful result automatically triggers a bounded,
+event-triggered follow-up turn in that same origin session — reusing the `reuse`/`continue`
+resume capability of §22.1, not a new standing process — rather than keeping a lead agent alive to
+poll or supervise; and GitHub issue closeout is permitted only behind deterministic,
+evidence-gated conditions the contract document states in full, with worker authority unchanged.
+Implementation is #114 (ownership/result domain and store) through #118 (live journey
+validation); see the contract document for the full comparison of approaches and the lifecycle
+transitions it is built on.
+
 ---
 
 ## 23. Persistence and crash recovery
