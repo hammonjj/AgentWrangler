@@ -520,7 +520,7 @@ body.resizing {
   position: sticky;
   /* The top of #app, which is the element that scrolls: the launcher bar and
      the usage strip are outside it and never move, so no offset is needed. */
-  top: 31px;
+  top: var(--aw-tabs-h, 31px);
   z-index: 2;
   text-align: left;
   padding: 5px 8px 4px;
@@ -2498,4 +2498,177 @@ body:has(#app.narrow) #usage {
 }
 #app.narrow .analytics .an-splitlabel {
   flex-basis: 100%;
+}
+
+/* ======================================================================
+   Phone widths and touch (#134)
+
+   `#app.narrow` is the pane's own width; `#app.touch` is the primary pointer
+   being a finger (`common/phone.ts`). Same rule as everywhere here: the pane
+   keys off itself, not the viewport.
+   ====================================================================== */
+
+/* The row's menu is a long-press away, so a row must not start a text
+   selection or the system callout when it is held. */
+#app.touch tr.row {
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#app.touch {
+  /* The tab strip's height: the header sticks just below it. */
+  --aw-tabs-h: 49px;
+}
+#app.touch .tabletabs button {
+  min-height: 44px;
+}
+#app.touch tr.sec td {
+  padding-top: 15px;
+  padding-bottom: 12px;
+}
+/* Rows are at least a finger tall. Two lines already make a narrow row 40px. */
+#app.touch tr.row > td {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+/* The × was revealed by hovering its row. There is no hover here: it is
+   always drawn, quiet, and as big as the cell it sits in. */
+#app.touch tr.row .dismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.6;
+  width: 44px;
+  height: 44px;
+  margin: -8px -9px;
+  padding: 0;
+}
+#app.touch tr.row > td.c-act {
+  padding-left: 0;
+  padding-right: 0;
+  overflow: visible;
+}
+#app.touch button.ptoggle {
+  min-height: 44px;
+}
+#app.touch th.h-act {
+  width: 44px;
+}
+#app.touch.narrow th.h-act {
+  width: 44px;
+}
+#app.touch th.h-dot,
+#app.touch.narrow th.h-dot {
+  width: 28px;
+}
+#app.touch button.pbtn {
+  min-height: 44px;
+  padding: 6px 14px;
+  font-size: 0.95em;
+}
+#app.touch button.schevron,
+#app.touch button.colcfg {
+  min-width: 44px;
+  min-height: 44px;
+}
+#app.touch .rowmenu {
+  width: 220px;
+}
+#app.touch .rowmenu .rmrow {
+  min-height: 44px;
+  padding: 10px 12px;
+}
+#app.touch .colmenu .cmrow {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#app.touch .colmenu .cmrow input {
+  width: 22px;
+  height: 22px;
+}
+#app.touch .colmenu .cmreset {
+  min-height: 44px;
+}
+#app.touch .banner button.bact,
+#app.touch .banner button.bx {
+  min-height: 44px;
+  min-width: 44px;
+}
+#app.touch .c-pr .pr,
+#app.touch .chip[data-open-mission] {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* The launcher and the usage strip sit above #app, so they are keyed off it
+   with :has(), as the narrow usage strip already is. */
+body:has(#app.touch) #bar {
+  --aw-bar-h: 52px;
+  gap: 8px;
+}
+body:has(#app.touch) #bar .projbtn,
+body:has(#app.touch) #bar .newbtn,
+body:has(#app.touch) #bar .ctlbtn,
+body:has(#app.touch) #bar .launchsel {
+  height: 44px;
+}
+body:has(#app.touch) #bar .ctlbtn {
+  min-width: 44px;
+}
+body:has(#app.touch) #bar .newbtn {
+  padding: 0 14px;
+}
+/* 16px stops iOS zooming the page when a dropdown is focused. */
+body:has(#app.touch) #bar .launchsel,
+body:has(#app.touch) #bar .projbtn {
+  font-size: 16px;
+}
+/* At phone width one row cannot hold folder, two dropdowns, New, Tasks and the
+   controls (the folder's name shrank to a chevron). Two rows instead: the
+   folder with the fleet controls, then the model, effort and the start
+   buttons. `display: contents` lets the two groups' children be ordered as one. */
+body:has(#app.narrow.touch) #bar {
+  --aw-bar-h: auto;
+  height: auto;
+  flex-wrap: wrap;
+  padding: 6px;
+}
+body:has(#app.narrow.touch) #bar .launch {
+  display: contents;
+}
+body:has(#app.narrow.touch) #bar .projbtn {
+  order: 1;
+  flex: 1 1 9rem;
+  max-width: none;
+}
+body:has(#app.narrow.touch) #bar .ctlgroup {
+  order: 2;
+  border-left: none;
+  padding-left: 0;
+}
+body:has(#app.narrow.touch) #bar .launchsel {
+  order: 3;
+  flex: 1 1 5.5rem;
+  max-width: none;
+  min-width: 0;
+}
+body:has(#app.narrow.touch) #bar .newbtn {
+  order: 4;
+}
+body:has(#app.touch) .projmenu .pmname {
+  min-height: 44px;
+}
+body:has(#app.touch) .projmenu .pmx,
+body:has(#app.touch) .projmenu .pmfav {
+  width: 44px;
+  min-height: 44px;
+  opacity: 0.7;
+}
+body:has(#app.touch) .projmenu .pmfav.on {
+  opacity: 1;
+}
+body:has(#app.touch) .projmenu .pmbrowse {
+  min-height: 44px;
 }

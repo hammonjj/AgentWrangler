@@ -46,6 +46,7 @@ import {
   requestTableView,
   type PageKind,
 } from '../common/shellBus';
+import { trackViewport } from '../common/phone';
 import { createModalHost } from './modalHost';
 import { showToast } from './toastHost';
 
@@ -120,6 +121,7 @@ export function startAppShell(opts: { browser: boolean }): void {
   shellApi.onReconnect(() => modals.reset());
 
   if (!opts.browser) return;
+  trackViewport(); // the on-screen keyboard must not cover the composer (#134)
   router = startRouter(wb);
 }
 

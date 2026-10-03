@@ -1713,19 +1713,19 @@ body,
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
-/* Narrow pane: the header's supporting detail is the first thing to go. */
-@media (max-width: 520px) {
-  #meta {
-    display: none;
-  }
-  .blk.user,
-  .blk.assistant,
-  .blk.tool,
-  .blk.thinking,
-  .blk.note {
-    padding-left: 8px;
-    padding-right: 8px;
-  }
+/* Narrow pane: the header's supporting detail is the first thing to go. This
+   was a viewport media query, which asked about the window and not the pane;
+   the compact form is now `#convApp.narrow` (the end of this sheet). */
+#convApp.narrow #meta {
+  display: none;
+}
+#convApp.narrow .blk.user,
+#convApp.narrow .blk.assistant,
+#convApp.narrow .blk.tool,
+#convApp.narrow .blk.thinking,
+#convApp.narrow .blk.note {
+  padding-left: 8px;
+  padding-right: 8px;
 }
 
 /*
@@ -1922,4 +1922,327 @@ body,
   flex-direction: column;
   padding: 3px 0;
   border-bottom: 1px solid var(--aw-rule);
+}
+
+/* ======================================================================
+   The compact form and touch (#134)
+
+   `#convApp.narrow` is set from this pane's own width (`CONV_NARROW_PX`),
+   never from the viewport; `#convApp.touch` from the primary pointer being a
+   finger (`common/phone.ts`). They are independent: a narrow pane in a desktop
+   window gets the compact layout with mouse-sized targets, and a wide pane on a
+   tablet gets finger-sized targets with the full layout.
+
+   The rule for every long thing in a block — a command, a table, a diff, a
+   result — is that it wraps or scrolls *inside its own box*. Nothing in the
+   transcript may make the page wider than the pane.
+   ====================================================================== */
+
+#convApp {
+  min-width: 0;
+}
+#convApp.narrow #scroll {
+  overflow-x: hidden;
+  padding: 8px 8px 12px;
+  /* A swipe that runs out of transcript is not a swipe on the page behind. */
+  overscroll-behavior: contain;
+}
+
+/* ---- header: one compact line ---- */
+#convApp.narrow #hdr {
+  gap: 6px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+#convApp.narrow #ttl {
+  flex: 1 1 0;
+  min-width: 0;
+}
+#convApp.narrow #convUsage,
+#convApp.narrow #spacer {
+  display: none;
+}
+#convApp.narrow #convRateLimit {
+  max-width: 7em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#convApp.narrow #banner {
+  flex-wrap: wrap;
+  padding: 6px 8px;
+}
+
+/* ---- composer: the controls share one row, the field grows above them ---- */
+#convApp.narrow #composer {
+  padding: 6px 8px;
+}
+#convApp.narrow #composerBar {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#convApp.narrow #composerBar .grow {
+  display: none;
+}
+/* Three dropdowns split the row; each truncates its own label rather than
+   pushing the others off. */
+#convApp.narrow #mode,
+#convApp.narrow #model,
+#convApp.narrow #effort {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+#convApp.narrow #composerRead {
+  flex-wrap: wrap;
+}
+#convApp.narrow .mentions {
+  max-height: 140px;
+}
+#convApp.narrow #composerInput > .dictation .dicttext {
+  max-height: 4em;
+}
+/* Above the composer rather than fixed to the viewport, which an on-screen
+   keyboard would cover: zero net height, drawn over the transcript's last line. */
+#convApp.narrow #jump {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  align-self: flex-end;
+  flex: 0 0 auto;
+  height: 32px;
+  margin: -40px 12px 8px auto;
+  z-index: 3;
+}
+
+/* ---- cards: full width, and the buttons are the biggest thing on them ---- */
+#convApp.narrow .blk.ask {
+  padding: 10px;
+}
+#convApp.narrow .askrow {
+  gap: 8px;
+}
+#convApp.narrow .askrow > .askbtn {
+  flex: 1 1 calc(50% - 8px);
+  min-height: 44px;
+}
+/* A long command wraps anywhere; one that is still too long scrolls in the card. */
+#convApp.narrow .askdetail {
+  max-height: 200px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  font-size: 0.88em;
+}
+#convApp.narrow .qopt {
+  align-items: flex-start;
+}
+#convApp.narrow .qfeedback,
+#convApp.narrow .qother {
+  width: 100%;
+  box-sizing: border-box;
+}
+#convApp.narrow .proposal .proppicks > * {
+  flex: 1 1 100%;
+}
+
+/* ---- blocks: nothing is wider than the pane ---- */
+#convApp.narrow .blk {
+  min-width: 0;
+}
+#convApp.narrow .blk.assistant {
+  padding-right: 28px;
+}
+#convApp.narrow .blk img {
+  max-width: 100%;
+  height: auto;
+}
+#convApp.narrow .blk :not(pre) > code {
+  overflow-wrap: anywhere;
+}
+#convApp.narrow .blk pre,
+#convApp.narrow .blk table,
+#convApp.narrow .tinput,
+#convApp.narrow .tresult,
+#convApp.narrow .tdiff {
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+/* Tables scroll in their own block, and keep cells readable instead of
+   squeezing them into a column of one letter. */
+#convApp.narrow .blk table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  font-size: 0.92em;
+}
+#convApp.narrow .blk th,
+#convApp.narrow .blk td {
+  padding: 3px 8px;
+  /* One line per row: the block scrolls sideways instead of stacking words. */
+  white-space: nowrap;
+}
+#convApp.narrow .blk pre {
+  font-size: 0.9em;
+}
+/* Room above the code for the Copy button, which would otherwise sit on it. */
+#convApp.narrow .blk pre:has(> .copy) {
+  padding-top: 30px;
+}
+#convApp.narrow .blk code {
+  font-size: 0.9em;
+}
+#convApp.narrow .tinput,
+#convApp.narrow .tresult,
+#convApp.narrow .tdiff {
+  margin-left: 4px;
+  max-height: 240px;
+  font-size: 0.86em;
+  overflow-y: auto;
+}
+#convApp.narrow .tresult,
+#convApp.narrow .tinput {
+  overflow-wrap: anywhere;
+}
+#convApp.narrow .worklog {
+  margin-top: 4px;
+}
+#convApp.narrow .subagent-work {
+  margin-left: 6px;
+  padding-left: 6px;
+}
+#convApp.narrow #findbar {
+  padding: 6px 8px;
+}
+
+/* ---- touch: finger-sized targets, and nothing that needs a hover ---- */
+
+/* 16px stops iOS Safari zooming the page when a field is focused. */
+#convApp.touch #msg,
+#convApp.touch #find,
+#convApp.touch #mode,
+#convApp.touch #model,
+#convApp.touch #effort,
+#convApp.touch .qother,
+#convApp.touch .qfeedback,
+#convApp.touch .propselect {
+  font-size: 16px;
+}
+#convApp.touch #msg {
+  line-height: 1.35;
+  min-height: 30px;
+}
+#convApp.touch #mode,
+#convApp.touch #model,
+#convApp.touch #effort,
+#convApp.touch .propselect,
+#convApp.touch .qother,
+#convApp.touch #find {
+  min-height: 44px;
+}
+#convApp.touch .hdrbtn,
+#convApp.touch .askbtn,
+#convApp.touch #banner button,
+#convApp.touch #notch,
+#convApp.touch .showmore,
+#convApp.touch .blk.note .note-action,
+#convApp.touch .diffopen,
+#convApp.touch #findbar button,
+#convApp.touch .asknav,
+#convApp.touch #jump,
+#convApp.touch #taskStrip .tsbtn,
+#convApp.touch #taskStrip .tsattempt,
+#convApp.touch #delegated .dwbtn,
+#convApp.touch .subagent-load,
+#convApp.touch .earlier-subagent {
+  min-height: 44px;
+}
+#convApp.touch #composerActions {
+  min-height: 44px;
+  gap: 4px;
+}
+#convApp.touch .clipbtn,
+#convApp.touch .micbtn {
+  width: 44px;
+  height: 44px;
+}
+#convApp.touch .clipbtn svg,
+#convApp.touch .micbtn svg {
+  width: 22px;
+  height: 22px;
+}
+#convApp.touch #composerActions .askbtn {
+  padding: 0 20px;
+}
+#convApp.touch .dictation .dictclose {
+  min-width: 44px;
+  min-height: 44px;
+  font-size: 1.4em;
+}
+#convApp.touch .attach {
+  width: 72px;
+  height: 72px;
+}
+#convApp.touch .attach .attachx {
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
+  line-height: 28px;
+}
+/* A row you tap: the whole line, not the arrow in front of it. */
+#convApp.touch .worklog > summary,
+#convApp.touch .blk.tool summary,
+#convApp.touch .blk.thinking summary,
+#convApp.touch .proposal .propdetails > summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+}
+#convApp.touch .qopt {
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+}
+#convApp.touch .qopt input {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  margin: 0;
+}
+#convApp.touch .mentions .mrow {
+  min-height: 44px;
+  align-items: center;
+}
+/* Copy buttons were revealed by hover. A finger never hovers: they are always
+   there, quiet until pressed, and a little bigger. The reply's is 30px rather
+   than 44, because it lives in the text's right-hand gutter. */
+#convApp.touch .copy {
+  opacity: 0.75;
+  min-width: 44px;
+  min-height: 32px;
+  font-size: 0.86em;
+}
+#convApp.touch .blockcopy {
+  opacity: 0.8;
+  width: 30px;
+  height: 30px;
+}
+#convApp.touch .blockcopy .cicon {
+  width: 16px;
+  height: 16px;
+}
+#convApp.touch.narrow .blk.assistant {
+  padding-right: 36px;
+}
+#convApp.touch .blockcopy-sticky {
+  margin-right: -36px;
+}
+#convApp.touch button,
+#convApp.touch select,
+#convApp.touch summary,
+#convApp.touch label {
+  touch-action: manipulation;
 }

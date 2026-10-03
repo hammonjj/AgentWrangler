@@ -35,7 +35,8 @@ import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestrati
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
 import { announceTableView, onTableViewRequest } from '../common/shellBus';
-import { canPauseSession, clampMenuPosition, dismissAction, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
+import { canPauseSession, clampMenuPosition, dismissAction, ITEM_H_TOUCH, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
+import { onLongPress, trackTouch } from '../common/phone';
 import {
   askLine,
   capitalize,
@@ -311,7 +312,7 @@ function rowMenuHtml(): string {
   if (!s) return '';
 
   const items = rowMenuItems(s);
-  const menuSize = rowMenuSize(items);
+  const menuSize = rowMenuSize(items, app.classList.contains('touch') ? ITEM_H_TOUCH : undefined);
   const { left, top } = clampMenuPosition(rowMenu, menuSize, {
     width: document.documentElement.clientWidth,
     height: document.documentElement.clientHeight,
@@ -1787,6 +1788,10 @@ app.addEventListener('contextmenu', (e) => {
   openRowMenu(row.dataset.key!, (e as MouseEvent).clientX, (e as MouseEvent).clientY);
 });
 
+// A finger has no right-click, and iOS Safari never sends `contextmenu`: a
+// long-press on a row opens the same menu (#134).
+onLongPress(app, 'tr.row', (row, x, y) => openRowMenu(row.dataset.key!, x, y));
+
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   closeMenu();
@@ -1819,6 +1824,7 @@ const measure = () => {
   }
 };
 app.classList.toggle('narrow', narrow);
+trackTouch(app);
 new ResizeObserver(measure).observe(app);
 window.addEventListener('resize', measure);
 

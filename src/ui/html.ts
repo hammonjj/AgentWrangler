@@ -87,7 +87,22 @@ export interface WebviewHtmlOptions {
   nonce?: string;
   /** `<meta name content>` pairs for the scripts to read (the browser's build, #128). */
   meta?: Record<string, string>;
+  /** The viewport meta's content. Absent, the plain one every host has always had. */
+  viewport?: string;
 }
+
+/** What the Electron window and VSCode get: unchanged since the first webview. */
+const DEFAULT_VIEWPORT = 'width=device-width, initial-scale=1.0';
+
+/**
+ * What a phone browser gets (#134): `viewport-fit=cover` lets the page draw under
+ * the notch and the home indicator (the shell pads by `env(safe-area-inset-*)`),
+ * and `interactive-widget=resizes-content` makes Chrome on Android shrink the
+ * layout for its keyboard, as iOS's visual viewport is followed in script. No
+ * `maximum-scale`: blocking pinch-zoom is an accessibility failure, and fields
+ * are 16px so iOS has no reason to zoom on focus.
+ */
+export const BROWSER_VIEWPORT = 'width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content';
 
 export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
   const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [], bodyClass, preScripts = [], connectSrc } = opts;
@@ -103,7 +118,7 @@ export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'; img-src ${cspSource} data:;${connect}">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">${metas}
+<meta name="viewport" content="${attr(opts.viewport ?? DEFAULT_VIEWPORT)}">${metas}
 ${links}
 <title>${title}</title>
 </head>
@@ -123,6 +138,7 @@ export function renderBrowserWorkbenchHtml(opts: { asset: (name: string) => stri
   return renderWebviewHtml({
     // What the shim compares the server's `hello` with (#128).
     meta: { 'aw-build': opts.build },
+    viewport: BROWSER_VIEWPORT,
     bundleName: 'workbench',
     title: 'Agent Wrangler',
     cssHref: opts.asset('workbench.css'),

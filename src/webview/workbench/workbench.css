@@ -466,3 +466,217 @@ body.aw-surface-conversation #wbConv {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 2px;
 }
+
+/*
+ * ---- phones (#134) ----
+ *
+ * The browser page only (`aw-web`): the Electron window has no such class and
+ * is untouched. This is the shell, so it may ask about the viewport and the
+ * pointer; the panes key off their own `.narrow` and `.touch` classes instead.
+ */
+
+/*
+ * The app fills the *visible* viewport. `viewport-fit=cover` (the page's meta)
+ * lets the page draw under the notch and the home indicator, and the safe-area
+ * insets keep the content out of them. iOS Safari does not resize the layout
+ * viewport for its keyboard, so `common/phone.ts` writes the visual viewport's
+ * top and height into `--aw-vv-top` / `--aw-vv-h`; without them (no JS yet, no
+ * `visualViewport`) `100dvh` is the next best thing. `body.aw-web` beats the
+ * theme's `body.aw-shell` padding by loading after it.
+ */
+body.aw-web {
+  position: fixed;
+  top: var(--aw-vv-top, 0px);
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 100vh;
+  height: var(--aw-vv-h, 100dvh);
+  padding-top: max(10px, env(safe-area-inset-top));
+  padding-right: max(12px, env(safe-area-inset-right));
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  padding-left: max(12px, env(safe-area-inset-left));
+  /* Taps respond at once (no double-tap-to-zoom wait) and the page behind a
+     scrolling list does not rubber-band. */
+  touch-action: manipulation;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* A visible but quiet flash on tap, instead of the default grey box. */
+  -webkit-tap-highlight-color: rgba(128, 128, 128, 0.22);
+}
+/* The keyboard covers the home indicator: its inset is not needed above it. */
+body.aw-web.aw-kbd {
+  padding-bottom: 6px;
+}
+/* The divider is dragged, not tapped: it keeps its own touch handling. */
+body.aw-web #wbSplit {
+  touch-action: none;
+}
+
+/* Toasts and the notification banner stay out from under the home indicator,
+   and move to the top of what is visible while the keyboard is up. */
+body.aw-web #awDock {
+  left: max(12px, env(safe-area-inset-left));
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(12px, env(safe-area-inset-bottom));
+}
+body.aw-web.aw-kbd #awDock {
+  bottom: auto;
+  top: calc(var(--aw-vv-top, 0px) + 8px);
+  flex-direction: column;
+}
+body.aw-web #awBanner {
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+body.aw-web .aw-toast {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* Nothing in a modal may be wider than the screen or taller than what the
+   keyboard leaves. */
+body.aw-web .aw-modal-layer {
+  padding-top: max(12px, 8dvh);
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+body.aw-web .aw-modal {
+  max-height: 76vh;
+  max-height: 84dvh;
+}
+body.aw-web .aw-hv {
+  max-height: 88vh;
+  max-height: 88dvh;
+  max-width: 100%;
+}
+body.aw-web .aw-hv-body {
+  overflow-wrap: anywhere;
+}
+body.aw-web .aw-hv-text {
+  overflow-x: auto;
+}
+body.aw-web .aw-fb {
+  max-height: 92vh;
+  max-height: 92dvh;
+}
+
+@media (max-width: 799px) {
+  /* One pane at a time: the page's own frame gives the screen back. */
+  body.aw-web {
+    padding-top: max(6px, env(safe-area-inset-top));
+    padding-right: max(8px, env(safe-area-inset-right));
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    gap: 6px;
+  }
+  body.aw-web.aw-kbd {
+    padding-bottom: 4px;
+  }
+  /* The routes are one row that scrolls sideways inside the bar, under the
+     back button and heading, rather than wrapping into a block of its own. */
+  #awBar {
+    gap: 4px 8px;
+  }
+  #awBar .aw-bar-title {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #awBar .aw-nav {
+    flex: 1 0 100%;
+    flex-wrap: nowrap;
+    margin-left: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  #awBar .aw-nav::-webkit-scrollbar {
+    display: none;
+  }
+  #awBar .aw-nav a {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  #awPage {
+    padding: 10px 10px;
+  }
+  .aw-modal {
+    padding: 12px;
+  }
+}
+
+/* The launcher is the table's, but sits beside #wb rather than inside #wbTable:
+   with the table out of sight it must go too, or it fills a phone's screen above
+   the conversation. */
+body.aw-surface-conversation #bar,
+body.aw-surface-page #bar {
+  display: none;
+}
+
+@media (max-width: 799px) {
+  /* A single pane has its Back button; the route links would be a second row
+     of chrome above a conversation. They are on the table's screen. */
+  body.aw-surface-conversation #awBar .aw-nav,
+  body.aw-surface-page #awBar .aw-nav {
+    display: none;
+  }
+}
+
+/* Finger-sized targets in the shell's own controls. */
+@media (pointer: coarse) {
+  #awBar .aw-nav a,
+  #awBar .aw-bar-back {
+    min-height: 44px;
+    padding: 4px 12px;
+  }
+  #awPage .aw-page-button {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 16px;
+  }
+  .aw-modal .aw-modal-btn,
+  .aw-modal .aw-modal-field,
+  .aw-modal .aw-modal-row {
+    min-height: 44px;
+  }
+  /* 16px stops iOS zooming the page when a field is focused. */
+  .aw-modal .aw-modal-field,
+  .aw-hv-command {
+    font-size: 16px;
+  }
+  .aw-modal .aw-modal-row {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .aw-hv-btn,
+  .aw-fb-choose,
+  .aw-fb-cancel,
+  .aw-fb-up,
+  #awBanner button {
+    min-height: 44px;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .aw-fb-row {
+    min-height: 48px;
+    justify-content: center;
+  }
+  .aw-fb-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+  }
+  .aw-fb-toggle input {
+    width: 22px;
+    height: 22px;
+  }
+}

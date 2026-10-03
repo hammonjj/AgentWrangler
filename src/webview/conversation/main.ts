@@ -53,6 +53,8 @@ import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { resetsInText } from '../../shared/usage';
 import { isRemoteHost, paneApi } from '../common/paneApi';
 import { uploadFile } from '../common/upload';
+import { trackTouch } from '../common/phone';
+import { CONV_NARROW_PX, isNarrowWidth } from '../../shared/phoneLayout';
 import { announceConversation } from '../common/shellBus';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { renderAnalyticsDetail } from './analyticsDetail';
@@ -68,6 +70,7 @@ const MAX_BLOCK_NODES = 400;
 const STICK_PX = 56;
 /** Composer grows with the message up to this, then scrolls. */
 const MAX_COMPOSER_PX = 180;
+const MAX_COMPOSER_NARROW_PX = 112;
 /**
  * How much of an ask card has to be on screen for it to count as seen. An ask
  * whose first line is the last pixel of the view has not been read, and the
@@ -183,6 +186,22 @@ const attachBtn = document.getElementById('attach') as HTMLButtonElement;
 const attachPick = document.getElementById('attachpick') as HTMLInputElement;
 const mentionsEl = document.getElementById('mentions')!;
 const composerInput = document.getElementById('composerInput')!;
+
+// ---- the compact form (#134) ----
+// `#convApp.narrow`, from the pane's own width like the table's `#app.narrow`:
+// the divider moves, so the window's width says nothing about this pane's. A
+// class rather than a media query, and `.touch` (the primary pointer is a
+// finger) beside it; the stylesheet keys on both.
+let narrow = isNarrowWidth(app.clientWidth, CONV_NARROW_PX, false);
+app.classList.toggle('narrow', narrow);
+trackTouch(app);
+new ResizeObserver(() => {
+  const next = isNarrowWidth(app.clientWidth, CONV_NARROW_PX, narrow);
+  if (next === narrow) return;
+  narrow = next;
+  app.classList.toggle('narrow', narrow);
+  autoGrow(); // the composer's ceiling differs between the two forms
+}).observe(app);
 
 /** Block id → its node, so a patch updates in place instead of re-rendering. */
 const nodes = new Map<string, HTMLElement>();
@@ -2132,7 +2151,10 @@ function renderTask(): void {
 
 function autoGrow(): void {
   msgEl.style.height = 'auto';
-  msgEl.style.height = `${Math.min(msgEl.scrollHeight, MAX_COMPOSER_PX)}px`;
+  // Shorter in the compact form: with a phone's keyboard up there is little
+  // left above it, and the composer must not take the transcript's last line.
+  const max = narrow ? MAX_COMPOSER_NARROW_PX : MAX_COMPOSER_PX;
+  msgEl.style.height = `${Math.min(msgEl.scrollHeight, max)}px`;
 }
 
 // ---- @ mentions ----
