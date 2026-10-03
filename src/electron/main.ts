@@ -42,6 +42,8 @@ import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
 import { createRemoteDaemonAgent } from '../node/remoteDaemonAgent';
 import { coreRunsElsewhere } from './coreElsewhere';
+import { socketAnswers } from '../core/control/probe';
+import { coreDaemonPaths, findCoreHolder } from '../core/daemon/coreDaemon';
 import { MenuBar, menuBarSessions } from './tray';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
 import { createBrowserClients, type BrowserClients } from './webPrototype';
@@ -131,7 +133,18 @@ void app.whenReady().then(async () => {
     userDataDir,
     log,
     sessionHosts: { runtime, ...hostDirs },
-    remoteDaemon: createRemoteDaemonAgent({ runDirs: hostDirs, logDir: hostDirs.logDir, runtime, isPackaged: app.isPackaged, log }),
+    remoteDaemon: createRemoteDaemonAgent({
+      runDirs: hostDirs,
+      logDir: hostDirs.logDir,
+      runtime,
+      isPackaged: app.isPackaged,
+      log,
+      // Never beside a core daemon, which runs Discord itself (#138).
+      coreDaemonHolds: async () => {
+        const paths = coreDaemonPaths(userDataDir, hostDirs.fallbackRunDir);
+        return (await findCoreHolder({ socketPath: paths.socketPath, manifestPath: paths.manifestPath, probe: socketAnswers })).kind === 'daemon';
+      },
+    }),
     palette: {
       pick: (items, options) => palette?.pick(items, options) ?? Promise.resolve(undefined),
       input: (options) => palette?.input(options) ?? Promise.resolve(undefined),
