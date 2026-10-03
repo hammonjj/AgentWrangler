@@ -28,7 +28,7 @@ import type { Disposable } from '../../core/events';
 import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../../shared/orchestration/taskView';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
-import type { SessionActions } from '../actions';
+import type { PermissionDecisionOutcome, SessionActions } from '../actions';
 import { sessionRef, type AccessRequest, type BoundAccess } from '../../core/access';
 import { runInRequest } from '../../core/requestScope';
 import type { PaneChannel } from '../paneChannel';
@@ -538,21 +538,26 @@ export class ConversationHost {
       case 'interrupt':
         await source?.interrupt?.();
         return;
+      // A live session's asks are answered through `SessionActions`, never
+      // straight at its handle: the table row, Discord and every other client's
+      // card answer the same ask, and the action is where "already answered" is
+      // decided and told to the client that pressed (#132). A transcript's card
+      // goes through it too, inside `TranscriptSource`.
       case 'decide': {
+        if (source?.kind === 'runner') {
+          if (key) this.cannotAnswer(await this.actions.decidePermission(key, m.decision, { expectedRequestId: m.requestId }));
+          return;
+        }
         const sent = await source?.decide?.(m.requestId, m.decision, m.message);
         if (sent === false) this.tooLate();
         return;
       }
-      case 'answer': {
-        const sent = await source?.answer?.(m.requestId, m.answers);
-        if (sent === false) this.tooLate();
+      case 'answer':
+        if (key) this.cannotAnswer(await this.actions.answerQuestion(key, m.requestId, m.answers));
         return;
-      }
-      case 'plan': {
-        const sent = await source?.decidePlan?.(m.requestId, m.decision === 'approve', m.feedback);
-        if (sent === false) this.tooLate();
+      case 'plan':
+        if (key) this.cannotAnswer(await this.actions.decidePlan(key, m.requestId, m.decision === 'approve', m.feedback));
         return;
-      }
       case 'setPermissionMode':
         await source?.setPermissionMode?.(m.mode);
         return;
@@ -735,6 +740,11 @@ export class ConversationHost {
 
   private tooLate(): void {
     this.ui.dialogs.flash('Agent Wrangler: that prompt has already been answered.', 4000);
+  }
+
+  /** `SessionActions` has already said "already answered"; only a refusal it does not report is left to say. */
+  private cannotAnswer(outcome: PermissionDecisionOutcome): void {
+    if (outcome === 'unsupported') this.ui.dialogs.flash('Agent Wrangler: that prompt cannot be answered from here.', 4000);
   }
 
   /**

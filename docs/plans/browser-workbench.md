@@ -323,6 +323,15 @@ context. If its client has gone, it falls back to the app's behaviour.
 | Audit | One append-only log, extending `FileAuditLog`: principal, device, connection, `via`, action, target ids, outcome. Ids only, never content, the same redaction as remote control. |
 | Approvals | Browser approvals go through `SessionActions.decidePermission`/`answerQuestion`/`decidePlan`, the same funnel the window and Discord use. There is no browser-specific approval path. Transport authentication (who may connect) and action authorisation (§9) stay separate from agent approval (what an agent may do). |
 
+**Built (#132).** The three approval actions are `src/app/approvals.ts`. The conversation card
+of a live session (Claude or Codex) answers through them too, not through its handle, so a
+second client's late press gets `stale` and a toast saying the ask was already answered. The
+action sends that toast, to the client that pressed and no other. A press with no client behind
+it (Discord, `aw`) is only logged. `test/multiClient.test.ts` covers two browsers, Discord,
+reconnects and per-browser view state, and fails if anything outside `approvals.ts` answers a
+session directly. One exception is listed there: the remote daemon's own feed answers hosted
+asks while the app is not running. It goes when Discord moves into the core daemon (#138).
+
 **LAN deployment assumptions** (for the README): a trusted home network; the Mac's firewall
 allows the port; no port forwarding; devices paired one by one. Anyone on that network can
 reach the login page, but nothing behind it without a credential.

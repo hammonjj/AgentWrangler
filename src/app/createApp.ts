@@ -140,6 +140,7 @@ import { FileAuditLog } from '../remote/audit';
 import { createAccessGate, ownerContext, type AccessGate } from '../core/access';
 import { outsideRequest } from '../core/requestScope';
 import { guardSessionActions } from '../ui/guardedActions';
+import { createApprovalActions } from './approvals';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { PermissionModeName } from '../shared/conversation';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
@@ -861,19 +862,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const question = sessions.get(id)?.pendingQuestion;
       return question ? { requestId: question.requestId, questions: question.questions } : undefined;
     },
-    answer: async (id: string | undefined, requestId: string, answers: Record<string, string>) => {
-      const handle = sessions.get(id);
-      return handle ? (await handle.answer(requestId, answers)) === 'applied' : false;
-    },
     // Only Claude has plans: Codex has no plan-mode concept, and its handle
     // never reports one.
     pendingPlan: (id: string | undefined) => {
       const plan = sessions.get(id)?.pendingPlan;
       return plan ? { requestId: plan.requestId, plan: plan.plan, more: plan.more } : undefined;
-    },
-    decidePlan: async (id: string | undefined, requestId: string, approve: boolean, feedback?: string) => {
-      const handle = sessions.get(id);
-      return handle ? (await handle.decidePlan(requestId, approve, feedback)) === 'applied' : false;
     },
     // Every runner is hosted, and a hosted session's permission prompt reaches
     // the row and the remote only from here, not through the hook file.
@@ -2661,83 +2654,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
     installHooks() {
       void installHooks();
     },
-    async decidePermission(key, behavior, opts) {
-      const s = store.get(key);
-      if (!s || s.provider !== 'claude') return 'unsupported';
-      const expected = opts?.expectedRequestId;
-      // A session in a host is answered through the host (§6.1): its ask
-      // waits for days, where the hook gives up after ~28 minutes, and since
-      // Stage 4 the hook does not wait for hosted sessions at all, so the
-      // host is the only way in (`AGENTWRANGLER_HOSTED`). The request named is
-      // answered; with none named, only a lone pending one, so the answer
-      // cannot land on the wrong prompt.
-      const hosted = runners.get(s.sessionId);
-      if (hosted?.hosted) {
-        const pending = hostedPermissions(hosted);
-        const target = expected !== undefined ? pending.find((b) => b.requestId === expected) : pending.length === 1 ? pending[0] : undefined;
-        if (target) {
-          const outcome = await hosted.decide(target.requestId, behavior);
-          if (outcome === 'applied') {
-            log(`permission ${behavior} sent to the host running ${s.name ?? s.sessionId}`);
-            return 'applied';
-          }
-          dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
-          return outcome === 'stale' ? 'stale' : 'gone';
-        }
-      }
-      // Caught here only to say the right thing: this snapshot can be a poll
-      // behind, so `HookLog.decide` re-checks against the id it read off the
-      // event stream, which is the one that actually decides.
-      if (expected !== undefined && s.permissionRequestId !== expected) {
-        dialogs.flash(`Agent Wrangler: that prompt for ${displayLabel(s)} has already been answered.`, 4000);
-        return 'stale';
-      }
-      const sent = await provider.decidePermission(s.sessionId, behavior, expected);
-      if (sent) {
-        log(`permission ${behavior} sent to ${s.name ?? s.sessionId}`);
-        if (behavior === 'always' && s.alwaysAllow) {
-          dialogs.flash(
-            `Agent Wrangler: allowed ${s.alwaysAllow.rules.join(', ')} in ${s.alwaysAllow.destination}.`,
-            5000,
-          );
-        }
-        return 'applied';
-      }
-      // The prompt was answered in Claude Code first, or the hook gave up
-      // waiting; either way there is nothing left to decide from here.
-      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
-      return 'gone';
-    },
-    async answerQuestion(key, requestId, answers) {
-      const s = store.get(key);
-      if (!s) return 'unsupported';
-      // `owns` rather than a try-and-see: a session running in a terminal has
-      // no question here to answer, and saying so is not the same as failing.
-      if (!runnerOwnership.owns(s.sessionId) || !runnerOwnership.answer) return 'unsupported';
-      const parked = runnerOwnership.pendingQuestion?.(s.sessionId);
-      if (parked && parked.requestId !== requestId) return 'stale';
-      const answered = await runnerOwnership.answer(s.sessionId, requestId, answers);
-      if (answered) {
-        log(`question answered for ${s.name ?? s.sessionId}`);
-        return 'applied';
-      }
-      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that question.`, 4000);
-      return 'gone';
-    },
-    async decidePlan(key, requestId, approve, feedback) {
-      const s = store.get(key);
-      if (!s) return 'unsupported';
-      if (!runnerOwnership.owns(s.sessionId) || !runnerOwnership.decidePlan) return 'unsupported';
-      const parked = runnerOwnership.pendingPlan?.(s.sessionId);
-      if (parked && parked.requestId !== requestId) return 'stale';
-      const decided = await runnerOwnership.decidePlan(s.sessionId, requestId, approve, feedback);
-      if (decided) {
-        log(`plan ${approve ? 'approved' : 'rejected'} for ${s.name ?? s.sessionId}`);
-        return 'applied';
-      }
-      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that plan.`, 4000);
-      return 'gone';
-    },
+    // Permissions, questions and plans: the one way an ask is answered from
+    // outside the agent, whichever surface or client the button is on (#132).
+    ...createApprovalActions({
+      store,
+      live: (id) => sessions.get(id),
+      decideByHook: (id, behavior, expected) => provider.decidePermission(id, behavior, expected),
+      flash: (message, timeoutMs) => dialogs.flash(message, timeoutMs),
+      log,
+    }),
   };
 
   // One microphone, so one recorder for the whole process however many panes are open.
