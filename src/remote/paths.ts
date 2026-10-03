@@ -34,3 +34,12 @@ export const DISCORD_BOT_TOKEN_KEY = 'remote.discord.botToken';
 export function auditFile(): string {
   return path.join(remoteHome(), 'audit.log');
 }
+
+/**
+ * Who did what to the app, through what (#123): the access gate's log, beside
+ * remote control's. A file of its own because the remote daemon is a separate
+ * process writing its own, and the two must not rotate each other's file.
+ */
+export function accessAuditFile(): string {
+  return path.join(os.homedir(), '.cache', 'agent-wrangler', 'access.log');
+}

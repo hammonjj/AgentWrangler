@@ -27,6 +27,7 @@ import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import { ConversationHost, type ConversationHostUi } from '../ui/conversation/conversationHost';
 import { DashboardHost } from '../ui/dashboardHost';
 import type { SessionActions } from '../ui/actions';
+import { ownerContext, type RequestContext } from '../core/access';
 import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 import { paneChannel, type EnvelopeTransport } from '../ui/paneChannel';
 import { documentUrl } from './bundleProtocol';
@@ -63,9 +64,15 @@ export function createWorkbenchHosts(
   host: HostServices,
   ui: ConversationHostUi,
   transport: EnvelopeTransport,
+  /**
+   * Who this document's messages act as (#123). The window is one client
+   * with one context; each browser connection brings its own, naming itself.
+   */
+  context: RequestContext,
   /** The prototype swaps in actions whose navigation lands in its own document. */
   actions: SessionActions = app.actions,
 ): { dashboard: DashboardHost; conversation: ConversationHost } {
+  const access = { context, gate: app.access };
   const dashboard = new DashboardHost(
     paneChannel(transport, 'dashboard'),
     app.store,
@@ -82,6 +89,7 @@ export function createWorkbenchHosts(
     host.settings,
     host.dialogs,
     app.models,
+    access,
     app.taskPanes,
     app.missions,
     app.analytics,
@@ -100,6 +108,7 @@ export function createWorkbenchHosts(
     // does not follow the session — the pane shows the name in its header.
     () => undefined,
     ui,
+    access,
     app.taskPanes,
   );
   return { dashboard, conversation };
@@ -293,7 +302,8 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       }),
     );
 
-    const panes = createWorkbenchHosts(app, host, ui, transport);
+    // The window is a browser-like client of the core: the owner, via 'browser'.
+    const panes = createWorkbenchHosts(app, host, ui, transport, ownerContext('browser'));
     this.dashboard = panes.dashboard;
     this.conversation = panes.conversation;
     this.windowSubs.push(this.dashboard, this.conversation);

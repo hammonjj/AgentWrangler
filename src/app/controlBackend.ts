@@ -10,6 +10,7 @@ import type { SessionExecutors } from '../core/session/sessionExecutors';
 import {
   RPC_AMBIGUOUS,
   RPC_NOT_FOUND,
+  RPC_UNAUTHORIZED,
   RPC_UNSUPPORTED,
   resolveSessionRef,
   type ControlCommandOutcome,
@@ -26,6 +27,7 @@ import { ControlError, type ControlBackend, type ControlSubscription } from '../
 import { displayTitle, type AgentSession } from '../shared/model';
 import { TaskError } from '../orchestration/engine/taskRunner';
 import type { AgentWranglerApp } from './createApp';
+import { ownerContext, sessionRef, type AccessGate, type ActionName, type RequestContext } from '../core/access';
 
 export interface ControlBackendDeps {
   build: string;
@@ -33,9 +35,24 @@ export interface ControlBackendDeps {
   startedAt: number;
   /** One line of feedback in the app when a command changed something, so it never happens unseen. */
   flash?: (message: string) => void;
+  /**
+   * The gate every method passes before it reads or acts (#123), as `aw`:
+   * `via: 'cli'`, the owner. The socket's token already says the caller is
+   * this user's own process; the gate is where a policy would add more.
+   */
+  gate: AccessGate;
 }
 
+/** What `aw` is, to `authorize`. One context for every connection: the token is per user, not per client. */
+export const CLI_CONTEXT: RequestContext = ownerContext('cli');
+
 export function createControlBackend(app: AgentWranglerApp, deps: ControlBackendDeps): ControlBackend {
+  /** Authorise, or refuse the RPC. Called first in every method below except `describe` (the handshake's build info). */
+  const admit = (action: ActionName, key?: string): void => {
+    if (!deps.gate.admit(CLI_CONTEXT, action, sessionRef(key))) {
+      throw new ControlError(RPC_UNAUTHORIZED, `not permitted: ${action}`);
+    }
+  };
   const row = (s: AgentSession): ControlSession => ({
     key: s.key,
     sessionId: s.sessionId,
@@ -86,6 +103,7 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
     describe,
 
     status(): ControlStatusResult {
+      admit('view.read');
       const byStatus: Partial<Record<ControlStatus, number>> = {};
       for (const s of app.store.sessions) {
         if (app.archive.isArchived(s.key)) continue;
@@ -95,9 +113,13 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       return { ...describe(), byStatus, running: { hosted: counts.hosted, app: counts.local } };
     },
 
-    sessions: ({ all }) => app.store.sessions.filter((s) => all || !app.archive.isArchived(s.key)).map(row),
+    sessions: ({ all }) => {
+      admit('view.read');
+      return app.store.sessions.filter((s) => all || !app.archive.isArchived(s.key)).map(row);
+    },
 
     session(ref): ControlSessionResult {
+      admit('view.read');
       const s = find(ref);
       const handle = app.sessions.get(s.sessionId);
       const r = app.sessionRegistry.get(s.sessionId);
@@ -111,6 +133,7 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
     },
 
     subscribe(ref, maxBlocks, onEvent: (event: SessionViewEvent) => void, onClosed: (reason: ControlSessionClosed['reason']) => void): ControlSubscription {
+      admit('view.read');
       const s = find(ref);
       const handle = handleFor(s, 'attach to');
       const snap = handle.snapshot();
@@ -134,8 +157,11 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       };
     },
 
+    // Resolve the reference first (a read), so the audit names the session
+    // rather than whatever prefix was typed; nothing acts before `admit`.
     async send(ref, text) {
       const s = find(ref);
+      admit('session.send', s.key);
       const handle = handleFor(s, 'send to');
       if (!handle.canSend) {
         return handle.readOnlyReason ? { outcome: 'unsupported', reason: handle.readOnlyReason } : { outcome: 'stale' };
@@ -147,16 +173,20 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
 
     async stop(ref, force) {
       const s = find(ref);
+      admit('session.close', s.key);
       const outcome = await app.stopSession(s.key, { force });
       if (outcome === 'gone') throw new ControlError(RPC_NOT_FOUND, `no session matches "${ref}"`);
       if (outcome === 'stopped') deps.flash?.(`aw stopped ${displayTitle(s)}`);
       return outcome;
     },
 
-    projects: () =>
-      app.projects.value.map((p) => ({ dir: p.dir, name: p.name, lastUsedAt: p.lastUsedAt, favourite: p.favourite, occupiedBy: p.occupiedBy })),
+    projects: () => {
+      admit('view.read');
+      return app.projects.value.map((p) => ({ dir: p.dir, name: p.name, lastUsedAt: p.lastUsedAt, favourite: p.favourite, occupiedBy: p.occupiedBy }));
+    },
 
     async proposeTask(params) {
+      admit('task.propose');
       try {
         return await app.proposeTask(params);
       } catch (err) {
@@ -167,6 +197,7 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
     },
 
     async delegate(params) {
+      admit('task.delegate');
       try {
         return await app.delegate(params);
       } catch (err) {
@@ -175,7 +206,10 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       }
     },
 
-    tasks: () => app.taskList(),
+    tasks: () => {
+      admit('view.read');
+      return app.taskList();
+    },
   };
 }
 

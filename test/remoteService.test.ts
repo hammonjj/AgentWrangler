@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Emitter, type Disposable } from '../src/core/events';
 import { MemoryAuditLog } from '../src/remote/audit';
+import type { Authorizer } from '../src/core/access';
 import { MirrorStore } from '../src/remote/mirrorStore';
 import { RemoteControlService, type RemoteConfig, type SessionSnapshot } from '../src/remote/service';
 import type {
@@ -185,7 +186,7 @@ describe('RemoteControlService', () => {
   let outcome: 'applied' | 'stale' | 'gone' | 'unsupported';
   let cfg: RemoteConfig;
 
-  const build = async (sessions: SessionSnapshot) => {
+  const build = async (sessions: SessionSnapshot, authorize?: Authorizer) => {
     const store = new MirrorStore(path.join(dir, 'mirrors.json'));
     const svc = new RemoteControlService(
       sessions,
@@ -206,6 +207,8 @@ describe('RemoteControlService', () => {
       store,
       () => cfg,
       audit,
+      undefined,
+      authorize,
     );
     svc.setTransport(transport);
     await svc.reconcile();
@@ -453,6 +456,37 @@ describe('RemoteControlService', () => {
       await svc.whenIdle();
       const rec = audit.records.find((r) => r.event === 'refused-unauthorised');
       expect(rec?.actorId).toBe('U-stranger');
+      // Not on the allowlist: never mapped to a principal at all.
+      expect(rec?.principal).toBeUndefined();
+      expect(rec?.via).toBe('discord');
+      svc.dispose();
+    });
+
+    it('maps an allow-listed id to the owner and authorises it before acting (#123)', async () => {
+      const seen: { principal: string; via: string; action: string; resource?: string }[] = [];
+      const deny: Authorizer = (ctx, action, resource) => {
+        seen.push({ principal: ctx.principal.id, via: ctx.via, action, resource: resource?.id });
+        return 'deny';
+      };
+      const { svc } = await build(fakeSessions([blocked()]), deny);
+      transport.press('allow');
+      await svc.whenIdle();
+      expect(seen).toEqual([{ principal: 'local-owner', via: 'discord', action: 'session.decide', resource: 'claude:sess-a' }]);
+      expect(decisions).toHaveLength(0);
+      expect(transport.replies[0].text).toContain('not authorised');
+      const rec = audit.records.find((r) => r.event === 'refused-unauthorised');
+      expect(rec).toMatchObject({ principal: 'local-owner', via: 'discord', actorId: 'U-allowed' });
+      svc.dispose();
+    });
+
+    it('records principal and via on every line of an applied press', async () => {
+      const { svc } = await build(fakeSessions([blocked()]));
+      transport.press('allow');
+      await svc.whenIdle();
+      expect(decisions).toHaveLength(1);
+      for (const event of ['pressed', 'applied'] as const) {
+        expect(audit.records.find((r) => r.event === event)).toMatchObject({ principal: 'local-owner', via: 'discord', actorId: 'U-allowed' });
+      }
       svc.dispose();
     });
 

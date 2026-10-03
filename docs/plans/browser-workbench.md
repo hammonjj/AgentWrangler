@@ -313,6 +313,17 @@ authorize(ctx: RequestContext, action: ActionName, resource?: ResourceRef): 'all
 
   None of that is built now.
 
+**Built (#123, slice 2).** The types, the policy and the gate are `src/core/access.ts`; the
+classification table above is repeated there as a doc comment. Each dispatcher authorises
+before it acts: `DashboardHost` and `ConversationHost` once per message (`dashboardRequest`,
+`conversationRequest`, both exhaustive over the message unions), the control backend once per
+method (`via: 'cli'`), the remote service after its allowlist (`via: 'discord'`), and the
+window's menu and tray, and the app's end of the remote daemon, through `guardSessionActions`.
+Auto-pause is `via: 'daemon'`. Allowed mutations and all refusals go to
+`~/.cache/agent-wrangler/access.log` (`FileAuditLog`, ids only); remote control's own lines in
+`remote/audit.log` now carry `principal` and `via` too. `test/access.test.ts` enumerates the
+entry points and drives each with a refusing `authorize`.
+
 ## 10. Web delivery and performance
 
 - **Assets.** Hashed filenames (`workbench.<hash>.js`), `Cache-Control: immutable`. HTML is

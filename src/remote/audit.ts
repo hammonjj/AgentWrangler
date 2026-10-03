@@ -8,12 +8,19 @@
  * It records **ids and tool names, not command bodies**. The channel already
  * holds the command, in redacted form; copying it here would make a second,
  * unredacted place for the same secret to leak from, on disk, forever.
+ *
+ * The same class keeps the app's own access log (`accessAuditFile`): every
+ * mutating action from the panes, `aw` and the app itself, with the principal
+ * and `via` that `core/access.ts` attaches. Same rule: ids, never content.
  */
 import * as fsSync from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import type { Via } from '../core/access';
 
 export type AuditEvent =
+  /** An action passed `authorize` (#123): mutating ones only. See `core/access.ts`. */
+  | 'authorized'
   | 'published'
   | 'publish-failed'
   | 'pressed'
@@ -36,6 +43,19 @@ export interface AuditRecord {
   choiceId?: string;
   outcome?: string;
   detail?: string;
+  /**
+   * Who acted and through what (#123), on every line that records an action
+   * being taken or refused. `actorId` above is the remote service's own user id
+   * (a Discord id); `principal` is who that id acts as here.
+   */
+  principal?: string;
+  via?: Via;
+  /** The `authorize` action name, and what it was about, by id. */
+  action?: string;
+  resource?: { kind: string; id: string };
+  /** Attribution only, never identity: which paired device, which tab. */
+  deviceId?: string;
+  connectionId?: string;
 }
 
 /** Rotate at 2 MB, keeping one previous file. Small: these lines are ~200 bytes. */

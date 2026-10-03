@@ -12,6 +12,8 @@
 import { Menu, type MenuItemConstructorOptions, app, shell } from 'electron';
 import type { AgentWranglerApp } from '../app/createApp';
 import type { WorkbenchSurface } from '../host/hostServices';
+import { ownerContext } from '../core/access';
+import { guardSessionActions } from '../ui/guardedActions';
 
 export function installApplicationMenu(
   wrangler: AgentWranglerApp,
@@ -21,6 +23,10 @@ export function installApplicationMenu(
   quits: { quit: () => void; quitAndStopAll: () => void },
 ): void {
   const mac = process.platform === 'darwin';
+  // Session actions pass the access gate like a pane's click does (#123): the
+  // window's own chrome is the owner at this Mac, via 'browser'.
+  const context = ownerContext('browser');
+  const actions = guardSessionActions(wrangler.actions, { context, gate: wrangler.access });
   // Not `role: 'quit'`: that bypasses the click handler, and then a ⌘Q looks
   // exactly like a script's quit (spike S2). Same accelerator, our handler.
   const quitItem: MenuItemConstructorOptions = {
@@ -115,29 +121,29 @@ export function installApplicationMenu(
         { type: 'separator' },
         {
           label: 'Open Conversation…',
-          click: () => void wrangler.withSession((k) => wrangler.actions.smartOpen(k))(),
+          click: () => void wrangler.withSession((k) => actions.smartOpen(k))(),
         },
         {
           label: 'Rename a Conversation…',
-          click: () => void wrangler.withSession((k) => wrangler.actions.rename(k))(),
+          click: () => void wrangler.withSession((k) => actions.rename(k))(),
         },
         {
           label: 'Copy Session ID…',
-          click: () => void wrangler.withSession((k) => wrangler.actions.copyId(k))(),
+          click: () => void wrangler.withSession((k) => actions.copyId(k))(),
         },
         {
           label: 'Reveal Transcript in Finder…',
           click: () =>
             void wrangler.withSession(
-              (k) => wrangler.actions.reveal(k),
+              (k) => actions.reveal(k),
               (s) => s.transcriptPath !== undefined,
             )(),
         },
         { type: 'separator' },
         // The token-emergency pair. Pausing asks first, like the toolbar
         // button; resuming does not. See `requestPauseAll` in createApp.
-        { label: 'Pause All Agents', click: () => wrangler.pauseAll(true) },
-        { label: 'Resume All Paused Agents', click: () => wrangler.pauseAll(false) },
+        { label: 'Pause All Agents', click: () => actions.pauseAll(true) },
+        { label: 'Resume All Paused Agents', click: () => actions.pauseAll(false) },
         { type: 'separator' },
         // Codex threads outlive the app in a background server; this is how
         // a Codex update reaches it while something is running (Stage 5).
