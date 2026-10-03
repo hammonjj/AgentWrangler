@@ -145,6 +145,12 @@ export const ACTIONS = {
   'web.login': 'mutate',
   /** A browser became a new device: a credential was issued and stored (#127). */
   'web.device.add': 'mutate',
+  /** A remote browser put a file on the host (#139). Audited with the size, never the name. */
+  'file.upload': 'mutate',
+  /** A remote browser took a file off the host (#139). Audited by an id of the file, never its path. */
+  'file.download': 'mutate',
+  /** A remote browser listed host directories to choose a folder (#139). */
+  'dirs.list': 'read',
 } as const satisfies Record<string, ActionKind>;
 
 export type ActionName = keyof typeof ACTIONS;
@@ -155,8 +161,10 @@ export function actionKind(action: ActionName): ActionKind {
 
 /** What an action is about, by id. Never a path or any content: it is written to the audit log. */
 export interface ResourceRef {
-  readonly kind: 'session' | 'mission' | 'setting' | 'proposal' | 'device';
+  readonly kind: 'session' | 'mission' | 'setting' | 'proposal' | 'device' | 'file';
   readonly id: string;
+  /** A file's size in bytes (#139). A number says nothing about what is in it. */
+  readonly size?: number;
 }
 
 export type AccessDecision = 'allow' | 'deny';
@@ -222,7 +230,9 @@ export function createAccessGate(opts: { authorize?: Authorizer; audit?: AccessA
         principal: ctx.principal.id,
         via: ctx.via,
         action,
-        ...(resource ? { resource: { kind: resource.kind, id: resource.id } } : {}),
+        ...(resource
+          ? { resource: { kind: resource.kind, id: resource.id, ...(resource.size !== undefined ? { size: resource.size } : {}) } }
+          : {}),
         ...(ctx.deviceId !== undefined ? { deviceId: ctx.deviceId } : {}),
         ...(ctx.connectionId !== undefined ? { connectionId: ctx.connectionId } : {}),
       });

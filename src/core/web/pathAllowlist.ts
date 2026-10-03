@@ -37,7 +37,20 @@ export function isSecretName(realPath: string): boolean {
   return base.endsWith('.key') || base.endsWith('.pem') || base === '.env' || base.startsWith('.env.') || base === 'id_rsa' || base === 'id_ed25519';
 }
 
-export function createPathAllowlist(roots: () => Iterable<string | undefined>): PathAllowlist {
+/** Directories that hold credentials, wherever they sit (`~/.ssh` in a project, say). */
+const SECRET_DIRS = new Set(['.ssh', '.gnupg', '.aws']);
+
+export interface PathAllowlistOptions {
+  /**
+   * The home folder. A root that is it, or a folder above it, allows nothing:
+   * a session started in `~` does not make everything the user owns downloadable.
+   */
+  home?: string;
+}
+
+export function createPathAllowlist(roots: () => Iterable<string | undefined>, options: PathAllowlistOptions = {}): PathAllowlist {
+  const home = options.home;
+  const usable = (realRoot: string): boolean => realRoot !== path.parse(realRoot).root && !(home && isWithin(realRoot, home));
   return {
     async check(target) {
       if (typeof target !== 'string' || target.includes('\0') || !path.isAbsolute(target)) return { ok: false, reason: 'not-absolute' };
@@ -45,9 +58,14 @@ export function createPathAllowlist(roots: () => Iterable<string | undefined>): 
       try {
         real = await fs.promises.realpath(target);
       } catch {
-        return { ok: false, reason: 'not-found' };
+        // Whether something exists is not told to a path nobody may read there anyway.
+        const lexical = path.resolve(target);
+        for (const root of new Set(roots())) {
+          if (root && path.isAbsolute(root) && isWithin(path.resolve(root), lexical)) return { ok: false, reason: 'not-found' };
+        }
+        return { ok: false, reason: 'outside' };
       }
-      if (isSecretName(real)) return { ok: false, reason: 'secret' };
+      if (isSecretName(real) || real.split(path.sep).some((c) => SECRET_DIRS.has(c))) return { ok: false, reason: 'secret' };
       for (const root of new Set(roots())) {
         if (!root || !path.isAbsolute(root)) continue;
         let realRoot: string;
@@ -57,7 +75,7 @@ export function createPathAllowlist(roots: () => Iterable<string | undefined>): 
           continue; // a root that is gone allows nothing
         }
         // A root of `/` would allow the machine: never a root.
-        if (realRoot === path.parse(realRoot).root) continue;
+        if (!usable(realRoot)) continue;
         if (isWithin(realRoot, real)) return { ok: true, realPath: real };
       }
       return { ok: false, reason: 'outside' };
