@@ -134,7 +134,10 @@ import { FileUsageCache } from '../core/usageCache';
 import { UsageService } from '../core/usageService';
 import { FileSuggestService } from '../core/fileSuggest';
 import { RemoteDaemonLink } from '../remote/daemon/client';
-import { DISCORD_BOT_TOKEN_KEY } from '../remote/paths';
+import { DISCORD_BOT_TOKEN_KEY, accessAuditFile } from '../remote/paths';
+import { FileAuditLog } from '../remote/audit';
+import { createAccessGate, ownerContext, type AccessGate } from '../core/access';
+import { guardSessionActions } from '../ui/guardedActions';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { PermissionModeName } from '../shared/conversation';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
@@ -237,7 +240,14 @@ export interface AgentWranglerApp {
   missions?: MissionSource;
   dictation: DictationService;
   files: FileSuggestService;
+  /**
+   * The raw actions. A dispatcher does not call these without passing `access`
+   * first: the pane hosts authorise each message, everything else goes through
+   * `guardSessionActions` (#123).
+   */
   actions: SessionActions;
+  /** The access gate: `authorize` plus the audit. See `core/access.ts`. */
+  access: AccessGate;
   getConfig: ConfigGetter;
 
   /**
@@ -330,6 +340,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const log = (msg: string) => host.log(msg);
   const dialogs = host.dialogs;
   const getConfig: ConfigGetter = () => readConfig(host.settings);
+  /** The one access gate every dispatcher passes (#123), auditing to `access.log`. */
+  const access = createAccessGate({ audit: new FileAuditLog(accessAuditFile()), log });
+  /** The app acting on its own (auto-pause): nobody's click is behind it. */
+  const daemonContext = ownerContext('daemon');
 
   /** Attached by the front end once its window exists. See `attachSurface`. */
   let surface: WorkbenchSurface | undefined;
@@ -1300,6 +1314,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         return;
       }
       // Scoped to Claude: a Claude plan limit must not freeze Codex sessions.
+      if (!access.admit(daemonContext, 'sessions.pauseAll')) return;
       if (setPausedAll(true, `plan usage reached ${percent}%`, 'claude')) autoPauseArmed = false;
     }),
   );
@@ -1336,6 +1351,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         codexAutoPauseArmed = decision.armed;
         return;
       }
+      if (!access.admit(daemonContext, 'sessions.pauseAll')) return;
       if (setPausedAll(true, `Codex plan usage reached ${percent}%`, 'codex')) codexAutoPauseArmed = false;
     }),
   );
@@ -2804,7 +2820,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
           }
           return { archived, nicknames: nicknamed };
         },
-        actions,
+        // A press the daemon relays was already authorised there; it is
+        // authorised again here, where `SessionActions` actually runs.
+        actions: guardSessionActions(actions, { context: ownerContext('discord'), gate: access }),
       })
     : undefined;
   if (remoteLink) host.subscribe(remoteLink);
@@ -3259,6 +3277,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     dictation,
     files,
     actions,
+    access,
     getConfig,
 
     attachSurface(next) {

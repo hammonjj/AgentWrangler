@@ -6,7 +6,8 @@ import type { SessionStore } from '../core/sessionStore';
 import { withHostedPermission, type HostedPermission } from '../core/sessionView';
 import type { CapabilityCatalog } from '../core/capabilityCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
-import type { DashboardToHost, HostToDashboard } from '../shared/messages';
+import type { DashboardAction, DashboardToHost, HostToDashboard } from '../shared/messages';
+import { sessionRef, type AccessRequest, type ActionName, type BoundAccess, type ResourceRef } from '../core/access';
 import type { TaskBadge } from '../shared/orchestration/taskView';
 import type { MissionOp, MissionsSnapshot } from '../shared/orchestration/missionView';
 import { parseDecision, type RoutingProposalDecision } from '../shared/orchestration/proposalsView';
@@ -159,6 +160,8 @@ export class DashboardHost {
     private settings: HostSettings,
     private dialogs: HostDialogs,
     private models: Pick<CapabilityCatalog, 'value' | 'onDidChange'>,
+    /** Who this pane's messages act as, and the gate they pass (#123). */
+    private access: BoundAccess,
     private tasks?: TaskBadgeSource,
     private missions?: MissionSource,
     private analytics?: AnalyticsSource,
@@ -370,7 +373,18 @@ export class DashboardHost {
     this.pushSnapshot();
   }
 
+  /**
+   * Every message is one request: classified, authorised (and audited when it
+   * mutates) here, before anything it asks for runs. Nothing below this line
+   * may act on a message that has not passed.
+   */
   private onMessage(m: DashboardToHost): void {
+    const req = dashboardRequest(m);
+    if (!this.access.gate.admit(this.access.context, req.action, req.resource)) return;
+    this.dispatch(m);
+  }
+
+  private dispatch(m: DashboardToHost): void {
     switch (m.type) {
       case 'ready':
         this.pushSnapshot();
@@ -531,5 +545,85 @@ export class DashboardHost {
     this.projects.add(dir);
     void this.webview.postMessage({ type: 'projectPicked', dir } satisfies HostToDashboard);
     await this.refreshProjects({ force: true });
+  }
+}
+
+/** A row button's action name. A `Record`, so a new `DashboardAction` cannot compile without one. */
+const ROW_ACTIONS: Record<DashboardAction, ActionName> = {
+  openInTab: 'session.open',
+  rename: 'session.rename',
+  resume: 'session.resume',
+  resumeHere: 'session.adopt',
+  archive: 'session.archive',
+  copyId: 'host.open',
+  close: 'session.close',
+  dismiss: 'session.close',
+  dismissHide: 'session.close',
+  pause: 'session.pause',
+  unpause: 'session.pause',
+  allow: 'session.decide',
+  deny: 'session.decide',
+  always: 'session.decide',
+};
+
+const setting = (id: string): ResourceRef => ({ kind: 'setting', id });
+
+/**
+ * What a table message asks to do, for `authorize`. Exhaustive: a message type
+ * added to `DashboardToHost` without a line here is a compile error, so no
+ * message can reach `dispatch` unclassified. Project folders are not passed as
+ * resources: they are paths, and resources are written to the audit log.
+ */
+export function dashboardRequest(m: DashboardToHost): AccessRequest {
+  switch (m.type) {
+    case 'ready':
+    case 'refresh':
+    case 'refreshProjects':
+    case 'analyticsQuery':
+      return { action: 'view.read' };
+    case 'rowClick':
+      return { action: 'session.open', resource: sessionRef(m.key) };
+    case 'action':
+      // An action name the webview made up is classed as the heaviest row action.
+      return { action: Object.hasOwn(ROW_ACTIONS, m.action) ? ROW_ACTIONS[m.action] : 'session.close', resource: sessionRef(m.key) };
+    case 'answerQuestion':
+      return { action: 'session.decide', resource: sessionRef(m.key) };
+    case 'openExternal':
+      return { action: 'host.open' };
+    case 'analyticsDetail':
+      return { action: 'session.open' };
+    case 'installHooks':
+      return { action: 'hooks.install' };
+    case 'setDiscordNotifications':
+      return { action: 'settings.write', resource: setting('remote.notificationsEnabled') };
+    case 'setRunnerModel':
+      return { action: 'settings.write', resource: setting(m.provider === 'openai' ? 'codexRunner.model' : 'runner.model') };
+    case 'setRunnerEffort':
+      return { action: 'settings.write', resource: setting(m.provider === 'openai' ? 'codexRunner.effort' : 'runner.effort') };
+    case 'setColumns':
+    case 'browseProject':
+    case 'removeProject':
+    case 'setProjectFavourite':
+      return { action: 'prefs.write' };
+    case 'newConversation':
+      return { action: 'session.start' };
+    case 'taskMenu':
+      return { action: 'task.act' };
+    case 'newMission':
+      return { action: 'mission.create' };
+    case 'mission':
+      return { action: 'mission.act', resource: typeof m.missionId === 'string' ? { kind: 'mission', id: m.missionId } : undefined };
+    case 'pauseAll':
+      return { action: 'sessions.pauseAll' };
+    case 'analyticsProposal':
+      return { action: 'routing.decide', resource: typeof m.id === 'string' ? { kind: 'proposal', id: m.id } : undefined };
+    default: {
+      // Compile-time: every message type is handled above. Run time: a type
+      // the webview made up is authorised as a mutation (so a refusal is
+      // audited), and then matches nothing in `dispatch`.
+      const unknown: never = m;
+      void unknown;
+      return { action: 'settings.write' };
+    }
   }
 }

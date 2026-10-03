@@ -372,6 +372,7 @@ void app.whenReady().then(() => {
         appPid: process.pid,
         startedAt: Date.now(),
         flash: (message) => host.dialogs.flash(message, 4000),
+        gate: wrangler.access,
       }),
     });
     control.listen(socketPath).then(

@@ -34,6 +34,7 @@ import {
   type RemoteChoiceAction,
   type RemoteNotice,
 } from '../shared/remote';
+import { authorize as defaultAuthorize, ownerContext, type Authorizer } from '../core/access';
 import type { AuditLog } from './audit';
 import { MirrorStore, type Mirror } from './mirrorStore';
 import { redactForDisplay } from './redact';
@@ -110,6 +111,8 @@ export class RemoteControlService implements Disposable {
     private config: () => RemoteConfig,
     private audit: AuditLog,
     private log: (message: string) => void = () => undefined,
+    /** The access policy a press passes after the allowlist (#123). Tests pass one that refuses. */
+    private authorize: Authorizer = defaultAuthorize,
   ) {
     this.subs.push(this.sessions.onDidUpdate(() => void this.reconcile()));
   }
@@ -279,7 +282,8 @@ export class RemoteControlService implements Disposable {
     const transport = this.transport;
     if (!transport) return;
 
-    const base = { interactionId: invocation.interactionId, actorId: invocation.actor.id, actorName: invocation.actor.displayName };
+    // `via` from the start; a principal only once the allowlist has said who this is (3b).
+    const base = { interactionId: invocation.interactionId, actorId: invocation.actor.id, actorName: invocation.actor.displayName, via: 'discord' as const };
 
     // 1. Scope. Cheapest check, and it runs before anything is looked up.
     if (
@@ -310,6 +314,19 @@ export class RemoteControlService implements Disposable {
       return;
     }
 
+    // 3b. Who that is here. An allow-listed id acts as the owner principal;
+    //     the Discord id stays in the audit as the actor and is never an
+    //     identity of ours. Then the same `authorize` every other way in
+    //     passes. From here on every line says who and through what.
+    const ctx = ownerContext('discord');
+    const who = { ...base, principal: ctx.principal.id, via: ctx.via, action: 'session.decide' as const };
+    if (this.authorize(ctx, 'session.decide', { kind: 'session', id: mirror.sessionKey }) !== 'allow') {
+      this.audit.write({ event: 'refused-unauthorised', askKey: mirror.askKey, sessionKey: mirror.sessionKey, ...who, choiceId: invocation.choiceId });
+      this.log(`remote: press by ${invocation.actor.id} refused by the access policy`);
+      await transport.reply(invocation, 'You are not authorised to answer Agent Wrangler prompts.');
+      return;
+    }
+
     // 4. Is this still the ask it was posted for? Re-derived now, from the
     //    store, rather than trusted from the message. Not while the list is
     //    incomplete (the daemon switching feeds): a missing session would read
@@ -321,7 +338,7 @@ export class RemoteControlService implements Disposable {
     const session = this.sessions.sessions.find((s) => s.key === mirror.sessionKey);
     const ask = session ? remoteAskFor(session) : undefined;
     if (!ask || ask.askKey !== mirror.askKey) {
-      this.audit.write({ event: 'refused-stale', askKey: mirror.askKey, sessionKey: mirror.sessionKey, ...base, choiceId: invocation.choiceId });
+      this.audit.write({ event: 'refused-stale', askKey: mirror.askKey, sessionKey: mirror.sessionKey, ...who, choiceId: invocation.choiceId });
       await transport.reply(invocation, 'That request has already been answered.');
       await this.closeMirror(transport, mirror, { outcome: 'answered-locally', atMs: Date.now() });
       return;
@@ -330,12 +347,12 @@ export class RemoteControlService implements Disposable {
     // 5. Is the choice one this ask actually offers?
     const choice = ask.choices.find((c) => c.action === invocation.choiceId);
     if (!choice) {
-      this.audit.write({ event: 'refused-stale', askKey: ask.askKey, sessionKey: ask.sessionKey, ...base, choiceId: invocation.choiceId });
+      this.audit.write({ event: 'refused-stale', askKey: ask.askKey, sessionKey: ask.sessionKey, ...who, choiceId: invocation.choiceId });
       await transport.reply(invocation, 'That option is no longer offered for this request.');
       return;
     }
 
-    this.audit.write({ event: 'pressed', askKey: ask.askKey, sessionKey: ask.sessionKey, toolName: ask.toolName, ...base, choiceId: choice.action });
+    this.audit.write({ event: 'pressed', askKey: ask.askKey, sessionKey: ask.sessionKey, toolName: ask.toolName, ...who, choiceId: choice.action });
 
     // 6. Apply it, through the same action the local button uses. The expected
     //    request id is what stops this landing on a newer prompt if one opened
@@ -346,13 +363,13 @@ export class RemoteControlService implements Disposable {
     try {
       outcome = await this.applyChoice(ask, choice.action);
     } catch (err) {
-      this.audit.write({ event: 'apply-failed', askKey: ask.askKey, ...base, detail: String(err) });
+      this.audit.write({ event: 'apply-failed', askKey: ask.askKey, ...who, detail: String(err) });
       this.log(`remote: applying ${choice.action} failed: ${String(err)}`);
       await transport.reply(invocation, 'Agent Wrangler could not apply that decision.');
       return;
     }
 
-    this.audit.write({ event: 'applied', askKey: ask.askKey, sessionKey: ask.sessionKey, toolName: ask.toolName, ...base, choiceId: choice.action, outcome });
+    this.audit.write({ event: 'applied', askKey: ask.askKey, sessionKey: ask.sessionKey, toolName: ask.toolName, ...who, choiceId: choice.action, outcome });
 
     if (outcome !== 'applied') {
       // Someone got there first, at the machine or in Claude Code's own dialog.

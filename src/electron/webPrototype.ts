@@ -23,6 +23,7 @@ import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import type { AgentWranglerApp } from '../app/createApp';
 import { Emitter, type Disposable } from '../core/events';
+import { ownerContext } from '../core/access';
 import type { HostServices } from '../host/hostServices';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import type { SessionActions } from '../ui/actions';
@@ -172,6 +173,7 @@ export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
     attach(socket);
   });
 
+  let connectionSeq = 0;
   function attach(socket: Duplex): void {
     connections.add(socket);
     const incoming = new Emitter<unknown>();
@@ -200,7 +202,10 @@ export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
         if (app.store.get(key)) panes?.conversation.show(key);
       },
     });
-    panes = createWorkbenchHosts(app, host, ui, transport, actions);
+    // The cookie is the owner's, so the owner it is; the connection id is for
+    // the audit, never identity (#123).
+    const connectionId = `web-${++connectionSeq}`;
+    panes = createWorkbenchHosts(app, host, ui, transport, ownerContext('browser', { connectionId }), actions);
     log(`web prototype: browser connected (${connections.size} open)`);
 
     const close = (code?: number) => {

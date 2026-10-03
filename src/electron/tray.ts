@@ -13,6 +13,8 @@
 import { Menu, type MenuItemConstructorOptions, nativeImage, type NativeImage, Tray } from 'electron';
 import type { AgentWranglerApp } from '../app/createApp';
 import type { Disposable } from '../core/events';
+import { ownerContext } from '../core/access';
+import { guardSessionActions } from '../ui/guardedActions';
 import { menuBarAgents, menuBarBadge, menuBarCounts, menuBarSummary, type MenuBarSession } from '../core/menuBar';
 import type { WorkbenchSurface } from '../host/hostServices';
 import { displayTitle } from '../shared/model';
@@ -116,7 +118,12 @@ export class MenuBar implements Disposable {
       submenu: [
         { label: 'Open', click: () => surface.show(a.key, { preserveFocus: false }) },
         // `closeSession` asks first, and says what stopping costs.
-        { label: 'Stop…', enabled: a.stoppable, click: () => app.actions.closeSession(a.key) },
+        // Through the access gate, as the window's own chrome: the owner, via 'browser' (#123).
+        {
+          label: 'Stop…',
+          enabled: a.stoppable,
+          click: () => guardSessionActions(app.actions, { context: ownerContext('browser'), gate: app.access }).closeSession(a.key),
+        },
       ],
     }));
     if (more > 0) agentItems.push({ label: `${more} more — open the window to see them`, enabled: false });

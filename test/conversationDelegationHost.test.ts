@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ConversationHost } from '../src/ui/conversation/conversationHost';
+import { createAccessGate, ownerContext } from '../src/core/access';
 import type { SessionHandle } from '../src/core/session/sessionHandle';
 import type { ConversationToHost, HostToConversation } from '../src/shared/messages';
 import type { AgentSession } from '../src/shared/model';
@@ -27,6 +28,7 @@ function rig(provider: 'claude' | 'codex') {
     {} as Args[2], {} as Args[3],
     { onDidChange: disposable, get: () => handle } as unknown as Args[4],
     { touch() {} }, {} as Args[6], {} as Args[7], {} as Args[8], () => {}, {} as Args[10],
+    { context: ownerContext('browser'), gate: createAccessGate() },
     { viewFor: () => undefined, run: async () => {}, onDidChange: disposable,
       conversationDelegation: { context: () => ({ repoRoot: session.cwd!, policyVersion: 'default', verificationCommands: [] }), delegate, record } },
   );

@@ -29,6 +29,7 @@ import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalVi
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
+import { sessionRef, type AccessRequest, type BoundAccess } from '../../core/access';
 import type { PaneChannel } from '../paneChannel';
 import { adoptActionFor } from '../openTarget';
 import { LiveSessionSource } from './runnerSource';
@@ -135,6 +136,8 @@ export class ConversationHost {
     private files: FileSuggestService,
     private onTitle: (title: string) => void,
     private ui: ConversationHostUi,
+    /** Who this pane's messages act as, and the gate they pass (#123). */
+    private access: BoundAccess,
     private tasks?: TaskPaneSource,
   ) {
     this.subs.push(
@@ -459,7 +462,21 @@ export class ConversationHost {
     return s?.transcriptPath ?? (s?.cwd && s.sessionId ? transcriptPathFor(s.sessionId, s.cwd) : undefined);
   }
 
+  /**
+   * Every message is one request: classified, authorised (and audited when it
+   * mutates) here, before anything it asks for runs (#123). A refused send is
+   * still answered, so the composer does not wait on it for good.
+   */
   private async onMessage(m: ConversationToHost): Promise<void> {
+    const req = conversationRequest(m, this.session?.key);
+    if (!this.access.gate.admit(this.access.context, req.action, req.resource)) {
+      if (m.type === 'send') this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Not permitted.' });
+      return;
+    }
+    await this.dispatch(m);
+  }
+
+  private async dispatch(m: ConversationToHost): Promise<void> {
     const key = this.session?.key;
     const source = this.source;
     switch (m.type) {
@@ -854,4 +871,68 @@ function readOnlyReason(
   if (canAdoptCodex) return 'Take over this Codex conversation to type here.';
   if (session.status === 'ended') return undefined;
   return 'This session is not currently available for typing here.';
+}
+
+/**
+ * What a conversation message asks to do, for `authorize`. `key` is the
+ * session the pane is showing: most messages act on it without naming it.
+ * Exhaustive, like `dashboardRequest`: a new message type does not compile
+ * until it is classified here.
+ */
+export function conversationRequest(m: ConversationToHost, key: string | undefined): AccessRequest {
+  const mission = (id: unknown) => (typeof id === 'string' ? { kind: 'mission' as const, id } : undefined);
+  switch (m.type) {
+    case 'ready':
+    case 'requestBlockText':
+    case 'archive':
+    case 'subagent':
+    case 'fileSuggest':
+    case 'dropPaths':
+      return { action: 'view.read', resource: sessionRef(key) };
+    case 'closeDetail':
+    case 'openInTab':
+      return { action: 'session.open', resource: sessionRef(key) };
+    case 'openAttempt':
+      return { action: 'session.open', resource: sessionRef(m.sessionKey) };
+    case 'openDiff':
+    case 'openExternal':
+    case 'openFile':
+      return { action: 'host.open' };
+    case 'dictate':
+      return { action: 'dictation.use' };
+    case 'send':
+      return { action: 'session.send', resource: sessionRef(m.sessionKey ?? key) };
+    case 'cancelSend':
+      return { action: 'session.send', resource: sessionRef(key) };
+    case 'interrupt':
+      return { action: 'session.interrupt', resource: sessionRef(key) };
+    case 'decide':
+    case 'answer':
+    case 'plan':
+      return { action: 'session.decide', resource: sessionRef(key) };
+    case 'setPermissionMode':
+    case 'setModel':
+    case 'setEffort':
+      return { action: 'session.configure', resource: sessionRef(key) };
+    case 'adopt':
+    case 'resumeHere':
+      return { action: 'session.adopt', resource: sessionRef(key) };
+    case 'release':
+      return { action: 'session.release', resource: sessionRef(key) };
+    case 'installHooks':
+      return { action: 'hooks.install' };
+    case 'delegationOfferDecision':
+      return { action: 'task.delegate', resource: sessionRef(key) };
+    case 'taskAction':
+    case 'proposalDecision':
+      return { action: 'task.act', resource: mission(m.missionId) };
+    case 'delegationAction':
+      return { action: 'task.delegate', resource: mission(m.missionId) };
+    default: {
+      // See `dashboardRequest`: unreachable when typed, a mutation when made up.
+      const unknown: never = m;
+      void unknown;
+      return { action: 'settings.write' };
+    }
+  }
 }
