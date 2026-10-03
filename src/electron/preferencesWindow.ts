@@ -22,6 +22,7 @@ import type { Disposable } from '../core/events';
 import type { HostSettings } from '../host/hostServices';
 import { settingUpdate, type HostToPreferences, type PreferencesToHost, type SettingStatus } from '../shared/preferences';
 import { isSettingActionId, modelPolicyChange, routingPolicyUpdate, type OrchestrationPrefsView, type SettingActionId } from '../shared/preferences';
+import { revokeWebDeviceId, type WebDeviceView } from '../shared/preferences';
 import type { ModelPolicyChange } from '../shared/orchestration/catalog';
 import { localEndpointChange, type LocalEndpointChange } from '../shared/orchestration/localEndpoints';
 import { SETTINGS } from '../shared/settings';
@@ -45,6 +46,15 @@ export interface PreferencesWindowOptions {
   /** Read-only status lines under settings (the LAN addresses, #136), and when they change. */
   status?: {
     read(): Record<string, SettingStatus>;
+    onDidChange(listener: () => void): Disposable;
+  };
+  /**
+   * Browser devices under Preferences → Browser (#137), with Revoke. The
+   * callee authorises and audits the revocation; this only checks the shape.
+   */
+  webDevices?: {
+    list(): WebDeviceView[];
+    revoke(id: string): void;
     onDidChange(listener: () => void): Disposable;
   };
   /** Orchestration → tier map. Absent: the section says there is nothing to show. */
@@ -82,6 +92,7 @@ export class PreferencesWindow implements Disposable {
     // lands, and when a tier is changed here: all of it belongs on screen.
     if (opts.orchestration) this.subs.push(opts.orchestration.onDidChange(() => this.pushOrchestration()));
     if (opts.status) this.subs.push(opts.status.onDidChange(() => this.pushStatus()));
+    if (opts.webDevices) this.subs.push(opts.webDevices.onDidChange(() => this.pushWebDevices()));
   }
 
   /** Open it, or bring the open one forward. */
@@ -153,7 +164,18 @@ export class PreferencesWindow implements Disposable {
     if (message.type === 'ready') {
       this.push();
       this.pushStatus();
+      this.pushWebDevices();
       this.pushOrchestration();
+      return;
+    }
+    if (message.type === 'revokeWebDevice') {
+      const id = revokeWebDeviceId(message);
+      if (!id || !this.opts.webDevices) {
+        this.opts.log('preferences: refused a device revocation');
+        return;
+      }
+      this.opts.webDevices.revoke(id);
+      this.pushWebDevices();
       return;
     }
     if (message.type === 'modelPolicy') {
@@ -276,6 +298,11 @@ export class PreferencesWindow implements Disposable {
   private pushStatus(): void {
     if (!this.opts.status) return;
     this.post({ type: 'status', status: this.opts.status.read() });
+  }
+
+  private pushWebDevices(): void {
+    if (!this.opts.webDevices) return;
+    this.post({ type: 'webDevices', devices: this.opts.webDevices.list() });
   }
 
   private pushOrchestration(): void {

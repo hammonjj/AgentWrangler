@@ -51,7 +51,7 @@ export const RPC_AMBIGUOUS = -32005;
 /** The session exists, but not in a way that allows this (e.g. `send` to one AW does not run). */
 export const RPC_UNSUPPORTED = -32006;
 
-export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'web.link'] as const;
+export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke'] as const;
 export type ControlMethod = (typeof CONTROL_METHODS)[number];
 /** Methods that change something. Logged by the core (method and session, never content). */
 export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate'];
@@ -314,6 +314,39 @@ export interface ControlDelegateResult {
 export interface ControlWebLinkResult {
   url: string;
   expiresAt: number;
+}
+
+/**
+ * `web.pair` (#137): start pairing a device on the home network. `url` is
+ * the LAN listener's `/pair?code=…` link (what the QR code says); `code` is
+ * the same code for typing, eight characters. Single use, until `expiresAt`
+ * (five minutes); a new one replaces it. Refused with `RPC_UNSUPPORTED` while
+ * LAN access is not listening.
+ */
+export interface ControlWebPairResult {
+  url: string;
+  code: string;
+  expiresAt: number;
+}
+
+/** One browser device (#137). Ids and a name, never a credential. */
+export interface ControlWebDevice {
+  id: string;
+  name: string;
+  /** `loopback`: a browser on this Mac (`aw web open`). `lan`: paired over the home network. May grow. */
+  scope: string;
+  createdAt: number;
+  lastSeen: number;
+}
+
+/** `web.devices` (#137). */
+export interface ControlWebDevicesResult {
+  devices: ControlWebDevice[];
+}
+
+/** `web.devices.revoke {id}` (#137): `id` or a unique prefix of 4+ characters. Its connections close at once. */
+export interface ControlWebRevokeResult {
+  device: ControlWebDevice;
 }
 
 /**

@@ -48,6 +48,7 @@ import { MenuBar, menuBarSessions } from './tray';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
 import { createBrowserClients, type BrowserClients } from './webPrototype';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
+import { WEB_DEVICES_FILE, WebDeviceStore } from '../core/web/devices';
 import { createFileViewRoute } from '../core/web/fileView';
 import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
 import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
@@ -232,6 +233,14 @@ void app.whenReady().then(async () => {
   // LAN access's status for Preferences (#136); `syncWeb` below keeps it current.
   let lanStatus: LanStatus = { state: 'off', lines: ['Off. Nothing listens beyond this Mac.'] };
   const webStatusChanged = new Emitter<void>();
+  // Browser devices (#137): one store for the process, shared by every web
+  // server `syncWeb` starts, `aw web devices` and Preferences, so a revocation
+  // from any of them closes the device's connections on whichever is running.
+  const webDevices = new WebDeviceStore(path.join(host.dataDir, WEB_DEVICES_FILE), () => Date.now(), log);
+  const revokeWebDevice = (id: string) =>
+    asLocalUser(() => {
+      if (wrangler.access.admit(WINDOW_CONTEXT, 'web.device.revoke', { kind: 'device', id })) webDevices.revoke(id);
+    });
 
   // ⌘, — the app's answer to VSCode's settings UI. It renders
   // `src/shared/settings.ts`, which is also what `package.json`'s
@@ -248,6 +257,11 @@ void app.whenReady().then(async () => {
     status: {
       read: () => ({ 'web.lan.enabled': { ok: lanStatus.state !== 'error', lines: lanStatus.lines } }),
       onDidChange: webStatusChanged.event,
+    },
+    webDevices: {
+      list: () => webDevices.list().map(({ id, name, scope, createdAt, lastSeen }) => ({ id, name, scope, createdAt, lastSeen })),
+      revoke: revokeWebDevice,
+      onDidChange: webDevices.onDidChange,
     },
     // Orchestration → tier map (#29): the catalog, and each source's health
     // from the same usage reads the dashboard cards use.
@@ -426,6 +440,8 @@ void app.whenReady().then(async () => {
         flash: (message) => host.dialogs.flash(message, 4000),
         gate: wrangler.access,
         webLink: () => (web?.listening ? web.server.loginLink() : undefined),
+        webPair: () => web?.server.pairingOffer(),
+        webDevices,
       }),
     });
     control.listen(socketPath).then(
@@ -509,6 +525,8 @@ void app.whenReady().then(async () => {
         }),
       ],
       onClient: (socket, context) => browsers.attach(socket, context),
+      devices: webDevices,
+      onDeviceRevoked: (id) => browsers.closeDevice(id),
       // `/ca.mobileconfig` on loopback. Made on first request, so a device can
       // be set up before LAN access is switched on. None with the user's own cert.
       caCertificate: async () => {

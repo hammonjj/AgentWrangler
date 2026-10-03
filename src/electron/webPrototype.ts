@@ -41,6 +41,8 @@ export interface BrowserClientsOptions {
 export interface BrowserClients extends Disposable {
   /** An upgraded socket from an authenticated device. Owned from here on. */
   attach(socket: WebSocket, device: RequestContext): void;
+  /** A revoked device's connections, closed now (#137). */
+  closeDevice(deviceId: string): number;
 }
 
 export function createBrowserClients(opts: BrowserClientsOptions): BrowserClients {
