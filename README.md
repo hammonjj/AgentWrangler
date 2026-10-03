@@ -97,7 +97,8 @@ section applies once it is on.
 - A host's files live in `~/Library/Application Support/Agent Wrangler/`: `run/` (a manifest,
   a token and a socket per host, readable by you only), `logs/host-*.log`, and `runtimes/`, a
   clone of the app that hosts run from so a reinstall never pulls the program out from under
-  them. A token opens its host's socket, so both are readable by your user only.
+  them. Hosts run on the Node the app bundles (`Contents/Resources/node`, an official pinned
+  release), shown in `ps` as `Agent Wrangler Host`. A token opens its host's socket, so both are readable by your user only.
 - **Security limits, plainly.** Hosts keep other users on the Mac out, and make accidental or
   prompt-injected use hard. They do **not** stop a process running as you: it can read a
   token and drive that host's conversation (send to it, answer its questions, change its

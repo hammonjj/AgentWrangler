@@ -23,8 +23,12 @@ import type { LostAgent } from './orphanSweep';
 /** Where a host runs from. The Electron front end clones and signs its own bundle; tests use Node. */
 export interface SessionHostRuntime {
   readonly buildId: string;
-  /** The executable and entry script for a new host. May clone the running bundle first. */
-  prepare(): Promise<{ exe: string; entry: string; runtimeDir?: string }>;
+  /**
+   * The executable and entry script for a new host, and any environment the
+   * executable needs to act as Node (`ELECTRON_RUN_AS_NODE` when it is the
+   * Electron binary; nothing for the bundled Node). May clone the running bundle first.
+   */
+  prepare(): Promise<{ exe: string; entry: string; runtimeDir?: string; env?: Record<string, string> }>;
   /** Remove cloned runtimes no live host uses. */
   gc?(inUse: Set<string>): void;
 }
@@ -352,7 +356,7 @@ export class HostSupervisor {
       const child = spawn(runtime.exe, [runtime.entry], {
         detached: true,
         stdio: ['pipe', logFd, logFd],
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...this.opts.hostEnv },
+        env: hostProcessEnv(process.env, runtime.env, this.opts.hostEnv),
       });
       pid = child.pid;
       child.once('error', (err) => (exited = String(err)));
@@ -419,6 +423,22 @@ export class HostSupervisor {
     }
     if ((st.mode & 0o077) !== 0) fs.chmodSync(dir, 0o700);
   }
+}
+
+/**
+ * A host's environment: the app's, plus what the runtime's executable needs
+ * to act as Node, plus the caller's extras. `ELECTRON_RUN_AS_NODE` is present
+ * only when the runtime asks for it (the Electron binary); a host on the
+ * bundled Node never inherits one.
+ */
+export function hostProcessEnv(
+  base: NodeJS.ProcessEnv,
+  runtimeEnv: Record<string, string> | undefined,
+  extra: Record<string, string> | undefined,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  delete env.ELECTRON_RUN_AS_NODE;
+  return { ...env, ...runtimeEnv, ...extra };
 }
 
 /** Eight base32 characters: short enough to keep socket paths under the limit, random enough never to collide. */

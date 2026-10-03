@@ -15,6 +15,14 @@
  * matches. If signing fails, the clone S2 measured (renamed, unmodified
  * Info.plist, unverifiable but runnable) is kept.
  *
+ * What runs in the clone is the bundle's pinned Node (#129, decision D1):
+ * `Contents/Resources/node/bin/node`, renamed `Agent Wrangler Host` in the
+ * clone for the same reason as the executable, on the programs electron-builder
+ * unpacks beside the asar (`app.asar.unpacked/dist/…`), since plain Node cannot
+ * read an asar. A bundle without `Resources/node` (built without
+ * scripts/fetch-node.mjs) falls back to what every build before #129 did: the
+ * renamed Electron executable with `ELECTRON_RUN_AS_NODE`, reading the asar.
+ *
  * Unpackaged (`npm run electron`), there is no bundle worth cloning: hosts run
  * straight from the Electron binary and the repo's `dist/`.
  */
@@ -29,6 +37,39 @@ export const BUILD_ID = typeof AW_BUILD_ID === 'string' ? AW_BUILD_ID : 'dev';
 
 const HOST_APP = 'Agent Wrangler Host.app';
 const HOST_EXE = 'Agent Wrangler Host';
+/** The pinned Node inside a bundle (electron-builder.yml `extraResources`). */
+const NODE_DIR = ['Contents', 'Resources', 'node', 'bin'];
+
+/** How to start a host program (session host or remote daemon) from one runtime. */
+export interface HostLaunchSpec {
+  exe: string;
+  /** The session host's entry; the remote daemon's is beside it (`daemonEntryFor`). */
+  entry: string;
+  /** What the executable needs in its environment to act as Node. */
+  env: Record<string, string>;
+}
+
+/** Unpackaged: the Electron binary as Node, on the repo's `dist/`. */
+export function devLaunch(appRoot: string, execPath: string): HostLaunchSpec {
+  return { exe: execPath, entry: path.join(appRoot, 'dist', 'sessionHost', 'main.js'), env: { ELECTRON_RUN_AS_NODE: '1' } };
+}
+
+/**
+ * Packaged, inside a host clone (`.../Agent Wrangler Host.app`): its renamed
+ * Node on the unpacked programs, or, for a bundle with no Node, its renamed
+ * Electron executable as Node on the asar.
+ */
+export function cloneLaunch(hostApp: string, bundledNode: boolean): HostLaunchSpec {
+  const resources = path.join(hostApp, 'Contents', 'Resources');
+  if (bundledNode) {
+    return { exe: path.join(hostApp, ...NODE_DIR, HOST_EXE), entry: path.join(resources, 'app.asar.unpacked', 'dist', 'sessionHost', 'main.js'), env: {} };
+  }
+  return {
+    exe: path.join(hostApp, 'Contents', 'MacOS', HOST_EXE),
+    entry: path.join(resources, 'app.asar', 'dist', 'sessionHost', 'main.js'),
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+  };
+}
 
 export interface RuntimeOptions {
   userDataDir: string;
@@ -42,17 +83,15 @@ export interface RuntimeOptions {
 
 export function createSessionHostRuntime(opts: RuntimeOptions): SessionHostRuntime {
   const runtimesDir = path.join(opts.userDataDir, 'runtimes');
-  let preparing: Promise<{ exe: string; entry: string; runtimeDir?: string }> | undefined;
+  let preparing: Promise<HostLaunchSpec & { runtimeDir?: string }> | undefined;
 
   const prepare = async () => {
-    if (!opts.isPackaged) {
-      return { exe: opts.execPath, entry: path.join(opts.appRoot, 'dist', 'sessionHost', 'main.js') };
-    }
+    if (!opts.isPackaged) return devLaunch(opts.appRoot, opts.execPath);
     const runtimeDir = path.join(runtimesDir, BUILD_ID);
     const hostApp = path.join(runtimeDir, HOST_APP);
-    const exe = path.join(hostApp, 'Contents', 'MacOS', HOST_EXE);
-    if (!fs.existsSync(exe)) await cloneRuntime(bundleOf(opts.execPath), runtimeDir, opts.log);
-    return { exe, entry: path.join(hostApp, 'Contents', 'Resources', 'app.asar', 'dist', 'sessionHost', 'main.js'), runtimeDir };
+    // The clone moves into place in one step, so its executable means it is whole.
+    if (!fs.existsSync(path.join(hostApp, 'Contents', 'MacOS', HOST_EXE))) await cloneRuntime(bundleOf(opts.execPath), runtimeDir, opts.log);
+    return { ...cloneLaunch(hostApp, fs.existsSync(path.join(hostApp, ...NODE_DIR, HOST_EXE))), runtimeDir };
   };
 
   return {
@@ -117,11 +156,17 @@ async function cloneRuntime(bundle: string, runtimeDir: string, log: (msg: strin
   const original = fs.readdirSync(macos).find((f) => !f.startsWith('.'));
   if (!original) throw new Error(`no executable in ${macos}`);
   fs.renameSync(path.join(macos, original), path.join(macos, HOST_EXE));
+  // The Node hosts actually run, renamed the same way: a host is an `Agent
+  // Wrangler Host` to `ps`, `pgrep` and `killall`, never a `node` that a
+  // `killall node` would take down. Its own signature does not name the file.
+  const nodeDir = path.join(hostApp, ...NODE_DIR);
+  const bundledNode = fs.existsSync(path.join(nodeDir, 'node'));
+  if (bundledNode) fs.renameSync(path.join(nodeDir, 'node'), path.join(nodeDir, HOST_EXE));
   const signed = await resign(hostApp, bundle, original, log);
   // Into place in one step, so a half-made runtime is never used.
   fs.rmSync(runtimeDir, { recursive: true, force: true });
   fs.renameSync(tmp, runtimeDir);
-  log(`cloned the session host runtime for build ${BUILD_ID} in ${Date.now() - started} ms (${signed ? 're-signed' : 'unsigned clone'})`);
+  log(`cloned the session host runtime for build ${BUILD_ID} in ${Date.now() - started} ms (${signed ? 're-signed' : 'unsigned clone'}, ${bundledNode ? 'bundled Node' : 'no bundled Node: Electron as Node'})`);
 }
 
 /**

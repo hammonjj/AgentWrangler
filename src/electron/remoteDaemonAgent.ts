@@ -16,11 +16,11 @@ import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { SessionHostRuntime } from '../core/session/hostSupervisor';
+import { hostProcessEnv, type SessionHostRuntime } from '../core/session/hostSupervisor';
 import type { RunDirs } from '../core/control/paths';
 import type { HostServices } from '../host/hostServices';
 import type { EnsureReason } from '../remote/daemon/client';
-import { daemonEntryFor, renderLaunchAgent } from '../remote/daemon/launchAgent';
+import { daemonEntryFor, remoteDaemonEnv, renderLaunchAgent } from '../remote/daemon/launchAgent';
 import { remoteDaemonPaths } from '../remote/daemon/paths';
 import { REMOTE_DAEMON_LABEL } from '../remote/daemon/protocol';
 
@@ -41,12 +41,6 @@ export function createRemoteDaemonAgent(opts: RemoteDaemonAgentOptions): NonNull
   const logFile = path.join(opts.logDir, 'remote-daemon.log');
   let running: Promise<void> = Promise.resolve();
 
-  const envFor = (runtimeDir: string | undefined): Record<string, string> => ({
-    ELECTRON_RUN_AS_NODE: '1',
-    AW_RUN_DIR: opts.runDirs.runDir,
-    AW_FALLBACK_RUN_DIR: opts.runDirs.fallbackRunDir,
-    ...(runtimeDir ? { AW_REMOTE_RUNTIME_DIR: runtimeDir } : {}),
-  });
 
   const ensurePackaged = async (why: EnsureReason): Promise<void> => {
     const rt = await opts.runtime.prepare();
@@ -55,7 +49,7 @@ export function createRemoteDaemonAgent(opts: RemoteDaemonAgentOptions): NonNull
       label: REMOTE_DAEMON_LABEL,
       program: rt.exe,
       args: [daemonEntryFor(rt.entry)],
-      env: envFor(rt.runtimeDir),
+      env: remoteDaemonEnv(opts.runDirs, rt),
       logFile,
     });
     let installed: string | undefined;
@@ -110,7 +104,7 @@ export function createRemoteDaemonAgent(opts: RemoteDaemonAgentOptions): NonNull
       const child = spawn(rt.exe, [daemonEntryFor(rt.entry)], {
         detached: true,
         stdio: ['ignore', fd, fd],
-        env: { ...process.env, ...envFor(rt.runtimeDir) },
+        env: hostProcessEnv(process.env, remoteDaemonEnv(opts.runDirs, rt), undefined),
       });
       child.unref();
       opts.log(`remote daemon: spawned pid ${child.pid} (unpackaged, no LaunchAgent)`);

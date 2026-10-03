@@ -29,17 +29,12 @@ directories:
 files:
   - dist/electron/**
   - dist/webview/**
-  # The session host. It runs from a clone of the installed bundle, straight
-  # out of app.asar (ELECTRON_RUN_AS_NODE reads asar; spike S2).
-  #
-  # That depends on the RunAsNode fuse staying on, which is Electron's default
-  # and why nothing here sets `electronFuses`. Turning it off (a common
-  # hardening step) makes every session host start as a second copy of the
-  # app instead; if fuses are ever configured, `runAsNode: true` must stay.
+  # The session host. It runs from a clone of the installed bundle, on the
+  # bundled Node (`Resources/node`, below), not on the Electron binary (#129).
   - dist/sessionHost/**
   # The remote daemon (#74), run by launchd from the same clone the same way.
   - dist/remoteDaemon/**
-  # The `aw` CLI (#21), run by bin/aw the same way: app binary as Node, from the asar.
+  # The `aw` CLI (#21), run by bin/aw on the installed bundle's Node.
   - dist/cli/**
   # Qualification stage 2's scratch-repo fixtures (plan §19.6), copied out of
   # the asar into a temp dir for each run.
@@ -47,6 +42,34 @@ files:
   - build/icon.png
 
 asar: true
+
+# Plain Node cannot read app.asar, so the three programs the bundled Node runs
+# are unpacked beside it: `Resources/app.asar.unpacked/dist/<name>/main.js`.
+# The Electron main process still reaches them through the asar paths.
+asarUnpack:
+  - dist/sessionHost/**
+  - dist/remoteDaemon/**
+  - dist/cli/**
+
+# The pinned official Node (#129, decision D1), staged in `.node-runtime/` by
+# scripts/fetch-node.mjs, which `npm run app:package` runs first. Ends up at
+# `Contents/Resources/node/bin/node` and is signed with the bundle.
+#
+# The RunAsNode fuse (Electron's default; nothing here sets `electronFuses`)
+# is no longer needed by session hosts, the remote daemon or `aw`. Two things
+# still use the app binary as Node, so if fuses are ever configured,
+# `runAsNode: true` must stay until Electron is retired:
+# - the agent-task qualification checks (`taskQualifier.ts`) run their `node`
+#   steps on `process.execPath` with ELECTRON_RUN_AS_NODE;
+# - hosts and the remote daemon fall back to it when a bundle has no
+#   `Resources/node` (sessionHostRuntime.ts). Hosts started by builds before
+#   #129 run on their own clone's binary and need nothing from this build.
+extraResources:
+  - from: .node-runtime
+    to: node
+    filter:
+      - bin/node
+      - LICENSE
 
 mac:
   category: public.app-category.developer-tools
