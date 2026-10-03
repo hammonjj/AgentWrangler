@@ -46,6 +46,7 @@ import { MenuBar, menuBarSessions } from './tray';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
 import { createBrowserClients, type BrowserClients } from './webPrototype';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
+import { createDictationRoute } from '../core/web/dictationRoute';
 import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
 import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
 import { Emitter } from '../core/events';
@@ -148,6 +149,8 @@ void app.whenReady().then(async () => {
       nativeDialogs = native;
       return clients.dialogs;
     },
+    // Browser tabs first, this Mac's notification only when none can show it (#141, D3).
+    scopeNotify: (native) => clients.notifier(native),
     asLocalUser,
   });
   const windowDialogs = nativeDialogs!;
@@ -466,6 +469,8 @@ void app.whenReady().then(async () => {
       log,
       page: renderBrowserWorkbenchHtml,
       onClient: (socket, context) => browsers.attach(socket, context),
+      // A phone's recording, transcribed here (#141).
+      routes: [createDictationRoute({ transcribe: (audio, ext) => wrangler.dictation.transcribeAudio(audio, ext), log })],
       // `/ca.mobileconfig` on loopback. Made on first request, so a device can
       // be set up before LAN access is switched on. None with the user's own cert.
       caCertificate: async () => {

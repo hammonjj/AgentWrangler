@@ -34,10 +34,12 @@ import {
   SHELL_PANE,
   WIRE_PROTOCOL,
   isCommandId,
+  parseShellNotice,
   type HostToShell,
   type ShellPrompt,
   type ShellToHost,
 } from '../../shared/shellProtocol';
+import { NoticeDeduper, secureContextProblem, shouldShowNotice, type NotificationState } from '../../shared/webCapabilities';
 
 interface Bridge {
   postMessage(message: unknown): void;
@@ -149,7 +151,12 @@ function reconnectNow(): void {
 window.addEventListener('online', reconnectNow);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) reconnectNow();
-  if (live) sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden } });
+  if (live) {
+    sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden } });
+    // The permission may have been changed in the browser's settings meanwhile.
+    reportNotifications();
+    renderBanner();
+  }
 });
 
 function sendRaw(envelope: unknown): void {
@@ -165,6 +172,7 @@ function onHello(protocol: number, build: string): void {
   live = true;
   attempt = 0;
   sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden } });
+  reportNotifications();
   // What was not acknowledged before the drop. A pane's old `ready` is
   // dropped: each pane sends a new one now, ahead of anything resent, so the
   // conversation is bound again before a resent `send` arrives for it.
@@ -230,8 +238,99 @@ function onShell(body: HostToShell | undefined): void {
     case 'promptCancel':
       // A native dialog cannot be closed from script; its answer is ignored.
       return;
+    case 'notify':
+      showNotice(body);
+      return;
   }
 }
+
+// ---- notifications (#141) ----
+
+/** The panes ask which microphone to use by looking at this. */
+document.documentElement.dataset.awHost = 'browser';
+
+const deduper = new NoticeDeduper();
+
+/** Why notifications cannot work in this page, or undefined. Computed once: a page does not become secure. */
+const insecureReason = secureContextProblem({
+  isSecureContext: window.isSecureContext,
+  protocol: location.protocol,
+  hostname: location.hostname,
+});
+
+function notificationState(): NotificationState {
+  if (insecureReason || typeof Notification === 'undefined') return 'unsupported';
+  return Notification.permission;
+}
+
+/** Tell the host what this tab can do; it sends notices only to a tab that said `granted`. */
+function reportNotifications(): void {
+  sendShell({ type: 'notifications', permission: notificationState() });
+}
+
+/**
+ * A "needs you" notice from the host. Shown only while the user is not
+ * looking at this page; the tag collapses the same ask arriving twice, here
+ * and in the browser's own notification list.
+ */
+function showNotice(raw: HostToShell): void {
+  const notice = parseShellNotice(raw);
+  if (!notice) return;
+  const state = {
+    permission: notificationState(),
+    hidden: document.hidden,
+    focused: document.hasFocus(),
+  };
+  if (!shouldShowNotice(state) || !deduper.first(notice.tag, Date.now())) return;
+  try {
+    const n = new Notification(notice.title, { body: notice.body, tag: notice.tag });
+    n.onclick = () => {
+      window.focus();
+      n.close();
+      // The same flow as a click in the table: the host points this tab's conversation at it.
+      if (notice.sessionKey) sendShell({ type: 'show', key: notice.sessionKey });
+    };
+  } catch {
+    // Some mobile browsers refuse `new Notification()` outside a service worker.
+  }
+}
+
+/** One line: "Enable notifications" while permission can still be asked, or why it cannot be here. */
+function renderBanner(): void {
+  const state = notificationState();
+  let banner = document.getElementById('awBanner');
+  const wanted = insecureReason !== undefined || state === 'default';
+  if (!wanted) {
+    banner?.remove();
+    return;
+  }
+  if (banner) return;
+  banner = document.createElement('div');
+  banner.id = 'awBanner';
+  banner.setAttribute('role', 'status');
+  const label = document.createElement('span');
+  banner.appendChild(label);
+  if (insecureReason) {
+    label.textContent = insecureReason;
+  } else {
+    label.textContent = 'Get a notification when an agent needs you.';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Enable notifications';
+    // A user gesture: browsers only show the permission prompt for one.
+    button.addEventListener('click', () => {
+      void Notification.requestPermission().then(() => {
+        reportNotifications();
+        renderBanner();
+      });
+    });
+    banner.appendChild(button);
+  }
+  document.body.appendChild(banner);
+}
+
+if (document.body) renderBanner();
+else window.addEventListener('DOMContentLoaded', renderBanner, { once: true });
 
 /** A numbered list for `prompt()`, answered by number. Undefined for cancelled or out of range. */
 function chooseByNumber(heading: string, labels: string[]): number | undefined {

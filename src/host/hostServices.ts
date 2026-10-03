@@ -178,6 +178,19 @@ export interface HostSecrets {
   delete(key: string): Promise<void>;
 }
 
+/**
+ * A "needs you" notice. `sessionKey` and `tag` are for the browser clients
+ * (#141): where tapping the notification goes, and one tag per ask so the
+ * same ask collapses. The host's own notification ignores both.
+ */
+export interface HostNotice {
+  title: string;
+  body: string;
+  onClick?: () => void;
+  sessionKey?: string;
+  tag?: string;
+}
+
 export interface HostServices {
   /** The name shown in dialogs and window titles. Always 'Agent Wrangler' today. */
   readonly appName: string;
@@ -235,7 +248,7 @@ export interface HostServices {
    * runs when it is clicked. Absent means this host has none, and the caller
    * falls back to `dialogs.info`.
    */
-  notify?(notice: { title: string; body: string; onClick?: () => void }): void;
+  notify?(notice: HostNotice): void;
   /**
    * Credentials, kept out of the settings file.
    *

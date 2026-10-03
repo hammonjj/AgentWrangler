@@ -866,6 +866,40 @@ Settings → Privacy & Security → Profiles, and set it to *Always Trust* in Ke
 To stop trusting it, remove the profile. Deleting `web-tls/` makes a new CA the next time LAN
 access starts, which every device then has to trust again.
 
+### Notifications and dictation in a browser (#141)
+
+**Notifications.** A page shows *Enable notifications* while the browser has not been asked;
+click it (browsers only prompt on a click) and allow. A tab that has allowed them gets each
+"needs you" notice as a browser notification **while it is hidden or its window is not
+focused**; a tab you are looking at shows nothing, because the table already says it. Tapping
+the notification focuses the tab and opens that session in its conversation pane. Each ask has
+a tag, so the same ask arriving twice is one notification, and every device is its own: a
+phone and a laptop each get one, and a tab you are looking at is the only one that stays quiet.
+
+Where a notice goes:
+
+| Browser tab connected, notifications allowed | The window | Notice goes to |
+|---|---|---|
+| None | Closed | The Mac's own notification (Notification Centre; `osascript` from the background core) |
+| None | Open | The Mac's own notification, as before; clicking it opens the session |
+| One or more | Either | Every such tab, which shows it only if hidden or unfocused. The Mac's own notification stays quiet |
+
+A tab that has not asked, was refused, or cannot show notifications does not count: with only
+those connected the Mac's notification still fires. Discord (when remote control is on) posts on
+its own either way and is not part of this. Browser notifications need a secure context:
+`http://127.0.0.1` on this Mac, or `https://` on the LAN. On plain http the page says so and
+offers nothing. iPhone Safari only shows web notifications for a page added to the Home Screen,
+and some Android browsers refuse `new Notification()` outside a service worker; neither is built.
+
+**Dictation.** In a browser the mic button records with the browser's own microphone
+(`MediaRecorder`: webm/opus where there is one, mp4/AAC on Safari), so it is the phone's
+microphone on a phone. Stopping uploads the recording to `POST /dictation` (the device cookie,
+`Origin`, and an `x-aw-dictation` header; at most 10 MB and five minutes; one at a time), which
+Whisper transcribes on the Mac with the same ffmpeg and model as the window's dictation. The
+text lands in the composer as it does there. There is no live preview in a browser. A refused
+microphone, a missing ffmpeg, whisper or model, and a non-secure page are each said beside the
+composer. The window keeps recording the Mac's microphone.
+
 ## Background core (experimental)
 
 Agent Wrangler's core (session tracking, the conversations it runs, Discord, `aw`) can run as a

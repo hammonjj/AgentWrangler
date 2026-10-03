@@ -17,8 +17,9 @@
  *    `<host>.local` or a bound address on the LAN, with the listener's port. A
  *    page that rebinds its own DNS name to us still sends its own name.
  * 2. Anything but GET/HEAD, and every WebSocket upgrade, must carry an
- *    `Origin` equal to this server (`https://…` on the LAN), or **403**. No
- *    endpoint takes a POST yet, so one that passes is 405.
+ *    `Origin` equal to this server (`https://…` on the LAN), or **403**. A
+ *    POST that passes goes to a registered route (`routes`, #141: the device
+ *    cookie, then the route's own checks); with none it is 405.
  * 3. `/login?code=…` exchanges a single-use code for a device cookie of the
  *    listener's scope: from `aw web open` on loopback, from pairing (#137) on
  *    the LAN. Everything else needs that cookie, or **401**.
@@ -40,6 +41,7 @@ import { ownerContext, type AccessGate, type RequestContext } from '../access';
 import { AssetManifest } from './assets';
 import { DEVICE_TTL_MS, WEB_DEVICES_FILE, WebDeviceStore, summarizeUserAgent, type DeviceScope, type WebDevice } from './devices';
 import { LoginCodes } from './loginLinks';
+import type { WebRoute } from './routes';
 import { caMobileconfig, MOBILECONFIG_CONTENT_TYPE } from './mobileconfig';
 import { isLoopbackHost, readCookie } from './wsFrames';
 
@@ -146,6 +148,8 @@ export interface WebServerOptions {
    * certificate is in use). Absent: those routes are 404.
    */
   caCertificate?: () => Promise<string | undefined>;
+  /** Extra POST endpoints (#141), each from its own file; see `routes.ts`. */
+  routes?: WebRoute[];
   now?: () => number;
 }
 
@@ -281,6 +285,11 @@ export class WebServer implements Disposable {
         res.writeHead(403, SECURITY_HEADERS).end();
         return;
       }
+      const route = this.routeFor(req);
+      if (route) {
+        this.runRoute(listener, route, req, res);
+        return;
+      }
       res.writeHead(405, { ...SECURITY_HEADERS, allow: 'GET, HEAD' }).end();
       return;
     }
@@ -322,6 +331,30 @@ export class WebServer implements Disposable {
       return;
     }
     this.asset(url.pathname, res);
+  }
+
+  private routeFor(req: http.IncomingMessage): WebRoute | undefined {
+    let pathname: string;
+    try {
+      pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+    } catch {
+      return undefined;
+    }
+    return this.opts.routes?.find((r) => r.method === req.method && r.path === pathname);
+  }
+
+  /** A registered route (#141): the device cookie first, then the route's own checks. */
+  private runRoute(listener: Listener, route: WebRoute, req: http.IncomingMessage, res: http.ServerResponse): void {
+    const device = this.devices.verify(readCookie(req.headers.cookie, cookieName(listener.scope)), listener.scope);
+    if (!device) {
+      text(res, 401, 'Not signed in.');
+      return;
+    }
+    const context = ownerContext('browser', { deviceId: device.id });
+    Promise.resolve(route.handle(req, res, { context, scope: listener.scope, gate: this.opts.gate })).catch((err) => {
+      this.opts.log(`web: ${route.path} failed: ${String(err)}`);
+      if (!res.headersSent) text(res, 500, 'Something went wrong.');
+    });
   }
 
   private login(listener: Listener, req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
