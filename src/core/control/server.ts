@@ -41,6 +41,7 @@ import {
   type ControlTaskProposeParams,
   type ControlTaskProposeResult,
   type ControlTaskView,
+  type ControlWebLinkResult,
   type StopOutcome,
   MAX_TASK_OBJECTIVE_CHARS,
 } from './protocol';
@@ -80,6 +81,8 @@ export interface ControlBackend {
   /** Delegate an outcome (#82): the planner decides one task or several. Throws `ControlError` when orchestration is off. */
   delegate(params: ControlDelegateParams): Promise<ControlDelegateResult>;
   tasks(): ControlTaskView[];
+  /** A single-use browser sign-in link (#127). Throws `ControlError` when the browser workbench is off. */
+  webLink(): ControlWebLinkResult;
 }
 
 export interface ControlServerOptions {
@@ -244,6 +247,10 @@ export class ControlServer implements Disposable {
         return (await backend.delegate(taskParams(p))) satisfies ControlDelegateResult;
       case 'tasks':
         return { tasks: backend.tasks() };
+      case 'web.link':
+        // Never the link itself: it is a credential for two minutes.
+        this.opts.log(`control socket: web.link by ${conn.client ?? '?'}`);
+        return backend.webLink() satisfies ControlWebLinkResult;
       default:
         throw new ControlError(RPC_METHOD_NOT_FOUND, `no method ${req.method}`);
     }

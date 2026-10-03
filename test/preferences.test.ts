@@ -135,6 +135,7 @@ describe('dependentParentKeys', () => {
     expect(dependentParentKeys(SETTINGS)).toEqual([
       'orchestration.enabled',
       'autoPause.enabled',
+      'web.enabled',
       'remote.enabled',
     ]);
   });

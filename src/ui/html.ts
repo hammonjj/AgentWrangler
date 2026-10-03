@@ -80,11 +80,16 @@ export interface WebviewHtmlOptions {
    * talks over IPC and wrong for a browser that talks over a WebSocket.
    */
   connectSrc?: string;
+  /**
+   * The script nonce. Absent, a fresh one. A server that also sends the CSP as
+   * a header (#127) generates it, so the header and the document agree.
+   */
+  nonce?: string;
 }
 
 export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
   const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [], bodyClass, preScripts = [], connectSrc } = opts;
-  const nonce = getNonce();
+  const nonce = opts.nonce ?? getNonce();
   const links = [...extraStylesheets, cssHref].map((href) => `<link rel="stylesheet" href="${href}">`).join('\n');
   const bodyAttr = bodyClass ? ` class="${bodyClass}"` : '';
   const connect = connectSrc ? ` connect-src ${connectSrc};` : '';
@@ -104,4 +109,24 @@ ${BODY[bundleName]}
 ${scripts}
 </body>
 </html>`;
+}
+
+/**
+ * The workbench as a browser loads it (#127): the shim first, in place of the
+ * preload, and every asset by the URL the server's manifest gives it (hashed,
+ * so it can be cached for good).
+ */
+export function renderBrowserWorkbenchHtml(opts: { asset: (name: string) => string; nonce: string; connectSrc: string }): string {
+  return renderWebviewHtml({
+    bundleName: 'workbench',
+    title: 'Agent Wrangler',
+    cssHref: opts.asset('workbench.css'),
+    jsSrc: opts.asset('workbench.js'),
+    cspSource: "'self'",
+    extraStylesheets: [opts.asset('theme.css')],
+    bodyClass: 'aw-shell',
+    preScripts: [opts.asset('webshim.js')],
+    connectSrc: opts.connectSrc,
+    nonce: opts.nonce,
+  });
 }

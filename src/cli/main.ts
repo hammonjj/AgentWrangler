@@ -24,7 +24,9 @@ import {
   type ControlTaskProposeParams,
   type ControlTaskProposeResult,
   type ControlTasksResult,
+  type ControlWebLinkResult,
 } from '../core/control/protocol';
+import { execFile } from 'node:child_process';
 import * as path from 'node:path';
 import { agentEnvironment, originOf, parseArgs, USAGE, type Command } from './args';
 import { ATTACH_BACKLOG, AttachRenderer } from './attach';
@@ -58,6 +60,15 @@ async function run(argv: string[]): Promise<number> {
         `aw ${cmd.kind}: refused, because this shell looks like ${inside}. ` +
           'One agent must not drive another through aw; run it from your own terminal.\n',
       );
+      return 3;
+    }
+  }
+  // The same speed bump: a printed sign-in link is the whole workbench, every
+  // session's controls included. `aw web open` hands it to the browser instead.
+  if (cmd.kind === 'web' && cmd.action === 'url') {
+    const inside = agentEnvironment(process.env);
+    if (inside) {
+      process.stderr.write(`aw web url: refused, because this shell looks like ${inside}. Run it from your own terminal, or use aw web open.\n`);
       return 3;
     }
   }
@@ -183,6 +194,17 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
       print(r, () => formatTasks(r.tasks, now), cmd.json);
       return 0;
     }
+    case 'web': {
+      const r = await client.request<ControlWebLinkResult>('web.link');
+      if (cmd.action === 'url') {
+        process.stdout.write(`${r.url}\n`);
+        process.stderr.write('Good once, for 2 minutes. Anyone who opens it first is signed in as you.\n');
+        return 0;
+      }
+      await openInBrowser(r.url);
+      process.stdout.write('Opened Agent Wrangler in your browser.\n');
+      return 0;
+    }
     default:
       return 2;
   }
@@ -238,6 +260,13 @@ function attach(ref: string, client: ControlClient): Promise<number> {
         reject(err);
       },
     );
+  });
+}
+
+/** The default browser, by macOS's `open`. The link is an argument, never through a shell. */
+function openInBrowser(url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('open', [url], (err) => (err ? reject(new Error(`could not open the browser: ${err.message}`)) : resolve()));
   });
 }
 

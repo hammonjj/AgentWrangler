@@ -20,7 +20,9 @@ export type Command =
    * current directory. `harness` undefined: let the resolver choose.
    */
   | { kind: 'delegate' | 'task'; objective: string | undefined; criteria: string[]; folder: string | undefined; harness: 'claude' | 'codex' | undefined; json: boolean }
-  | { kind: 'tasks'; json: boolean };
+  | { kind: 'tasks'; json: boolean }
+  /** `open`: sign this Mac's default browser in. `url`: print the single-use link instead (#127). */
+  | { kind: 'web'; action: 'open' | 'url' };
 
 export const USAGE = `aw — Agent Wrangler from a terminal
 
@@ -40,6 +42,8 @@ Usage:
       --claude | --codex    which agent to prefer (default: let routing choose)
   aw task <objective…>      shortcut: always one task, no planner (same options as delegate)
   aw tasks                  tasks that are not finished
+  aw web open               open the workbench in your default browser, signed in
+  aw web url                print a single-use sign-in link instead (good once, for 2 minutes)
 
 <id> is a session id, a unique prefix of one (4+ characters), or a key like claude:<id>.
 --json prints the raw result for status, sessions, session, projects, delegate, task and tasks.
@@ -93,6 +97,14 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
       return allowed('--json') ?? { kind: 'projects', json };
     case 'tasks':
       return allowed('--json') ?? { kind: 'tasks', json };
+    case 'web': {
+      const bad = allowed();
+      if (bad) return bad;
+      const [action, ...more] = rest;
+      if (action !== 'open' && action !== 'url') return { error: 'aw web: open or url? (aw web open, aw web url)' };
+      if (more.length > 0) return { error: `aw web: unexpected "${more[0]}"` };
+      return { kind: 'web', action };
+    }
     default:
       return { error: `aw: no command "${name}". Run aw help.` };
   }
