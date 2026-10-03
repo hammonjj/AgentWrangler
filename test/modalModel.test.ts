@@ -95,11 +95,15 @@ describe('a prompt becomes a modal', () => {
     expect(modalFromPrompt({ kind: 'input', prompt: 'Branch name' })).not.toHaveProperty('prompt');
   });
 
-  it('a folder is a typed path; blank is cancelled', () => {
+  it('a folder is chosen in the folder browser: its host path is the answer, cancelled is undefined', () => {
     const m = modalFromPrompt({ kind: 'pickFolder', openLabel: 'Add project' });
-    expect(m).toMatchObject({ kind: 'input', title: 'Add project', folder: true });
-    expect(steps(m, [{ type: 'text', text: '  /Users/test/proj  ' }, { type: 'submit' }])).toEqual({ done: true, value: '/Users/test/proj' });
-    expect(steps(m, [{ type: 'text', text: '   ' }, { type: 'submit' }])).toEqual({ done: true, value: undefined });
+    expect(m).toEqual({ kind: 'folder', title: 'Add project', openLabel: 'Add project' });
+    expect(modalFromPrompt({ kind: 'pickFolder' })).toEqual({ kind: 'folder', title: 'Choose a folder' });
+    expect(stepModal(m, { type: 'choose', path: '/Users/test/proj' })).toEqual({ done: true, value: '/Users/test/proj' });
+    expect(stepModal(m, { type: 'choose', path: undefined })).toEqual({ done: true, value: undefined });
+    expect(stepModal(m, { type: 'cancel' })).toEqual({ done: true, value: undefined });
+    // Typing means nothing to it.
+    expect(stepModal(m, { type: 'text', text: 'x' })).toEqual({ done: false, model: m });
   });
 });
 

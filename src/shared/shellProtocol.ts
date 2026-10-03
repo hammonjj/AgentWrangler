@@ -77,10 +77,48 @@ export type HostToShell =
    */
   | { type: 'hello'; protocol: number; build: string }
   /** These pane envelopes (by `commandId`) arrived; the client may forget them. */
-  | { type: 'ack'; ids: string[] };
+  | { type: 'ack'; ids: string[] }
+  /**
+   * Something needs the user (#141): shown by the tab as an OS notification
+   * when it is hidden or unfocused. `tag` is one per ask, so the same ask
+   * arriving twice collapses; `sessionKey` is where tapping it goes.
+   */
+  | { type: 'notify'; title: string; body: string; sessionKey?: string; tag: string }
+  /** #140: open this link in the browser that asked, never on the host. http/https only. */
+  | { type: 'openUrl'; url: string }
+  /**
+   * #140: show a file the host named. `intent` is what the app wanted
+   * (open it, or reveal it in the file manager); a browser answers both with
+   * the read-only viewer (`FILE_VIEW_ROUTE`). `hostActions` is true only for a
+   * loopback client, which may also ask for it on the Mac (`hostAction`).
+   */
+  | { type: 'showFile'; id: number; path: string; name: string; intent: 'open' | 'reveal'; hostActions: boolean }
+  /**
+   * #140: a command the user runs in a terminal of their own (`claude --resume
+   * <id>`). The client shows and copies it. Same `hostActions` rule.
+   */
+  | { type: 'showCommand'; id: number; command: string; cwd: string; title: string; hostActions: boolean };
+
+/** The longest text a `notify` or `show` carries. Longer is cut, not refused. */
+export const MAX_NOTICE_TEXT = 500;
 
 export type ShellToHost =
+  /**
+   * #140: a loopback client asks for what `showFile` / `showCommand` `id`
+   * offered to be done on the Mac ("Open on this Mac"). Anything else, and any
+   * other kind of client, is ignored. Only what the app offered can be asked
+   * for; the client never names a path or a command.
+   */
+  | { type: 'hostAction'; id: number; action: 'open' | 'reveal' | 'run' }
   | { type: 'promptResult'; id: number; value: string | number | null }
+  /**
+   * What this tab can do about notices (#141): its `Notification.permission`,
+   * sent on connect and whenever it changes. Only a `granted` tab is sent
+   * `notify`, and while one is connected the host's own notification stays quiet.
+   */
+  | { type: 'notifications'; permission: 'granted' | 'denied' | 'default' | 'unsupported' }
+  /** A tapped notification: point this tab's conversation at that session (#141). */
+  | { type: 'show'; key: string }
   /** The client's half of the handshake (#128): what it was loaded as. */
   | { type: 'hello'; protocol: number; build: string }
   /** The tab was hidden or shown: a hidden one gets the table less often (#128). */
@@ -95,10 +133,41 @@ export function parseShellToHost(body: unknown): ShellToHost | undefined {
     return { type: 'hello', protocol: m.protocol, build: m.build };
   }
   if (m.type === 'visibility') return typeof m.hidden === 'boolean' ? { type: 'visibility', hidden: m.hidden } : undefined;
+  if (m.type === 'notifications') {
+    const p = (body as { permission?: unknown }).permission;
+    return p === 'granted' || p === 'denied' || p === 'default' || p === 'unsupported' ? { type: 'notifications', permission: p } : undefined;
+  }
+  if (m.type === 'show') {
+    const key = (body as { key?: unknown }).key;
+    return typeof key === 'string' && key.length > 0 && key.length <= 1024 ? { type: 'show', key } : undefined;
+  }
+  if (m.type === 'hostAction') {
+    const a = (body as { action?: unknown }).action;
+    if (typeof m.id !== 'number' || !Number.isInteger(m.id)) return undefined;
+    return a === 'open' || a === 'reveal' || a === 'run' ? { type: 'hostAction', id: m.id, action: a } : undefined;
+  }
   if (m.type !== 'promptResult' || typeof m.id !== 'number' || !Number.isInteger(m.id)) return undefined;
   const value = m.value;
   if (value !== null && value !== undefined && typeof value !== 'string' && typeof value !== 'number') return undefined;
   return { type: 'promptResult', id: m.id, value: value ?? null };
+}
+
+export type ShellNotice = Extract<HostToShell, { type: 'notify' }>;
+
+/** A `notify` as the shim receives it, checked and with its text bounded. */
+export function parseShellNotice(body: unknown): ShellNotice | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const m = body as { type?: unknown; title?: unknown; body?: unknown; sessionKey?: unknown; tag?: unknown };
+  if (m.type !== 'notify' || typeof m.title !== 'string' || typeof m.body !== 'string') return undefined;
+  if (typeof m.tag !== 'string' || m.tag.length === 0 || m.tag.length > 256) return undefined;
+  if (m.sessionKey !== undefined && (typeof m.sessionKey !== 'string' || m.sessionKey.length === 0 || m.sessionKey.length > 1024)) return undefined;
+  return {
+    type: 'notify',
+    title: m.title.slice(0, MAX_NOTICE_TEXT),
+    body: m.body.slice(0, MAX_NOTICE_TEXT),
+    tag: m.tag,
+    ...(m.sessionKey !== undefined ? { sessionKey: m.sessionKey } : {}),
+  };
 }
 
 // ---- the connection (#128, plan §7.2) ----
@@ -132,3 +201,33 @@ export function isCommandId(v: unknown): v is string {
  * and the host replies with a fresh snapshot / init: no page reload.
  */
 export const RECONNECT_EVENT = 'agentwrangler:reconnect';
+
+// ---- the read-only file and diff view (#140) ----
+
+/** `GET /api/view?path=<absolute path>` answers a `FileView`; with `&download=1` it sends the file. */
+export const FILE_VIEW_ROUTE = '/api/view';
+
+/** How much of a text file the viewer is sent. The rest is cut and `truncated` says so. */
+export const FILE_VIEW_MAX_BYTES = 256 * 1024;
+
+export interface FileView {
+  path: string;
+  name: string;
+  /** The file's size on disk, in bytes. */
+  size: number;
+  /** `diff` is a unified diff (`.diff`, `.patch`), drawn with its additions and deletions marked. */
+  kind: 'text' | 'diff' | 'binary';
+  /** Absent for `binary`, which is offered as a download instead. */
+  text?: string;
+  truncated: boolean;
+}
+
+/** The viewer's path for a file, and the download's. */
+export function fileViewUrl(path: string, download = false): string {
+  return `${FILE_VIEW_ROUTE}?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`;
+}
+
+/** A unified diff by name. The orchestration writes its diffs as `<mission>-a<n>.diff`. */
+export function isDiffFile(path: string): boolean {
+  return /\.(diff|patch)$/i.test(path);
+}

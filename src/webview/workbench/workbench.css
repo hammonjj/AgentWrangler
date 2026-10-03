@@ -432,3 +432,37 @@ body.aw-surface-conversation #wbConv {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 2px;
 }
+
+/* A host view (file, diff, command: #140) drawn in the modal host: its own
+   `aw-hv-*` parts supply the body and buttons, this frames them. */
+.aw-modal.aw-modal-view {
+  width: min(900px, 100%);
+  padding: 0;
+}
+.aw-modal.aw-modal-view .aw-modal-title {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--vscode-widget-border);
+}
+
+/* The folder browser (#139) is its own panel; the modal is only its frame. */
+.aw-modal.aw-modal-folder {
+  width: min(560px, 100%);
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+#awPage .aw-page-button {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 4px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  text-decoration: none;
+}
+#awPage .aw-page-button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}

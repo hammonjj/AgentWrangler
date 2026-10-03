@@ -14,6 +14,11 @@
  * The pick is a combobox driving a listbox with `aria-activedescendant`, so
  * focus stays in the filter while the arrows move the highlight.
  *
+ * Also here, so there is one modal at a time on screen: the file, diff and
+ * command views of #140 (`aw:host-view`, taken with preventDefault and drawn in
+ * this dialog) and the folder browser of #139 for `pickFolder`. A view waits
+ * for an open prompt, and prompts that arrive while a view is open wait for it.
+ *
  * Text is set with `textContent`, never parsed: titles and rows can carry
  * session titles and paths. Classes only (CSP); the rules are in workbench.css.
  */
@@ -31,6 +36,8 @@ import {
   type PickModal,
 } from '../../shared/modalModel';
 import type { HostToShell, ShellToHost } from '../../shared/shellProtocol';
+import { mountFolderBrowser } from '../common/folderBrowser';
+import { HOST_VIEW_EVENT, drawHostView, hostViewTitle, type HostViewMessage } from '../common/hostView';
 
 export interface ModalHostOptions {
   send(body: ShellToHost): void;
@@ -49,7 +56,7 @@ export interface ModalHost {
   readonly isOpen: boolean;
 }
 
-const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
 /** Rows PageUp/PageDown move by. */
 const PAGE = 8;
 
@@ -58,6 +65,12 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
   /** Focus before the first modal opened; restored after the last closes. */
   let returnFocus: Element | null = null;
   let inerted: HTMLElement[] = [];
+  /** A host view is on screen; prompts arriving meanwhile are held, in order. */
+  let viewOpen = false;
+  let held: HostToShell[] = [];
+  let pendingViews: HostViewMessage[] = [];
+  /** Tears down whatever the dialog mounted (the folder browser). */
+  let unmount: (() => void) | undefined;
 
   const layer = document.createElement('div');
   layer.id = 'awModalLayer';
@@ -96,23 +109,35 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
           if (e.modal.model.kind === 'pick') renderPickRows(e.modal.model);
           break;
         case 'close':
-          hide();
+          if (!viewOpen) finishPrompts();
           break;
       }
     }
   }
 
+  function openLayer(): void {
+    if (!layer.hidden) return;
+    returnFocus = document.activeElement;
+    inerted = opts.background().filter((el) => el !== layer && !el.inert);
+    for (const el of inerted) el.inert = true;
+    layer.hidden = false;
+  }
+
   function show(modal: OpenModal): void {
-    if (layer.hidden) {
-      returnFocus = document.activeElement;
-      inerted = opts.background().filter((el) => el !== layer && !el.inert);
-      for (const el of inerted) el.inert = true;
-      layer.hidden = false;
-    }
+    openLayer();
     render(modal);
   }
 
+  /** No prompt left: a view that was waiting goes up; otherwise the layer closes. */
+  function finishPrompts(): void {
+    const next = pendingViews.shift();
+    if (next) startView(next);
+    else hide();
+  }
+
   function hide(): void {
+    unmount?.();
+    unmount = undefined;
     layer.hidden = true;
     dialog.replaceChildren();
     pickList = pickField = undefined;
@@ -139,8 +164,59 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
     return b;
   }
 
+  // ---- host views (#140) ----
+
+  function startView(msg: HostViewMessage): void {
+    openLayer();
+    unmount?.();
+    unmount = undefined;
+    viewOpen = true;
+    dialog.replaceChildren();
+    pickList = pickField = undefined;
+    dialog.className = 'aw-modal aw-modal-view';
+    dialog.setAttribute('role', 'dialog');
+    dialog.removeAttribute('aria-describedby');
+    const title = el('h2', 'aw-modal-title', hostViewTitle(msg));
+    title.id = 'awModalTitle';
+    const body = el('div', 'aw-hv-body');
+    const actions = el('div', 'aw-hv-actions');
+    const close = el('button', 'aw-hv-btn', 'Close');
+    close.type = 'button';
+    close.addEventListener('click', closeView);
+    actions.appendChild(close);
+    dialog.append(title, body, actions);
+    close.focus();
+    drawHostView({ body, actions, close: closeView }, msg, { sendShell: opts.send, toast: opts.toast });
+  }
+
+  function closeView(): void {
+    if (!viewOpen) return;
+    viewOpen = false;
+    const next = pendingViews.shift();
+    if (next) return startView(next);
+    // Prompts that came in meanwhile, in the order they were asked.
+    const replay = held;
+    held = [];
+    for (const message of replay) {
+      const step = modalHostReceive(state, message);
+      state = step.state;
+      run(step.effects);
+    }
+    if (!state.current) hide();
+  }
+
+  window.addEventListener(HOST_VIEW_EVENT, (e) => {
+    // Ours to draw: the shim then draws nothing of its own.
+    e.preventDefault();
+    const msg = (e as CustomEvent<HostViewMessage>).detail;
+    if (viewOpen || state.current) pendingViews.push(msg);
+    else startView(msg);
+  });
+
   function render(modal: OpenModal): void {
     const m = modal.model;
+    unmount?.();
+    unmount = undefined;
     dialog.replaceChildren();
     pickList = pickField = undefined;
     dialog.className = `aw-modal aw-modal-${m.kind}`;
@@ -150,7 +226,21 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
     const described: string[] = [];
     let focus: HTMLElement | undefined;
 
-    if (m.kind === 'message') {
+    if (m.kind === 'folder') {
+      // The host's own listing, mounted from `common/folderBrowser`. It has its
+      // own title, Cancel and Escape; this dialog only frames it.
+      dialog.setAttribute('role', 'dialog');
+      title.hidden = true;
+      const holder = el('div', 'aw-modal-folder-holder');
+      dialog.appendChild(holder);
+      const view = mountFolderBrowser(holder, {
+        ...(m.openLabel ? { openLabel: m.openLabel } : {}),
+        onChoose: (path) => dispatch({ type: 'choose', path }),
+      });
+      unmount = () => view.dispose();
+      // The first control in the browser: Up, then the list.
+      queueMicrotask(() => holder.querySelector<HTMLElement>('button:not([disabled])')?.focus());
+    } else if (m.kind === 'message') {
       dialog.setAttribute('role', m.level === 'info' ? 'dialog' : 'alertdialog');
       dialog.classList.add(`aw-modal-${m.level}`);
       if (m.detail) {
@@ -286,13 +376,20 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
     }
   }
 
+  function cancelCurrent(): void {
+    if (viewOpen) closeView();
+    else dispatch({ type: 'cancel' });
+  }
+
   // Keys the whole dialog answers: Escape anywhere in it, and Tab kept inside it.
   dialog.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      // The folder browser cancels itself; answering twice would cancel the next modal too.
+      if ((e.target as HTMLElement).closest('.aw-fb')) return;
       e.preventDefault();
       // The panes listen on `window` for Escape (menus, dictation): this one is ours.
       e.stopPropagation();
-      dispatch({ type: 'cancel' });
+      cancelCurrent();
       return;
     }
     if (e.key !== 'Tab') return;
@@ -307,7 +404,7 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
   // with a single OK is dismissed the same way. Never a decision by accident:
   // dismissing always answers "cancelled".
   layer.addEventListener('click', (e) => {
-    if (e.target === layer) dispatch({ type: 'cancel' });
+    if (e.target === layer) cancelCurrent();
   });
 
   // Focus that escapes anyway (a click into the page through a gap, a script)
@@ -321,11 +418,18 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
   return {
     receive(message) {
       if (message.type !== 'prompt' && message.type !== 'promptCancel') return;
+      if (viewOpen) {
+        // A view is up: the question waits behind it, unless it is withdrawn first.
+        if (message.type === 'prompt') held.push(message);
+        else held = held.filter((h) => h.type !== 'prompt' || h.id !== message.id);
+        return;
+      }
       const step = modalHostReceive(state, message);
       state = step.state;
       run(step.effects);
     },
     reset() {
+      held = [];
       const step = modalHostReset(state);
       state = step.state;
       run(step.effects);

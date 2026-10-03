@@ -28,6 +28,10 @@ function fakeClient(connectionId: string, opts: { isOpen?: boolean } = {}) {
   const navigations: NavigateTarget[] = [];
   const channel: ClientChannel = {
     connectionId,
+    kind: 'window',
+    openUrl: () => undefined,
+    showFile: () => undefined,
+    showCommand: () => undefined,
     isOpen: opts.isOpen ?? true,
     prompt: (request) => new Promise((resolve) => prompts.push({ request, answer: resolve })),
     toast: (text) => toasts.push(text),
@@ -256,6 +260,7 @@ describe('shell channel: a browser connection', () => {
     const shown: string[] = [];
     const shell = createShellChannel({
       connectionId: 'web-1',
+      kind: 'lan',
       post: (envelope) => {
         expect(envelope.pane).toBe('shell');
         posted.push(envelope.body);

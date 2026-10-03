@@ -29,6 +29,7 @@ import type { RawData, WebSocket } from 'ws';
 import { Emitter, type Disposable } from '../events';
 import { ownerContext, type RequestContext } from '../access';
 import type { ClientRegistry } from '../clients';
+import type { HostShell } from '../../host/hostServices';
 import { CommandResults } from './commandResults';
 import { createShellChannel, type ShellConversation } from './shellChannel';
 import { SHELL_PANE, WIRE_PROTOCOL, isCommandId, parseShellToHost, type HostToShell } from '../../shared/shellProtocol';
@@ -77,6 +78,10 @@ export interface BrowserConnectionsOptions {
   isMutating(pane: string, body: unknown): boolean;
   /** The build the page's assets come from; a page from another one reloads. */
   build(): string;
+  /** Whether a folder a browser chose is one the folder browser may offer (#139); see `ShellChannelOptions`. */
+  folderAllowed?(dir: string): Promise<boolean>;
+  /** The Mac's own shell, for a loopback client's explicit "Open on this Mac" (#140). Never for a LAN one. */
+  hostShell?: HostShell;
   /** Shared by every connection, so a resend on a new one is recognised. */
   results?: CommandResults;
   limits?: Partial<ConnectionLimits>;
@@ -85,6 +90,12 @@ export interface BrowserConnectionsOptions {
 export interface BrowserConnections extends Disposable {
   /** An upgraded socket from an authenticated device. Owned from here on. */
   attach(ws: WebSocket, device: RequestContext): void;
+  /**
+   * Close every connection of a revoked device now (#137): its client
+   * registrations go (and its prompts resolve as cancelled) and its pane hosts
+   * are disposed in this call. The number closed.
+   */
+  closeDevice(deviceId: string): number;
   /** Open connections (tests, diagnostics). */
   readonly size: number;
 }
@@ -102,6 +113,8 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
   const results = opts.results ?? new CommandResults();
   /** Each open socket, and how to close it. */
   const connections = new Map<WebSocket, () => void>();
+  /** Each open socket's device, for revocation (#137). */
+  const deviceOf = new Map<WebSocket, string | undefined>();
 
   function attach(ws: WebSocket, device: RequestContext): void {
     const incoming = new Emitter<unknown>();
@@ -157,6 +170,9 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       connectionId,
       post: (envelope) => void transport.postMessage(envelope),
       conversation: () => panes?.conversation,
+      ...(opts.folderAllowed ? { folderAllowed: opts.folderAllowed } : {}),
+      kind: device.deviceScope === 'loopback' ? 'loopback' : 'lan',
+      ...(opts.hostShell ? { hostShell: opts.hostShell } : {}),
     });
     const registration = clients.register(shell.channel);
     const sendShell = (body: HostToShell) => sendNow({ pane: SHELL_PANE, body });
@@ -240,10 +256,12 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       panes?.conversation.dispose();
       panes = undefined;
       connections.delete(ws);
+      deviceOf.delete(ws);
       log(`web: browser disconnected (${connections.size} open)`);
     }
 
     connections.set(ws, () => close(1001, 'going away'));
+    deviceOf.set(ws, device.deviceId);
     log(`web: browser connected (${connections.size} open)`);
 
     ws.on('message', onMessage);
@@ -256,6 +274,11 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
 
   return {
     attach,
+    closeDevice: (deviceId) => {
+      const mine = [...deviceOf].filter(([, id]) => id === deviceId).map(([ws]) => ws);
+      for (const ws of mine) connections.get(ws)?.();
+      return mine.length;
+    },
     get size() {
       return connections.size;
     },

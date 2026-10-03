@@ -9,11 +9,16 @@
  * Expiry slides: a device unseen for 30 days stops working. `lastSeen` is
  * written at most once an hour per device, so an open tab does not mean a
  * write per request.
+ *
+ * Revoking (#137) deletes the device; `onDidRevoke` tells the server, which
+ * closes that device's open connections at once. One store per process, shared
+ * by every `WebServer` it starts, so a revocation reaches whichever is running.
  */
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { LOCAL_OWNER } from '../access';
+import { Emitter } from '../events';
 
 export const DEVICE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LAST_SEEN_WRITE_MS = 60 * 60 * 1000;
@@ -54,6 +59,12 @@ function hashCredential(credential: string): Buffer {
 
 export class WebDeviceStore {
   private devices: StoredDevice[];
+  private readonly revoked = new Emitter<string>();
+  private readonly changed = new Emitter<void>();
+  /** A device was revoked: its id. Its connections must close now. */
+  readonly onDidRevoke = this.revoked.event;
+  /** The list changed: a device was added or revoked, or was seen. */
+  readonly onDidChange = this.changed.event;
 
   constructor(
     private readonly file: string,
@@ -78,7 +89,28 @@ export class WebDeviceStore {
     };
     this.devices = [...this.live(), stored];
     this.save();
+    this.changed.fire();
     return { device: publicView(stored), credential };
+  }
+
+  /**
+   * Forget a device: its credential stops working from this call on, and
+   * `onDidRevoke` fires so its open connections are closed. Undefined when
+   * there is no such device.
+   */
+  revoke(id: string): WebDevice | undefined {
+    const found = this.devices.find((d) => d.id === id);
+    if (!found) return undefined;
+    this.devices = this.devices.filter((d) => d !== found);
+    this.save();
+    this.revoked.fire(id);
+    this.changed.fire();
+    return publicView(found);
+  }
+
+  /** Whether `id` is a current device (it may have been revoked since a check). */
+  has(id: string): boolean {
+    return this.live().some((d) => d.id === id);
   }
 
   /**
@@ -101,6 +133,7 @@ export class WebDeviceStore {
       match.lastSeen = at;
       this.devices = this.live();
       this.save();
+      this.changed.fire();
     }
     return publicView(match);
   }
@@ -147,6 +180,19 @@ export class WebDeviceStore {
 
 function publicView(d: StoredDevice): WebDevice {
   return { id: d.id, name: d.name, createdAt: d.createdAt, lastSeen: d.lastSeen, principal: d.principal, scope: d.scope };
+}
+
+/** The longest device name kept. */
+export const MAX_DEVICE_NAME = 60;
+
+/**
+ * The name a device is paired under (#137): what was typed, one line, no
+ * control characters, at most `MAX_DEVICE_NAME`; or `fallback` when that
+ * leaves nothing.
+ */
+export function cleanDeviceName(input: string | null | undefined, fallback: string): string {
+  const name = typeof input === 'string' ? input.replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_DEVICE_NAME).trim() : '';
+  return name || fallback;
 }
 
 /** "Chrome on macOS", from a user agent, for a device list. Never stored as more than this. */

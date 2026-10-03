@@ -71,13 +71,23 @@ export interface RequestContext {
   readonly deviceId?: string;
   /** Browser: which tab. Attribution only, never identity. */
   readonly connectionId?: string;
+  /**
+   * Browser: which listener the device signed in on. Where the client is, so
+   * the host-local actions (#140) know whether "this Mac" is in front of it.
+   * Not authority: `authorize` never reads it. Absent is treated as `lan`.
+   */
+  readonly deviceScope?: 'loopback' | 'lan';
 }
 
 /** A context for the owner, through `via`. Device and connection ids ride along for the audit only. */
-export function ownerContext(via: Via, ids: { deviceId?: string; connectionId?: string } = {}): RequestContext {
+export function ownerContext(
+  via: Via,
+  ids: { deviceId?: string; connectionId?: string; deviceScope?: 'loopback' | 'lan' } = {},
+): RequestContext {
   return Object.freeze({
     principal: LOCAL_OWNER,
     via,
+    ...(ids.deviceScope !== undefined ? { deviceScope: ids.deviceScope } : {}),
     ...(ids.deviceId !== undefined ? { deviceId: ids.deviceId } : {}),
     ...(ids.connectionId !== undefined ? { connectionId: ids.connectionId } : {}),
   });
@@ -135,6 +145,18 @@ export const ACTIONS = {
   'web.login': 'mutate',
   /** A browser became a new device: a credential was issued and stored (#127). */
   'web.device.add': 'mutate',
+  /** Start pairing a device: a five-minute, single-use code and its QR (`aw web pair`, `/pair/new`, #137). */
+  'web.pair.start': 'mutate',
+  /** A device exchanged a pairing code for a LAN credential on `/pair` (#137). */
+  'web.pair.redeem': 'mutate',
+  /** Revoke a device: its credential stops working and its connections close (#137). */
+  'web.device.revoke': 'mutate',
+  /** A remote browser put a file on the host (#139). Audited with the size, never the name. */
+  'file.upload': 'mutate',
+  /** A remote browser took a file off the host (#139). Audited by an id of the file, never its path. */
+  'file.download': 'mutate',
+  /** A remote browser listed host directories to choose a folder (#139). */
+  'dirs.list': 'read',
 } as const satisfies Record<string, ActionKind>;
 
 export type ActionName = keyof typeof ACTIONS;
@@ -145,8 +167,10 @@ export function actionKind(action: ActionName): ActionKind {
 
 /** What an action is about, by id. Never a path or any content: it is written to the audit log. */
 export interface ResourceRef {
-  readonly kind: 'session' | 'mission' | 'setting' | 'proposal' | 'device';
+  readonly kind: 'session' | 'mission' | 'setting' | 'proposal' | 'device' | 'file';
   readonly id: string;
+  /** A file's size in bytes (#139). A number says nothing about what is in it. */
+  readonly size?: number;
 }
 
 export type AccessDecision = 'allow' | 'deny';
@@ -164,7 +188,10 @@ export const authorize: Authorizer = (ctx) =>
 
 /** One audit line for an access decision. Ids only. */
 export interface AccessAuditRecord {
-  /** `login-failed`: a login that named nobody (a bad, used or expired link). It has no principal. */
+  /**
+   * `login-failed`: a login that named nobody (a bad, used or expired link, or
+   * a wrong pairing code, #137). It has no principal.
+   */
   event: 'authorized' | 'refused-unauthorised' | 'login-failed';
   /** Absent only on `login-failed`: nobody was identified. */
   principal?: PrincipalId;
@@ -195,10 +222,11 @@ export interface AccessGate {
   /**
    * A credential that identified nobody (#127): a login link that is unknown,
    * used or expired. There is no principal to authorise, so it is only
-   * audited, always. `outcome` is a word ("invalid", "expired"), never the
-   * credential.
+   * audited, always. `outcome` is a word ("invalid", "expired", "locked-out"),
+   * never the credential. `action`: what was being attempted (`web.login`,
+   * or `web.pair.redeem` for a pairing code, #137).
    */
-  loginFailed(via: Via, outcome: string): void;
+  loginFailed(via: Via, outcome: string, action?: ActionName): void;
 }
 
 export function createAccessGate(opts: { authorize?: Authorizer; audit?: AccessAudit; log?: (message: string) => void } = {}): AccessGate {
@@ -212,15 +240,17 @@ export function createAccessGate(opts: { authorize?: Authorizer; audit?: AccessA
         principal: ctx.principal.id,
         via: ctx.via,
         action,
-        ...(resource ? { resource: { kind: resource.kind, id: resource.id } } : {}),
+        ...(resource
+          ? { resource: { kind: resource.kind, id: resource.id, ...(resource.size !== undefined ? { size: resource.size } : {}) } }
+          : {}),
         ...(ctx.deviceId !== undefined ? { deviceId: ctx.deviceId } : {}),
         ...(ctx.connectionId !== undefined ? { connectionId: ctx.connectionId } : {}),
       });
       if (decision === 'deny') opts.log?.(`access: refused ${action} via ${ctx.via} for ${ctx.principal.id}`);
       return decision === 'allow';
     },
-    loginFailed(via, outcome) {
-      opts.audit?.write({ event: 'login-failed', via, action: 'web.login', outcome });
+    loginFailed(via, outcome, action = 'web.login') {
+      opts.audit?.write({ event: 'login-failed', via, action, outcome });
     },
   };
 }

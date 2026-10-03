@@ -2,7 +2,8 @@
  * The app's end of the remote daemon (#74).
  *
  * Starts the daemon if it is not running (`ensure`: the LaunchAgent, in the
- * packaged app), connects, hands over the settings and the bot token, streams
+ * packaged app), connects, hands over the settings (the daemon reads the bot
+ * token from the Keychain itself, #138), streams
  * the app's decorated session list, and applies the presses the daemon sends
  * back through the same `SessionActions` the dashboard's buttons use. It
  * reconnects for as long as remote control is on; the daemon carries on

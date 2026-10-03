@@ -125,7 +125,8 @@ at startup. Codex has its own background server (below).
   usual. Never one that is working, waiting on a question or permission, or running background
   tasks, and time the machine spends asleep does not count.
 - While a conversation is working, the Mac is kept from *idle* sleep (a lid close still sleeps).
-  On wake, the app rechecks its hosts, and the remote daemon reconnects Discord at once.
+  On wake, the core rechecks its hosts, and whichever process holds Discord (the core daemon,
+  or the remote daemon) reconnects it at once.
 - The remote daemon's connection to a host is *passive*: it does not count as Agent Wrangler
   being connected, so it never keeps an idle conversation from being parked. (A host started
   by a build older than #74 does not know the flag, and counts it until it next moves to a
@@ -724,6 +725,8 @@ The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy
 | `aw tasks` | Tasks that are not finished, with their state and branch. |
 | `aw web open` | Open the workbench in your default browser, signed in (see [Open in a browser](#open-in-a-browser)). |
 | `aw web url` | Print the single-use sign-in link instead of opening it. |
+| `aw web pair` | Pair a phone or tablet on your home network: prints a QR code and a code (see [Pairing a device](#pairing-a-device)). |
+| `aw web devices [revoke <id>]` | The browsers that can sign in; `revoke` signs one out for good and disconnects its open tabs. |
 
 `<id>` is a session id, a unique prefix of one (four characters or more), or a key such as `claude:<id>`. `--json` prints the raw result.
 
@@ -785,7 +788,7 @@ It respects `telemetry.enabled`. An older optional Claude Code skill is in
 - **It is a client of the app, never a supervisor.** It talks only to the app's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new at every launch). It never connects to session hosts, and every command goes the same way as the equivalent click. The app shows a short notice when `aw` sends or stops something.
 - **With the app quit**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the app starts) and what the app last recorded. Everything else says the app is not running.
 - **`delegate` and `task` are allowed there**, because they only ever create a proposal or a plan. Nothing runs until you accept it in the app, so an agent calling them can't start work you haven't seen.
-- **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12). `aw web url` refuses there too, for the same reason: the link it prints is the whole workbench.
+- **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12). `aw web url` refuses there too, for the same reason: the link it prints is the whole workbench. So do `aw web pair` (its code lets a device in as you) and `aw web devices revoke`.
 
 ## Open in a browser
 
@@ -829,8 +832,7 @@ It assumes:
 - **No port forwarding.** Never forward 7392 from your router; this is not for the internet.
 - **Devices are paired one by one.** A LAN device needs its own credential, which only pairing
   issues. The credential from `aw web open` does not work on the LAN listener, and a LAN one
-  does not work on `127.0.0.1`. *Pairing is not built yet (#137): until it is, the LAN
-  listener answers every request with "not signed in".*
+  does not work on `127.0.0.1`. See [Pairing a device](#pairing-a-device).
 
 How it is served:
 
@@ -866,6 +868,77 @@ Settings → Privacy & Security → Profiles, and set it to *Always Trust* in Ke
 To stop trusting it, remove the profile. Deleting `web-tls/` makes a new CA the next time LAN
 access starts, which every device then has to trust again.
 
+### Pairing a device
+
+With LAN access on and the CA trusted on the device:
+
+1. On the Mac, run `aw web pair` in your own terminal, or open
+   `http://127.0.0.1:7391/pair/new` in a browser signed in with `aw web open` and press
+   **Show a pairing code**. Either shows a QR code and an eight-character code such as
+   `K7QD-3MXA`.
+2. Scan the QR code with the device's camera and open the link. The pairing page opens with
+   the code filled in and a name for the device (edit it if you like).
+3. Tap **Pair this device**. The workbench opens, signed in, and stays signed in for 30 days
+   from the last time it is used.
+
+Without a camera, open `https://<your-mac>.local:7392/pair` on the device and type the code.
+
+- **A code works once, for five minutes.** Starting pairing again replaces it; turning LAN
+  access off withdraws it.
+- **Guessing is locked out.** Five wrong codes from one address in ten minutes lock that
+  address out of pairing for fifteen; twenty from anywhere lock pairing out for everyone for
+  fifteen; and a code that has seen five wrong guesses is withdrawn. While locked, even the right
+  code is refused.
+- **The forms are protected** by an `Origin` check and a form token tied to a `SameSite=Strict`
+  cookie, so another site cannot submit them, and they accept at most 4 KB. (File uploads,
+  #139, will have their own limits.)
+- **The device's credential** is 256 random bits in a `__Host-`, `Secure`, `HttpOnly`,
+  `SameSite=Strict` cookie; Agent Wrangler keeps only its hash, with the device's name, when
+  it was added and when it was last seen, in `web-devices.json` (0600).
+
+**Devices and revoking.** Preferences → Browser → *Devices* lists every browser that can sign
+in, on this Mac and paired, with **Revoke** (press it twice). `aw web devices` lists them too,
+and `aw web devices revoke <id>` (an id or a unique prefix of four or more characters) revokes
+one. Revoking disconnects that device's open tabs at once, and it cannot reconnect or sign in
+again until it is paired again.
+
+Pairing started, devices paired, wrong codes, lockouts, sign-ins and revocations are recorded
+in the access log by id only, never the code.
+
+### Notifications and dictation in a browser (#141)
+
+**Notifications.** A page shows *Enable notifications* while the browser has not been asked;
+click it (browsers only prompt on a click) and allow. A tab that has allowed them gets each
+"needs you" notice as a browser notification **while it is hidden or its window is not
+focused**; a tab you are looking at shows nothing, because the table already says it. Tapping
+the notification focuses the tab and opens that session in its conversation pane. Each ask has
+a tag, so the same ask arriving twice is one notification, and every device is its own: a
+phone and a laptop each get one, and a tab you are looking at is the only one that stays quiet.
+
+Where a notice goes:
+
+| Browser tab connected, notifications allowed | The window | Notice goes to |
+|---|---|---|
+| None | Closed | The Mac's own notification (Notification Centre; `osascript` from the background core) |
+| None | Open | The Mac's own notification, as before; clicking it opens the session |
+| One or more | Either | Every such tab, which shows it only if hidden or unfocused. The Mac's own notification stays quiet |
+
+A tab that has not asked, was refused, or cannot show notifications does not count: with only
+those connected the Mac's notification still fires. Discord (when remote control is on) posts on
+its own either way and is not part of this. Browser notifications need a secure context:
+`http://127.0.0.1` on this Mac, or `https://` on the LAN. On plain http the page says so and
+offers nothing. iPhone Safari only shows web notifications for a page added to the Home Screen,
+and some Android browsers refuse `new Notification()` outside a service worker; neither is built.
+
+**Dictation.** In a browser the mic button records with the browser's own microphone
+(`MediaRecorder`: webm/opus where there is one, mp4/AAC on Safari), so it is the phone's
+microphone on a phone. Stopping uploads the recording to `POST /dictation` (the device cookie,
+`Origin`, and an `x-aw-dictation` header; at most 10 MB and five minutes; one at a time), which
+Whisper transcribes on the Mac with the same ffmpeg and model as the window's dictation. The
+text lands in the composer as it does there. There is no live preview in a browser. A refused
+microphone, a missing ffmpeg, whisper or model, and a non-secure page are each said beside the
+composer. The window keeps recording the Mac's microphone.
+
 ## Background core (experimental)
 
 Agent Wrangler's core (session tracking, the conversations it runs, Discord, `aw`) can run as a
@@ -891,6 +964,10 @@ aw daemon stop --all     # stop it and end them too, like Quit and Stop All Agen
   reattaches every host. launchd restarts a daemon that crashes, but not one that was stopped.
 - **Login:** it starts at login only when *Open at login* is on. Otherwise `aw daemon start` (or
   opening the app with the setting on) starts it.
+- **Discord runs inside it** (#138), with the bot token read from the Keychain, so it works after
+  a reboot with no window or browser open. The separate remote daemon and its LaunchAgent
+  (`com.hammonjj.agentwrangler.remote`) are stopped and removed the first time it starts. See
+  [Remote control](#remote-control-experimental).
 - **Files:** `run/core-daemon.json` (its pid, build and start time) and `logs/core-daemon.log`
   in the app's support folder; it writes the usual `agent-wrangler.log` too. While agents work
   it holds `caffeinate -i -w <pid>`, as the app holds its power blocker.
@@ -930,12 +1007,32 @@ not already offering.
    (User Settings → Advanced) to copy IDs. An empty allowlist means **nobody**,
    and nothing is published at all.
 
-**It keeps working when the app is closed.** The Discord connection is not held
-by the app but by a small background service, the *remote daemon* (#74): a
-LaunchAgent (`com.hammonjj.agentwrangler.remote`) that starts when Discord
-integration is switched on, runs from the same cloned runtime as session hosts
-(so a reinstall does not pull it out from under itself), and is restarted by
-launchd if it crashes. Switching the integration off stops it and removes it.
+**It keeps working when the app is closed.** Where the Discord connection lives
+depends on where the core runs (see [Background core](#background-core-experimental)):
+
+| Core runs in | Discord runs in | LaunchAgents |
+|---|---|---|
+| The core daemon (`experimental.coreDaemon` on) | The core daemon itself, fed its own session list (#138) | One: `com.hammonjj.agentwrangler.core` |
+| The app (the default today) | The *remote daemon* (#74), a separate background service | `com.hammonjj.agentwrangler.remote` |
+
+Either way it reads the bot token from the Keychain itself, so **after a reboot
+Discord works without opening a window or a browser**: the core daemon starts at
+login when *Open at login* is on, and the remote daemon whenever Discord
+integration is on.
+
+- **In the core daemon** there is no second process and nothing to hand over:
+  presses are applied by the core directly, as they are from the table. When it
+  starts it stops the remote daemon and removes its LaunchAgent before it
+  connects, so only one process ever holds the bot, and the cards the remote
+  daemon posted are taken over rather than posted again. Its log lines are in
+  `logs/core-daemon.log`.
+- **In the remote daemon** (while the app runs the core; it goes when Electron
+  does, #142): a LaunchAgent that starts when Discord integration is switched
+  on, runs from the same cloned runtime as session hosts (so a reinstall does
+  not pull it out from under itself), and is restarted by launchd if it
+  crashes. Switching the integration off stops it and removes it. The app never
+  starts it while a core daemon holds the core. The rest of this list is about
+  this mode.
 
 - **While the app runs,** the daemon follows the app's own list, exactly what
   the table shows, and hands presses back to the app to apply. Nothing about
@@ -950,10 +1047,13 @@ launchd if it crashes. Switching the integration off stops it and removes it.
 - A card is not reposted across the handover. Both lists name an ask the same
   way, and while neither is complete (the few seconds after a switch), nothing is
   closed and a press is asked to try again.
-- **The token stays in the app.** The app hands it to the daemon over its
-  private socket (0700 directory, 0600 socket, token-authenticated), and the
-  daemon keeps it in memory only. So after a reboot, or if the daemon itself
-  restarts, it waits, connected to nothing, until you open Agent Wrangler once.
+- **The daemon reads the settings and the token itself.** At start it reads
+  `settings.json` and the bot token from the login Keychain, so after a reboot
+  or a crash it connects and follows its own feed with the app closed. While
+  the app runs it sends its settings over the daemon's private socket (0700
+  directory, 0600 socket, token-authenticated); the bot token never crosses it,
+  and the daemon reads the Keychain again whenever the settings change, which is
+  how **Connect Discord…** and **Disconnect Discord** reach it.
 - Its log is `~/Library/Application Support/Agent Wrangler/logs/remote-daemon.log`,
   and **Test remote control** says whether it is running and connected.
 
@@ -1002,9 +1102,9 @@ A permission prompt is answerable from anywhere because answering one is a file
 write into a directory every process shares. An `AskUserQuestion` and an
 `ExitPlanMode` are not: they are settled by resolving a callback that exists
 only inside the process running the session. For a conversation in a session
-host, that callback is reachable over the host's socket, by the app or by the
-remote daemon; for one running inside the app (hosts off, or a Codex thread),
-only the app can reach it, so those are mirrored while the app runs. A session
+host, that callback is reachable over the host's socket, by the core (the app or
+the core daemon) or by the remote daemon; for a Codex thread, only the core can
+reach it, so with the remote daemon those are mirrored while the app runs. A session
 running in a terminal still mirrors permissions only: there is no callback
 anywhere to resolve.
 
@@ -1042,9 +1142,11 @@ your home directory is folded to `~`. Every publish, press, refusal and
 resolution is appended to `~/.cache/agent-wrangler/remote/audit.log`, which
 records IDs and tool names but not command text — the channel already has that.
 
-**Exactly one gateway socket, always.** Only the remote daemon connects, and
-there is only ever one daemon (launchd runs one per label, and a second copy
-that finds the socket answering exits). Discord will happily let one bot hold
+**Exactly one gateway socket, always.** Only one process connects: the core
+daemon, or else the remote daemon. There is only ever one of each (launchd runs
+one per label, and a second copy that finds the socket answering exits), and
+never both: the core daemon retires the remote daemon, and waits for it to
+exit, before it connects. Discord will happily let one bot hold
 several connections at once, and they are not redundancy: every socket receives
 every interaction, all of them race to acknowledge the press, and the losers get
 `404 Unknown interaction` — which the card renders as *"The application didn't

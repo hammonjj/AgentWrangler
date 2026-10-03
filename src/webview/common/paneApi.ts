@@ -44,6 +44,13 @@ declare function acquireVsCodeApi(): WebviewBridge<WorkbenchState>;
  */
 const api = createWebviewBridge<WorkbenchState>(() => acquireVsCodeApi());
 
+/**
+ * This document is a browser on another device (the shim says so), not the
+ * Electron window: a file's path in it is not a host path, so files are
+ * uploaded rather than named (#139).
+ */
+export const isRemoteHost = (globalThis as { agentWranglerHost?: { remote?: boolean } }).agentWranglerHost?.remote === true;
+
 export type PaneName = 'dashboard' | 'conversation';
 
 /** What `setState` holds: a slot per pane, plus the shared split. */

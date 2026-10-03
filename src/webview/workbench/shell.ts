@@ -61,6 +61,34 @@ function depthOf(state: unknown): number | undefined {
   return typeof d === 'number' && d >= 0 ? d : undefined;
 }
 
+/** Whether this tab is on the Mac itself: the only place pairing can be started (#137). */
+export function isLoopbackBrowser(hostname: string = location.hostname): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
+}
+
+/**
+ * Pair a device (#137): the server renders `/pair/new` itself, under its own
+ * tight CSP, so this page leads to it in this tab and does not embed it. A
+ * device on the LAN cannot start pairing at all.
+ */
+function mountPairPage(root: HTMLElement): void {
+  const note = document.createElement('p');
+  note.className = 'aw-page-note';
+  root.appendChild(note);
+  if (!isLoopbackBrowser()) {
+    note.textContent = 'A device is paired from a browser on the Mac running Agent Wrangler. Open Agent Wrangler there, then Preferences, then Pair a device.';
+    return;
+  }
+  note.textContent = 'Start pairing to get a five-minute code and QR code that signs another device in, such as a phone on your home network.';
+  const p = document.createElement('p');
+  const go = document.createElement('a');
+  go.className = 'aw-page-button';
+  go.href = '/pair/new';
+  go.textContent = 'Start pairing a device';
+  p.appendChild(go);
+  root.appendChild(p);
+}
+
 export function startAppShell(opts: { browser: boolean }): void {
   const wb = document.getElementById('wb') as HTMLElement;
   let router: ((input: RouterInput) => void) | undefined;
@@ -240,22 +268,26 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
       mount(pageBody);
       return;
     }
-    // Placeholders until their stories land: Preferences (#135), pairing (#137).
+    // Placeholders until their stories land: Preferences (#135).
     const note = document.createElement('p');
     note.className = 'aw-page-note';
     if (kind === 'preferences') {
       note.textContent = 'Preferences are not available in the browser yet. Open them from Agent Wrangler on the Mac.';
-      const pair = document.createElement('a');
-      pair.href = formatRoute({ kind: 'pair' });
-      pair.textContent = 'Pair a device';
-      const p = document.createElement('p');
-      p.appendChild(pair);
-      pageBody.append(note, p);
+      pageBody.appendChild(note);
+      // Only a browser on the Mac can start pairing (#137): a link a LAN device could not use is noise.
+      if (isLoopbackBrowser()) {
+        const p = document.createElement('p');
+        const pair = document.createElement('a');
+        pair.href = formatRoute({ kind: 'pair' });
+        pair.textContent = 'Pair a device';
+        p.appendChild(pair);
+        pageBody.appendChild(p);
+      }
     } else {
-      note.textContent = 'Pairing another device is not available yet.';
-      pageBody.append(note);
+      mountPairPage(pageBody);
     }
   }
+
   function focusHeading(): void {
     const route = state.route;
     let target: HTMLElement | null = heading;

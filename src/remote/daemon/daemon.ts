@@ -8,17 +8,25 @@
  * only it can. When it goes, the daemon follows its own feed (`LocalFeed`).
  * See `protocol.ts` for the wire and `sources.ts` for the switch.
  *
- * The token is held in memory only: it stays in the app's `safeStorage`, and a
- * daemon that restarts without the app (a crash, a reboot) waits, connected to
- * nothing, until the app is opened and hands it over again.
+ * It reads the settings (`settings.json`) and the bot token (the login
+ * Keychain, #124) itself when it starts, so after a reboot it connects without
+ * the app being opened (#138). The app's `configure` then replaces the
+ * settings with its own, and makes it read the Keychain again (the token was
+ * just stored or deleted).
+ *
+ * Only while the Electron app runs the core. When the core daemon holds it
+ * (`experimental.coreDaemon`), Discord runs inside the core daemon
+ * (`../inProcess.ts`), which retires this daemon and its LaunchAgent; this
+ * file, the socket and the app/own-feed switch go with Electron (#142).
  */
 import { timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { DEFAULT_CONFIG, type WranglerConfig } from '../../core/config';
+import { DEFAULT_CONFIG, readConfig, type WranglerConfig } from '../../core/config';
 import { Emitter, type Disposable } from '../../core/events';
+import { JsonSettings } from '../../core/jsonStore';
 import { NdjsonPeer, type IncomingRequest } from '../../core/rpc/ndjsonPeer';
 import { ensurePrivateDir, writeControlToken } from '../../core/control/server';
 import { writeJsonAtomic } from '../../core/session/manifestFile';
@@ -26,11 +34,10 @@ import { watchForSleep } from '../../core/sleepWatcher';
 import type { SessionDTO } from '../../shared/model';
 import type { RemoteNotice } from '../../shared/remote';
 import type { PermissionDecisionOutcome } from '../../ui/actions';
-import { FileAuditLog, type AuditLog } from '../audit';
-import { DiscordTransport } from '../discord/transport';
-import { MirrorStore } from '../mirrorStore';
-import { auditFile, mirrorFile } from '../paths';
-import { RemoteControlService, type RemoteConfig } from '../service';
+import type { AuditLog } from '../audit';
+import { RemoteConnector } from '../connector';
+import { DISCORD_BOT_TOKEN_KEY } from '../paths';
+import type { RemoteConfig } from '../service';
 import type { RemoteTransport } from '../transport';
 import { LocalFeed, type LocalFeedOptions } from './localFeed';
 import {
@@ -61,6 +68,17 @@ export interface RemoteDaemonOptions {
   /** The runtime clone this daemon runs from, recorded so the app's GC keeps it. */
   runtimeDir?: string;
   log: (message: string) => void;
+  /**
+   * The app's `settings.json`, read once at start so the daemon can connect
+   * before the app has configured it. Absent: wait for `configure`.
+   */
+  settingsFile?: string;
+  /**
+   * Where the bot token is read from: the login Keychain in production. Read
+   * at start and on every `configure`. Absent: only a token `configure`
+   * carries (an app from before #138, and tests).
+   */
+  secrets?: { get(key: string): Promise<string | undefined> };
   /** Tests: fakes for Discord and the local feed, and private file locations. */
   makeTransport?: (token: string, cfg: RemoteConfig) => RemoteTransport;
   makeOwnFeed?: (opts: LocalFeedOptions) => OwnFeed;
@@ -136,32 +154,31 @@ export class RemoteDaemon implements Disposable {
   private conns = new Set<Conn>();
   private app?: { conn: Conn; feed: AppFeed };
   private sources: SourceSwitch;
-  private service: RemoteControlService;
+  private connector: RemoteConnector;
   private own?: OwnFeed;
 
-  private config: WranglerConfig = DEFAULT_CONFIG;
   private homeDir = os.homedir();
-  private botToken?: string;
   private archived = new Set<string>();
   private nicknames = new Map<string, string>();
-
-  private transport?: RemoteTransport;
-  /** What the transport was built for; a change means reconnecting. */
-  private transportFor?: string;
-  private syncing: Promise<void> = Promise.resolve();
+  /** `configure` calls, one at a time: each reads the Keychain before applying. */
+  private configuring: Promise<void> = Promise.resolve();
   private sleepWatcher?: Disposable;
 
   constructor(private opts: RemoteDaemonOptions) {
     const log = (m: string) => opts.log(m);
     this.sources = new SourceSwitch(log);
-    this.service = new RemoteControlService(
-      this.sources,
-      this.sources,
-      new MirrorStore(opts.mirrorFile ?? mirrorFile()),
-      () => this.remoteConfig(),
-      opts.audit ?? new FileAuditLog(auditFile()),
+    this.connector = new RemoteConnector({
+      sessions: this.sources,
+      actions: this.sources,
       log,
-    );
+      makeTransport: opts.makeTransport,
+      mirrorFile: opts.mirrorFile,
+      audit: opts.audit,
+    });
+  }
+
+  private get config(): WranglerConfig {
+    return this.connector.settings;
   }
 
   async start(): Promise<void> {
@@ -175,8 +192,28 @@ export class RemoteDaemon implements Disposable {
       socketPath: this.opts.socketPath,
       ...(this.opts.runtimeDir ? { runtimeDir: this.opts.runtimeDir } : {}),
     });
-    this.opts.log(`remote daemon ${this.opts.build} listening (pid ${process.pid}); waiting for the app to hand over the settings`);
+    this.opts.log(`remote daemon ${this.opts.build} listening (pid ${process.pid})`);
     this.watchForSleep();
+    await this.configureFromDisk();
+  }
+
+  /**
+   * At start, with no app: the settings from `settings.json` and the token from
+   * the Keychain, so a reboot does not leave Discord waiting for the app to be
+   * opened (#138). An app that connects later replaces both.
+   */
+  private async configureFromDisk(): Promise<void> {
+    if (!this.opts.settingsFile) {
+      this.opts.log('waiting for the app to hand over the settings');
+      return;
+    }
+    const config = readConfig(new JsonSettings(this.opts.settingsFile));
+    if (!config.remoteEnabled) {
+      this.opts.log('Discord integration is off in settings; waiting for the app');
+      return;
+    }
+    await this.configure({ config, homeDir: this.homeDir });
+    this.opts.log(this.connector.hasToken ? 'configured from settings.json and the Keychain' : 'no bot token in the Keychain; waiting for one');
   }
 
   /**
@@ -188,7 +225,7 @@ export class RemoteDaemon implements Disposable {
     this.sleepWatcher = watchForSleep({
       onWake: () => {
         this.opts.log('woke from sleep: rechecking the Discord connection and the hosts');
-        this.transport?.wake?.();
+        this.connector.wake();
       },
     });
   }
@@ -198,18 +235,18 @@ export class RemoteDaemon implements Disposable {
       build: this.opts.build,
       pid: process.pid,
       startedAt: this.startedAt,
-      hasToken: this.botToken !== undefined,
-      connected: this.service.connected,
+      hasToken: this.connector.hasToken,
+      connected: this.connector.connected,
       source: this.sources.source,
-      mirrored: this.service.mirroredCount,
+      mirrored: this.connector.mirroredCount,
       hosts: this.own?.hostCount ?? 0,
     };
   }
 
   /** For tests: resolves once queued reconciles and notices have run. */
   async whenIdle(): Promise<void> {
-    await this.syncing;
-    await this.service.whenIdle();
+    await this.configuring;
+    await this.connector.whenIdle();
   }
 
   async dispose(): Promise<void> {
@@ -222,41 +259,45 @@ export class RemoteDaemon implements Disposable {
     } catch {
       // gone
     }
-    await this.disconnectTransport();
-    this.service.dispose();
+    // Waits for queued writes to the mirror map, so whoever connects next
+    // (the core daemon retiring this one, #138) reads a finished map.
+    await this.connector.dispose();
     this.sources.dispose();
     this.own?.dispose();
   }
 
   // ---- settings ----
 
-  private remoteConfig(): RemoteConfig {
-    const cfg = this.config;
-    return {
-      enabled: cfg.remoteEnabled,
-      notificationsEnabled: cfg.remoteNotificationsEnabled,
-      guildId: cfg.remoteGuildId,
-      channelId: cfg.remoteChannelId,
-      authorizedUserIds: cfg.remoteAuthorizedUserIds,
-      homeDir: this.homeDir,
-    };
+  /**
+   * New settings, and the token. Resolves once they have taken effect: the
+   * surface reconciled first (so switching off closes the cards while there
+   * is still a connection to close them with), then the connection made,
+   * remade or dropped.
+   *
+   * The token is read from the Keychain (#138): the app no longer sends it.
+   * One that `configure` does carry (an app from before #138) is used as it is.
+   */
+  private configure(p: Partial<ConfigureParams>): Promise<void> {
+    const run = this.configuring.then(async () => {
+      const config = p.config && typeof p.config === 'object' ? { ...DEFAULT_CONFIG, ...p.config } : this.config;
+      if (typeof p.homeDir === 'string' && p.homeDir) this.homeDir = p.homeDir;
+      const botToken = typeof p.botToken === 'string' && p.botToken ? p.botToken : config.remoteEnabled ? await this.readToken() : undefined;
+      if (config.remoteEnabled && botToken) this.ensureOwnFeed();
+      else this.dropOwnFeed();
+      await this.connector.apply({ config, homeDir: this.homeDir, botToken });
+    });
+    this.configuring = run.catch(() => undefined);
+    return run;
   }
 
-  /**
-   * New settings, and the token (or its absence). Resolves once they have
-   * taken effect: the surface reconciled first (so switching off closes the
-   * cards while there is still a connection to close them with), then the
-   * connection made, remade or dropped.
-   */
-  private async configure(p: ConfigureParams): Promise<void> {
-    if (p.config && typeof p.config === 'object') this.config = { ...DEFAULT_CONFIG, ...p.config };
-    if (typeof p.homeDir === 'string' && p.homeDir) this.homeDir = p.homeDir;
-    this.botToken = typeof p.botToken === 'string' && p.botToken ? p.botToken : undefined;
-    if (this.config.remoteEnabled && this.botToken) this.ensureOwnFeed();
-    else this.dropOwnFeed();
-    // The toolbar button changes what may be published, not the connection.
-    await this.service.reconcile();
-    await this.syncTransport();
+  private async readToken(): Promise<string | undefined> {
+    if (!this.opts.secrets) return undefined;
+    try {
+      return await this.opts.secrets.get(DISCORD_BOT_TOKEN_KEY);
+    } catch (err) {
+      this.opts.log(`could not read the bot token from the Keychain: ${String(err)}`);
+      return undefined;
+    }
   }
 
   private ensureOwnFeed(): void {
@@ -270,7 +311,7 @@ export class RemoteDaemon implements Disposable {
       isArchived: (key) => this.archived.has(key),
       nickname: (key) => this.nicknames.get(key),
       isActive: () => this.sources.source === 'daemon',
-      onNotice: (notice) => void this.service.notify(notice),
+      onNotice: (notice) => void this.connector.notify(notice),
     });
     this.own = own;
     this.sources.set('daemon', own);
@@ -283,52 +324,6 @@ export class RemoteDaemon implements Disposable {
     this.sources.set('daemon', undefined);
     this.own.dispose();
     this.own = undefined;
-  }
-
-  // ---- Discord ----
-
-  private disconnectTransport = async (): Promise<void> => {
-    if (!this.transport) return;
-    this.service.setTransport(undefined);
-    const going = this.transport;
-    this.transport = undefined;
-    this.transportFor = undefined;
-    await going.disconnect();
-    going.dispose();
-  };
-
-  /** Connect, reconnect or disconnect, whichever the settings and the token now say. */
-  private syncTransport(): Promise<void> {
-    this.syncing = this.syncing.then(async () => {
-      const cfg = this.remoteConfig();
-      const token = this.botToken;
-      const wanted = cfg.enabled && !!token && !!cfg.guildId && !!cfg.channelId;
-      const key = wanted ? `${token}\u0000${cfg.guildId}\u0000${cfg.channelId}` : undefined;
-      if (key === this.transportFor && (wanted ? !!this.transport : !this.transport)) return;
-      if (this.transport) this.opts.log('disconnecting from Discord');
-      await this.disconnectTransport();
-      if (!wanted) return;
-      const make =
-        this.opts.makeTransport ??
-        ((t: string, c: RemoteConfig) =>
-          new DiscordTransport({
-            config: () => ({ guildId: c.guildId, channelId: c.channelId }),
-            restDeps: { token: () => t, log: (m) => this.opts.log(m) },
-            gatewayDeps: { token: () => t, log: (m) => this.opts.log(m) },
-            log: (m) => this.opts.log(m),
-          }));
-      const next = make(token!, cfg);
-      this.transport = next;
-      this.transportFor = key;
-      this.service.setTransport(next);
-      try {
-        await next.connect();
-        this.opts.log('connecting to Discord');
-      } catch (err) {
-        this.opts.log(`could not connect to Discord: ${String(err)}`);
-      }
-    });
-    return this.syncing;
   }
 
   // ---- the socket ----
@@ -406,10 +401,10 @@ export class RemoteDaemon implements Disposable {
     switch (req.method) {
       case 'configure':
         this.claimApp(conn);
-        await this.configure(p as unknown as ConfigureParams);
+        await this.configure(p as Partial<ConfigureParams>);
         return { ok: true };
       case 'notify':
-        await this.service.notify((p as { notice: RemoteNotice }).notice);
+        await this.connector.notify((p as { notice: RemoteNotice }).notice);
         return { ok: true };
       case 'status':
         return this.status();

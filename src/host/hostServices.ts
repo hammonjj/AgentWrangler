@@ -34,6 +34,8 @@ import type { SessionHandle } from '../core/session/sessionHandle';
 import type { SessionHostRuntime } from '../core/session/hostSupervisor';
 import type { EnsureReason } from '../remote/daemon/client';
 import type { RemoteDaemonPaths } from '../remote/daemon/paths';
+import type { RemoteConfig } from '../remote/service';
+import type { RemoteTransport } from '../remote/transport';
 import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 
 /**
@@ -178,6 +180,19 @@ export interface HostSecrets {
   delete(key: string): Promise<void>;
 }
 
+/**
+ * A "needs you" notice. `sessionKey` and `tag` are for the browser clients
+ * (#141): where tapping the notification goes, and one tag per ask so the
+ * same ask collapses. The host's own notification ignores both.
+ */
+export interface HostNotice {
+  title: string;
+  body: string;
+  onClick?: () => void;
+  sessionKey?: string;
+  tag?: string;
+}
+
 export interface HostServices {
   /** The name shown in dialogs and window titles. Always 'Agent Wrangler' today. */
   readonly appName: string;
@@ -219,6 +234,23 @@ export interface HostServices {
     /** Stop it and take it out of login items: remote control was switched off. */
     remove(): Promise<void>;
   };
+  /**
+   * Remote control in this process (#138): the core daemon. Discord is fed the
+   * core's own list and presses go through its own actions, with no remote
+   * daemon. Takes precedence over `remoteDaemon`, which only the Electron app
+   * (while it runs the core) supplies.
+   */
+  remoteInProcess?: {
+    /**
+     * Stop the remote daemon and remove its LaunchAgent, resolving once it has
+     * exited. Awaited before this process builds its connector, every start:
+     * the two share the mirror map, and only one may run.
+     */
+    retireDaemon(): Promise<void>;
+    /** Tests: a fake Discord, and a private mirror map. */
+    makeTransport?: (token: string, cfg: RemoteConfig) => RemoteTransport;
+    mirrorFile?: string;
+  };
   /** Directory for caches this host owns, e.g. the shared usage read. Must exist. */
   storageDir: string;
   /**
@@ -235,7 +267,7 @@ export interface HostServices {
    * runs when it is clicked. Absent means this host has none, and the caller
    * falls back to `dialogs.info`.
    */
-  notify?(notice: { title: string; body: string; onClick?: () => void }): void;
+  notify?(notice: HostNotice): void;
   /**
    * Credentials, kept out of the settings file.
    *

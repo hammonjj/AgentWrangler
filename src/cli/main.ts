@@ -25,13 +25,29 @@ import {
   type ControlTaskProposeResult,
   type ControlTasksResult,
   type ControlWebLinkResult,
+  type ControlWebDevicesResult,
+  type ControlWebPairResult,
+  type ControlWebRevokeResult,
 } from '../core/control/protocol';
+import { encodeQr, qrToTerminal } from '../core/web/qr';
 import { execFile } from 'node:child_process';
 import * as path from 'node:path';
-import { agentEnvironment, originOf, parseArgs, USAGE, type Command } from './args';
+import { agentEnvironment, originOf, parseArgs, webRefusal, USAGE, type Command } from './args';
 import { ATTACH_BACKLOG, AttachRenderer } from './attach';
 import { ControlClient } from './client';
-import { formatDelegation, formatOffline, formatProjects, formatProposal, formatSession, formatSessions, formatStatus, formatTasks } from './format';
+import {
+  formatDelegation,
+  formatOffline,
+  formatProjects,
+  formatProposal,
+  formatSession,
+  formatSessions,
+  formatStatus,
+  formatTasks,
+  formatWebDevices,
+  formatWebPair,
+  safe,
+} from './format';
 import { readOfflineView } from './offline';
 import { runDaemonCommand } from './daemon';
 import { locateInstall } from '../core/daemon/coreDaemon';
@@ -75,6 +91,13 @@ async function run(argv: string[]): Promise<number> {
       process.stderr.write(`aw web url: refused, because this shell looks like ${inside}. Run it from your own terminal, or use aw web open.\n`);
       return 3;
     }
+  }
+  // Pairing prints a code that lets a device in as you, and revoking signs
+  // one of yours out: neither is for an agent to do (#137).
+  const refusal = webRefusal(cmd, agentEnvironment(process.env));
+  if (refusal) {
+    process.stderr.write(`${refusal}\n`);
+    return 3;
   }
 
   const dirs = defaultRunDirs();
@@ -237,6 +260,22 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
       }
       await openInBrowser(r.url);
       process.stdout.write('Opened Agent Wrangler in your browser.\n');
+      return 0;
+    }
+    case 'webPair': {
+      const r = await client.request<ControlWebPairResult>('web.pair');
+      process.stdout.write(qrToTerminal(encodeQr(r.url, 'M'), { ansi: process.stdout.isTTY === true }));
+      process.stdout.write(`\n${formatWebPair(r, Date.now())}\n`);
+      return 0;
+    }
+    case 'webDevices': {
+      const r = await client.request<ControlWebDevicesResult>('web.devices');
+      print(r, () => formatWebDevices(r.devices, now, width()), cmd.json);
+      return 0;
+    }
+    case 'webRevoke': {
+      const r = await client.request<ControlWebRevokeResult>('web.devices.revoke', { id: cmd.id });
+      process.stdout.write(`Revoked ${safe(r.device.name)} (${r.device.id.slice(0, 8)}). Its open tabs have been disconnected.\n`);
       return 0;
     }
     default:

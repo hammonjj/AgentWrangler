@@ -39,8 +39,17 @@ export interface InputModal {
   value: string;
   placeholder?: string;
   password: boolean;
-  /** `pickFolder`: a path on the Mac the app runs on; blank is cancelled. */
-  folder: boolean;
+}
+
+/**
+ * `pickFolder`: a folder on the Mac the app runs on, chosen in the folder
+ * browser (`common/folderBrowser.ts`), which the modal host mounts. The
+ * browser answers with the host path (`choose`), or `undefined` if cancelled.
+ */
+export interface FolderModal {
+  kind: 'folder';
+  title: string;
+  openLabel?: string;
 }
 
 export interface PickModal {
@@ -56,7 +65,7 @@ export interface PickModal {
   active: number;
 }
 
-export type ModalModel = MessageModal | InputModal | PickModal;
+export type ModalModel = MessageModal | InputModal | PickModal | FolderModal;
 
 export type ModalEvent =
   /** The field changed: the input's text, or the pick's filter. */
@@ -66,6 +75,8 @@ export type ModalEvent =
   | { type: 'moveTo'; edge: 'first' | 'last' }
   /** Enter in a field, or a row clicked (by its position in `visible`). */
   | { type: 'submit'; visibleIndex?: number }
+  /** The folder browser finished: a host path, or `undefined` for cancelled. */
+  | { type: 'choose'; path: string | undefined }
   /** A message button, by its position in `buttons`. */
   | { type: 'button'; index: number }
   /** Escape, the Cancel button, a click outside. */
@@ -110,18 +121,9 @@ export function modalFromPrompt(prompt: ShellPrompt): ModalModel {
         value: prompt.value ?? '',
         ...(prompt.placeHolder ? { placeholder: prompt.placeHolder } : {}),
         password: prompt.password === true,
-        folder: false,
       };
     case 'pickFolder':
-      return {
-        kind: 'input',
-        title: prompt.openLabel ?? 'Choose a folder',
-        prompt: 'A folder on the Mac running Agent Wrangler, as a full path.',
-        value: '',
-        placeholder: '/Users/you/project',
-        password: false,
-        folder: true,
-      };
+      return { kind: 'folder', title: prompt.openLabel ?? 'Choose a folder', ...(prompt.openLabel ? { openLabel: prompt.openLabel } : {}) };
     case 'pick': {
       const rows = prompt.items.map((item) => ({ ...item, label: stripCodicons(item.label) }));
       return filtered({
@@ -156,12 +158,10 @@ export function stepModal(model: ModalModel, event: ModalEvent): ModalStep {
       return { done: false, model };
     case 'input':
       if (event.type === 'text') return { done: false, model: { ...model, value: event.text } };
-      if (event.type === 'submit') {
-        if (!model.folder) return { done: true, value: model.value };
-        const path = model.value.trim();
-        return { done: true, value: path || undefined };
-      }
+      if (event.type === 'submit') return { done: true, value: model.value };
       return { done: false, model };
+    case 'folder':
+      return event.type === 'choose' ? { done: true, value: event.path } : { done: false, model };
     case 'pick': {
       if (event.type === 'text') return { done: false, model: filtered({ ...model, query: event.text }) };
       const n = model.visible.length;

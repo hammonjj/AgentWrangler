@@ -60,6 +60,19 @@ export interface ElectronHostOptions {
    */
   scopeDialogs?(native: HostDialogs): HostDialogs;
   /**
+   * What the app is given as `notify`, made from the native one (#141): `main.ts`
+   * hands back the client registry's router, which sends a notice to the
+   * browser tabs that can show it and falls back to the native one only when
+   * there are none. Absent, the native one.
+   */
+  scopeNotify?(native: HostServices['notify']): HostServices['notify'];
+  /**
+   * The same for `shell` (#140): the registry's scoped shell goes to the app,
+   * and the native one stays with the window client and with a loopback
+   * browser's "Open on this Mac".
+   */
+  scopeShell?(native: HostShell): HostShell;
+  /**
    * Run a notification's click as the user at this Mac (#126): a click on a
    * banner is the window client's request, so what it opens or asks lands
    * in the window.
@@ -252,9 +265,9 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     storageDir,
     dataDir: userDataDir,
     dialogs: opts.scopeDialogs ? opts.scopeDialogs(dialogsFor(opts)) : dialogsFor(opts),
-    shell: shellFor(opts),
+    shell: opts.scopeShell ? opts.scopeShell(shellFor(opts)) : shellFor(opts),
     clipboard: { writeText: async (text) => clipboard.writeText(text) },
-    notify: notifierFor(opts),
+    notify: opts.scopeNotify ? opts.scopeNotify(notifierFor(opts)) : notifierFor(opts),
     // The login Keychain, never `settings.json`. `secrets.json` is the old
     // safeStorage file, moved into the Keychain once and then removed (#124).
     secrets: createElectronSecrets(path.join(userDataDir, 'secrets.json'), opts.log),

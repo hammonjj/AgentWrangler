@@ -9,6 +9,8 @@
  * allows, so the fade matches the removal.
  */
 
+import { overlayDock } from '../common/overlayDock';
+
 const DEFAULT_TIMEOUT_MS = 4000;
 /** Older lines go first when a burst would stack past this. */
 const MAX_TOASTS = 4;
@@ -21,7 +23,7 @@ function container(): HTMLElement {
     // Read out without taking focus: these report, they never ask.
     host.setAttribute('role', 'status');
     host.setAttribute('aria-live', 'polite');
-    document.body.appendChild(host);
+    overlayDock().appendChild(host);
   }
   return host;
 }

@@ -27,9 +27,13 @@ import type { RequestContext } from './access';
 import type { Disposable } from './events';
 import { currentRequest } from './requestScope';
 import type { SessionHandle } from './session/sessionHandle';
-import type { HostDialogs, InputOptions, PickItem, WorkbenchSurface } from '../host/hostServices';
+import type { HostDialogs, HostServices, HostShell, InputOptions, PickItem, WorkbenchSurface } from '../host/hostServices';
 import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 import type { ShellPrompt, ShellPromptValue } from '../shared/shellProtocol';
+import { NoticeDeduper } from '../shared/webCapabilities';
+
+/** The same tag inside this is one ask. */
+const NOTICE_DEDUPE_MS = 5_000;
 
 /** Where a client's conversation pane should go. */
 export type NavigateTarget =
@@ -46,9 +50,59 @@ export type NavigateTarget =
  */
 export type ClientPrompt = ShellPrompt & { validateInput?: (value: string) => string | undefined };
 
+/** What a browser tab is sent for a notice (#141). Tapping it goes to `sessionKey`. */
+export interface ClientNotice {
+  title: string;
+  body: string;
+  sessionKey?: string;
+  /** One per ask: the same ask arriving twice collapses into one notification. */
+  tag: string;
+}
+
+/**
+ * Where a client is, which decides what the host-local actions (open a file,
+ * show it in Finder, run a command in a terminal) mean for it (#140):
+ *
+ * | kind | Is | Host-local actions |
+ * |---|---|---|
+ * | `window` | the Electron window, on the Mac | done on the Mac |
+ * | `loopback` | a browser on this machine | shown in the browser; "Open on this Mac" offered |
+ * | `lan` | a browser elsewhere | shown in the browser; nothing is ever done on the host |
+ */
+export type ClientKind = 'window' | 'loopback' | 'lan';
+
+/** A file the app wants a client to look at. */
+export interface ClientFile {
+  path: string;
+  /** What the app asked for: the file opened, or revealed in the file manager. */
+  intent: 'open' | 'reveal';
+}
+
+/** A command the app wants a client's user to run in a terminal. */
+export interface ClientCommand {
+  command: string;
+  cwd: string;
+  name: string;
+}
+
 export interface ClientChannel {
   /** The `RequestContext.connectionId` its requests carry. */
   readonly connectionId: string;
+  /**
+   * A browser tab that shows OS notifications itself (#141): true only while
+   * its permission is granted. Absent or false: not a place a notice can go
+   * (the Electron window, a tab that has not asked or was refused).
+   */
+  readonly canNotify?: boolean;
+  /** Send a notice to a tab with `canNotify`. The tab decides whether to show it (hidden or unfocused). */
+  notify?(notice: ClientNotice): void;
+  readonly kind: ClientKind;
+  /** A link, opened where this client is: its own browser, or the default browser on the Mac. */
+  openUrl(url: string): void;
+  /** A file: the viewer in a browser; the default app or the file manager on the Mac for the window. */
+  showFile(file: ClientFile): void;
+  /** A command: shown and copyable in a browser; run in Terminal on the Mac for the window. */
+  showCommand(command: ClientCommand): void;
   /** On screen now: the window is open, the tab is connected. */
   readonly isOpen: boolean;
   /** Ask; resolves with the answer, or undefined for cancelled. See `ShellPromptValue`. */
@@ -79,10 +133,18 @@ export class ClientRegistry {
   readonly dialogs: HostDialogs;
   /** Scoped to the originating client. Hand this to the app as its surface. */
   readonly surface: WorkbenchSurface;
+  /**
+   * Scoped to the originating client (#140). Hand this to the app as
+   * `host.shell`: a link, file or command goes to the client that asked and
+   * is shown where that client is. With none, the fallback client if open
+   * (the window), else nothing: the host never opens anything unasked.
+   */
+  readonly shell: HostShell;
 
   constructor(private readonly opts: ClientRegistryOptions) {
     this.dialogs = this.createDialogs();
     this.surface = this.createSurface();
+    this.shell = this.createShell();
   }
 
   /** Connect a client. Disposing it disconnects it, and cancels whatever it was being asked. */
@@ -123,6 +185,50 @@ export class ClientRegistry {
         this.opts.log(`clients: toast to ${channel.connectionId} failed: ${String(err)}`);
       }
     }
+  }
+
+  /**
+   * Send a notice to every browser tab that can show one; how many were sent.
+   * Each tab decides for itself whether the user is already looking at it.
+   */
+  notify(notice: ClientNotice): number {
+    let sent = 0;
+    for (const { channel } of this.clients.values()) {
+      if (!channel.canNotify || !channel.notify) continue;
+      try {
+        channel.notify(notice);
+        sent++;
+      } catch (err) {
+        this.opts.log(`clients: notice to ${channel.connectionId} failed: ${String(err)}`);
+      }
+    }
+    return sent;
+  }
+
+  /**
+   * `host.notify`, routed (#141, decision D3). A notice goes to every browser
+   * tab that can show it; the host's own (`native`: the Electron
+   * notification, or `osascript` in the daemon) fires only when no such tab is
+   * connected. A visible tab suppresses its own copy, and the host's stays
+   * quiet too: somebody is looking. Discord is separate and unchanged.
+   *
+   * The same `tag` inside `NOTICE_DEDUPE_MS` is one ask, delivered once.
+   */
+  notifier(native: HostServices['notify'], now: () => number = Date.now): NonNullable<HostServices['notify']> {
+    const dedupe = new NoticeDeduper(NOTICE_DEDUPE_MS);
+    return (notice) => {
+      if (notice.tag !== undefined && !dedupe.first(notice.tag, now())) return;
+      const sent =
+        notice.tag !== undefined
+          ? this.notify({
+              title: notice.title,
+              body: notice.body,
+              tag: notice.tag,
+              ...(notice.sessionKey !== undefined ? { sessionKey: notice.sessionKey } : {}),
+            })
+          : 0;
+      if (sent === 0) native?.(notice);
+    };
   }
 
   private entryFor(ctx: RequestContext | undefined): Entry | undefined {
@@ -218,6 +324,25 @@ export class ClientRegistry {
     };
   }
 
+  private createShell(): HostShell {
+    const registry = this;
+    /** The originating client, or the fallback while it is open. */
+    const target = (what: string): ClientChannel | undefined => {
+      const client = registry.originating();
+      if (client) return client;
+      const fallback = registry.opts.navigationFallback !== undefined ? registry.get(registry.opts.navigationFallback) : undefined;
+      if (fallback?.isOpen) return fallback;
+      registry.opts.log(`clients: ${what}: no client to show it to`);
+      return undefined;
+    };
+    return {
+      openExternal: (url) => target(`open ${url}`)?.openUrl(url),
+      openFile: (path) => target(`open ${path}`)?.showFile({ path, intent: 'open' }),
+      revealInFileManager: (path) => target(`reveal ${path}`)?.showFile({ path, intent: 'reveal' }),
+      runInTerminal: (command, options) => target(`run ${command}`)?.showCommand({ command, cwd: options.cwd, name: options.name }),
+    };
+  }
+
   private createSurface(): WorkbenchSurface {
     const registry = this;
     /** The originating client, or the fallback while it is open. */
@@ -254,10 +379,20 @@ export function channelFromDialogs(opts: {
   dialogs: HostDialogs;
   isOpen: () => boolean;
   navigate: (target: NavigateTarget) => void;
+  /** The machine's own shell, which this client (the window) acts on. Without it, nothing is opened. */
+  shell?: HostShell;
+  kind?: ClientKind;
 }): ClientChannel {
-  const { dialogs } = opts;
+  const { dialogs, shell } = opts;
   return {
     connectionId: opts.connectionId,
+    kind: opts.kind ?? 'window',
+    openUrl: (url) => shell?.openExternal(url),
+    showFile: (file) => (file.intent === 'reveal' ? shell?.revealInFileManager(file.path) : shell?.openFile(file.path)),
+    showCommand: (c) => {
+      if (shell?.runInTerminal) shell.runInTerminal(c.command, { cwd: c.cwd, name: c.name });
+      else dialogs.error('Agent Wrangler: this host has no terminal to hand the session to.');
+    },
     get isOpen() {
       return opts.isOpen();
     },

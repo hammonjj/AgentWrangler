@@ -42,6 +42,10 @@ import {
   type ControlTaskProposeResult,
   type ControlTaskView,
   type ControlWebLinkResult,
+  type ControlWebDevice,
+  type ControlWebDevicesResult,
+  type ControlWebPairResult,
+  type ControlWebRevokeResult,
   type StopOutcome,
   MAX_TASK_OBJECTIVE_CHARS,
 } from './protocol';
@@ -83,6 +87,12 @@ export interface ControlBackend {
   tasks(): ControlTaskView[];
   /** A single-use browser sign-in link (#127). Throws `ControlError` when the browser workbench is off. */
   webLink(): ControlWebLinkResult;
+  /** Start pairing a device (#137). Throws `ControlError` while LAN access is not listening. */
+  webPair(): ControlWebPairResult;
+  /** Browser devices, loopback and paired (#137). */
+  webDevices(): ControlWebDevice[];
+  /** Revoke one by id or unique prefix (#137); its connections close at once. */
+  webRevoke(id: string): ControlWebRevokeResult;
 }
 
 export interface ControlServerOptions {
@@ -251,6 +261,19 @@ export class ControlServer implements Disposable {
         // Never the link itself: it is a credential for two minutes.
         this.opts.log(`control socket: web.link by ${conn.client ?? '?'}`);
         return backend.webLink() satisfies ControlWebLinkResult;
+      case 'web.pair':
+        // Never the code: it is a credential for five minutes.
+        if (this.mutationsStopped) throw new ControlError(RPC_UNSUPPORTED, 'Agent Wrangler is quitting');
+        this.opts.log(`control socket: web.pair by ${conn.client ?? '?'}`);
+        return backend.webPair() satisfies ControlWebPairResult;
+      case 'web.devices':
+        return { devices: backend.webDevices() } satisfies ControlWebDevicesResult;
+      case 'web.devices.revoke': {
+        if (typeof p.id !== 'string' || p.id.trim().length === 0) throw new ControlError(RPC_INVALID_PARAMS, 'id is required');
+        if (this.mutationsStopped) throw new ControlError(RPC_UNSUPPORTED, 'Agent Wrangler is quitting');
+        this.opts.log(`control socket: web.devices.revoke ${p.id.slice(0, 40)} by ${conn.client ?? '?'}`);
+        return backend.webRevoke(p.id.trim()) satisfies ControlWebRevokeResult;
+      }
       default:
         throw new ControlError(RPC_METHOD_NOT_FOUND, `no method ${req.method}`);
     }

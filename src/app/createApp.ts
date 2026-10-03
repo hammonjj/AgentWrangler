@@ -135,11 +135,13 @@ import { FileUsageCache } from '../core/usageCache';
 import { UsageService } from '../core/usageService';
 import { FileSuggestService } from '../core/fileSuggest';
 import { RemoteDaemonLink } from '../remote/daemon/client';
+import { createInProcessRemoteControl, type InProcessRemoteControl } from '../remote/inProcess';
 import { DISCORD_BOT_TOKEN_KEY, accessAuditFile } from '../remote/paths';
 import { FileAuditLog } from '../remote/audit';
 import { createAccessGate, ownerContext, type AccessGate } from '../core/access';
 import { outsideRequest } from '../core/requestScope';
 import { guardSessionActions } from '../ui/guardedActions';
+import { createApprovalActions } from './approvals';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { PermissionModeName } from '../shared/conversation';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
@@ -339,6 +341,11 @@ export interface AgentWranglerApp {
    * first and see the first scan land in it.
    */
   start(): void;
+  /**
+   * Hang up Discord when it runs in this process (the core daemon, #138),
+   * once queued writes to the mirror map are done. Nothing to do otherwise.
+   */
+  stopRemote(): Promise<void>;
   dispose(): void;
 }
 
@@ -861,19 +868,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const question = sessions.get(id)?.pendingQuestion;
       return question ? { requestId: question.requestId, questions: question.questions } : undefined;
     },
-    answer: async (id: string | undefined, requestId: string, answers: Record<string, string>) => {
-      const handle = sessions.get(id);
-      return handle ? (await handle.answer(requestId, answers)) === 'applied' : false;
-    },
     // Only Claude has plans: Codex has no plan-mode concept, and its handle
     // never reports one.
     pendingPlan: (id: string | undefined) => {
       const plan = sessions.get(id)?.pendingPlan;
       return plan ? { requestId: plan.requestId, plan: plan.plan, more: plan.more } : undefined;
-    },
-    decidePlan: async (id: string | undefined, requestId: string, approve: boolean, feedback?: string) => {
-      const handle = sessions.get(id);
-      return handle ? (await handle.decidePlan(requestId, approve, feedback)) === 'applied' : false;
     },
     // Every runner is hosted, and a hosted session's permission prompt reaches
     // the row and the remote only from here, not through the hook file.
@@ -1637,6 +1636,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
           host.notify?.({
             title: n.title,
             body: n.body,
+            tag: `mission:${n.missionId}:${n.title}`,
+            ...(origin ? { sessionKey: origin.key } : {}),
             onClick: () => (origin ? surface?.show(origin.key, { preserveFocus: false }) : showMissionRequests.fire(n.missionId)),
           });
         }
@@ -2209,7 +2210,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
       else void reviewProposal(runner, mission.id, current.tasks[0].recommendation!, { showSession: false });
     };
     const body = route ? `Proposed: ${route}. Click to review and start it.` : 'No route recommended: click to pick one.';
-    if (host.notify) host.notify({ title: `Task proposal: ${mission.title}`, body, onClick: open });
+    if (host.notify) {
+      host.notify({
+        title: `Task proposal: ${mission.title}`,
+        body,
+        onClick: open,
+        tag: `proposal:${mission.id}`,
+        ...(from ? { sessionKey: from.key } : {}),
+      });
+    }
     dialogs.flash(`Task proposal waiting: ${mission.title} (${from ? 'in its conversation' : 'Tasks menu'})`, 6000);
     log(`task ${mission.id}: proposed through aw`);
     return {
@@ -2371,10 +2380,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (cfg.remoteAuthorizedUserIds.length === 0) bad('No authorised users, so nothing will be published at all');
       else ok(`${cfg.remoteAuthorizedUserIds.length} authorised user(s)`);
 
-      // The connection is the daemon's, not this process's (#74).
-      const status = await remoteLink?.status();
+      // The connection is this process's in the core daemon (#138), the remote daemon's otherwise (#74).
+      const status = inProcessRemote ? remoteHere?.status() : await remoteLink?.status();
       if (!status) {
-        bad('The background service that holds the Discord connection is not running. It starts when Discord integration is on; see logs/remote-daemon.log');
+        bad(
+          inProcessRemote
+            ? 'Discord is not running in the background service yet. It starts when Discord integration is on; see logs/core-daemon.log'
+            : 'The background service that holds the Discord connection is not running. It starts when Discord integration is on; see logs/remote-daemon.log',
+        );
       } else {
         ok(`The background service is running (pid ${status.pid}), so Discord keeps working when Agent Wrangler is closed`);
         if (!status.hasToken) bad('The background service has no bot token yet');
@@ -2414,8 +2427,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
   const disconnectDiscord = async (): Promise<{ ok: boolean; lines: string[] }> => {
     await host.secrets.delete(DISCORD_BOT_TOKEN_KEY);
-    // The daemon forgets its copy and hangs up.
-    await remoteLink?.reconfigure();
+    // Whoever holds the connection reads the Keychain again, finds nothing, and hangs up.
+    if (inProcessRemote) await syncRemote();
+    else await remoteLink?.reconfigure();
     log('remote: token removed and disconnected');
     return { ok: true, lines: ['✓  The bot token has been removed and the connection closed.'] };
   };
@@ -2661,83 +2675,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
     installHooks() {
       void installHooks();
     },
-    async decidePermission(key, behavior, opts) {
-      const s = store.get(key);
-      if (!s || s.provider !== 'claude') return 'unsupported';
-      const expected = opts?.expectedRequestId;
-      // A session in a host is answered through the host (§6.1): its ask
-      // waits for days, where the hook gives up after ~28 minutes, and since
-      // Stage 4 the hook does not wait for hosted sessions at all, so the
-      // host is the only way in (`AGENTWRANGLER_HOSTED`). The request named is
-      // answered; with none named, only a lone pending one, so the answer
-      // cannot land on the wrong prompt.
-      const hosted = runners.get(s.sessionId);
-      if (hosted?.hosted) {
-        const pending = hostedPermissions(hosted);
-        const target = expected !== undefined ? pending.find((b) => b.requestId === expected) : pending.length === 1 ? pending[0] : undefined;
-        if (target) {
-          const outcome = await hosted.decide(target.requestId, behavior);
-          if (outcome === 'applied') {
-            log(`permission ${behavior} sent to the host running ${s.name ?? s.sessionId}`);
-            return 'applied';
-          }
-          dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
-          return outcome === 'stale' ? 'stale' : 'gone';
-        }
-      }
-      // Caught here only to say the right thing: this snapshot can be a poll
-      // behind, so `HookLog.decide` re-checks against the id it read off the
-      // event stream, which is the one that actually decides.
-      if (expected !== undefined && s.permissionRequestId !== expected) {
-        dialogs.flash(`Agent Wrangler: that prompt for ${displayLabel(s)} has already been answered.`, 4000);
-        return 'stale';
-      }
-      const sent = await provider.decidePermission(s.sessionId, behavior, expected);
-      if (sent) {
-        log(`permission ${behavior} sent to ${s.name ?? s.sessionId}`);
-        if (behavior === 'always' && s.alwaysAllow) {
-          dialogs.flash(
-            `Agent Wrangler: allowed ${s.alwaysAllow.rules.join(', ')} in ${s.alwaysAllow.destination}.`,
-            5000,
-          );
-        }
-        return 'applied';
-      }
-      // The prompt was answered in Claude Code first, or the hook gave up
-      // waiting; either way there is nothing left to decide from here.
-      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
-      return 'gone';
-    },
-    async answerQuestion(key, requestId, answers) {
-      const s = store.get(key);
-      if (!s) return 'unsupported';
-      // `owns` rather than a try-and-see: a session running in a terminal has
-      // no question here to answer, and saying so is not the same as failing.
-      if (!runnerOwnership.owns(s.sessionId) || !runnerOwnership.answer) return 'unsupported';
-      const parked = runnerOwnership.pendingQuestion?.(s.sessionId);
-      if (parked && parked.requestId !== requestId) return 'stale';
-      const answered = await runnerOwnership.answer(s.sessionId, requestId, answers);
-      if (answered) {
-        log(`question answered for ${s.name ?? s.sessionId}`);
-        return 'applied';
-      }
-      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that question.`, 4000);
-      return 'gone';
-    },
-    async decidePlan(key, requestId, approve, feedback) {
-      const s = store.get(key);
-      if (!s) return 'unsupported';
-      if (!runnerOwnership.owns(s.sessionId) || !runnerOwnership.decidePlan) return 'unsupported';
-      const parked = runnerOwnership.pendingPlan?.(s.sessionId);
-      if (parked && parked.requestId !== requestId) return 'stale';
-      const decided = await runnerOwnership.decidePlan(s.sessionId, requestId, approve, feedback);
-      if (decided) {
-        log(`plan ${approve ? 'approved' : 'rejected'} for ${s.name ?? s.sessionId}`);
-        return 'applied';
-      }
-      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that plan.`, 4000);
-      return 'gone';
-    },
+    // Permissions, questions and plans: the one way an ask is answered from
+    // outside the agent, whichever surface or client the button is on (#132).
+    ...createApprovalActions({
+      store,
+      live: (id) => sessions.get(id),
+      decideByHook: (id, behavior, expected) => provider.decidePermission(id, behavior, expected),
+      flash: (message, timeoutMs) => dialogs.flash(message, timeoutMs),
+      log,
+    }),
   };
 
   // One microphone, so one recorder for the whole process however many panes are open.
@@ -2790,34 +2736,40 @@ export function createApp(host: HostServices): AgentWranglerApp {
   );
   host.subscribe(remoteSessions);
   /**
-   * Remote control runs in the remote daemon (#74), not here.
+   * Remote control: in this process, or in the remote daemon.
    *
-   * The daemon holds the Discord connection and the reconciler, and keeps both
-   * going while this app is quit, crashed or being reinstalled. This process is
-   * its best feed while it runs: it hands over the settings and the bot token
-   * (which stays in `safeStorage`; the daemon keeps it in memory), streams
-   * `remoteSessions`, and applies the presses the daemon sends back through
-   * `actions`, the same calls the dashboard's buttons make. Nothing is started
-   * until `remote.enabled` is on, so the default configuration runs no daemon.
+   * **In this process** (`host.remoteInProcess`: the core daemon, #138). The
+   * core does not come and go, so Discord runs right here:
+   * `createInProcessRemoteControl` is fed `remoteSessions` and applies presses
+   * through `actions`, the same calls the dashboard's buttons make, and reads
+   * the bot token from the Keychain itself. The first sync retires the remote
+   * daemon (its LaunchAgent included) and waits for it to exit before anything
+   * is built, since the two share the mirror map. Nothing is built until
+   * `remote.enabled` is on.
    *
-   * The list is not offered as complete (`ready`) until the Claude provider's
-   * first scan is in and adopted hosts have had a moment to catch up: until
-   * then the daemon keeps following its own feed, rather than close cards for
-   * asks this process has not seen yet.
+   * **In the remote daemon** (#74; `host.remoteDaemon`: the Electron app while
+   * it runs the core). The daemon holds the Discord connection and the
+   * reconciler, and keeps both going while this app is quit, crashed or being
+   * reinstalled. This process is its best feed while it runs: it hands over
+   * the settings (the daemon reads the token from the Keychain itself),
+   * streams `remoteSessions`, and applies the presses the daemon sends back
+   * through `actions`. Nothing is started until `remote.enabled` is on, so the
+   * default configuration runs no daemon. Goes with Electron (#142).
+   *
+   * Either way, the list is not offered as complete (`ready`) until the Claude
+   * provider's first scan is in and adopted hosts have had a moment to catch
+   * up: until then nothing is closed for asks this process has not seen yet.
    */
   let remoteReady = false;
-  const remoteLink = host.remoteDaemon
+  const inProcessRemote = host.remoteInProcess;
+  const remoteLink = host.remoteDaemon && !inProcessRemote
     ? new RemoteDaemonLink({
         paths: host.remoteDaemon.paths,
         build: host.sessionHosts.runtime.buildId,
         log: (m) => log(`remote: ${m}`),
         ensure: (why) => host.remoteDaemon!.ensure(why),
         replaceOutdated: host.remoteDaemon.replaceOutdated,
-        configure: async () => ({
-          config: getConfig(),
-          homeDir: os.homedir(),
-          botToken: getConfig().remoteEnabled ? ((await host.secrets.get(DISCORD_BOT_TOKEN_KEY)) ?? null) : null,
-        }),
+        configure: async () => ({ config: getConfig(), homeDir: os.homedir() }),
         sessions: remoteSessions,
         ready: () => remoteReady,
         extras: () => {
@@ -2836,13 +2788,46 @@ export function createApp(host: HostServices): AgentWranglerApp {
       })
     : undefined;
   if (remoteLink) host.subscribe(remoteLink);
-  announceRemote = (notice) => void remoteLink?.notify(notice);
+  /** Discord in this process, once retired-and-enabled has built it. */
+  let remoteHere: InProcessRemoteControl | undefined;
+  let remoteDaemonRetired = false;
+  let remoteStopped = false;
+  announceRemote = (notice) => void (remoteHere ? remoteHere.notify(notice) : remoteLink?.notify(notice));
+
+  /** In this process: retire the remote daemon once, then build, reconfigure or hang up. */
+  const syncRemoteHere = async (here: NonNullable<HostServices['remoteInProcess']>): Promise<void> => {
+    if (!remoteDaemonRetired) {
+      remoteDaemonRetired = true;
+      await here.retireDaemon().catch((err) => log(`remote: could not retire the remote daemon: ${String(err)}`));
+    }
+    if (remoteStopped) return;
+    if (!remoteHere) {
+      if (!getConfig().remoteEnabled) return;
+      remoteHere = createInProcessRemoteControl({
+        sessions: remoteSessions,
+        ready: () => remoteReady,
+        actions,
+        gate: access,
+        getConfig,
+        secrets: host.secrets,
+        log: (m) => log(`remote: ${m}`),
+        makeTransport: here.makeTransport,
+        mirrorFile: here.mirrorFile,
+      });
+      log('remote: Discord runs in this process');
+    }
+    await remoteHere.sync();
+  };
 
   /** Start following the daemon, hand it new settings, or stop it: whichever `remote.enabled` now says. */
   let remoteWanted = false;
   let remoteSyncing: Promise<void> = Promise.resolve();
   const syncRemote = (): Promise<void> => {
     remoteSyncing = remoteSyncing.then(async () => {
+      if (inProcessRemote) {
+        await syncRemoteHere(inProcessRemote).catch((err) => log(`remote: ${String(err)}`));
+        return;
+      }
       if (!remoteLink || !host.remoteDaemon) return;
       if (getConfig().remoteEnabled) {
         if (!remoteWanted) {
@@ -2904,6 +2889,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
           if (!notice) continue;
           host.notify({
             ...notice,
+            // One tag per ask (#141): the session and what it is waiting for.
+            tag: `attention:${s.key}:${s.status}`,
+            sessionKey: s.key,
             // Clicked: the user asked for it, so the window comes forward.
             onClick: () => surface?.show(s.key, { preserveFocus: false }),
           });
@@ -3252,9 +3240,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
       await runners.endAllForQuit(withinMs);
     },
     onSystemResume() {
-      // The Discord connection is the daemon's, which notices the sleep itself.
+      // The remote daemon notices a sleep itself; Discord in this process is told.
       log('woke from sleep: rechecking session hosts');
       runners.wakeAll();
+      remoteHere?.wake();
     },
     restartCodexServer,
     runnerOwnership,
@@ -3334,6 +3323,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         while (Date.now() < deadline && catchingUp()) await new Promise((r) => setTimeout(r, 250));
         remoteReady = true;
         remoteLink?.pushSoon();
+        void remoteHere?.reconcile();
       });
       // After the store's first scan, so "is it running elsewhere?" has an answer.
       setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), 2000);
@@ -3342,9 +3332,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
         .finally(settleStartup);
     },
 
+    async stopRemote() {
+      const here = remoteHere;
+      remoteHere = undefined;
+      remoteStopped = true; // nothing is built again on the way out
+      await here?.dispose();
+    },
+
     dispose() {
       dictation.cancel(); // never leave ffmpeg holding the microphone after the app has gone
       store.dispose();
+      void remoteHere?.dispose();
     },
   };
 }

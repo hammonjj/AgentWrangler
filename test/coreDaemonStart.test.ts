@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { SecurityRunner } from '../src/core/keychainSecrets';
 import type { SessionHostRuntime } from '../src/core/session/hostSupervisor';
 import type { PowerAssertion } from '../src/node/powerAssertion';
+import type { RemoteInvocation } from '../src/remote/transport';
 
 vi.mock('electron', () => {
   throw new Error('electron was imported under the core daemon');
@@ -188,6 +189,104 @@ describe('startCoreDaemon', () => {
     };
     expect(await result.daemon.stop('menuStopAll')).toMatchObject({ stopHosted: true });
     expect(seen).toEqual([true]);
+  });
+
+  it('runs Discord in-process: retires the remote daemon first, then connects with the Keychain token (#138)', async () => {
+    const { startCoreDaemon } = await import('../src/daemon/startCore');
+    const { Emitter } = await import('../src/core/events');
+    const dir = path.join(root, 'discord');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({
+        showUsage: false,
+        'autoPause.enabled': false,
+        codexBinaryPath: path.join(root, 'no-codex'),
+        'remote.enabled': true,
+        'remote.discord.guildId': 'G1',
+        'remote.discord.channelId': 'C1',
+        'remote.discord.authorizedUserIds': 'U1',
+      }),
+    );
+    const keychain: string[][] = [];
+    const securityWithToken: SecurityRunner = {
+      available: () => true,
+      run: async (args) => {
+        keychain.push(args);
+        return args[0] === 'find-generic-password' && args.includes('remote.discord.botToken')
+          ? { code: 0, stdout: 'tok-kc\n', stderr: '' }
+          : { code: 44, stdout: '', stderr: 'not found' };
+      },
+    };
+    const order: string[] = [];
+    let retired!: () => void;
+    const retiring = new Promise<void>((r) => (retired = r));
+    const transports: { token: string; connected: boolean }[] = [];
+    const result = await startCoreDaemon({
+      dataDir: dir,
+      fallbackRunDir,
+      build: 'b-test',
+      runtime: refusingRuntime,
+      log: () => undefined,
+      securityRunner: securityWithToken,
+      fixToolPath: false,
+      power: fakePower(),
+      watchSleep: () => ({ dispose: () => undefined }),
+      remoteInProcess: {
+        retireDaemon: async () => {
+          order.push('retire');
+          await retiring;
+          order.push('retired');
+        },
+        mirrorFile: path.join(dir, 'mirrors.json'),
+        makeTransport: (token) => {
+          order.push('transport');
+          const invoke = new Emitter<RemoteInvocation>();
+          const conn = new Emitter<void>();
+          const t = {
+            id: 'fake',
+            token,
+            connected: false,
+            onDidInvoke: (l: (i: RemoteInvocation) => void) => invoke.event(l),
+            onDidChangeConnection: (l: () => void) => conn.event(l),
+            connect: async () => {
+              t.connected = true;
+              conn.fire();
+            },
+            disconnect: async () => {
+              t.connected = false;
+              conn.fire();
+            },
+            publish: async () => ({ channelId: 'C1', messageId: 'M1' }),
+            update: async () => undefined,
+            close: async () => undefined,
+            reply: async () => undefined,
+            notify: async () => undefined,
+            dispose: () => undefined,
+          };
+          transports.push(t);
+          return t;
+        },
+      },
+    });
+    if (!result.started) throw new Error(result.reason);
+
+    // Nothing connects, and the Keychain is not read, while the remote daemon is still going.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(order).toEqual(['retire']);
+    expect(transports).toEqual([]);
+
+    retired();
+    const deadline = Date.now() + 3000;
+    while (!transports[0]?.connected && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    expect(order).toEqual(['retire', 'retired', 'transport']);
+    expect(transports.map((t) => t.token)).toEqual(['tok-kc']);
+    expect(transports[0].connected).toBe(true);
+    expect(keychain.some((a) => a[0] === 'find-generic-password' && a.includes('remote.discord.botToken'))).toBe(true);
+
+    // A stop hangs up.
+    await result.daemon.stop('signal');
+    expect(transports[0].connected).toBe(false);
   });
 
   it('refuses while the app holds the core, and builds nothing', async () => {

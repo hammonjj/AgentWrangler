@@ -456,13 +456,16 @@ describe('snapshot coalescing', () => {
 
 /** Just enough of a browser for `webshim` and `paneApi`, against the rig. */
 function stubBrowser(r: Rig, opts: { build?: string } = {}) {
-  const win = new EventTarget() as EventTarget & { postMessage(data: unknown, origin: string): void };
+  const win = new EventTarget() as EventTarget & { postMessage(data: unknown, origin: string): void; isSecureContext: boolean };
+  win.isSecureContext = true;
   win.postMessage = (data) => win.dispatchEvent(new MessageEvent('message', { data }));
   const storage = new Map<string, string>();
   const reload = vi.fn();
   const doc = Object.assign(new EventTarget(), {
     hidden: false,
     body: null,
+    documentElement: { dataset: {} as Record<string, string> },
+    hasFocus: () => true,
     querySelector: (sel: string) => (sel === 'meta[name="aw-build"]' ? { content: opts.build ?? r.server.build() } : null),
     getElementById: () => null,
   });
@@ -476,7 +479,7 @@ function stubBrowser(r: Rig, opts: { build?: string } = {}) {
   }
   vi.stubGlobal('window', win);
   vi.stubGlobal('document', doc);
-  vi.stubGlobal('location', { protocol: 'http:', host: `127.0.0.1:${r.port}`, origin: `http://127.0.0.1:${r.port}`, reload });
+  vi.stubGlobal('location', { protocol: 'http:', hostname: '127.0.0.1', host: `127.0.0.1:${r.port}`, origin: `http://127.0.0.1:${r.port}`, reload });
   vi.stubGlobal('localStorage', {
     getItem: (k: string) => storage.get(k) ?? null,
     setItem: (k: string, v: string) => void storage.set(k, v),
