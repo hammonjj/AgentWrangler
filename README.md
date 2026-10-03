@@ -961,7 +961,12 @@ service **Agent Wrangler**, one item per secret, with the secret's key as the ac
 They are written and read with `/usr/bin/security`. A write sends the command on stdin
 (`security -i`), so the secret never appears in a process's arguments, where `ps` would show
 it. The items' access list trusts `/usr/bin/security`, which does not change when Agent
-Wrangler is rebuilt, so there is no Keychain prompt per build. Secrets must be printable ASCII
+Wrangler is rebuilt, so there is no Keychain prompt per build. The flip side: any process running
+as you can read them with the same command, without a prompt, and that includes the agents
+Agent Wrangler runs. This is the same boundary the session hosts' token files already have (a
+process running as you is trusted). `safeStorage` asked before a different program read its key.
+Restricting the items to a signed Agent Wrangler binary would need a native Keychain binding;
+that is a possible later hardening. Secrets must be printable ASCII
 (every token and API key is). Code that needs secrets uses `src/core/keychainSecrets.ts`, which
 does not depend on Electron.
 
