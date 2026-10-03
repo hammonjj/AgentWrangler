@@ -17,6 +17,12 @@ Nothing may import `vscode`, and `HostServices` has one implementation.
   **Run it yourself after every code change**, and say so; it replaces the copy James uses.
   It signs with the self-signed *Agent Wrangler Local Signing* certificate and fails without
   it; `npm run app:signing-setup` creates it (once per machine, needs James's password).
+- `aw daemon start|stop|stop --all|status` — the core daemon (#130): the core as a LaunchAgent
+  (`com.hammonjj.agentwrangler.core`) instead of inside the app. Only one core runs at a time;
+  `experimental.coreDaemon` (off by default) makes opening the app start the daemon instead.
+  From a checkout it spawns the checkout's `dist/daemon/main.js` against the real data dir, so
+  in tests point `HOME` (and `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) at a temp dir. Never install the
+  LaunchAgent on James's machine unless asked.
 
 ## Branches and worktrees
 
@@ -104,6 +110,13 @@ Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
   Never use ⌥⌘Q (*Quit and Stop All Agents*): it ends hosted conversations too. If in doubt,
   say "a restart is needed" and leave it to James.
   A running copy on the old build is the usual cause of "my fix didn't work".
+
+  **When the core daemon runs the core** (`aw daemon status` says running; `experimental.coreDaemon`
+  on), restarting the app restarts nothing: the app only starts the daemon and quits. Restart
+  the core with `aw daemon start` from the new install instead (`app:install` does it for you when
+  the daemon is running): it reloads the LaunchAgent, the old daemon stops as `aw daemon stop`
+  does, and the new one reattaches the hosts. The same "don't restart if" list applies. Never
+  run `aw daemon stop --all` (it is ⌥⌘Q, and refuses in an agent's shell anyway).
 - **The repo is public** (`hammonjj/AgentWrangler`). No real project paths, session titles,
   prompts, transcript content or hook payloads in code, tests, fixtures, docs or commits.
   Fixtures use `/Users/test/proj`-style paths. Never paste `live.integration.test.ts` output anywhere.
@@ -130,7 +143,9 @@ Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
 `src/claude/*` Claude Code provider (registry, transcript tail/index, hook events + log +
 installer, status) · `src/codex/*` Codex provider and runner · `src/core/*` provider-agnostic
 store, config, services · `src/remote/*` remote control, with `discord/` below the transport
-boundary · `src/app/createApp.ts` the application, minus the window · `src/electron/*` the main
+boundary · `src/app/createApp.ts` the application, minus the window · `src/daemon/*` the core daemon
+(plain Node, no Electron) · `src/node/*` plain-Node host services and LaunchAgent installers ·
+`src/electron/*` the main
 process, windows and menu · `src/host/*` the seam the app is written against · `src/ui/*`
 webview hosts and click routing · `src/webview/*` browser bundles (one dir per bundle, entry
 `main.ts` + a `.css`; `workbench` is what ships and imports the `dashboard` and `conversation`

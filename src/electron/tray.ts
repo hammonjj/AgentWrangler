@@ -15,9 +15,11 @@ import type { AgentWranglerApp } from '../app/createApp';
 import type { Disposable } from '../core/events';
 import { ownerContext } from '../core/access';
 import { guardSessionActions } from '../ui/guardedActions';
-import { menuBarAgents, menuBarBadge, menuBarCounts, menuBarSummary, type MenuBarSession } from '../core/menuBar';
+import { menuBarAgents, menuBarBadge, menuBarCounts, menuBarSessions, menuBarSummary } from '../core/menuBar';
 import type { WorkbenchSurface } from '../host/hostServices';
-import { displayTitle } from '../shared/model';
+
+// Moved to core so the daemon's power assertion reads it too (#130); re-exported for `main.ts`.
+export { menuBarSessions };
 
 export interface MenuBarOptions {
   app: AgentWranglerApp;
@@ -25,20 +27,6 @@ export interface MenuBarOptions {
   openPreferences(): void;
   quit(): void;
   quitAndStopAll(): void;
-}
-
-/** The store's sessions as the menu bar reads them. Shared with the power-blocker in `main.ts`. */
-export function menuBarSessions(app: AgentWranglerApp): MenuBarSession[] {
-  return app.store.sessions.map((s) => ({
-    key: s.key,
-    status: s.status,
-    title: displayTitle(s),
-    projectName: s.projectName,
-    archived: app.archive.isArchived(s.key),
-    owned: app.runners.owns(s.sessionId) || app.codexRunners.owns(s.sessionId),
-    pid: s.pid,
-    blockedReason: s.blockedReason,
-  }));
 }
 
 /**

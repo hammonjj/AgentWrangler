@@ -33,6 +33,10 @@ import { ATTACH_BACKLOG, AttachRenderer } from './attach';
 import { ControlClient } from './client';
 import { formatDelegation, formatOffline, formatProjects, formatProposal, formatSession, formatSessions, formatStatus, formatTasks } from './format';
 import { readOfflineView } from './offline';
+import { runDaemonCommand } from './daemon';
+import { locateInstall } from '../core/daemon/coreDaemon';
+import { createSessionHostRuntime } from '../core/session/sessionHostRuntime';
+import { createCoreDaemonAgent } from '../node/coreDaemonAgent';
 
 declare const AW_BUILD_ID: string | undefined;
 const BUILD_ID = typeof AW_BUILD_ID === 'string' ? AW_BUILD_ID : 'dev';
@@ -74,6 +78,8 @@ async function run(argv: string[]): Promise<number> {
   }
 
   const dirs = defaultRunDirs();
+  // Before connecting: the daemon commands work whether or not anything answers.
+  if (cmd.kind === 'daemon') return daemonCommand(cmd, dirs);
   const client = await ControlClient.connect(dirs, { build: BUILD_ID });
   if (!client) return offline(cmd, dirs.userDataDir, dirs.runDir);
   if (client.hello.build !== BUILD_ID && BUILD_ID !== 'dev') {
@@ -84,6 +90,34 @@ async function run(argv: string[]): Promise<number> {
   } finally {
     if (cmd.kind !== 'attach') client.close();
   }
+}
+
+/**
+ * `aw daemon …` (#130). The daemon runs from the same bundle (or checkout) as
+ * this `aw`, so `aw daemon start` from a newer install is also the update.
+ */
+function daemonCommand(cmd: Extract<Command, { kind: 'daemon' }>, dirs: ReturnType<typeof defaultRunDirs>): Promise<number> {
+  const where = locateInstall(__dirname);
+  // Quiet: the runtime clone and launchctl log progress, which a terminal does not need.
+  const log = (m: string) => {
+    if (process.env.AW_DEBUG) process.stderr.write(`${m}\n`);
+  };
+  const runtime = createSessionHostRuntime({
+    userDataDir: dirs.userDataDir,
+    appRoot: where.appRoot,
+    isPackaged: where.isPackaged,
+    execPath: process.execPath,
+    execIsNode: true,
+    bundle: where.bundle,
+    log,
+  });
+  const agent = createCoreDaemonAgent({ dataDir: dirs.userDataDir, fallbackRunDir: dirs.fallbackRunDir, runtime, isPackaged: where.isPackaged, log });
+  return runDaemonCommand(cmd, agent, {
+    out: (t) => process.stdout.write(t),
+    err: (t) => process.stderr.write(t),
+    env: process.env,
+    now: Date.now,
+  });
 }
 
 /** The app is quit: read what can be read, refuse the rest. */

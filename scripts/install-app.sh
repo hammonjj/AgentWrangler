@@ -44,6 +44,21 @@ inside_session_host() {
   return 1
 }
 
+# The core daemon (#130), when it is running as its LaunchAgent: move it onto
+# the build just installed. `aw daemon start` from the new bundle rewrites the
+# plist (it names the build's runtime), boots the old daemon out (an ordinary
+# stop: session hosts keep running) and bootstraps the new one, which
+# reattaches them. A daemon stopped on purpose is left stopped.
+update_core_daemon() {
+  local node="$DEST/Contents/Resources/node/bin/node"
+  local cli="$DEST/Contents/Resources/app.asar.unpacked/dist/cli/main.js"
+  [ -f "$HOME/Library/LaunchAgents/com.hammonjj.agentwrangler.core.plist" ] || return 0
+  [ -x "$node" ] && [ -f "$cli" ] || return 0
+  if "$node" "$cli" daemon status >/dev/null 2>&1; then
+    "$node" "$cli" daemon start || echo "The core daemon was not updated: run aw daemon start." >&2
+  fi
+}
+
 if running_at_all && { ! running || inside_session_host; }; then
   # Run by an agent Agent Wrangler is running (in-process or in a session host).
   # Quitting the app would end its in-process sessions, perhaps this agent's
@@ -55,6 +70,7 @@ if running_at_all && { ! running || inside_session_host; }; then
   cp -R "$APP" "$DEST"
   echo "Installed $DEST (the running copy was left running: a restart is needed to use this build)"
   echo "Built from: $APP"
+  update_core_daemon
   exit 0
 fi
 
@@ -86,3 +102,4 @@ cp -R "$APP" "$DEST"
 
 echo "Installed $DEST"
 echo "Built from: $APP"
+update_core_daemon

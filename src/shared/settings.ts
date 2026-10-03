@@ -458,6 +458,17 @@ export const SETTINGS: SettingSpec[] = [
     description:
       'Post a message when an agent finishes its task, alongside the permission prompts. It has no buttons — nothing is waiting on you — and names the agent, repository and branch, never anything it said. Auto-pause is announced the same way and is not covered by this switch: everything stopping is not optional news.',
   },
+  // The core daemon (#130). Read once at startup by the app, which is why it
+  // says "restart"; with it on the app does not open this window at all.
+  {
+    key: 'experimental.coreDaemon',
+    label: 'Run the core in the background',
+    group: 'Experimental',
+    type: 'boolean',
+    default: false,
+    description:
+      'Run Agent Wrangler’s core (session tracking, the agents it runs, Discord, the aw command) as a background service that keeps running with no window open, instead of inside this app. Opening the app then starts the service and points you to "aw web open"; this window does not open until the browser workbench replaces it. Takes effect when you quit and reopen Agent Wrangler. To switch back, set it to false in settings.json, run "aw daemon stop", and reopen the app.',
+  },
 ];
 
 /**

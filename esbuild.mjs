@@ -92,6 +92,17 @@ const remoteDaemon = {
 };
 
 /**
+ * The core daemon (#130): `createApp` and the control socket with no window,
+ * run by launchd from the same cloned runtime, on its bundled Node. Plain
+ * Node, no `electron`; a test checks nothing it imports reaches for it.
+ */
+const coreDaemon = {
+  ...sessionHost,
+  entryPoints: ['src/daemon/main.ts'],
+  outfile: 'dist/daemon/main.js',
+};
+
+/**
  * The `aw` command-line client (#21). Plain Node, no `electron`: `bin/aw` runs
  * it on the installed app's bundled Node, from `app.asar.unpacked`, the way
  * session hosts run.
@@ -148,7 +159,7 @@ const web = {
   plugins: [watchLogger],
 };
 
-const configs = [web, electronMain, electronPreload, sessionHost, remoteDaemon, cli];
+const configs = [web, electronMain, electronPreload, sessionHost, remoteDaemon, coreDaemon, cli];
 
 /**
  * Qualification stage 2's scratch-repo fixtures (plan §19.6), which the main
