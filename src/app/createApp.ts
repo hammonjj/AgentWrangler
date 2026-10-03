@@ -138,6 +138,7 @@ import { RemoteDaemonLink } from '../remote/daemon/client';
 import { DISCORD_BOT_TOKEN_KEY, accessAuditFile } from '../remote/paths';
 import { FileAuditLog } from '../remote/audit';
 import { createAccessGate, ownerContext, type AccessGate } from '../core/access';
+import { outsideRequest } from '../core/requestScope';
 import { guardSessionActions } from '../ui/guardedActions';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { PermissionModeName } from '../shared/conversation';
@@ -256,6 +257,10 @@ export interface AgentWranglerApp {
    * after it has built its window. Everything that has to *show* something goes
    * through this; before it is attached those behaviours run and display
    * nothing, which is what an app with no window should do.
+   *
+   * With several clients the front end attaches `ClientRegistry.surface`
+   * (#126), which shows things in the client whose request is being handled;
+   * `host.dialogs` is scoped the same way. Nothing here passes a client along.
    */
   attachSurface(surface: WorkbenchSurface): void;
 
@@ -1620,7 +1625,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const startedAt = Date.now();
     let noticed = linkedNotices(tasks.list(), new Set(), { initial: true }).seen;
     host.subscribe(
-      tasks.onDidChange(() => {
+      // The app's own notices, not part of whichever request changed the mission (#126).
+      tasks.onDidChange(() => outsideRequest(() => {
         reindex();
         store.linkedWorkApplied();
         const { notices, seen } = linkedNotices(tasks.list(), noticed, { sinceMs: startedAt });
@@ -1634,7 +1640,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
             onClick: () => (origin ? surface?.show(origin.key, { preserveFocus: false }) : showMissionRequests.fire(n.missionId)),
           });
         }
-      }),
+      })),
     );
   }
 
@@ -2881,7 +2887,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // where the host has one: it takes no focus, where a message box does.
   const lastToastAt = new Map<string, number>();
   host.subscribe(
-    store.onDidUpdate((u) => {
+    // The app's own notice, not part of whichever request changed the store (#126).
+    store.onDidUpdate((u) => outsideRequest(() => {
       if (u.becameWaiting.length === 0) return;
       const cfg = getConfig();
       const windowOpen = surface?.isOpen ?? false;
@@ -2913,7 +2920,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
           else if (choice === 'Dashboard') surface?.open();
         });
       }
-    }),
+    })),
   );
 
   /**

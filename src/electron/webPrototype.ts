@@ -11,10 +11,11 @@
  * `DashboardHost`/`ConversationHost` run unchanged per browser over a WebSocket
  * `EnvelopeTransport` — one pair per connection, all over the one app.
  *
- * What it does not do, and the plan says who does: confirmations, pickers and
- * toasts still appear on the Mac (`HostDialogs` is app-wide); navigation the
- * app starts — a new conversation, a notification — goes to the window, not
- * the browser (`WorkbenchSurface` is app-wide); no TLS, no LAN, no pairing.
+ * Each browser is a client of its own (#126): confirmations, pickers, toasts
+ * and navigation its own clicks cause come back to it over the `shell`
+ * channel (`src/core/web/shellChannel.ts`), answered for now with the
+ * browser's `confirm()`/`prompt()`. What it does not do, and the plan says who
+ * does: in-page modals (#133), TLS, LAN, pairing.
  */
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
@@ -26,7 +27,9 @@ import { Emitter, type Disposable } from '../core/events';
 import { ownerContext } from '../core/access';
 import type { HostServices } from '../host/hostServices';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
-import type { SessionActions } from '../ui/actions';
+import type { ClientRegistry } from '../core/clients';
+import { createShellChannel } from '../core/web/shellChannel';
+import { SHELL_PANE } from '../shared/shellProtocol';
 import { renderWebviewHtml } from '../ui/html';
 import type { EnvelopeTransport } from '../ui/paneChannel';
 import {
@@ -56,6 +59,8 @@ export interface WebPrototypeOptions {
   app: AgentWranglerApp;
   host: HostServices;
   ui: ConversationHostUi;
+  /** Each browser registers as a client, so what it causes comes back to it (#126). */
+  clients: ClientRegistry;
   distDir: string;
   runDir: string;
   port: number;
@@ -69,7 +74,7 @@ export function webPrototypePort(env: NodeJS.ProcessEnv = process.env): number |
 }
 
 export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
-  const { app, host, ui, port, log } = opts;
+  const { app, host, ui, clients, port, log } = opts;
   const root = path.resolve(opts.distDir, 'webview');
   const token = crypto.randomBytes(32).toString('hex');
   const tokenFile = path.join(opts.runDir, 'web.token');
@@ -194,18 +199,27 @@ export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
       onDidReceiveMessage: (listener) => incoming.event(listener),
     };
 
-    // A row click shows the conversation in *this* browser. Everything else is
-    // the app's own actions; the prototype of the prototype's limits is above.
-    let panes: ReturnType<typeof createWorkbenchHosts> | undefined;
-    const actions: SessionActions = Object.assign(Object.create(app.actions) as SessionActions, {
-      smartOpen: (key: string) => {
-        if (app.store.get(key)) panes?.conversation.show(key);
-      },
-    });
     // The cookie is the owner's, so the owner it is; the connection id is for
-    // the audit, never identity (#123).
+    // the audit and for sending this browser's prompts, toasts and navigation
+    // back to it (#126), never identity (#123).
     const connectionId = `web-${++connectionSeq}`;
-    panes = createWorkbenchHosts(app, host, ui, transport, ownerContext('browser', { connectionId }), actions);
+    let panes: ReturnType<typeof createWorkbenchHosts> | undefined = createWorkbenchHosts(
+      app,
+      host,
+      ui,
+      transport,
+      ownerContext('browser', { connectionId }),
+    );
+    const shell = createShellChannel({
+      connectionId,
+      post: (envelope) => void transport.postMessage(envelope),
+      conversation: () => panes?.conversation,
+    });
+    const shellIn = incoming.event((raw) => {
+      const m = raw as { pane?: unknown; body?: unknown } | undefined;
+      if (m && typeof m === 'object' && m.pane === SHELL_PANE) shell.receive(m.body);
+    });
+    const registration = clients.register(shell.channel);
     log(`web prototype: browser connected (${connections.size} open)`);
 
     const close = (code?: number) => {
@@ -213,6 +227,10 @@ export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
       open = false;
       if (code !== undefined && !socket.destroyed) socket.end(encodeClose(code));
       else socket.destroy();
+      // Before the panes: whatever this browser was being asked resolves as cancelled.
+      registration.dispose();
+      shell.dispose();
+      shellIn.dispose();
       panes?.dashboard.dispose();
       panes?.conversation.dispose();
       panes = undefined;

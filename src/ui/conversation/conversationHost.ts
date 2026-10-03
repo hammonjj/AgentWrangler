@@ -30,6 +30,7 @@ import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
 import type { SessionActions } from '../actions';
 import { sessionRef, type AccessRequest, type BoundAccess } from '../../core/access';
+import { runInRequest } from '../../core/requestScope';
 import type { PaneChannel } from '../paneChannel';
 import { adoptActionFor } from '../openTarget';
 import { LiveSessionSource } from './runnerSource';
@@ -473,7 +474,8 @@ export class ConversationHost {
       if (m.type === 'send') this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Not permitted.' });
       return;
     }
-    await this.dispatch(m);
+    // As this pane's client: what it causes goes back to it (#126, `requestScope.ts`).
+    await runInRequest(this.access.context, () => this.dispatch(m));
   }
 
   private async dispatch(m: ConversationToHost): Promise<void> {

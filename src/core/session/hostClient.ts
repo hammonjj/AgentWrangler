@@ -29,6 +29,7 @@ import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { Emitter, type Disposable } from '../events';
 import { NdjsonPeer, RpcRemoteError } from '../rpc/ndjsonPeer';
 import { isSameProcessAlive } from '../procStart';
+import { outsideRequest } from '../requestScope';
 import {
   CAPABILITY_CONFIGURE_IDLE,
   CLIENT_CAPABILITY_PASSIVE,
@@ -365,7 +366,8 @@ export class HostClient {
   /** Connect, authenticate, catch up, subscribe. Only then does the connection become the client's. */
   private connectOnce(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const socket = net.createConnection(this.opts.socketPath);
+      // Outlives whichever request opened it: the host's events are the app's own (#126).
+      const socket = outsideRequest(() => net.createConnection(this.opts.socketPath));
       let adopted = false;
       let settled = false;
       const fail = (err: unknown) => {
