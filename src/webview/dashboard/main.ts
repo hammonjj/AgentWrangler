@@ -34,6 +34,7 @@ import { analyticsClickRef, analyticsDecision, analyticsFilterChange, analyticsH
 import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestration/analyticsView';
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
+import { announceTableView, onTableViewRequest } from '../common/shellBus';
 import { canPauseSession, clampMenuPosition, dismissAction, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
 import {
   askLine,
@@ -151,6 +152,12 @@ const expandedSubagents = new Set<string>(saved?.expandedSubagents ?? []);
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
 let tableView: TableView = saved?.tableView ?? 'status';
+/** Status or Project, whichever the session table last used: where the shell's Agents route goes back to. */
+let sessionGrouping: 'status' | 'project' = tableView === 'project' ? 'project' : 'status';
+/** A snapshot has arrived, so whether Missions exists is known. */
+let snapshotSeen = false;
+/** A view the app shell asked for (#133) before the snapshot that says whether it exists. */
+let pendingView: TableView | undefined;
 /** The Missions view's data (#43). Absent while orchestration is off, and then so is its tab. */
 let missionsSnap: MissionsSnapshot | undefined;
 const missionsUi = newMissionsUiState();
@@ -174,6 +181,26 @@ function sessionView(): 'status' | 'project' {
 function saveState(): void {
   vscodeApi.setState({ collapsed: [...collapsed], expandedSubagents: [...expandedSubagents], bannerDismissed, project, tableView, analytics: analyticsSel });
 }
+
+/** Tell the browser's app shell, if there is one, which view is on screen (#133). */
+function announce(user: boolean): void {
+  announceTableView({ view: tableView, user, settled: snapshotSeen, hasMissions: missionsSnap !== undefined });
+}
+
+// The app shell's routes (#133): Agents, Missions and Analytics are this
+// pane's views. Agents means the session table, grouped however it last was.
+onTableViewRequest((want) => {
+  const next: TableView = want === 'sessions' ? sessionGrouping : want;
+  if (want !== 'sessions' && !snapshotSeen) pendingView = want;
+  if (next === tableView) {
+    announce(false);
+    return;
+  }
+  tableView = next;
+  saveState();
+  if (tableView === 'analytics') queryAnalytics();
+  render();
+});
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -810,7 +837,9 @@ function rowHtml(s: SessionDTO, span: number): string {
 
   const est = s.statusIsEstimated && s.status !== 'ended' ? ' est' : '';
   const unc = s.statusUncertain ? ' unc' : '';
-  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}${unc}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
+  // A tab stop, opened with Enter like a click (#133): keyboard-only use has to
+  // reach a conversation. `data-fk` keeps focus on it across repaints.
+  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}${unc}" data-key="${esc(s.key)}" data-fk="row:${esc(s.key)}" tabindex="0" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
     <div class="title">${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${unknownChip(s)}${rateLimitChip(s)}${statusChip(s)}${delegatedChips(s)}</span></div>
@@ -1425,7 +1454,7 @@ renderControls();
 /** The table's view switcher. Missions is the third view, there only while orchestration is on (#43). */
 function tabsHtml(): string {
   const tab = (view: TableView, label: string, extra = '') =>
-    `<button role="tab" aria-selected="${tableView === view}" data-table-view="${view}"${extra}>${label}</button>`;
+    `<button role="tab" aria-selected="${tableView === view}" data-table-view="${view}" data-fk="tab:${view}"${extra}>${label}</button>`;
   // The host's count (status contract A3: each ask once, open proposals
   // included); the mission phases are the fallback for an older host.
   const waiting = missionsSnap?.attention ?? missionsSnap?.missions.filter((m) => m.phase?.needsYou).length ?? 0;
@@ -1441,6 +1470,7 @@ function tabsHtml(): string {
 function showMission(missionId: string | undefined): void {
   if (!missionsSnap) return;
   tableView = 'missions';
+  announce(true);
   if (missionId) {
     missionsUi.collapsed.delete(missionId);
     missionsUi.expanded.add(missionId);
@@ -1466,7 +1496,8 @@ function render(): void {
 
   renderUsage();
   // Orchestration was turned off (or never on): there is no Missions view to be on.
-  if ((tableView === 'missions' || tableView === 'analytics') && !missionsSnap) tableView = 'status';
+  if ((tableView === 'missions' || tableView === 'analytics') && !missionsSnap) tableView = sessionGrouping;
+  announce(false);
   if (tableView === 'analytics') {
     // A filter's dropdown is open: repainting would close it under the pointer.
     if (document.activeElement instanceof HTMLSelectElement && document.activeElement.closest('.analytics')) return;
@@ -1539,7 +1570,7 @@ function render(): void {
     const label = tableView === 'status' ? SECTION_LABEL[group as SectionId] : group;
     const styleClass = tableView === 'status' ? ` st-${group}` : ' named';
     html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${esc(collapseKey)}">
-<tr class="sec${styleClass}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(label)}<span class="count">${rows.length}</span></td></tr>`;
+<tr class="sec${styleClass}" tabindex="0" data-fk="sec:${esc(collapseKey)}" aria-expanded="${!isCollapsed}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(label)}<span class="count">${rows.length}</span></td></tr>`;
     for (const s of rows) html += rowHtml(s, span);
     html += '</tbody>';
   }
@@ -1582,6 +1613,13 @@ vscodeApi.onMessage((body) => {
   if (m.type === 'snapshot') {
     sessions = m.sessions;
     missionsSnap = m.missions;
+    // A route that asked for Missions before anything said whether there are any.
+    if (!snapshotSeen && pendingView && missionsSnap) {
+      tableView = pendingView;
+      if (tableView === 'analytics') queryAnalytics();
+    }
+    snapshotSeen = true;
+    pendingView = undefined;
     if (m.projects) {
       projects = m.projects;
       renderLauncher();
@@ -1784,6 +1822,17 @@ app.classList.toggle('narrow', narrow);
 new ResizeObserver(measure).observe(app);
 window.addEventListener('resize', measure);
 
+// A focused row or section header answers Enter and Space as it answers a
+// click (#133): opening a conversation must not need a pointer. Only when the
+// row itself has focus — a button inside it handles its own keys.
+app.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const target = e.target as HTMLElement;
+  if (!(target instanceof HTMLTableRowElement) || !target.matches('tr.row, tr.sec')) return;
+  e.preventDefault();
+  target.click();
+});
+
 app.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
 
@@ -1802,6 +1851,9 @@ app.addEventListener('click', (e) => {
   const viewTab = target.closest<HTMLElement>('[data-table-view]');
   if (viewTab) {
     tableView = viewTab.dataset.tableView as TableView;
+    if (tableView === 'status' || tableView === 'project') sessionGrouping = tableView;
+    // Before the repaint, which announces it again as a mere repaint: this one is a navigation.
+    announce(true);
     saveState();
     if (tableView === 'analytics') queryAnalytics();
     render();

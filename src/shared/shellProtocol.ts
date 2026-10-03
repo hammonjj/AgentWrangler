@@ -4,9 +4,9 @@
  * traffic, with `pane: 'shell'`, so the pane hosts ignore it.
  *
  * Today it carries the prompts, toasts and navigation that a client's own
- * requests cause (`src/core/clients.ts`). The app shell (#133) gives them
- * real modals and routes; the web prototype answers them with the browser's
- * own `confirm()` and `prompt()`.
+ * requests cause (`src/core/clients.ts`). In the browser the app shell (#133)
+ * answers them: prompts with in-page modals (`modalModel.ts`), toasts in its
+ * toast host, and navigation with a route (`appRoutes.ts`).
  *
  * No Node or DOM imports: the server and the browser shim both use it.
  */
@@ -32,6 +32,12 @@ export type ShellPrompt =
       value?: string;
       placeHolder?: string;
       password?: boolean;
+      /**
+       * Why the last answer was refused. A browser cannot run the host's check
+       * as the user types, so the host checks each answer and asks again with
+       * this set and `value` holding what was typed (#133).
+       */
+      error?: string;
     }
   | {
       kind: 'pick';

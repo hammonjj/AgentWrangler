@@ -114,3 +114,355 @@ body {
 #wb.dragging #wbConv {
   pointer-events: none;
 }
+
+/*
+ * ---- the browser app shell (#133) ----
+ *
+ * `aw-app` is on <body> only in a browser (`workbench/shell.ts`): a bar of
+ * routes above the panes, and a page for the routes that are not panes. These
+ * rules may use the viewport — the shell owns the window — but the panes inside
+ * still size off themselves.
+ */
+
+body.aw-app {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Beats the theme's `body.aw-shell #wb { height: 100% }` by coming later. */
+body.aw-app #wb {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+#awBar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-height: 28px;
+}
+
+#awBar .aw-bar-title {
+  margin: 0;
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+#awBar .aw-bar-title:focus,
+#awPage h2:focus,
+#convApp #ttl:focus {
+  outline: none;
+}
+#awBar .aw-bar-title:focus-visible,
+#awPage h2:focus-visible,
+#convApp #ttl:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+#awBar .aw-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-left: auto;
+}
+
+#awBar .aw-nav a,
+#awBar .aw-bar-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 2px 9px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-decoration: none;
+}
+
+#awBar .aw-bar-back {
+  border-color: var(--vscode-button-border, transparent);
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, inherit);
+  cursor: pointer;
+}
+
+#awBar .aw-nav a:hover,
+#awBar .aw-bar-back:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+#awBar .aw-nav a[aria-current='page'] {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+#awBar .aw-nav a:focus-visible,
+#awBar .aw-bar-back:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* One pane at a time, below the breakpoint. `!important` because the divider
+   writes the table's width into its own style, which would otherwise win. */
+body.aw-surface-table #wbSplit,
+body.aw-surface-table #wbConv,
+body.aw-surface-conversation #wbTable,
+body.aw-surface-conversation #wbSplit,
+body.aw-surface-page #wb {
+  display: none;
+}
+body.aw-surface-table #wbTable {
+  flex: 1 1 auto !important;
+}
+body.aw-surface-conversation #wbConv {
+  border-left: none;
+}
+
+#awPage {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+}
+
+#awPage h2 {
+  margin: 0 0 10px;
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+#awPage .aw-page-note {
+  margin: 0 0 8px;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.4;
+}
+
+#awPage a {
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+/* ---- in-page modals (#133): the browser's palette and dialogs ---- */
+
+.aw-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 12vh 12px 12px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.aw-modal {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(560px, 100%);
+  max-height: 76vh;
+  padding: 14px 16px;
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background);
+  color: var(--vscode-foreground);
+  box-shadow: 0 4px 18px var(--vscode-widget-shadow);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+.aw-modal * {
+  box-sizing: border-box;
+}
+
+.aw-modal.aw-modal-warn {
+  border-top: 3px solid var(--vscode-editorWarning-foreground, #cca700);
+}
+.aw-modal.aw-modal-error {
+  border-top: 3px solid var(--vscode-errorForeground);
+}
+
+.aw-modal .aw-modal-title {
+  margin: 0 0 6px;
+  font-size: 1.05em;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.aw-modal .aw-modal-detail,
+.aw-modal .aw-modal-prompt {
+  margin: 0 0 8px;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.aw-modal .aw-modal-field {
+  flex: 0 0 auto;
+  width: 100%;
+  min-height: 28px;
+  padding: 5px 8px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-dropdown-border));
+  border-radius: 4px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: inherit;
+}
+.aw-modal .aw-modal-field::placeholder {
+  color: var(--vscode-descriptionForeground);
+}
+.aw-modal .aw-modal-field:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  border-color: var(--vscode-focusBorder);
+}
+.aw-modal .aw-modal-field[aria-invalid='true'] {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+}
+
+/* Why Enter was refused: the one thing in the dialog that must not be missed. */
+.aw-modal .aw-modal-error {
+  margin: 6px 0 0;
+  padding: 4px 8px;
+  border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+  border-radius: 3px;
+  background: var(--vscode-inputValidation-errorBackground, transparent);
+  color: var(--vscode-foreground);
+}
+
+.aw-modal .aw-modal-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.aw-modal .aw-modal-row {
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.aw-modal .aw-modal-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+/* The highlighted row is the one Enter takes: the stronger mark of the two. */
+.aw-modal .aw-modal-row.on {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+.aw-modal .aw-modal-rowtop {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.aw-modal .aw-modal-label {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aw-modal .aw-modal-desc,
+.aw-modal .aw-modal-rowdetail {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aw-modal .aw-modal-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.aw-modal .aw-modal-row.on .aw-modal-desc,
+.aw-modal .aw-modal-row.on .aw-modal-rowdetail {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.aw-modal .aw-modal-empty {
+  margin: 10px 2px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.aw-modal .aw-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.aw-modal .aw-modal-btn {
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 4px;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, inherit);
+  font: inherit;
+  cursor: pointer;
+}
+.aw-modal .aw-modal-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+.aw-modal .aw-modal-btn.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+.aw-modal .aw-modal-btn.primary:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+.aw-modal .aw-modal-btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+/* A host view (file, diff, command: #140) drawn in the modal host: its own
+   `aw-hv-*` parts supply the body and buttons, this frames them. */
+.aw-modal.aw-modal-view {
+  width: min(900px, 100%);
+  padding: 0;
+}
+.aw-modal.aw-modal-view .aw-modal-title {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--vscode-widget-border);
+}
+
+/* The folder browser (#139) is its own panel; the modal is only its frame. */
+.aw-modal.aw-modal-folder {
+  width: min(560px, 100%);
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+#awPage .aw-page-button {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 4px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  text-decoration: none;
+}
+#awPage .aw-page-button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}

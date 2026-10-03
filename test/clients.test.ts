@@ -312,7 +312,7 @@ describe('shell channel: a browser connection', () => {
     expect(posted[0]).toEqual({ type: 'prompt', id: 1, prompt: { kind: 'input', title: 'Name' } });
     shell.receive({ type: 'promptResult', id: 1, value: '  ' });
     await flush();
-    expect(posted[1]).toEqual({ type: 'prompt', id: 2, prompt: { kind: 'input', title: 'Name', prompt: 'A name cannot be blank.', value: '  ' } });
+    expect(posted[1]).toEqual({ type: 'prompt', id: 2, prompt: { kind: 'input', title: 'Name', error: 'A name cannot be blank.', value: '  ' } });
     shell.receive({ type: 'promptResult', id: 2, value: 'Mine' });
     expect(await answer).toBe('Mine');
   });

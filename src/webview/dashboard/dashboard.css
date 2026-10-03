@@ -602,6 +602,13 @@ tr.row {
 tr.row:hover td {
   background: var(--vscode-list-hoverBackground);
 }
+/* Rows and section headers are tab stops (#133); the ring is drawn inside the
+   row, since the table clips anything outside it. */
+tr.row:focus-visible,
+tr.sec:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
 tr.row.archived td {
   opacity: 0.55;
 }

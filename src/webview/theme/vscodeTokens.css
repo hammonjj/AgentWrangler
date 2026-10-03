@@ -453,6 +453,33 @@ body.aw-shell #wbConv {
   display: none;
 }
 
+/* The browser's overlay dock (#133): the banner and the toasts in one column
+   instead of two fixed corners that overlap on a narrow screen. The banner sits
+   at the bottom, toasts above it. Declared after both rules above, and
+   more specific, so a toast or banner outside the dock (the window's) is unchanged. */
+#awDock {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: stretch;
+  gap: 6px;
+  pointer-events: none;
+}
+#awDock > #awBanner {
+  position: static;
+  align-self: flex-start;
+  pointer-events: auto;
+}
+#awDock > #awToasts {
+  position: static;
+  align-self: flex-end;
+  max-width: 100%;
+}
+
 #awBanner button {
   flex: none;
   padding: 3px 10px;

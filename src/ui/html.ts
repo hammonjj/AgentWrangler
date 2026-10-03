@@ -129,7 +129,8 @@ export function renderBrowserWorkbenchHtml(opts: { asset: (name: string) => stri
     jsSrc: opts.asset('workbench.js'),
     cspSource: "'self'",
     extraStylesheets: [opts.asset('theme.css')],
-    bodyClass: 'aw-shell',
+    // `aw-web`: the workbench starts its app shell's routes and layout (#133).
+    bodyClass: 'aw-shell aw-web',
     preScripts: [opts.asset('webshim.js')],
     connectSrc: opts.connectSrc,
     nonce: opts.nonce,

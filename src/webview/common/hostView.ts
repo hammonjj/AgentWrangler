@@ -38,18 +38,32 @@ export function openUrlHere(url: string): void {
 export function showHostView(msg: HostViewMessage, deps: HostViewDeps): void {
   const offered = new CustomEvent(HOST_VIEW_EVENT, { detail: msg, cancelable: true });
   if (!window.dispatchEvent(offered)) return; // the modal host took it
-  const modal = openModal(msg.type === 'showCommand' ? msg.title : msg.name);
+  const modal = openModal(hostViewTitle(msg));
+  drawHostView(modal, msg, deps);
+}
+
+export function hostViewTitle(msg: HostViewMessage): string {
+  return msg.type === 'showCommand' ? msg.title : msg.name;
+}
+
+/**
+ * Fill a modal with a host view. For the app shell's modal host (#133), which
+ * supplies the frame: `actions` must end with the Close button, since the
+ * view's own buttons are inserted before it.
+ */
+export function drawHostView(modal: HostViewModal, msg: HostViewMessage, deps: HostViewDeps): void {
   if (msg.type === 'showCommand') drawCommand(modal, msg, deps);
   else drawFile(modal, msg, deps);
 }
 
 // ---- the plain modal ----
 
-interface Modal {
+export interface HostViewModal {
   body: HTMLElement;
   actions: HTMLElement;
   close(): void;
 }
+type Modal = HostViewModal;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);

@@ -29,7 +29,7 @@
  */
 
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
-import { RECONNECT_EVENT } from '../../shared/shellProtocol';
+import { RECONNECT_EVENT, SHELL_PANE, type HostToShell, type ShellToHost } from '../../shared/shellProtocol';
 
 declare function acquireVsCodeApi(): WebviewBridge<WorkbenchState>;
 
@@ -124,6 +124,35 @@ export function paneApi<S>(pane: PaneName): PaneApi<S> {
     },
   };
 }
+
+/**
+ * The `shell` channel (#126), for the app shell (#133): prompts, toasts and
+ * navigation addressed to this document rather than to a pane.
+ *
+ * Separate from `paneApi` because its envelopes carry no `commandId`: the
+ * server never acknowledges a shell message, so one tracked for resending
+ * would be resent forever, and a prompt is cancelled host-side when its
+ * connection drops anyway. In the browser the shim delivers the host's shell
+ * messages as `message` events like any pane's; the Electron window has no
+ * shell channel yet and never sends one.
+ */
+export const shellApi = {
+  post(body: ShellToHost): void {
+    api.postMessage({ pane: SHELL_PANE, body });
+  },
+  onMessage(listener: (body: HostToShell) => void): void {
+    window.addEventListener('message', (e: MessageEvent) => {
+      const m = e.data as { pane?: unknown; body?: unknown } | undefined;
+      if (!m || typeof m !== 'object' || m.pane !== SHELL_PANE) return;
+      if (!m.body || typeof m.body !== 'object') return;
+      listener(m.body as HostToShell);
+    });
+  },
+  /** The connection dropped and is back: whatever the host was asking is cancelled. */
+  onReconnect(listener: () => void): void {
+    window.addEventListener(RECONNECT_EVENT, () => listener());
+  },
+};
 
 /** The divider position, shared by the panes rather than owned by either. */
 export const splitState = {

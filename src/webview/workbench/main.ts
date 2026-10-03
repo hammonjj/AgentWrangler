@@ -23,6 +23,12 @@ import './workbench.css';
 import { splitState } from '../common/paneApi';
 import '../dashboard/main';
 import '../conversation/main';
+import { startAppShell } from './shell';
+
+// The app shell (#133): modals and toasts everywhere, routes and the narrow
+// layout only in a browser — the page the web server renders says which
+// (`aw-web`); the Electron window keeps its own frame for now.
+startAppShell({ browser: document.body.classList.contains('aw-web') });
 
 /** Neither pane may be squeezed below this. Both stop being usable well before. */
 const MIN_PANE_PX = 260;
