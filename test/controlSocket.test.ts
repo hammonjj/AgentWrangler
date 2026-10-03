@@ -85,6 +85,10 @@ function fakeBackend() {
       return { task: { ...taskView }, decision: 'multiple', tasks: [{ key: 't1', title: 'One' }, { key: 't2', title: 'Two' }] };
     },
     tasks: () => [taskView],
+    webLink: () => {
+      calls.push('webLink');
+      return { url: 'http://127.0.0.1:1/login?code=synthetic', expiresAt: 1 };
+    },
   };
   return { backend, calls, origins, emit: (e: SessionViewEvent) => emit?.(e), close: (r: 'ended') => close?.(r), disposed: () => disposed };
 }
@@ -281,6 +285,17 @@ describe('control socket', () => {
     expect(await codeOf(client.request('delegate', { folder: 'relative/dir', objective: 'x' }))).toBe(RPC_INVALID_PARAMS);
     server!.stopMutations();
     expect(await codeOf(client.request('delegate', { folder: '/Users/test/proj', objective: 'x' }))).toBe(RPC_UNSUPPORTED);
+    client.close();
+  });
+
+  it('web.link returns the sign-in link and logs the call, never the link (#127)', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    const r = await client.request<{ url: string; expiresAt: number }>('web.link');
+    expect(r.url).toContain('/login?code=');
+    expect(fake.calls).toEqual(['webLink']);
+    expect(logs).toEqual([`control socket: web.link by aw pid ${process.pid}`]);
     client.close();
   });
 

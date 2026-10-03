@@ -7,7 +7,7 @@
  * loaded before the workbench bundle and must have defined the host by the time
  * `paneApi` evaluates.
  *
- * Prototype only (`AW_WEB_PROTOTYPE`). What it does not do yet, on purpose:
+ * Served by `core/web/server.ts` (#127). What it does not do yet, on purpose:
  * resume a dropped connection (it reloads the page, and the panes re-initialise
  * from the host's `ready` replies), carry toasts, or answer host dialogs.
  */

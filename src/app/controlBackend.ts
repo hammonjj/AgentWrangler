@@ -22,6 +22,7 @@ import {
   type ControlSessionClosed,
   type ControlSessionResult,
   type ControlStatusResult,
+  type ControlWebLinkResult,
 } from '../core/control/protocol';
 import { ControlError, type ControlBackend, type ControlSubscription } from '../core/control/server';
 import { displayTitle, type AgentSession } from '../shared/model';
@@ -41,6 +42,12 @@ export interface ControlBackendDeps {
    * this user's own process; the gate is where a policy would add more.
    */
   gate: AccessGate;
+  /**
+   * Mint a browser sign-in link (#127), or undefined when the browser
+   * workbench is off or not listening. Looked up per call: the listener comes
+   * and goes with its setting.
+   */
+  webLink?: () => ControlWebLinkResult | undefined;
 }
 
 /** What `aw` is, to `authorize`. One context for every connection: the token is per user, not per client. */
@@ -209,6 +216,18 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
     tasks: () => {
       admit('view.read');
       return app.taskList();
+    },
+
+    webLink: () => {
+      admit('web.link');
+      const link = deps.webLink?.();
+      if (!link) {
+        throw new ControlError(
+          RPC_UNSUPPORTED,
+          'The browser workbench is not running. Turn on "Open in a browser" in Preferences (web.enabled), or check the log for a port in use.',
+        );
+      }
+      return link;
     },
   };
 }

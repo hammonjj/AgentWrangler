@@ -129,6 +129,12 @@ export const ACTIONS = {
   'mission.create': 'mutate',
   'mission.act': 'mutate',
   'routing.decide': 'mutate',
+  /** Mint a single-use browser login link (`aw web open`, #127). */
+  'web.link': 'mutate',
+  /** Exchange a login link, or a device cookie at `/login`, for a signed-in browser (#127). */
+  'web.login': 'mutate',
+  /** A browser became a new device: a credential was issued and stored (#127). */
+  'web.device.add': 'mutate',
 } as const satisfies Record<string, ActionKind>;
 
 export type ActionName = keyof typeof ACTIONS;
@@ -139,7 +145,7 @@ export function actionKind(action: ActionName): ActionKind {
 
 /** What an action is about, by id. Never a path or any content: it is written to the audit log. */
 export interface ResourceRef {
-  readonly kind: 'session' | 'mission' | 'setting' | 'proposal';
+  readonly kind: 'session' | 'mission' | 'setting' | 'proposal' | 'device';
   readonly id: string;
 }
 
@@ -158,13 +164,17 @@ export const authorize: Authorizer = (ctx) =>
 
 /** One audit line for an access decision. Ids only. */
 export interface AccessAuditRecord {
-  event: 'authorized' | 'refused-unauthorised';
-  principal: PrincipalId;
+  /** `login-failed`: a login that named nobody (a bad, used or expired link). It has no principal. */
+  event: 'authorized' | 'refused-unauthorised' | 'login-failed';
+  /** Absent only on `login-failed`: nobody was identified. */
+  principal?: PrincipalId;
   via: Via;
   action: ActionName;
   resource?: ResourceRef;
   deviceId?: string;
   connectionId?: string;
+  /** `login-failed` only: why, in a word. */
+  outcome?: string;
 }
 
 /** Where access lines go. `FileAuditLog` is one; tests use an array. */
@@ -182,6 +192,13 @@ export interface AccessAudit {
  */
 export interface AccessGate {
   admit(ctx: RequestContext, action: ActionName, resource?: ResourceRef): boolean;
+  /**
+   * A credential that identified nobody (#127): a login link that is unknown,
+   * used or expired. There is no principal to authorise, so it is only
+   * audited, always. `outcome` is a word ("invalid", "expired"), never the
+   * credential.
+   */
+  loginFailed(via: Via, outcome: string): void;
 }
 
 export function createAccessGate(opts: { authorize?: Authorizer; audit?: AccessAudit; log?: (message: string) => void } = {}): AccessGate {
@@ -201,6 +218,9 @@ export function createAccessGate(opts: { authorize?: Authorizer; audit?: AccessA
       });
       if (decision === 'deny') opts.log?.(`access: refused ${action} via ${ctx.via} for ${ctx.principal.id}`);
       return decision === 'allow';
+    },
+    loginFailed(via, outcome) {
+      opts.audit?.write({ event: 'login-failed', via, action: 'web.login', outcome });
     },
   };
 }

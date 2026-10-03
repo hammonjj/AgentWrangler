@@ -370,6 +370,31 @@ export const SETTINGS: SettingSpec[] = [
       'Codex CLI binary used for plan usage and conversations. The default discovers the newest compatible executable bundled with the OpenAI Codex extension, then falls back to PATH. Set an explicit path to override discovery.',
   },
 
+  // ---- Browser ----
+  // On by default (plan §8): it listens on this Mac only, and nothing behind
+  // it opens without a sign-in link from `aw web open`.
+  {
+    key: 'web.enabled',
+    label: 'Open in a browser',
+    group: 'Browser',
+    type: 'boolean',
+    default: true,
+    description:
+      'Serve the workbench to browsers on this Mac, at http://127.0.0.1 on the port below. Only this Mac can reach it, and a browser needs a single-use sign-in link to get in: run "aw web open" in a terminal. Off closes the listener and every open browser tab.',
+  },
+  {
+    key: 'web.port',
+    dependsOn: 'web.enabled',
+    label: 'Port',
+    group: 'Browser',
+    type: 'number',
+    default: 7391,
+    minimum: 1024,
+    maximum: 65535,
+    description:
+      'The port the browser workbench listens on, on 127.0.0.1. Takes effect at once; open tabs reconnect to the new port only after you open the new address.',
+  },
+
   // ---- Experimental ----
   // Off by default and grouped apart on purpose: everything here can reach
   // outside the machine, and none of it has been lived with long enough to be

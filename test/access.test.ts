@@ -439,6 +439,7 @@ describe('control backend (aw): every method is authorised before it acts', () =
     proposeTask: (b) => b.proposeTask({ objective: 'synthetic', cwd: '/Users/test/proj' } as never),
     delegate: (b) => b.delegate({ objective: 'synthetic', cwd: '/Users/test/proj' } as never),
     tasks: (b) => b.tasks(),
+    webLink: (b) => b.webLink(),
   };
 
   it.each(Object.entries(METHODS))('%s: refused → RPC_UNAUTHORIZED via cli, and nothing ran', async (_name, call) => {

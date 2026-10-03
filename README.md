@@ -722,6 +722,8 @@ The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy
 | `aw delegate <objective…> [--criteria "a; b"] [--folder <dir>] [--claude\|--codex]` | Hand work over. A read-only planner decides whether it is one task or several, and the app waits for you to approve the proposal or the plan (see below). `-` reads the objective from stdin. |
 | `aw task <objective…>` (same options) | Shortcut: always one task, no planner. The app assesses and routes it, then waits for you to start it. |
 | `aw tasks` | Tasks that are not finished, with their state and branch. |
+| `aw web open` | Open the workbench in your default browser, signed in (see [Open in a browser](#open-in-a-browser)). |
+| `aw web url` | Print the single-use sign-in link instead of opening it. |
 
 `<id>` is a session id, a unique prefix of one (four characters or more), or a key such as `claude:<id>`. `--json` prints the raw result.
 
@@ -783,7 +785,32 @@ It respects `telemetry.enabled`. An older optional Claude Code skill is in
 - **It is a client of the app, never a supervisor.** It talks only to the app's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new at every launch). It never connects to session hosts, and every command goes the same way as the equivalent click. The app shows a short notice when `aw` sends or stops something.
 - **With the app quit**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the app starts) and what the app last recorded. Everything else says the app is not running.
 - **`delegate` and `task` are allowed there**, because they only ever create a proposal or a plan. Nothing runs until you accept it in the app, so an agent calling them can't start work you haven't seen.
-- **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12).
+- **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12). `aw web url` refuses there too, for the same reason: the link it prints is the whole workbench.
+
+## Open in a browser
+
+The workbench, table and conversation, also runs in an ordinary browser on this Mac. Run:
+
+```bash
+aw web open
+```
+
+and your default browser opens `http://127.0.0.1:7391/`, signed in. That browser stays signed
+in for 30 days from the last time you opened the page. `aw web url` prints the link instead, for
+another browser.
+
+- **This Mac only.** It listens on `127.0.0.1`, not on your network. A page that tries to
+  reach it under another name is refused (421), and so is any other site's script (403).
+- **A sign-in link works once, for two minutes.** It turns into a cookie your browser keeps
+  (`HttpOnly`, `SameSite=Strict`); Agent Wrangler stores only a hash of it, in
+  `web-devices.json` in its support folder. Without that cookie the browser gets nothing but
+  "not signed in" (401).
+- **Settings:** *Open in a browser* (`web.enabled`, on) and its *Port* (`web.port`, 7391), in
+  Preferences under Browser. Off closes the listener and every open tab.
+- **Not there yet:** confirmations and pickers still appear on the Mac, and things the app
+  opens by itself (a new conversation, a notification click) open in the window.
+- Sign-ins, failed sign-ins and new browsers are recorded in the access log
+  (`~/.cache/agent-wrangler/access.log`), by id only.
 
 ## Remote control (experimental)
 
@@ -1094,7 +1121,7 @@ There is no Done toast while delegated work is still going, and none for attempt
 
 ## Settings
 
-`runner.defaultPermissionMode` (`acceptEdits` — or `default` to be asked every time, `plan` to plan first) · `runner.model` (empty — Claude Code's own default) · `runner.autoResumeLastOnStartup` (true) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting, blocked or done) · `pollIntervalSeconds` (5) · `showUsage` (true) · `usagePollIntervalSeconds` (60, and 20 by itself near a limit) · `autoPause.enabled` (false) · `autoPause.percent` (98)
+`runner.defaultPermissionMode` (`acceptEdits` — or `default` to be asked every time, `plan` to plan first) · `runner.model` (empty — Claude Code's own default) · `runner.autoResumeLastOnStartup` (true) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting, blocked or done) · `pollIntervalSeconds` (5) · `showUsage` (true) · `usagePollIntervalSeconds` (60, and 20 by itself near a limit) · `autoPause.enabled` (false) · `autoPause.percent` (98) · `web.enabled` (true — the browser workbench on 127.0.0.1) · `web.port` (7391)
 
 **Preferences → Orchestration** lists every model Claude Code and Codex have reported. For each one it shows the capability tier Agent Wrangler assigns it (`basic < standard < expert < frontier`; `frontier` is reached only by escalation), whether it is enabled, how AW's effort levels map onto the model's own, what is known about it and where each fact came from, and how its cost is worked out. Unassigned models are listed first, and routing never picks one automatically. Your choices go into `settings.json` under `orchestration.models`; anything left at its default is not written.
 
