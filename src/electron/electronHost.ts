@@ -26,7 +26,7 @@ import { type BrowserWindow, clipboard, dialog, Notification, shell } from 'elec
 import type { Disposable } from '../core/events';
 import type { HostDialogs, HostServices, HostShell, InputOptions, PickItem, PickOptions } from '../host/hostServices';
 import { JsonSettings, JsonStore } from './jsonStore';
-import { ElectronSecrets } from './secrets';
+import { createElectronSecrets } from './secrets';
 import { TOAST } from './channels';
 
 export interface ElectronHostOptions {
@@ -243,9 +243,9 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     shell: shellFor(opts),
     clipboard: { writeText: async (text) => clipboard.writeText(text) },
     notify: notifierFor(opts),
-    // Beside the other state, but a file of its own: see `secrets.ts` for why
-    // a credential must not live in `settings.json`.
-    secrets: new ElectronSecrets(path.join(userDataDir, 'secrets.json'), opts.log),
+    // The login Keychain, never `settings.json`. `secrets.json` is the old
+    // safeStorage file, moved into the Keychain once and then removed (#124).
+    secrets: createElectronSecrets(path.join(userDataDir, 'secrets.json'), opts.log),
     // Machine-wide by design: there is no workspace, and the launcher already
     // merges Claude Code's own history with everything currently running.
     workspaceFolders: () => [],

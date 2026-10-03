@@ -171,7 +171,7 @@ export interface WorkbenchSurface {
  * interface that could hold a credential store would invite one.
  */
 export interface HostSecrets {
-  /** False when the OS declines to encrypt; nothing should be stored then. */
+  /** False when the OS store (the macOS Keychain) cannot be used; nothing should be stored then. */
   readonly available: boolean;
   get(key: string): Promise<string | undefined>;
   store(key: string, value: string): Promise<void>;
@@ -240,8 +240,9 @@ export interface HostServices {
    * Credentials, kept out of the settings file.
    *
    * Settings are plain JSON a user may open, copy, or paste into an issue; a
-   * bot token in there is a token in a screenshot. This goes to the OS instead,
-   * and a host that cannot encrypt must say so rather than quietly writing
+   * bot token in there is a token in a screenshot. This goes to the login
+   * Keychain instead (`src/core/keychainSecrets.ts`), and a host that cannot
+   * reach it must say so rather than quietly writing
    * plaintext — hence `available`, which the caller checks before offering to
    * store anything.
    */
