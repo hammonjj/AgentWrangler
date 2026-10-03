@@ -169,8 +169,8 @@ const composerWrite = document.getElementById('composerWrite')!;
 const composerNote = document.getElementById('composerNote')!;
 const adoptBtn = document.getElementById('adopt') as HTMLButtonElement;
 const pinBtn = document.getElementById('pin') as HTMLButtonElement;
-// "Own tab" opens a second window in Electron. A browser page is one document,
-// and the host can only answer it with "not available" (#134): no button there.
+// "Own tab" needs a second window, and a browser page is one document: the host
+// can only answer it with "not available" (#134), so the page drops the button.
 if (document.body.classList.contains('aw-web')) pinBtn.remove();
 const releaseBtn = document.getElementById('release') as HTMLButtonElement;
 const modeSel = document.getElementById('mode') as HTMLSelectElement;

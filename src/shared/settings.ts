@@ -129,7 +129,7 @@ export const SETTINGS: SettingSpec[] = [
     type: 'boolean',
     default: true,
     description:
-      'Run Codex conversations in a background Codex server that keeps going when Agent Wrangler quits or is reinstalled, so a running turn finishes and an approval or question is still waiting when the app comes back. Updating Codex restarts that server, which ends a running turn; Agent Wrangler only does that when nothing is running, or when you choose Agents → Restart Codex Server. Off runs Codex as a child of the app, which ends with it. Takes effect after a restart.',
+      'Run Codex conversations in a background Codex server that keeps going when Agent Wrangler’s background service stops or is reinstalled, so a running turn finishes and an approval or question is still waiting when it comes back. Updating Codex restarts that server, which ends a running turn; Agent Wrangler only does that when the service starts and nothing is running. Off runs Codex as a child of the service, which ends with it. Takes effect after a restart.',
   },
   {
     key: 'runner.confirmTakeoverOnSend',

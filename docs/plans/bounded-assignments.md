@@ -530,6 +530,10 @@ If recovery replays from a checkpoint (e.g., after a host restart):
 
 **Core restart (Electron app quits and relaunches):**
 
+> Superseded by [browser-workbench.md](browser-workbench.md) (#121): the core is the core
+> daemon now (#130, #142), so this is a daemon stop and start. The steps are unchanged.
+
+
 1. On startup, `SessionRegistry.startup()` recovers all open sessions.
 2. `recovery.ts` rebuilds each session's state from SeqLog and transcript.
 3. For each registry record with `origin.kind = 'orchestration'`, find its assignment.

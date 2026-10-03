@@ -1,26 +1,128 @@
 # Agent Wrangler
 
-Local macOS service that monitors every AI agent session on this machine — who is **waiting on you**, who is busy, who looks stuck, and who is done — in one live dashboard you open in a browser.
+Agent Wrangler watches every AI agent session on a Mac — who is **waiting on you**, who is
+busy, who looks stuck, and who is done — and runs conversations of its own. You see and drive
+all of it from one live workbench in a browser: on that Mac, or on a phone or another computer
+on your home network once you have paired it.
 
-Agent Wrangler supports **Claude Code and Codex** sessions across local VSCode windows, terminals, and desktop clients. The dashboard can filter by provider, and conversations started from Agent Wrangler can run through either Claude's Agent SDK or Codex App Server.
+It sees **Claude Code and Codex** sessions however they were started: in a terminal, an
+editor, a desktop client, another agent's subprocess, or Agent Wrangler itself. The table can
+filter by provider, and conversations started from Agent Wrangler run through Claude's Agent
+SDK or Codex App Server.
 
 Status comes from Claude Code's own hooks when they're installed, so a row that says it is waiting on a permission prompt means the prompt is genuinely on screen — not a guess from a quiet transcript.
 
-## Run it
+## How it fits together
+
+| Part | What it is | Where it runs |
+|---|---|---|
+| **Execution host** | The Mac that runs the agents and everything they touch: repositories, worktrees, builds, tests, and any app an agent drives (Unity, an automation browser) | One Mac |
+| **Core daemon** | The background service that owns all of Agent Wrangler's state: sessions, the conversations it runs, missions, Discord, `aw` and the web server. A LaunchAgent, `com.hammonjj.agentwrangler.core` | The execution host |
+| **Session hosts** | One small process per Claude conversation, so restarting or updating the daemon never ends one. Codex threads run in a background Codex server the same way | The execution host |
+| **Browser clients** | Any browser showing the workbench. A client renders and sends commands; it never runs agent work | The Mac itself, or a paired phone, tablet or computer on your home network |
+
+What follows from that:
+
+- **Work happens on the execution host.** A file you attach from a phone is uploaded to the
+  Mac. A folder you pick is a folder on the Mac, and every path the workbench shows is a path on
+  the Mac. An app an agent drives stays on the Mac's screen: the browser shows what the agent
+  reports, screenshots included, never a live view of a Mac window. Use macOS Screen Sharing
+  for that.
+- **Loopback by default.** The workbench listens on `127.0.0.1:7391`, and even there a browser
+  has to sign in (`aw web open`).
+- **Your home network is opt-in.** *Allow devices on my home network* adds an HTTPS listener on
+  the Mac's private addresses, with a certificate from a local CA you trust once per device, and
+  each device is paired one by one. See [LAN access](#lan-access).
+- **Never the internet.** No public URL, no port forwarding, no relay, no cloud account. Away
+  from home, Discord is the channel (see [Remote control](#remote-control-experimental)), and it
+  only ever makes outbound connections.
+- **One approval path.** Allowing a tool, answering a question and approving a plan go through
+  the same server-side actions whether the press came from a browser on the Mac, a phone,
+  Discord or `aw`. The first answer wins; a client that answers late is told it was already
+  answered. Nothing can be approved remotely that the table is not already offering.
+- **One user.** Every client acts as the Mac account's owner, the single `local-owner`
+  principal. Each request still says who is acting and how (`browser`, `cli`, `discord`, or the
+  daemon acting by itself), passes one `authorize()` check, and is written to the access log by
+  id. There are no accounts. Adding them later would mean a principal store and sign-in,
+  per-user preferences (columns, favourite projects, notification choices, drafts), an owner on
+  sessions and missions, and a real `authorize()` policy, while agent runtimes, hooks, secrets
+  and the listener stay shared by the host (`docs/plans/browser-workbench.md` §9).
+- **Closing every tab stops nothing.** The daemon does not track browsers: agents keep running,
+  and the next tab you open picks up the current state.
+
+**What the browser does not do.** Agent Wrangler used to be a desktop window (Electron),
+retired in #142. A few things went with it:
+
+| Gone | What there is instead |
+|---|---|
+| A window of its own, a Dock icon, a menu-bar item with the attention count | A browser tab. Decision D4 gives the count to the tab's title, but that is not built yet: the title names the page only |
+| Clickable Mac notifications while no tab is open | A plain Mac notification from the daemon (clicking it does nothing), plus Discord when it is on. See [Notifications and dictation](#notifications-and-dictation-in-a-browser-141) |
+| A live preview of the words while dictating | The browser records; the Mac transcribes when you stop |
+| *Resume in Terminal* and *Release* into a new Terminal window | The `claude --resume` command, shown to copy and run yourself |
+| *Open in its own tab* | Open the conversation in a second browser tab |
+| A side-by-side diff editor for an edit | The tool card shows the whole patch |
+| The menu's *Refresh*, *Restart Codex Server* and *Remove Status Hooks* | No control yet. Usage is read every minute anyway; Codex's server is restarted at daemon start when nothing is running; hooks can be removed by hand from `~/.claude/settings.json` |
+
+## Getting started
+
+This sets up a new Mac, then a phone. Everything runs on the Mac; the phone needs only a
+browser.
+
+**The Mac needs:** Git and the Xcode Command Line Tools (`xcode-select --install`; the
+launcher is compiled with `clang`), Node and npm to build (the app then runs on its own pinned
+Node 22), and Claude Code or Codex, installed and signed in. Dictation also needs
+`brew install ffmpeg whisper-cpp`.
+
+1. **Get the code.**
+
+   ```bash
+   git clone https://github.com/hammonjj/AgentWrangler.git
+   cd AgentWrangler
+   npm install
+   ```
+
+2. **Create the signing certificate**, once per Mac: `npm run app:signing-setup`. macOS asks
+   for your login password to trust it. See [Signing](#installing-updating-and-restarting)
+   for why.
+3. **Build and install the app:** `npm run app:install`. It puts *Agent Wrangler* in
+   `/Applications`. The first build may ask whether `codesign` may use the key: choose
+   **Always Allow**.
+4. **Put `aw` on your PATH:** `npm run cli:install`.
+5. **Open Agent Wrangler** from `/Applications`, Spotlight or Finder, or run `aw web open`.
+   Either starts the core daemon, then opens your default browser at
+   `http://127.0.0.1:7391/`, signed in. `aw daemon status` should now say
+   `Core daemon: running`, with its build.
+6. **Install the status hooks.** The table shows a banner saying status is only estimated;
+   press **Install hooks**. Claude Code sessions started from then on report exact status;
+   restart the ones already running when convenient. See
+   [How status is detected](#how-status-is-detected).
+7. **Preferences** (the *Preferences* link in the page's bar, `#/preferences`):
+   - *Open at login* starts the daemon when you log in, with no browser, so Discord and running
+     agents are covered after a reboot.
+   - To be told when an agent needs you while the tab is in the background, turn on *Notify
+     when an agent needs you* (off by default), then press **Enable notifications** in the
+     page's banner and allow them. With no tab open, the Mac notifies by itself (*Notify while
+     no tab is open*, on by default).
+8. **Add a phone** (optional; same home network as the Mac):
+   1. In Preferences → Browser, turn on *Allow devices on my home network*. Allow incoming
+      connections if the macOS firewall asks.
+   2. Trust the Mac's local CA on the phone, once: see
+      [Trusting the CA on an iPhone or iPad](#lan-access).
+   3. Pair it: run `aw web pair` on the Mac and scan the QR code with the phone. See
+      [Pairing a device](#pairing-a-device).
+   4. On the phone, bookmark the page. Browser notifications do not reach an iPhone yet; see
+      [Notifications and dictation](#notifications-and-dictation-in-a-browser-141).
+9. **Discord** (optional, for answering from away from home): see
+   [Remote control](#remote-control-experimental).
+
+If something does not come up, see [Troubleshooting](#troubleshooting).
+
+## Installing, updating and restarting
 
 Agent Wrangler is a background service, the **core daemon**, plus a web workbench that a
-browser opens (#121, #142). There is no window of its own: Electron was retired in #142.
-
-```bash
-npm install
-npm run app:install       # build, package, put it in /Applications, start the daemon
-npm run cli:install       # put `aw` on your PATH
-```
-
-Then open **Agent Wrangler** (Finder, Spotlight, the Dock). Opening it makes sure the core
-daemon is running on this build, asks it for a one-time sign-in link, opens that in your
-default browser, and exits; there is no Dock icon to linger. `aw web open` does the same from
-a terminal. Closing every tab stops nothing.
+browser opens. Opening the app (Finder, Spotlight) makes sure the core daemon is running on
+this build, asks it for a one-time sign-in link, opens that in your default browser, and exits:
+there is no Dock icon to linger. `aw web open` does the same from a terminal.
 
 From a checkout, without installing:
 
@@ -43,7 +145,7 @@ node dist/launcher/main.js --dry-run  # say what it would do; start, install and
 It is signed with the identity below and checked with `codesign --verify --deep --strict`.
 Hardened runtime stays off, as before.
 
-**Signing, once per machine.** Packaged builds are signed with a self-signed certificate,
+**Signing, once per Mac.** Packaged builds are signed with a self-signed certificate,
 *Agent Wrangler Local Signing*, from your login keychain. Create it before the first
 `app:install`:
 
@@ -88,9 +190,8 @@ daemon starts.
 
 **Restarting** means restarting the core daemon: `aw daemon start` from a newer install, or
 `aw daemon stop` then opening the app. Neither ends a Claude conversation or a Codex thread on
-the background server. Notifications with no tab open come from the Mac (`osascript`), and
-Discord posts its own when it is on (decision D3). There is no menu-bar item (decision D4):
-a tab's title carries the attention count. **Open at login** (off by default) is the
+the background server, and a tab left open reconnects and reloads itself onto the new build.
+**Open at login** (off by default) is the
 LaunchAgent's `RunAtLoad`: the daemon starts at login and no browser opens. launchd restarts a
 daemon that crashes, never one that was stopped. While an agent the daemon runs is working or
 asking permission it holds `caffeinate -i`, which also defers idle sleep.
@@ -146,7 +247,7 @@ at startup. Codex has its own background server (below).
   never a second process on one conversation. The row shows **interrupted** and Resume brings it
   back; a crashed one is never resumed automatically.
 - **Idle conversations are parked** after *End idle sessions with no Agent Wrangler connected
-  after* (default 24 hours, 0 = never) with the app closed: ended gracefully, resumable as
+  after* (default 24 hours, 0 = never) while the core daemon is stopped: ended gracefully, resumable as
   usual. Never one that is working, waiting on a question or permission, or running background
   tasks, and time the machine spends asleep does not count.
 - While a conversation is working, the Mac is kept from *idle* sleep (a lid close still sleeps).
@@ -154,113 +255,106 @@ at startup. Codex has its own background server (below).
 - A logout or reboot ends hosts too (macOS ends every process of yours). Each host ends its
   conversation gracefully, and it comes back as **interrupted**, resumable as above.
 
-**Codex conversations survive a quit.** Agent Wrangler runs every Codex thread in one
-background `codex app-server` of its own, detached from the app, so quitting, a crash or a
-reinstall leaves it running: a turn in progress finishes, and an approval or question it is
-waiting on is still there, on the same card, when the app comes back. Quitting does not count
-them as agents it would stop. The server runs from a copy of the Codex binary kept under the
-app's data directory (`runtimes/`), because VS Code deletes old extension versions; its
-manifest, socket and log are in `run/`. It is not Codex's machine-wide `app-server daemon`,
-which the `codex` command line would attach to.
+**Codex conversations survive a daemon restart.** Agent Wrangler runs every Codex thread in
+one background `codex app-server` of its own, detached from the core daemon, so a stop, a crash
+or a reinstall leaves it running: a turn in progress finishes, and an approval or question it is
+waiting on is still there, on the same card, when the daemon comes back. The server runs from a
+copy of the Codex binary kept under the app's data directory (`runtimes/`), because VS Code
+deletes old extension versions; its manifest, socket and log are in `run/`. It is not Codex's
+machine-wide `app-server daemon`, which the `codex` command line would attach to.
 
 - **Updating Codex restarts that server**, which ends a running turn and drops its pending
-  approvals and questions (you send again). Agent Wrangler does it by itself only at startup,
-  and only when nothing is running; otherwise **Agents → Restart Codex Server…** does it and
-  says what it would interrupt.
+  approvals and questions (you send again). Agent Wrangler does it by itself only when the
+  daemon starts, and only when nothing is running. The browser has no control to do it on
+  demand yet (the window's *Restart Codex Server…* went with it); `aw daemon stop` then
+  `aw daemon start` at a quiet moment does it.
 - A thread can have only one writer. One Agent Wrangler's server holds is refused by the VS Code
   extension until about a minute after it goes idle with nobody attached, and the reverse:
   a thread VS Code holds shows in Agent Wrangler as *open in another app*, read-only, until you
   take it over again.
 - *Keep Codex conversations running across restarts* (on by default) turns this off; Codex then
-  runs as a child of the app and ends with it.
+  runs as a child of the core daemon and ends with it.
 
 Codex discovery reads bounded tails from `~/.codex/sessions`; it does not modify Codex's state
 database. A Codex row carries its originating client when the rollout reports one. External
-Codex conversations are live, read-only transcript views. Set the dashboard provider filter to
+Codex conversations are live, read-only transcript views. Set the table's provider filter to
 **Codex** before pressing **+ New** to start a fully interactive Codex thread through App Server,
 including streaming replies, interruption, and approval decisions.
 
-> **There was a VSCode extension.** It was removed on 2026-09-22 — the app had caught up on
-> everything that mattered, and keeping a second front end alive meant every feature needing two
-> stories. `git log` has it if you need it back.
-
 ## Behavior
 
-- **One tab, two panes, a divider you move.** The agent table and the conversation live in a single editor tab rather than two, because they are never used apart — as two tabs they could be closed independently, shoved around by a file opening into either editor group, and re-arranged by hand afterwards. Drag the divider to give either side more room, double-click it to go back to the default, or focus it and use the arrow keys (Shift for a bigger step). The position is remembered.
-  - **Neither pane assumes it has the window.** The table folds its Project/Worktree/Branch/Model/PR columns below 720px, and that threshold is now measured on the *pane* rather than the window — drag the divider left and the columns fold without the window changing size at all. *Open in its own tab* still gives a conversation a tab of its own, which is the escape hatch for watching one agent while browsing others.
-- **Plan usage cards sit pinned above the table (they stay put while the list scrolls)** — the same numbers as Claude Code's `/usage`: the 5-hour session, the 7-day week, any model-scoped week (e.g. *Weekly Fable*), and extra-usage credits once any have been spent. Each card has the percent, a bar (blue, yellow from 70%, orange from 90%), and a *Resets in* countdown that ticks locally. They are read every minute (`agentWrangler.usagePollIntervalSeconds`), and **every 20 seconds once any limit passes 90%** — or ten points below your auto-pause threshold, whichever is lower — because near the end of a window the question stops being "am I close" and becomes "how many minutes do I have", and a reading five minutes old is how a burst of agents crosses 98% and lands on 100%. The read costs no tokens (it is an account-metadata endpoint, not an inference call) and every window shares one read per interval, so the only budget it spends is the endpoint's own rate limit. The source is `GET /api/oauth/usage` with the login token Claude Code stored at sign-in (macOS Keychain item *Claude Code-credentials*, else `~/.claude/.credentials.json`); the token is only ever read — Claude Code owns refreshing it. If a read fails the last good numbers simply stay up and the next poll tries again (backing off); the failure is logged, not shown on the cards. A read that leaves a window out (some list only the model-scoped week) does not take its card away: the Session and Weekly cards keep their last figure until that window resets, since within a window the percent only climbs, and the card's tooltip says when that figure was read. The *Refresh* menu item forces a read now. Every window shares one read per interval through a cache file in the app's cache directory (the endpoint returns HTTP 429 when several windows ask at once; a 429 backs the next read off by at least five minutes, or `Retry-After`). Turn the cards off with `agentWrangler.showUsage`.
-- The dashboard is a column-aligned table with collapsible sections (*Pinned / Waiting / Possibly stuck / Done / Busy / Paused / Ended / Archived*); collapse state is remembered.
+- **One page, two panes, a divider you move.** The agent table and the conversation share one page, because they are never used apart. Drag the divider to give either side more room, double-click it to go back to the default, or focus it and use the arrow keys (Shift for a bigger step). The position is remembered per browser.
+  - **The page's bar** links the routes: *Agents* (the table), *Missions*, *Analytics* and *Preferences*, each its own URL (`#/missions`, `#/preferences`; a conversation is `#/c/<key>`), so the browser's Back button and bookmarks work.
+  - **On a phone** (or any narrow window) the page shows one pane at a time: the table, then the conversation with a *‹ Back* button. Touch targets are 44px, and the composer stays above the on-screen keyboard.
+  - **Neither pane assumes it has the page.** The table folds its Project/Worktree/Branch/Model/PR columns below 720px, measured on the *pane* rather than the window — drag the divider left and the columns fold without the window changing size at all. To watch one agent while browsing others, open its conversation in a second browser tab: every tab has a conversation pane of its own.
+- **Plan usage cards sit pinned above the table (they stay put while the list scrolls)** — the same numbers as Claude Code's `/usage`: the 5-hour session, the 7-day week, any model-scoped week (e.g. *Weekly Fable*), and extra-usage credits once any have been spent. Each card has the percent, a bar (blue, yellow from 70%, orange from 90%), and a *Resets in* countdown that ticks locally. They are read every minute (`usagePollIntervalSeconds`), and **every 20 seconds once any limit passes 90%** — or ten points below your auto-pause threshold, whichever is lower — because near the end of a window the question stops being "am I close" and becomes "how many minutes do I have", and a reading five minutes old is how a burst of agents crosses 98% and lands on 100%. The read costs no tokens (it is an account-metadata endpoint, not an inference call) and every window shares one read per interval, so the only budget it spends is the endpoint's own rate limit. The source is `GET /api/oauth/usage` with the login token Claude Code stored at sign-in (macOS Keychain item *Claude Code-credentials*, else `~/.claude/.credentials.json`); the token is only ever read — Claude Code owns refreshing it. If a read fails the last good numbers simply stay up and the next poll tries again (backing off); the failure is logged, not shown on the cards. A read that leaves a window out (some list only the model-scoped week) does not take its card away: the Session and Weekly cards keep their last figure until that window resets, since within a window the percent only climbs, and the card's tooltip says when that figure was read. The daemon makes one read per interval, whatever number of tabs are open, through a cache file in the app's cache directory (a 429 from the endpoint backs the next read off by at least five minutes, or `Retry-After`). Turn the cards off with `showUsage`.
+- The agent table is column-aligned, with collapsible sections (*Pinned / Waiting / Possibly stuck / Done / Busy / Paused / Ended / Archived*); collapse state is remembered.
   - ***Waiting* is both ways an agent can be waiting on you**: stopped at a permission prompt it cannot get past, and finished with a turn that ended on a question. They used to be *Blocked on you* and *Waiting*, two headings for one instruction — go and look at that one — which cost a section of table height to draw a line the reader does not act on. Nothing was merged away underneath: a permission prompt is still its own status everywhere it is acted on, and the row says which it is without a heading having to. It **sorts to the top of the section**, because it is the only row in the table where the agent is frozen until you press something; it carries the orange dot rather than the yellow one; and it opens a card with buttons, where a question does not.
-- **Columns are yours.** Every divider in the header is drawn, not hidden: drag one to resize the column to its right, and **only** that column changes — the elastic Agent column absorbs the difference and every other column keeps the width it had. A column can grow until Agent reaches its 110px floor, and no further, so a drag can never push the table wider than the dock. The button at the right end of the header (or a right-click anywhere on it) opens a picker for switching columns on and off, with *Reset widths*. Both the widths and the hidden set are saved in the app's state file, so they survive a restart. Anything switched off keeps showing on the row's second line, so hiding a column costs the space it took, not the fact it carried.
+- **Columns are yours.** Every divider in the header is drawn, not hidden: drag one to resize the column to its right, and **only** that column changes — the elastic Agent column absorbs the difference and every other column keeps the width it had. A column can grow until Agent reaches its 110px floor, and no further, so a drag can never push the table wider than its pane. The button at the right end of the header (or a right-click anywhere on it) opens a picker for switching columns on and off, with *Reset widths*. Both the widths and the hidden set are saved in the app's state file on the Mac, so they survive a restart and every browser shares them. Anything switched off keeps showing on the row's second line, so hiding a column costs the space it took, not the fact it carried.
 - **The Age column is the age of the conversation**, counting from its first prompt and across every resume since — not the time since it last said something. That was the old meaning and it answered a question the table already answers twice: a busy row carries its tool's elapsed time and an ETA, and an idle row's silence is the point of it being idle. "How long has this been going" is the thing nothing else says. The number comes from the transcript file's creation time, which is exact for the purpose — Claude Code writes no transcript until the first prompt, and `--resume` appends to the same file rather than starting a new one (checked here against 229 transcripts: every one agreed with its first line's timestamp to within a second). The cell's tooltip adds the last-activity time, so nothing was lost, and says so plainly on the rare session that has no transcript to read a birth time from.
 - **A Model column** shows which model wrote the latest reply — *Opus 5*, *Fable 5.1*, *Haiku 4.5* — read from the transcript's last assistant message. The cell's tooltip has the full wire id. A model released after this build still appears, just unshortened.
-- **A Worktree column** names the linked git worktree a session is working in, and is blank in a main checkout — which is the point, since several agents on one repo means several trees and *main* alone stops telling you who is where. Detected without running git: a linked worktree's `.git` is a *file* holding `gitdir: …/.git/worktrees/<name>`, where a main checkout's is a directory. A session sitting in a subdirectory still resolves, the answer is cached per directory, and *Refresh* re-checks (so a `git worktree add` shows up on the next refresh).
+- **A Worktree column** names the linked git worktree a session is working in, and is blank in a main checkout — which is the point, since several agents on one repo means several trees and *main* alone stops telling you who is where. Detected without running git: a linked worktree's `.git` is a *file* holding `gitdir: …/.git/worktrees/<name>`, where a main checkout's is a directory. A session sitting in a subdirectory still resolves, and the answer is cached per directory until the daemon restarts.
 - **The Project is the repository, not the folder.** A session in a linked worktree (`MyApp-feature`) or a subfolder (`MyApp/packages/web`) shows and groups as `MyApp`, the main checkout's name; the Worktree column says which tree. Outside git it is the folder's own name. A repository at your home folder itself (a dotfiles repo) is ignored, so it does not swallow every folder under home.
 - **Subagents are not rows.** Codex's internal and subagent threads are always left out of the table. Claude Code's subagents never were rows: they live inside their parent's conversation.
 - **A *shared checkout* chip** marks every live session that has another live session in the same checkout — the same main checkout, or the same linked worktree. Two agents there share one index and one working tree, so a commit by one can pick up the other's half-finished edits. Separate worktrees of one repo are not flagged. The tooltip names the other sessions. Claude sessions count until they end. Codex threads never end, so they count only while Agent Wrangler runs them or they are mid-turn. The launcher's folder button turns amber with a ⚠ when the picked folder's checkout is already occupied. Both are warnings only: nothing is blocked.
-- **Waiting vs Done.** Both mean the agent finished its turn and is idle. *Waiting* means its last message asked you something — a question, a choice, "let me know". *Done* means it reported and stopped. The split is read off the reply text (a question mark closing the last paragraph, or a decision phrase), so it is a heuristic that errs towards *Waiting*: unknown or failed turns are always *Waiting*. Done sessions get a green dot, do not light the status-bar bell, and do toast when `notifyOnWaiting` is on.
+- **Waiting vs Done.** Both mean the agent finished its turn and is idle. *Waiting* means its last message asked you something — a question, a choice, "let me know". *Done* means it reported and stopped. The split is read off the reply text (a question mark closing the last paragraph, or a decision phrase), so it is a heuristic that errs towards *Waiting*: unknown or failed turns are always *Waiting*. Done sessions get a green dot, do not count as needing you, and do notify when `notifyOnWaiting` is on.
 - **A row stopped at a permission prompt opens a card.** It gets extra rows of its own under it, spanning the table: a header line with Claude's own one-line description of what it wants to do, and — sliding open underneath — the command *as it will run*, wrapped over as many lines as it takes rather than ellipsised, with **Allow**, **Always allow** and **Deny**. The card opens by itself while a decision can still land and collapses to its header once it cannot; clicking the header toggles it either way. Claude Code's own dialog keeps working; whichever is answered first wins. (Hooks required; see below for how the buttons reach Claude Code.)
 - **Conversations nobody has typed into yet are hidden.** A new Claude panel or a `/clear` registers a live process with no transcript; it appears the moment the first prompt lands, not as a *Waiting* row with nothing in it.
-- **Narrow docking works.** Below ~720px (a sidebar or a split bottom panel) the Project, Worktree, Branch, Model and PR columns are not rendered at all and fold into the row's second line, so the session title, status chips, ETA and age stay visible instead of being pushed off-screen. The picker shows those columns as *too narrow* rather than pretending they are on screen; widening the dock brings them back exactly as you left them.
+- **Narrow panes work.** Below ~720px (the divider dragged left, or a phone) the Project, Worktree, Branch, Model and PR columns are not rendered at all and fold into the row's second line, so the session title, status chips, ETA and age stay visible instead of being pushed off-screen. The picker shows those columns as *too narrow* rather than pretending they are on screen; widening the pane brings them back exactly as you left them.
 - **An ETA column** on every busy row (hooks required). It counts down against your own turn history: until the median while the turn is still typical, then until the 90th percentile once it has outlived half its peers (yellow past p75, orange past p90, where it shows `>Xm` instead of a countdown). Italic means the baseline is still the seeded one, before 20 of your turns have been recorded. A dash means the turn's start was not observed; the cell's tooltip says why.
 - **A banner at the top says when status is only estimated** — hooks not installed, disabled, or stale — with an *Install hooks* button. Once installed, it lists the live sessions that predate the install and still need a restart.
-- **Clicking a row opens the conversation here.** Every session — started here, in a VSCode window, in a terminal, on this machine at all — opens in the **conversation pane** beside the dashboard, and the click never moves focus or jumps you between windows. The pane reads the session's transcript live, so it works for conversations Agent Wrangler has nothing to do with.
+- **Clicking a row opens the conversation here.** Every session — started here, in an editor, in a terminal, anywhere on the Mac — opens in the **conversation pane** beside the table, in the tab you clicked in, and the click never moves you to another window. The pane reads the session's transcript live, so it works for conversations Agent Wrangler has nothing to do with.
   - **What it renders**: prompts and replies as markdown, thinking collapsed, one card per tool call that expands to its input and output, edits as a diff. Code blocks have a copy button; links open in the browser.
-  - **Permission prompts can be answered from it.** A session stopped at one grows a card naming the tool and what it wants, with **Allow** and **Deny**. This is the same hook race the dashboard buttons use, so answering in Claude Code instead simply flips the card to *answered there*. (`AskUserQuestion` and plan approval cannot go through the hook at all, by Claude Code's design — they are answerable only for conversations this window is running, where the app holds the callback itself.)
+  - **Permission prompts can be answered from it.** A session stopped at one grows a card naming the tool and what it wants, with **Allow** and **Deny**. This is the same hook race the table's buttons use, so answering in Claude Code instead simply flips the card to *answered there*. (`AskUserQuestion` and plan approval cannot go through the hook at all, by Claude Code's design — they are answerable only for conversations Agent Wrangler is running, where the daemon holds the callback itself.)
   - **Send takes over here.** For an idle external session, sending ends its previous process and resumes it here. For hook-backed busy sessions, the message waits until idle. Estimated status requires confirmation. Cancel leaves the draft intact; Release hands the session back to a terminal.
-  - **Open in its own tab** (a row's right-click menu, or the pane's own *Own tab* button) gives a session a tab that row clicks never swap away. One reusable pane plus a couple of these means browsing five agents costs one tab. It was called *Pin* until pinning a dashboard row needed the word; the two are unrelated, and one menu cannot have two items called Pin.
   - **Ended sessions** open in the pane too, with *Resume here* or sending a message as the way to continue them.
-- **Conversations you start here are fully interactive.** A bar across the top of the dashboard holds a **project dropdown** and a **+ New** button: pick a folder, press the button, and a Claude Code session starts there, inside the app, in the pane. It is an ordinary session in every respect that matters — it registers in `~/.claude/sessions`, runs your hooks, writes the normal transcript, and can be resumed anywhere afterwards — but this pane is its only interface, so it has no terminal to steal your attention. Unlike the Claude Code panel, which is bound to its window's workspace, one window can run sessions in **any** project on the machine. The dropdown's first row, and its default, is **Global**: a conversation that belongs to no project, for the questions that are not about code you have checked out. It runs in `~/.agent-wrangler/Global`, a scratch folder of its own rather than your home directory, so an agent asked something general has a harmless place to stand and its transcript is not filed under a project it never touched.
-  - **The dropdown lists every folder you have used Claude Code in**, newest first. That list is Claude Code's own — the `projects` map in `~/.claude.json`, which it appends to itself the first time you work somewhere — plus this window's workspace folders and anything currently running, so a new project appears without being told about it. Folders that have been deleted are left out, since nothing can start in them. **Browse…** at the bottom reaches anywhere else. The dropdown shows the folder's name and its full path as a tooltip, because two checkouts of one repo share a basename.
+- **Conversations you start here are fully interactive.** A bar across the top of the table holds a **project dropdown** and a **+ New** button: pick a folder, press the button, and a Claude Code session starts there, run by Agent Wrangler, in the pane. It is an ordinary session in every respect that matters — it registers in `~/.claude/sessions`, runs your hooks, writes the normal transcript, and can be resumed anywhere afterwards — but this pane is its only interface, so it has no terminal to steal your attention. Unlike the Claude Code panel in an editor, which is bound to its window's workspace, Agent Wrangler can run sessions in **any** project on the Mac. The dropdown's first row, and its default, is **Global**: a conversation that belongs to no project, for the questions that are not about code you have checked out. It runs in `~/.agent-wrangler/Global`, a scratch folder of its own rather than your home directory, so an agent asked something general has a harmless place to stand and its transcript is not filed under a project it never touched.
+  - **The dropdown lists every folder you have used Claude Code in**, newest first. That list is Claude Code's own — the `projects` map in `~/.claude.json`, which it appends to itself the first time you work somewhere — plus anything currently running, so a new project appears without being told about it. Folders that have been deleted are left out, since nothing can start in them. **Browse…** at the bottom opens a folder browser of the **Mac's** folders (your known projects first, then anything under your home folder), whichever device you are on. The dropdown shows the folder's name and its full path as a tooltip, because two checkouts of one repo share a basename.
   - **Each row has an X that removes it**, for the folders you tried once and will not open again. The entry stays in `~/.claude.json` — that file is Claude Code's, not ours, and rewriting someone else's config to tidy a dropdown is not a trade worth making — so the removal is recorded on our side and applied to every later scan. Removals are shared by every dashboard, and survive reloads. The menu stays open while you remove, so clearing three stale folders is three clicks.
   - **A star beside the X makes a folder a favourite.** Favourites sit at the top of the list, under Global, sorted by name rather than by recency, so the few folders you use all the time are always in the same place; everything else keeps its newest-first order below them. Like removals, favourites are kept on our side (not in `~/.claude.json`), shared by every dashboard and survive relaunches. Starring leaves the menu open and the selection unchanged. A starred folder that has been deleted is left out like any other, and removing a favourite with the X also un-stars it, so browsing back to it brings it back as an ordinary row.
   - **Anywhere you navigate to is added back.** Browsing to a folder, or starting a conversation in one, puts it in the list and undoes a previous removal — so an X is never a decision you have to be sure about. Nothing else un-removes a folder: a session that shows up in one from a terminal elsewhere leaves your list alone.
-  - The choice is remembered per dashboard, not globally: two windows are usually two different jobs, and a shared setting would have each one moving where the other starts its next conversation.
-  - *Agent Wrangler: New Conversation…* and the **+** in the view's title bar do the same thing through a quick pick, in the same order, for when your hands are on the keyboard.
+  - The choice is remembered per browser, not on the Mac: your laptop and your phone can each keep their own.
   - **Type, interrupt, queue.** Enter sends, Shift+Enter is a newline, and a message sent mid-turn queues behind it with a *queued* chip. While Claude is working the **Send** button becomes **Stop**, which interrupts the turn in flight, and goes back to Send when the turn ends — one button, so the thing to press is always the button under the box. Enter still sends while it says Stop, so a message typed mid-turn queues rather than being eaten by the interrupt. Replies stream in a word at a time.
   - **The composer is one box.** The attachment chips, the text and a toolbar strip along the bottom — paperclip and microphone on the left, **Send** on the right — all live inside a single framed surface that takes the focus ring as a whole. It used to be a flex *row*: a textarea with two 28px icon buttons and a text button balanced on its bottom edge, which ate half the width at the 300px the pane is often used at and left Send stranded far from the text at full width. The frame moved off the textarea and onto the box around it, which is what makes the four parts read as one control.
-  - **Right-click anything typeable for Cut/Copy/Paste.** The browser's own context menu, spelling suggestions included.
   - **The model dropdown** beside the permission-mode one lists exactly the models your account can use — the list is the CLI's own answer, not a hardcoded one — and switches the model for the next turn.
   - **Permission, question and plan cards are answered here.** A permission ask offers **Allow**, **Deny**, and **Always allow** when the prompt itself suggested a rule (the button's tooltip names the rule it writes). `AskUserQuestion` renders as a form with the options and an *Other* box; a plan renders with **Approve** and **Request changes**, and the feedback goes back to the model. These three are exactly what the hook path cannot do for a session running elsewhere.
   - **An ask is never something you have to go looking for.** When one arrives — and when the pane opens on a session that is already waiting — the view lands on the **top** of its card, at the question itself, rather than at the end of the conversation, which on a card taller than the pane (a long plan, a multi-part question) means landing past it on its buttons. If the card is off screen for any other reason, a strip above the composer says what Claude is waiting on (*↑ Plan ready for approval*) and clicking it brings that card's head back to the top of the view, with a one-second outline so the eye finds it. The strip disappears as soon as the card is visible: it is a pointer, not a second copy of the question. Answering starts the conversation following along again.
   - **Long blocks keep the rest one click away.** Text is capped at 6,000 characters on the way to the pane so that opening a conversation does not ship a megabyte nobody will read; anything cut gets a **Show the rest (N more characters)** button rather than a silent ellipsis, and the host hands over what it held back. It matters most on a plan — approving half a plan is approving something you have not read. A reply still streaming keeps its expansion as it grows, and if the held text has since been dropped (a 2 MB-per-conversation budget, oldest first) the button says so instead of quietly showing the short version.
-  - **Dictate instead of typing.** The microphone beside the composer records; click it again and what you said lands at the cursor — in the box, ready to edit, **never sent**. Escape throws the recording away. Transcription is **local** — `ffmpeg` records 16 kHz mono, `whisper.cpp` transcribes it, and no audio leaves the machine. Roughly half a second for a sentence once warm; the very first run takes ~15s while Metal compiles its shaders, once ever.
-    - **You see the words while you speak.** A strip inside the composer frame, above the text, shows what is being recognised, in dimmed italics under a *Listening — preview, may change* heading. Words show up roughly 0.3–1 s after they are said. It is provisional and says so: the preview re-reads the last stretch of audio about once a second, so a word can change as more context arrives. Stopping switches the strip to *Finishing transcription…* while the **whole** recording is transcribed once more, and that text — not the preview — is what goes in the box, at the caret, after whatever was already typed. A selection is not replaced, so a stray select-all cannot cost you a draft. If the preview falls more than 3 s behind (a slow machine, a big model, the first-ever run), the strip says how far, and that nothing is lost. A refused microphone, a failed transcription, or a recording in which nothing was heard is reported in the same strip.
-    - How: whisper.cpp has no streaming mode that uses ffmpeg (`whisper-stream` captures through SDL, a different recording stack), but a warm `whisper-cli` pass over a few seconds of audio takes ~0.25 s. So ffmpeg writes PCM to a pipe instead of a file, and while you talk the audio since the last cut is re-transcribed; once that tail passes 18 s it is cut at its quietest moment and frozen, so every pass stays inside one Whisper window. Silent stretches are not sent to Whisper at all during the preview — it invents "Thank you." for a quiet room. Turn the preview off with `agentWrangler.dictation.livePreview`; the final pass is the same either way.
-    - Switching conversations mid-recording stops it; the text is filed in the draft of the conversation it was dictated in. Closing the pane, or the window reloading, discards the recording and kills ffmpeg and any Whisper pass; temporary WAVs are deleted after every pass. A recording stops by itself at five minutes and is transcribed as if you had clicked.
-    - It needs `brew install ffmpeg whisper-cpp` and a model. Agent Wrangler checks for all three when you click, names whichever is missing, and offers to install it or download the default model (`ggml-base.en`, 141 MB, into `~/.cache/agent-wrangler/whisper/`). Point `agentWrangler.dictation.modelPath` at a bigger model for better accuracy, or another language.
-    - The recording runs in the main process, not the webview — a webview is an iframe with its own permission story, and a child process of the app is just the app asking for the microphone, which macOS already understands. Expect one permission prompt the first time. It is also how Claude Code's own dictation works.
-    - The tools are found on `PATH` **and** in the Homebrew prefixes, because a GUI VSCode is started by `launchd` and inherits a bare `PATH` in which no Homebrew binary exists. `agentWrangler.dictation.ffmpegPath` / `.whisperPath` override the search, and `.inputDevice` picks a microphone other than the system default.
+  - **Dictate instead of typing.** The microphone beside the composer records with the microphone of the device you are on — the phone's, on a phone; click it again and what you said lands at the cursor — in the box, ready to edit, **never sent**. Escape throws the recording away. Transcription is **local to the Mac**: the recording is uploaded to the daemon, `whisper.cpp` transcribes it there, and no audio leaves your own devices. Roughly half a second for a sentence once warm; the very first run takes ~15s while Metal compiles its shaders, once ever. Details, limits and what a browser needs are in [Notifications and dictation in a browser](#notifications-and-dictation-in-a-browser-141).
+    - The text goes in the box at the caret, after whatever was already typed. A selection is not replaced, so a stray select-all cannot cost you a draft. Switching conversations mid-recording stops it; the text is filed in the draft of the conversation it was dictated in. A refused microphone, a failed transcription, or a recording in which nothing was heard is reported beside the composer.
+    - It needs `brew install ffmpeg whisper-cpp` on the Mac and a model. Agent Wrangler checks for all three when you click, names whichever is missing, and offers to install it or download the default model (`ggml-base.en`, 141 MB, into `~/.cache/agent-wrangler/whisper/`). Point `dictation.modelPath` at a bigger model for better accuracy, or another language. The tools are found on `PATH` **and** in the Homebrew prefixes, because the daemon is started by `launchd` and inherits a bare `PATH`; `dictation.ffmpegPath` / `dictation.whisperPath` override the search.
+    - There is no live preview of the words while you speak: the window had one because it recorded with the Mac's own microphone, and that went with it (#142). The `dictation.livePreview` and `dictation.inputDevice` settings belonged to that recording and do nothing in a browser.
   - **Paste a screenshot straight in.** Paste an image into the composer and it becomes a thumbnail with an X to take it back; it goes with your message as an image block. An image on its own is a fine message. Images too large for the API (5 MB) or in a format it will not take are refused at the paste, not hours later as a failed turn.
-  - **Drop files on the pane to attach them.** Anywhere on the pane, from the Finder or from VSCode's own explorer: an image is attached as an image, and anything else — a source file, a folder — is written into the box as an `@` mention, relative to the session's folder when it lives inside it. That is what dragging a file into the TUI does, and it is the cheaper half: Claude reads the ones it actually needs instead of a dropped folder arriving whole in the prompt. An image past the 5 MB ceiling goes in as a path rather than being refused, since Claude's own Read can open it. Paths come from the drag's `text/uri-list`; a file dropped without one (an image dragged straight out of another app) still attaches by its bytes.
+  - **Attach files with the paperclip, or drop them on the pane.** An image is attached as an image. Anything else is **uploaded to the Mac** (up to 50 MB a file) into a staging folder for that conversation under the app's support folder, and written into the box as an `@` mention of the uploaded copy's path on the Mac. Uploads older than a week are deleted. A drop from the Mac's own Finder carries the file's path (`text/uri-list`), and a path inside a folder Agent Wrangler serves (a session's folder, a worktree) is mentioned where it is, relative to the session's folder, which is what dragging a file into the TUI does. A path a browser sends is never trusted as a Mac path on its own say-so: anything else is refused with a note to attach it with the paperclip instead.
   - **Type `@` to mention a file.** The list is every file in the session's folder that `git ls-files` knows about — tracked *and* new-but-not-ignored, so this morning's file is there and `node_modules` is not — ranked by a fuzzy match on the filename. Arrows move, Enter or Tab completes, Escape dismisses. Outside a git repository it falls back to walking the folder.
-  - **Open an edit in the real diff editor.** Any tool card carrying a patch has a button for it: side by side, syntax highlighted, navigable. Both sides are rebuilt from the patch rather than read off disk, because a transcript can be weeks old and the file changed many times since — so the tab says *changed region*, which is what it shows.
-  - **The permission mode is a dropdown**: ask every time, auto-accept edits, or plan mode. It changes the live session, the same as `shift+tab` in the terminal. Defaults come from `agentWrangler.runner.defaultPermissionMode` and `runner.model`.
+  - **Edits show as a diff in their tool card**, the whole patch. There is no separate side-by-side diff view in the browser yet; the card's button says so.
+  - **Files a conversation names** (a path in a tool card, a mission's changed file) open in an in-browser viewer served by the daemon, with *Download* and *Copy path*. Only files under the session folders, worktrees and transcript folders can be fetched. A browser on the Mac itself also gets *Open on this Mac* and *Show in Finder on this Mac*; a paired device never acts on the Mac's desktop.
+  - **The permission mode is a dropdown**: ask every time, auto-accept edits, or plan mode. It changes the live session, the same as `shift+tab` in the terminal. Defaults come from `runner.defaultPermissionMode` and `runner.model`.
   - **The model is a dropdown beside it**, and switching applies to the next reply, the same as `/model` in the terminal. The list is the CLI's own answer to "which models may this account use", asked once per session rather than hardcoded, so it never offers a model you cannot reach and never goes stale as models are added. It appears once the session has started; if an older CLI cannot answer, the dropdown stays hidden rather than guessing. The session reports back the *resolved* id (`claude-sonnet-4-5-…`) while the list offers aliases (`sonnet`), so the dropdown matches the two up — and shows the raw id rather than the wrong name if it ever cannot.
-  - **Take over here** pulls an existing session into this window, wherever it was running — another VSCode window, a terminal, an iTerm tab. It ends that process and resumes the same session id here, which works because a Claude Code conversation *is* its transcript: resume appends to the same file under the same id, so nothing is lost. Offered only while the session is idle (*Waiting* or *Done*) — a turn in flight would be thrown away — and re-checked after you confirm, in case it started working while the dialog was up. If the old process refuses to die, the takeover is abandoned rather than risking two processes writing one transcript. An **ended** session skips all that and simply says *Resume here*.
+  - **Take over here** pulls an existing session into Agent Wrangler, wherever it was running — an editor's Claude Code panel, a terminal, an iTerm tab. It ends that process and resumes the same session id here, which works because a Claude Code conversation *is* its transcript: resume appends to the same file under the same id, so nothing is lost. Offered only while the session is idle (*Waiting* or *Done*) — a turn in flight would be thrown away — and re-checked after you confirm, in case it started working while the dialog was up. If the old process refuses to die, the takeover is abandoned rather than risking two processes writing one transcript. An **ended** session skips all that and simply says *Resume here*.
     - **The button and the composer no longer say the same thing.** The note beside *Resume here* used to read "Send resumes this session here and ends its previous process" — two ways to do one thing, printed side by side, which makes the button look redundant. It is not: until the session is adopted the permission-mode, model and effort dropdowns are disabled, so choosing a model before writing anything needs the button. The note now says what the *button* is for (*Ended. Resume it here, or just type — sending resumes it too.*) and the hint about Send moved to where Send is typed, the placeholder.
-  - **Release** is the opposite: this window stops running the session and a terminal resumes the same id. Same reasoning, same guarantee, and a turn in flight is cut off, which the confirm says.
-  - **A reload brings your conversation back.** These sessions are child processes of the window, so *Developer: Reload Window* ends them — but only the processes. On startup the window resumes the one the pane was last showing, and opens it without taking focus. Bounded on purpose: the most recent session only, recorded in *this* window's state rather than shared between windows, only within the last few hours, and never one that something else has picked up in the meantime. Turn it off with `agentWrangler.runner.autoResumeLastOnStartup`.
-  - **And it brings back what was *said*, not just the session.** A resumed session streams nothing of its past — the SDK picks the conversation up and carries on — so a pane showing one used to come back empty while the model still held every word of it, and the only way to see where you had got to was to ask the agent to repeat itself. The pane now reads the session's transcript for the half that happened before the resume and puts it above the live half, so a reload, a *Take over* and a *Resume here* all land you at the bottom of the conversation you were already having. The two halves can never overlap or double up: the transcript is read once, before the resumed process is started, so it holds strictly the past. The same 512 KB / 300-block window the read-only pane uses applies, with the same notch at the top when there is more above it.
-  - Rows this window runs carry no badge of their own. They used to be marked **here**, which marked the rule instead of the exception — with nearly everything running in one window it appeared on nearly every row — so it went. A row's tooltip still says where clicking it will open the session.
-  - It runs the `claude` bundled inside your installed Claude Code VSCode extension, which is a far newer build than whatever `claude` is on `PATH`. `agentWrangler.claudeBinaryPath` overrides that.
-- **Pause the agents when the tokens run low.** The bar above the table has a controls group pushed to its right, opposite the launcher, and the first thing in it is one button that freezes **every** running agent on the machine — not just this window's. Pressing it sends `SIGSTOP` to each session's process: a stopped `claude` makes no further API requests, so it spends nothing, and `SIGCONT` puts it back exactly where it was. Anything paused turns the button into **▶ N**, so a half-frozen fleet is one click from running again. Pausing asks first: the button sits beside the Discord toggle, and a stray click used to freeze everything. The confirmation names how many agents it will stop, and Cancel is the default, so Return, Escape and Cancel all leave them running. The *Pause All Agents* menu item asks the same way. Resuming never asks, and auto-pause (below) never waits on a dialog.
+  - **Release** is the opposite: Agent Wrangler stops running the session so that a terminal can resume the same id. The browser shows the `claude --resume <id>` command and the folder to run it in, and copies it; you run it in a terminal on the Mac. Same reasoning, same guarantee, and a turn in flight is cut off, which the confirm says.
+  - **A restart brings your conversation back.** A daemon restart does not end a conversation (it is in a session host), but a logout, a reboot or a crashed host does. On the next start the daemon resumes the most recently interrupted one by itself. Bounded on purpose: the most recent session only, only within the last few hours, never one that crashed, and never one that something else has picked up in the meantime. Turn it off with `runner.autoResumeLastOnStartup`.
+  - **And it brings back what was *said*, not just the session.** A resumed session streams nothing of its past — the SDK picks the conversation up and carries on — so a pane showing one used to come back empty while the model still held every word of it, and the only way to see where you had got to was to ask the agent to repeat itself. The pane now reads the session's transcript for the half that happened before the resume and puts it above the live half, so a restart, a *Take over* and a *Resume here* all land you at the bottom of the conversation you were already having. The two halves can never overlap or double up: the transcript is read once, before the resumed process is started, so it holds strictly the past. The same 512 KB / 300-block window the read-only pane uses applies, with the same notch at the top when there is more above it.
+  - Rows Agent Wrangler runs carry no badge of their own. They used to be marked **here**, which marked the rule instead of the exception — it appeared on nearly every row — so it went. A row's tooltip still says where clicking it will open the session.
+  - It runs the `claude` bundled inside your installed Claude Code VSCode extension when there is one, which is usually a far newer build than whatever `claude` is on `PATH`. `claudeBinaryPath` overrides that.
+- **Pause the agents when the tokens run low.** The bar above the table has a controls group pushed to its right, opposite the launcher, and the first thing in it is one button that freezes **every** running agent on the Mac — not just the ones Agent Wrangler runs. Pressing it sends `SIGSTOP` to each session's process: a stopped `claude` makes no further API requests, so it spends nothing, and `SIGCONT` puts it back exactly where it was. Anything paused turns the button into **▶ N**, so a half-frozen fleet is one click from running again. Pausing asks first: the button sits beside the Discord toggle, and a stray click used to freeze everything. The confirmation names how many agents it will stop, and Cancel is the default, so Return, Escape and Cancel all leave them running. Resuming never asks, and auto-pause (below) never waits on a dialog.
   - **Per session, from the row's right-click menu** — *Pause agent* / *Resume agent*. Neither asks for confirmation, unlike *Close session*: pausing is undone by the same menu item, and a dialog in front of the button you reach for while watching the last of your tokens disappear is friction in the wrong place.
-  - **Paused rows move to their own *Paused* section**, above *Ended*, with a purple dot and a `paused` chip — a frozen agent is a live process you are coming back to, not one of the two sections that hold what you are finished with. The section exists because a frozen session's status stops being about the session: status is read from transcript activity, and a stopped process makes none, so a paused row left in Busy would read as work in progress and then relabel itself *Possibly stuck* — which is why the row's tooltip says it is paused rather than naming a status that is no longer moving. They stop counting toward the status-bar bell for the same reason: a frozen session stopped at a permission prompt is asking something that nothing can answer until it is resumed.
+  - **Paused rows move to their own *Paused* section**, above *Ended*, with a purple dot and a `paused` chip — a frozen agent is a live process you are coming back to, not one of the two sections that hold what you are finished with. The section exists because a frozen session's status stops being about the session: status is read from transcript activity, and a stopped process makes none, so a paused row left in Busy would read as work in progress and then relabel itself *Possibly stuck* — which is why the row's tooltip says it is paused rather than naming a status that is no longer moving. They stop counting as needing you for the same reason: a frozen session stopped at a permission prompt is asking something that nothing can answer until it is resumed.
   - **What it costs.** Nothing at all for an idle agent. A turn *in flight* is the exception: its HTTPS request is held open by a process that has stopped reading it, so a long pause can have the far end drop the connection and that turn fails on resume. Everything already written to the transcript is kept, so the cost is one turn, never the conversation. This is also why pausing is not `SIGKILL`: a stopped process finishes its partial writes when it resumes, so the transcript is never truncated.
-  - **It works for sessions Agent Wrangler has nothing to do with** — another VSCode window, an iTerm tab, anywhere on the machine — because a signal is the one channel into a running Claude Code TUI that exists.
-  - **Nothing is written down: which agents are paused is read from the OS.** `ps` reports a stopped process as state `T`, so every dashboard asks the same question of the same authority and gets the same answer. That is what makes a pause in one window visible in another, survive a reload, need no cleanup when a paused agent is killed from its own terminal, and correct itself if a signal is ever refused — and it means an agent you stopped by hand with `kill -STOP` shows up as paused too, with a button to start it again. The first cut of this kept a persisted set of "sessions this window paused" instead; a second window could neither see those records nor preserve them, so pausing anything there erased them, and a stopped process whose record has been erased is frozen with nothing left to thaw it.
+  - **It works for sessions Agent Wrangler has nothing to do with** — an editor's panel, an iTerm tab, anywhere on the Mac — because a signal is the one channel into a running Claude Code TUI that exists.
+  - **Nothing is written down: which agents are paused is read from the OS.** `ps` reports a stopped process as state `T`, so the answer comes from one authority. That is what makes a pause survive a daemon restart, need no cleanup when a paused agent is killed from its own terminal, and correct itself if a signal is ever refused — and it means an agent you stopped by hand with `kill -STOP` shows up as paused too, with a button to start it again.
   - **Closing or taking over a paused session continues it first**, since a stopped process cannot act on the SIGTERM that *Close session* sends — it would sit out the whole grace period and then be SIGKILLed, which is the one way to strand a half-written transcript line.
-  - **Auto-pause** (`agentWrangler.autoPause.enabled`, off by default) does it for you at `autoPause.percent` — **98%** by default, across *any* limit window, not just the one currently constraining requests: a weekly limit at 99% ends the day as firmly as the five-hour one. 98 rather than 100 leaves room for the reading to be a poll old and for a turn that started at 99% to finish. It fires **once per approach**: after firing it re-arms only when usage falls back under the threshold, so an agent you deliberately resumed at 98% is not frozen again at the next poll. A failed usage read never triggers it — no reading is not evidence of exhaustion, and freezing every agent on the machine is too blunt a thing to do on a guess — and it stays armed until it has actually stopped something, so a window reloaded while over the threshold does not spend its one shot before the first session scan has found anything to pause. Turning it on also keeps the usage reads going when `showUsage` is off: hiding the cards is a preference about a narrow dock, and it must not quietly switch off a spending guard.
+  - **Auto-pause** (`autoPause.enabled`, off by default) does it for you at `autoPause.percent` — **98%** by default, across *any* limit window, not just the one currently constraining requests: a weekly limit at 99% ends the day as firmly as the five-hour one. 98 rather than 100 leaves room for the reading to be a poll old and for a turn that started at 99% to finish. It fires **once per approach**: after firing it re-arms only when usage falls back under the threshold, so an agent you deliberately resumed at 98% is not frozen again at the next poll. A failed usage read never triggers it — no reading is not evidence of exhaustion, and freezing every agent on the machine is too blunt a thing to do on a guess — and it stays armed until it has actually stopped something, so a daemon started while over the threshold does not spend its one shot before the first session scan has found anything to pause. Turning it on also keeps the usage reads going when `showUsage` is off: hiding the cards is a preference about a narrow pane, and it must not quietly switch off a spending guard. It runs in the daemon, so it works with no browser open.
 - **Organize conversations into your own sections.** The table has a status view for *Waiting*, *Busy*, *Paused*, *Done* and the other live states, plus a sections view for your own organization. Every conversation starts in the always-present **Uncategorized** section — named for what it is, since a conversation sitting in a section somebody chose and one nobody has filed yet are the difference the view exists to show. Right-click a row and choose *Add to…* to move it to an existing section, or create a new named section and add it in one step.
-- **Give a conversation your own name.** *Give it a name…* on the row menu opens a box showing the current title as a placeholder, so you type a name rather than edit one; once a name is set the item reads *Rename…*, the box is prefilled with it, and emptying the box puts the original title back. It is deliberately not prefilled the first time — filling it with the derived title would let you freeze today's guess at a name as a literal one, which would then stick when the real title improved. The name shows everywhere the session does — the dashboard row, the conversation pane's header and tab, the status-bar tooltip, the toasts, the command palette's picker, and the terminal tab a resume opens — because it is applied in the session store, which is the one thing all of those read from. The row's tooltip still carries the title it came with.
+- **Give a conversation your own name.** *Give it a name…* on the row menu opens a box showing the current title as a placeholder, so you type a name rather than edit one; once a name is set the item reads *Rename…*, the box is prefilled with it, and emptying the box puts the original title back. It is deliberately not prefilled the first time — filling it with the derived title would let you freeze today's guess at a name as a literal one, which would then stick when the real title improved. The name shows everywhere the session does — the table row, the conversation pane's header, the notifications — because it is applied in the session store, which is the one thing all of those read from. The row's tooltip still carries the title it came with.
   - **It is a nickname, not a rename, and that is deliberate.** A Claude Code session's title is not a field anyone owns: it is derived from the `ai-title` line the model writes into the transcript, then the registry's generated handle, then the slug of the first prompt, then the first prompt itself. Changing it for real would mean writing into `~/.claude/sessions/<pid>.json` or appending to the transcript — both Claude Code's files, and the second one *is* the conversation. This repo already declined to rewrite `~/.claude.json` to tidy a dropdown; corrupting a conversation to relabel it is a far worse trade. Keeping the name on our side also means it works on ended sessions and on sessions Agent Wrangler has never run, and that clearing it is a real undo rather than a second rename back to a remembered string.
-- **Right-click a row for its actions.** *Add to…*, *Give it a name…*, *Open in its own tab*, *Go to where it runs*, *Pause agent*, *Copy session id*, *Archive* — and, separated and in red at the bottom, *Close session…*. Archived sessions move to the always-last Archived section in the status view (collapsed by default), stop counting toward the status-bar bell, and never toast; the same item unarchives.
-  - **Close session** ends the process running a session and stops there — it hands it to nobody, unlike *Take over* and *Release*. That is safe for the same reason those are: a Claude Code conversation *is* its transcript, so closing one parks it rather than destroying it. The row moves to *Ended* and the conversation resumes from where it stopped. Unlike *Take over* it is offered **while a turn is in flight**, because the session most worth closing is the one that has wedged; the confirm says so plainly when that is the case. A session this window runs is stopped gracefully; anything else gets SIGTERM, then SIGKILL if it has not gone in five seconds, and an error rather than a silent failure if it refuses both. Ended sessions and live ones with no known pid do not get the item at all — there would be nothing to signal.
-  - **Every provider, not just Claude.** It used to be Claude-only, which left *Archive* — a hide, not a stop — as the only thing you could do to a Codex row you were finished with. The two real conditions are the ones above and they answer for any provider: a Codex thread this window runs has no pid of its own (one app-server serves every thread) and is closed by releasing it, and a Codex conversation running somewhere else has neither a pid nor a handle and correctly does not offer the item.
+- **Right-click a row for its actions** (on a phone, touch and hold). *Add to…*, *Give it a name…*, *Resume here* for an interrupted one, *Pause agent*, *Copy session id*, *Archive* — and, separated and in red at the bottom, *Close session…*. *Open in its own tab* is still listed, but a browser opens the conversation in the pane and says a conversation of its own is not available yet: open a second browser tab instead. Archived sessions move to the always-last Archived section in the status view (collapsed by default), stop counting as needing you, and never notify; the same item unarchives.
+  - **Close session** ends the process running a session and stops there — it hands it to nobody, unlike *Take over* and *Release*. That is safe for the same reason those are: a Claude Code conversation *is* its transcript, so closing one parks it rather than destroying it. The row moves to *Ended* and the conversation resumes from where it stopped. Unlike *Take over* it is offered **while a turn is in flight**, because the session most worth closing is the one that has wedged; the confirm says so plainly when that is the case. A session Agent Wrangler runs is stopped gracefully; anything else gets SIGTERM, then SIGKILL if it has not gone in five seconds, and an error rather than a silent failure if it refuses both. Ended sessions and live ones with no known pid do not get the item at all — there would be nothing to signal.
+  - **Every provider, not just Claude.** It used to be Claude-only, which left *Archive* — a hide, not a stop — as the only thing you could do to a Codex row you were finished with. The two real conditions are the ones above and they answer for any provider: a Codex thread Agent Wrangler runs has no pid of its own (one app-server serves every thread) and is closed by releasing it, and a Codex conversation running somewhere else has neither a pid nor a handle and correctly does not offer the item.
 - **The × on a hovered row means "I'm done with this agent".** It appears in the last column when the pointer is over the row, and it does what *Close session…* does: the process running it ends, the transcript is kept, and the row drops to *Ended*, which ages out of the table on its own. It asks first **only** when a turn is in flight — the case the confirm exists for — so retiring an idle agent costs one click. On a row with nothing left to stop (already ended, or a live session with no known pid) the same button archives instead, since that is what "off my table" can mean there; on an archived row it unarchives.
   - **On the Project tab it also takes the row away.** That tab groups by *where* a session ran, which stays true after it is closed, so there is no Ended section for the row to fall into and it would sit in its project for ever. There the × archives as well as closing — and the Project tab renders no archived rows, so the row goes. Only after the close actually happened: decline the confirm on a working agent and nothing is hidden. The session is still in the Status tab under *Archived*, and a project whose rows have all gone takes its heading with it.
-- The menu carries the same actions (refresh, new conversation, open conversation, open a conversation in its own tab, rename a conversation, go to where a session runs, resume, copy id, reveal transcript, pause all agents, resume all paused agents, pause or resume one agent, install/remove status hooks, connect or disconnect Discord).
+- **There is no app menu.** What it held lives where it is used: new conversation and pause all in the bar above the table, per-session actions in the row menu, installing hooks in the table's banner, connecting or disconnecting Discord in Preferences. The few with no browser control yet are listed under [What the browser does not do](#how-it-fits-together).
 
 ## Usage records (telemetry)
 
@@ -301,7 +395,7 @@ nothing, not zeroes.
     records no usage, and nothing is subtracted.
   - **A turn is recorded once.** A reattach replays the last turn; that turn is not recorded
     twice.
-  - **Turns while Agent Wrangler was quit** are covered by the next recorded turn, which is
+  - **Turns while the core daemon was stopped** are covered by the next recorded turn, which is
     marked `coversGap`.
 - **Where each agent falls short** (a missing figure is left out, never written as 0):
 
@@ -519,13 +613,13 @@ new worktree and branch of the chosen folder's repository:
     back — merged, or not — never by running it again; if git cannot answer, the buttons stay off
     and *Check again* asks it again (`docs/plans/pending-actions.md`). Each merge, conflict, revert and mission check writes
     an `integration` usage record (counts and stage names, never file names).
-- **Restarts.** A task's conversation is an ordinary row in the table. It survives quitting and
-  reinstalling, since every Claude conversation runs in a session host. On relaunch the task is
-  picked up where it is. If its session was
+- **Restarts.** A task's conversation is an ordinary row in the table. It survives a daemon
+  restart or a reinstall, since every Claude conversation runs in a session host. When the
+  daemon starts again the task is picked up where it is. If its session was
   lost (its host was killed, say), the task offers *Resume the attempt*, which continues the
   same session id, and *Retry fresh*. It never resumes by itself, unless the mission sets
   `autoRecover` (one resume, never after a host crash). A retry that was waiting (a backoff, a
-  rate limit) when the app quit runs when it is due after the relaunch.
+  rate limit) when the daemon stopped runs when it is due after it starts again.
 - **Records.** Missions are `orchestration/missions/<id>.json` under the app's support folder.
   Each attempt adds one `attempt` line to the usage records, with its route, timings, usage
   summed from its turns, git numbers and flags, and a `routing` line records what the router
@@ -637,7 +731,7 @@ To register the server, use **Preferences → Orchestration → Local endpoints*
 press *Probe*. Then give the model a tier in the **Tier map**: `basic` for assessments, or
 `standard` or above so missions that prefer local models can plan with it. The status line
 under the picker says whether that took. *Qualify* is optional. *Qualify tasks* reports *not
-runnable* here, because `mlx_lm.server` has no `/v1/responses`. Or, with the app quit, add the entry the script prints to `orchestration.localEndpoints`:
+runnable* here, because `mlx_lm.server` has no `/v1/responses`. Or, with the core daemon stopped (`aw daemon stop`), add the entry the script prints to `orchestration.localEndpoints`:
 
 ```json
 {
@@ -681,7 +775,7 @@ agents, worktrees and checks stay on this Mac. Only the HTTP calls to the endpoi
   context, not the `num_ctx` it runs with, and a probed window beats a declared one.
 - **Lock the box down.** Its firewall should admit the port only from the Mac's address, and
   both machines should have a fixed address (a DHCP reservation).
-- **Register it** once per server, with the app quit, in `orchestration.localEndpoints`. Or
+- **Register it** once per server, with the core daemon stopped, in `orchestration.localEndpoints`. Or
   add it in Preferences, tick *My own machine on this network*, and turn it on:
 
   ```json
@@ -728,7 +822,7 @@ The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy
 
 | Command | What it does |
 |---|---|
-| `aw status` | What the app is doing: sessions by status, and how many it runs that survive a quit. |
+| `aw status` | What the core daemon is doing: sessions by status, and how many it runs that survive a daemon restart. |
 | `aw sessions [--all]` | The rows of the table (`--all` adds archived ones). |
 | `aw session <id>` | One session in detail, including what it is waiting on. |
 | `aw attach <id>` | Follow a session the app runs, read-only, until it ends or Ctrl-C. |
@@ -742,6 +836,7 @@ The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy
 | `aw web url` | Print the single-use sign-in link instead of opening it. |
 | `aw web pair` | Pair a phone or tablet on your home network: prints a QR code and a code (see [Pairing a device](#pairing-a-device)). |
 | `aw web devices [revoke <id>]` | The browsers that can sign in; `revoke` signs one out for good and disconnects its open tabs. |
+| `aw daemon start\|stop\|status` | Start, stop or check the core daemon (see [The core daemon](#the-core-daemon)). |
 
 `<id>` is a session id, a unique prefix of one (four characters or more), or a key such as `claude:<id>`. `--json` prints the raw result.
 
@@ -800,14 +895,14 @@ provider, rule/policy version, and wait duration, never prompt content or reposi
 It respects `telemetry.enabled`. An older optional Claude Code skill is in
 `docs/skills/agentwrangler-task/SKILL.md`.
 
-- **It is a client of the app, never a supervisor.** It talks only to the app's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new at every launch). It never connects to session hosts, and every command goes the same way as the equivalent click. The app shows a short notice when `aw` sends or stops something.
-- **With the app quit**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the app starts) and what the app last recorded. Everything else says the app is not running.
+- **It is a client of the core daemon, never a supervisor.** It talks only to the daemon's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new every time the daemon starts). It never connects to session hosts, and every command goes the same way as the equivalent click. Open tabs show a short notice when `aw` sends or stops something.
+- **With the daemon stopped**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the daemon starts) and what the daemon last recorded. Everything else says Agent Wrangler is not running.
 - **`delegate` and `task` are allowed there**, because they only ever create a proposal or a plan. Nothing runs until you accept it in the app, so an agent calling them can't start work you haven't seen.
 - **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12). `aw web url` refuses there too, for the same reason: the link it prints is the whole workbench. So do `aw web pair` (its code lets a device in as you) and `aw web devices revoke`.
 
 ## Open in a browser
 
-The workbench, table and conversation, also runs in an ordinary browser on this Mac. Run:
+The workbench is a web page the core daemon serves. On the Mac, open the app, or run:
 
 ```bash
 aw web open
@@ -815,7 +910,8 @@ aw web open
 
 and your default browser opens `http://127.0.0.1:7391/`, signed in. That browser stays signed
 in for 30 days from the last time you opened the page. `aw web url` prints the link instead, for
-another browser.
+another browser on the Mac. Phones and other computers need [LAN access](#lan-access) and
+[pairing](#pairing-a-device).
 
 - **This Mac only.** It listens on `127.0.0.1`, not on your network. A page that tries to
   reach it under another name is refused (421), and so is any other site's script (403).
@@ -824,7 +920,9 @@ another browser.
   `web-devices.json` in its support folder. Without that cookie the browser gets nothing but
   "not signed in" (401).
 - **Settings:** *Open in a browser* (`web.enabled`, on) and its *Port* (`web.port`, 7391), in
-  Preferences under Browser. Off closes the listener and every open tab.
+  Preferences under Browser. Off closes the listener and every open tab, which leaves only
+  `aw` and Discord: turn it back on by stopping the daemon, setting `"web.enabled": true` in
+  `settings.json` in the support folder, and starting it again.
 - Confirmations and pickers appear in the tab whose click asked (#126); one nobody's click
   caused is shown to every tab as a notice and answered "cancel".
 - Sign-ins, failed sign-ins and new browsers are recorded in the access log
@@ -905,8 +1003,8 @@ Without a camera, open `https://<your-mac>.local:7392/pair` on the device and ty
   fifteen; and a code that has seen five wrong guesses is withdrawn. While locked, even the right
   code is refused.
 - **The forms are protected** by an `Origin` check and a form token tied to a `SameSite=Strict`
-  cookie, so another site cannot submit them, and they accept at most 4 KB. (File uploads,
-  #139, will have their own limits.)
+  cookie, so another site cannot submit them, and they accept at most 4 KB. (File uploads
+  have their own limits: 50 MB a file and 30 a minute per device.)
 - **The device's credential** is 256 random bits in a `__Host-`, `Secure`, `HttpOnly`,
   `SameSite=Strict` cookie; Agent Wrangler keeps only its hash, with the device's name, when
   it was added and when it was last seen, in `web-devices.json` (0600).
@@ -930,7 +1028,9 @@ the notification focuses the tab and opens that session in its conversation pane
 a tag, so the same ask arriving twice is one notification, and every device is its own: a
 phone and a laptop each get one, and a tab you are looking at is the only one that stays quiet.
 
-Where a notice goes:
+Which notices are sent at all is two settings: *Notify when an agent needs you*
+(`notifyOnWaiting`, off by default) while any tab is connected, and *Notify while no tab is
+open* (`notifyWhenWindowClosed`, on) while none is. Where a sent notice goes:
 
 | Browser tab connected, notifications allowed | Notice goes to |
 |---|---|
@@ -948,10 +1048,11 @@ and some Android browsers refuse `new Notification()` outside a service worker; 
 (`MediaRecorder`: webm/opus where there is one, mp4/AAC on Safari), so it is the phone's
 microphone on a phone. Stopping uploads the recording to `POST /dictation` (the device cookie,
 `Origin`, and an `x-aw-dictation` header; at most 10 MB and five minutes; one at a time), which
-Whisper transcribes on the Mac with the same ffmpeg and model the Electron window used. The
-text lands in the composer. There is no live preview in a browser (the Electron window's
-host-microphone recording had one; it went with the window in #142). A refused microphone, a
-missing ffmpeg, whisper or model, and a non-secure page are each said beside the composer.
+Whisper transcribes on the Mac with ffmpeg and the configured model. The text lands in the
+composer. There is no live preview while you speak (the old window's recording with the Mac's
+own microphone had one; it went with the window in #142). A refused microphone, a missing
+ffmpeg, whisper or model, and a non-secure page are each said beside the composer. The
+microphone needs a secure context too: `http://127.0.0.1` on the Mac, `https://` on the LAN.
 
 ## The core daemon
 
@@ -991,12 +1092,14 @@ aw daemon stop --all     # stop it and end them too
 
 ## Remote control (experimental)
 
-Answer a permission prompt from your phone. Off by default, and under
-**Preferences → Experimental** because it is the only thing here that reaches
-outside the machine.
+Answer a permission prompt from your phone when you are away from home, through
+Discord. (At home, a [paired phone](#pairing-a-device) has the whole workbench.)
+Off by default, and under **Preferences → Experimental** because it is the only
+thing here that sends anything off your own devices. It needs no inbound
+connection: the daemon connects out to Discord.
 
 Agent Wrangler stays in charge throughout. Discord shows the same choices the
-dashboard row shows, and pressing one runs the same action — the agent never
+table row shows, and pressing one runs the same action — the agent never
 learns Discord exists, and nothing can be approved remotely that the local UI is
 not already offering.
 
@@ -1012,7 +1115,7 @@ not already offering.
 4. If the channel is private — a good idea — add the bot to **that channel**
    explicitly. Being in the server is not enough, and the failure looks like the
    bot simply ignoring you.
-5. **Connect Discord…** from the app menu, and paste the token. It is checked
+5. **Connect Discord…** in **Preferences → Experimental**, and paste the token. It is checked
    against Discord before it is saved, so a typo fails there rather than later
    as a connection error. It goes to the **macOS login Keychain**, never to
    `settings.json`.
@@ -1032,7 +1135,7 @@ opening a browser** when *Open at login* is on.
   holds the bot, and the cards that daemon posted are taken over rather than
   posted again. A daemon restart or update hands its cards to the next one the
   same way.
-- Its log lines are in `logs/core-daemon.log`, and **Test remote control** says
+- Its log lines are in `logs/core-daemon.log`, and **Test connection** in Preferences says
   whether it is running and connected.
 
 **What you get.** When an agent hits a permission prompt, one message appears
@@ -1051,7 +1154,7 @@ a guess would be worse than the blank.
 **It also says when an agent finishes** (`remote.notifyOnDone`, on once Discord
 is connected). A buttonless message naming the agent, repository and branch —
 never a word of what it said, which is the news being on the machine where it is
-safe. It rides the same working→finished edge the local toasts do, so it fires
+safe. It rides the same working→finished edge the local notifications do, so it fires
 once per finish rather than repeatedly while a session sits there done, and an
 archived session stays quiet. Codex sessions are included: nothing is being
 offered, so nothing has to be answerable.
@@ -1166,7 +1269,8 @@ that is a possible later hardening. Secrets must be printable ASCII
 `safeStorage` ciphertext in `secrets.json` in the app's data folder. The Electron builds from
 #124 on moved them to the Keychain on their first start. That move needs Electron, which is gone
 since #142, so a copy older than #124 must first run a build that has #124 and still has
-Electron, then this one (see *Migrating from an Electron build* under *Run it*). A
+Electron, then this one (see *Migrating from an Electron build* under
+[Installing, updating and restarting](#installing-updating-and-restarting)). A
 `secrets.json` left behind is not read.
 
 ## How status is detected
@@ -1177,7 +1281,7 @@ Every row answers three questions: **what is happening** (the primary status: Wa
 
 ### 1. Hooks (exact, opt-in)
 
-Choose **Install Status Hooks…** from the menu (or click *Install hooks* in the dashboard banner). It merges a block into `~/.claude/settings.json` in which every hook appends its stdin payload to `~/.claude/agentwrangler/$PPID.jsonl`; Agent Wrangler tails those logs. The one exception is `PermissionRequest`, which runs `~/.claude/agentwrangler/permission-hook.sh` (written by the installer) — see *Allow / Deny* below.
+Click *Install hooks* in the banner above the table (it shows while status is only estimated). It merges a block into `~/.claude/settings.json` in which every hook appends its stdin payload to `~/.claude/agentwrangler/$PPID.jsonl`; Agent Wrangler tails those logs. The one exception is `PermissionRequest`, which runs `~/.claude/agentwrangler/permission-hook.sh` (written by the installer) — see *Allow / Deny* below.
 
 | Signal | Meaning |
 |---|---|
@@ -1190,7 +1294,7 @@ Choose **Install Status Hooks…** from the menu (or click *Install hooks* in th
 | `SessionEnd`, or pid gone | **Ended** |
 | `SessionStart` with no transcript yet | *hidden* (an empty conversation) |
 
-**Allow / Deny from the dashboard.** Claude Code runs `PermissionRequest` hooks and shows its permission dialog *at the same time*, then takes whichever answers first (verified in the 2.1.267 binary: the hook generator and the dialog promise are started together and raced). The installed script logs the payload like every other hook, leaves a marker in `~/.claude/agentwrangler/requests/`, and then polls for `decisions/<id>.json` for up to ~28 minutes (its hook `timeout` is 30 minutes). Clicking **Allow** or **Deny** writes that file with Claude Code's own decision shape (`hookSpecificOutput.decision.behavior`); the script prints it and exits, and Claude Code applies it. If you answer in Claude Code instead, the decision is picked up from the pid file (below), which also removes the marker, and the script exits within half a second. The buttons only render while the marker exists, so they never offer a decision that can no longer land. Tools that require interaction by design (`AskUserQuestion`, `ExitPlanMode`) cannot be answered this way and show no buttons.
+**Allow / Deny from the table.** Claude Code runs `PermissionRequest` hooks and shows its permission dialog *at the same time*, then takes whichever answers first (verified in the 2.1.267 binary: the hook generator and the dialog promise are started together and raced). The installed script logs the payload like every other hook, leaves a marker in `~/.claude/agentwrangler/requests/`, and then polls for `decisions/<id>.json` for up to ~28 minutes (its hook `timeout` is 30 minutes). Clicking **Allow** or **Deny** writes that file with Claude Code's own decision shape (`hookSpecificOutput.decision.behavior`); the script prints it and exits, and Claude Code applies it. If you answer in Claude Code instead, the decision is picked up from the pid file (below), which also removes the marker, and the script exits within half a second. The buttons only render while the marker exists, so they never offer a decision that can no longer land. Tools that require interaction by design (`AskUserQuestion`, `ExitPlanMode`) cannot be answered this way and show no buttons.
 
 **Answering in the Claude Code window** is the one thing hooks cannot report, so it is read off the pid file instead. There is no `PermissionGranted` hook — Claude Code 2.1.270 registers `PermissionDenied` but has no counterpart for the other answer — and the event order is `PreToolUse` → `PermissionRequest` → *you answer* → `PostToolUse`. `PostToolUse` fires when the tool has **finished**, so on hooks alone, allowing a ten-minute test run would leave the row sitting at the top of *Waiting*, still claiming to be stopped at a prompt, for the whole ten minutes, which is exactly backwards. `~/.claude/sessions/<pid>.json` closes the gap: Claude Code rewrites a `status` field there on every state change — `running` → `busy`, `requires_action` → `waiting` (with `waitingFor` = `permission prompt` or `input needed`), `idle` → `idle` — stamped with `statusUpdatedAt`. Measured here, the flip back to `busy` is written within ~0.1 s of the click, and stays `waiting` for as long as a prompt is genuinely open. The registry watcher already sees that write, so the row clears in well under a second however long the allowed command then runs. The status is only ever used to *end* a block, never to start one, and only when its stamp is later than the moment the block was recorded — a `busy` written before the prompt existed cannot cancel it. Sessions from an older Claude Code that writes no `status` simply keep the old behaviour.
 
@@ -1270,7 +1374,7 @@ A conversation with several missions shows the most urgent one (needs you before
 
 **Uncertainty markers.** A value a provider or Agent Wrangler's own records report has no marker. An estimate carries `~`: a status read from the transcript (also the hollow dot), a Waiting read from the reply's wording, or delegated work tied to a turn whose start is unknown. What no signal can say right now carries `?`, and is never filled in with a guess. A row whose session host is reconnecting keeps its last status with a *? reconnecting* chip and is not counted as needing you. Each tooltip names the source and whether it is verified or estimated.
 
-**Notifications.** Each notice has a dedupe key and is sent once per run of the app, and never for a state that already held when the app started:
+**Notifications.** Each notice has a dedupe key and is sent once per run of the core daemon, and never for a state that already held when it started:
 - a permission or question: once per request;
 - becoming Waiting on your reply: as before, with a 30 s cooldown;
 - a proposal or plan to approve: once per mission and plan run. The row's own Waiting toast is suppressed for it;
@@ -1282,9 +1386,92 @@ There is no Done toast while delegated work is still going, and none for attempt
 
 ## Settings
 
-`runner.defaultPermissionMode` (`acceptEdits` — or `default` to be asked every time, `plan` to plan first) · `runner.model` (empty — Claude Code's own default) · `runner.autoResumeLastOnStartup` (true) · `openOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (false — toast when an agent flips to waiting, blocked or done) · `pollIntervalSeconds` (5) · `showUsage` (true) · `usagePollIntervalSeconds` (60, and 20 by itself near a limit) · `autoPause.enabled` (false) · `autoPause.percent` (98) · `web.enabled` (true — the browser workbench on 127.0.0.1) · `web.port` (7391)
+All of them are in Preferences (`#/preferences`) and stored in `settings.json` in the app's support folder (`~/Library/Application Support/Agent Wrangler/`), keyed by the names below. Edit the file by hand only with the core daemon stopped.
+
+`runner.defaultPermissionMode` (`acceptEdits` — or `default` to be asked every time, `plan` to plan first) · `runner.model` (empty — Claude Code's own default) · `runner.autoResumeLastOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (notify an open tab when an agent needs you or is done) · `notifyWhenWindowClosed` (a Mac notification when no tab can show one) · `openAtLogin` (false — start the daemon at login) · `lifecycle.orphanIdleHours` (24) · `pollIntervalSeconds` (5) · `showUsage` (true) · `usagePollIntervalSeconds` (60, and 20 by itself near a limit) · `autoPause.enabled` (false) · `autoPause.percent` (98) · `web.enabled` (true — the browser workbench on 127.0.0.1) · `web.port` (7391) · `web.lan.enabled` (false) · `web.lan.port` (7392) · `web.lan.certFile` / `web.lan.keyFile` (your own certificate)
 
 **Preferences → Orchestration** lists every model Claude Code and Codex have reported. For each one it shows the capability tier Agent Wrangler assigns it (`basic < standard < expert < frontier`; `frontier` is reached only by escalation), whether it is enabled, how AW's effort levels map onto the model's own, what is known about it and where each fact came from, and how its cost is worked out. Unassigned models are listed first, and routing never picks one automatically. Your choices go into `settings.json` under `orchestration.models`; anything left at its default is not written.
+
+## Troubleshooting
+
+Relative paths below are in the app's support folder, `~/Library/Application Support/Agent Wrangler/`.
+
+**Nothing opens, or the page will not load.** Check the core daemon:
+
+```bash
+aw daemon status
+```
+
+- `Core daemon: running` with a pid and build: the daemon is fine; see the next items.
+- `not running (nothing is running the core)`: start it with `aw daemon start`, or open the
+  app. A daemon you stopped stays stopped; launchd only restarts one that crashed.
+- `not running (an older Agent Wrangler app is running it)`: an Electron-era copy (from before
+  #142) still holds the core. Quit it (`osascript -e 'quit app "Agent Wrangler"'`, never
+  *Quit and Stop All Agents*), then `aw daemon start`. `npm run app:install` does this for you.
+- It starts and dies: read `logs/core-daemon.log` (the daemon's own output, including a crash)
+  and `agent-wrangler.log`. `launchctl print gui/$(id -u)/com.hammonjj.agentwrangler.core`
+  shows what launchd thinks: whether it is loaded, its pid, and the last exit code. The
+  LaunchAgent itself is `~/Library/LaunchAgents/com.hammonjj.agentwrangler.core.plist`;
+  `aw daemon start` rewrites it, so do not edit it by hand.
+- `aw` itself is not found: run `npm run cli:install` again (it says which folder it used and
+  whether that is on your `PATH`), and check that `/Applications/Agent Wrangler.app` exists.
+
+**The port is in use.** Something else is listening on 7391 (or 7392 for the LAN). The daemon
+logs `web: not serving on port 7391: …` in `agent-wrangler.log`; Preferences → Browser lists
+each LAN address with `port in use`. Find the other program with `lsof -nP -iTCP:7391
+-sTCP:LISTEN`, or change *Port* (`web.port`) or *HTTPS port* (`web.lan.port`). With no page to
+reach Preferences from, stop the daemon, set the port in `settings.json`, and start it again.
+
+**"Not signed in" (401).** The browser has no valid credential for this listener. On the Mac,
+run `aw web open` (or open the app) for a fresh one-time link: a link works once, for two
+minutes, and a browser stays signed in for 30 days from its last visit. A credential from
+`127.0.0.1` does not work on the LAN address and the other way round, and a revoked device stays
+out until it is paired again. The cookie belongs to the exact name the link used, so on the Mac
+bookmark `http://127.0.0.1:7391/`, not `localhost`. A 421 means the page was reached under a
+name the daemon does not answer to; on the LAN use `<your-mac>.local` or an address Preferences
+lists.
+
+**Certificate warnings on the phone.** Safari says the connection is not private, or the page
+will not load at all:
+
+- the CA profile is installed but not trusted: **Settings → General → About → Certificate Trust
+  Settings**, turn on *Agent Wrangler Local CA*;
+- the profile is from an older CA: deleting `web-tls/` makes a new one, which every device must
+  trust again. Remove the old profile, and install the new one from
+  `http://127.0.0.1:7391/ca.mobileconfig` on the Mac;
+- the name does not match: open the address Preferences → Browser lists, or
+  `https://<your-mac>.local:7392/`. The server certificate covers those names and is re-issued
+  when an address changes;
+- the phone is on another network (cellular, a guest Wi-Fi): it cannot reach the Mac at all.
+  That is by design; use Discord away from home.
+
+Never accept the warning and carry on: the device credential would then travel to whoever
+answered.
+
+**A lost or retired device.** Revoke it: Preferences → Browser → *Devices* → **Revoke** (press
+twice), or `aw web devices` to list and `aw web devices revoke <id>`. Its open tabs disconnect at
+once and it cannot sign in again until it is paired again. To lock every LAN device out at
+once, turn *Allow devices on my home network* off.
+
+**A Keychain prompt the first time a secret is used.** Secrets (the Discord token, local
+endpoint keys) are read with `/usr/bin/security`. If macOS asks whether `security` may use the
+*Agent Wrangler* item, the item was created or last changed by another program (Keychain Access,
+for example); choose **Always Allow** and it will not ask again. If it never stops asking, or
+the Keychain is locked, `agent-wrangler.log` says `cannot read … from the Keychain`; delete the
+item in Keychain Access and store the secret again from Preferences.
+
+**A browser tab opens at login.** The Electron app registered itself as a Login Item when *Open
+at login* was on, and opening the app now opens a browser. Remove *Agent Wrangler* from
+**System Settings → General → Login Items** (*Login Items & Extensions* on recent macOS), under
+*Open at Login*. Starting at login is
+now the LaunchAgent's job (*Open at login* in Preferences), which opens no browser. Electron's
+caches (`Cache`, `Code Cache`, `GPUCache`, `Local Storage` and similar) may also be left in the
+support folder; nothing reads them now.
+
+**A fix did not take.** The daemon is probably still on the old build: `aw daemon status` shows
+the build it runs. `npm run app:install` moves a running daemon onto the new one; a stopped one
+stays stopped until you start it. An open tab reloads itself onto the new build when it
+reconnects.
 
 ## Development
 
@@ -1307,7 +1494,5 @@ The Agent SDK is bundled into `dist/daemon/main.js` and `dist/sessionHost/main.j
 - Tool output can be expanded in full. Agent/Task cards offer **Load subagent work** after the parent transcript links the sidecar; live subagent messages nest under their parent.
 - Type `/` for commands; Tab focuses the first completion. `/compact`, `/clear`, and `/context` were checked in streaming mode. Commands advertised by the CLI are also offered. `/clear` changes the session identity, just as in Claude Code.
 - Cost is the cumulative **estimate for this runner invocation**, not lifetime billing. Context is the latest summary supplied by the CLI, refreshed after each turn when supported.
-- `agentWrangler.runner.confirmTakeoverOnSend` restores confirmation for all send-triggered takeovers. Estimated status always requires confirmation.
-- The dashboard and conversation share one workbench tab; row clicks stay here. Deliberate terminal release remains available.
-
-Source-checkout handoff: `docs/plans/electron-prep-handoff.md` lists acceptance checks and remaining limitations.
+- `runner.confirmTakeoverOnSend` restores confirmation for all send-triggered takeovers. Estimated status always requires confirmation.
+- The table and conversation share one page; row clicks stay in it. Deliberate terminal release remains available.

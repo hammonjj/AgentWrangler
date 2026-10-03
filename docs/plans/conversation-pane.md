@@ -1,5 +1,12 @@
 # Conversation pane: work every Claude Code session from one window
 
+> **Partly superseded by [browser-workbench.md](browser-workbench.md) (#121).** This was
+> written for the VSCode extension and then the Electron window, both gone (#142). The pane
+> now lives in the web workbench the core daemon serves, and the conversations it runs are in
+> session hosts, not in a window's process. The rendering, custody (take over, release, resume)
+> and card designs below are still the pane's; anything about windows, editor tabs, VSCode
+> commands or reloading a window is history.
+
 Status: **implemented through phase 4d; further preparation in progress.** See
 `electron-prep-handoff.md` for the current branch, checkpoints, and remaining work.
 Written 2026-09-11 after a design discussion and a live spike; the implementing agent

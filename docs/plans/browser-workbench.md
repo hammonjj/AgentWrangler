@@ -1,5 +1,12 @@
 # Browser-only Agent Wrangler: daemon core and web workbench
 
+**Status: implemented** (2026-10-03). Exploration #120; epic #121, delivered as #122–#143
+(slices in §12). Electron was retired in #142, and #143 brought the README and CLAUDE.md in
+line. The "Built (#n)" notes below record how each part landed. Not built, from this plan: an
+attention count in the tab title (D4), browser notifications on iPhone (they need a Home
+Screen web app), a side-by-side diff view, and a live dictation preview. The README lists what
+the browser does not do.
+
 Spike for #120. Recorded 2026-10-02.
 
 **Decision: go.** Agent Wrangler becomes a background daemon on the Mac that runs the agents,
@@ -50,24 +57,8 @@ workbench to a browser on 127.0.0.1 from the running app.
 assets, CSP header, login link and device cookie), on by default (`web.enabled`, `web.port`
 7391), and `aw web open` replaces the token below. The switch and `run/web.token` are gone;
 `webPrototype.ts` kept only the WebSocket side, and #131 moved that to `src/app/webWorkbench.ts`
-so the core daemon serves the workbench too. The record below is the spike as it ran.
-
-**Code**
-
-| File | Role |
-|---|---|
-| `src/electron/webPrototype.ts` | HTTP and WebSocket server |
-| `src/webview/webshim/main.ts` | Browser bridge |
-| `src/core/web/wsFrames.ts` | Frame codec and request guards, tested in `test/wsFrames.test.ts` |
-| `createWorkbenchHosts` in `workbenchWindow.ts` | Pane-host factory shared with the window |
-
-**Running it**
-
-```bash
-osascript -e 'quit app "Agent Wrangler"'
-open -g --env AW_WEB_PROTOTYPE=7391 -a "Agent Wrangler"
-open "http://127.0.0.1:7391/?token=$(cat ~/Library/Application\ Support/Agent\ Wrangler/run/web.token)"
-```
+so the core daemon serves the workbench too. The prototype's code and instructions for running
+it were removed with Electron (#142, #143); its results are kept below.
 
 **Results**, against the installed app with live sessions:
 
@@ -327,8 +318,8 @@ call site changed. Where the context would leak or be lost, it is set explicitly
   session-host client and supervisor, the Codex app-server link and the remote daemon link.
 - Listeners that are the app acting by itself run in `outsideRequest`: "needs you" notices and
   mission notices.
-- The Electron menu, tray, notification clicks and Preferences run as the window client.
-  A menu quit asks natively.
+- The Electron menu, tray, notification clicks and Preferences ran as the window client, and a
+  menu quit asked natively, until all of them went in #142.
 
 Browser connections use `src/core/web/shellChannel.ts`. Navigation is applied to the
 connection's own `ConversationHost`, and the shell is sent a `navigate` notice.
@@ -359,6 +350,7 @@ it (Discord, `aw`) is only logged. `test/multiClient.test.ts` covers two browser
 reconnects and per-browser view state, and fails if anything outside `approvals.ts` answers a
 session directly. One exception is listed there: the remote daemon's own feed answers hosted
 asks while the app is not running. It goes when Discord moves into the core daemon (#138).
+*Gone in #142*, with the remote daemon.
 
 **LAN deployment assumptions** (for the README): a trusted home network; the Mac's firewall
 allows the port; no port forwarding; devices paired one by one. Anyone on that network can

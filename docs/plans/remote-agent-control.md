@@ -1,5 +1,13 @@
 # Remote Agent Control
 
+> **Partly superseded by [browser-workbench.md](browser-workbench.md) (#121).** The separate
+> remote daemon (#74) and its two feeds (the app feed from the Electron app, and its own feed
+> while the app was quit) are gone: Discord runs inside the core daemon since #138, and
+> Electron was retired in #142. The "no inbound port" stance now covers Discord only: the
+> workbench listens on loopback, and on the home network only by opt-in (plan §8). The
+> presentation-layer design, the permission flow, redaction and the security rules below are
+> still current.
+
 Answer a permission prompt from your phone, without opening a port, running a server, or building
 a second permission system.
 
