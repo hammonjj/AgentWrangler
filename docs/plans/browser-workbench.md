@@ -88,6 +88,8 @@ these and recorded them:
 2. **Dialogs are app-wide.** `HostDialogs` confirmations, pickers and inputs appear as native
    dialogs on the Mac, whoever clicked.
 
+Both are fixed by #126 (§7.3). The `smartOpen` override is gone.
+
 **Reconnect.** The conversation pane keeps its session key in `setState`, but the host decides
 what is shown, and `ready` does not carry the key. A reconnecting tab comes back to an empty
 conversation. The window works because `main.ts` restores the key from `window.json`.
@@ -262,6 +264,24 @@ context**:
 `SessionActions` and the `launcher`/`projects` sources already take their dialogs through
 `host.dialogs`. The change is to thread the context to that call. It is not a rewrite of each
 action.
+
+**Built (#126).** The context is carried by `AsyncLocalStorage`, not threaded as a parameter
+(`src/core/requestScope.ts`). Each dispatcher runs its request in `runInRequest(ctx, …)`: the
+pane hosts, the control backend (as `cli`) and the remote service (as `discord`). The app's
+`host.dialogs` and surface are `ClientRegistry`'s scoped facades (`src/core/clients.ts`), so no
+call site changed. Where the context would leak or be lost, it is set explicitly:
+
+- Sockets and child processes that outlive the request are created in `outsideRequest`: the
+  session-host client and supervisor, the Codex app-server link and the remote daemon link.
+- Listeners that are the app acting by itself run in `outsideRequest`: "needs you" notices and
+  mission notices.
+- The Electron menu, tray, notification clicks and Preferences run as the window client.
+  A menu quit asks natively.
+
+Browser connections use `src/core/web/shellChannel.ts`. Navigation is applied to the
+connection's own `ConversationHost`, and the shell is sent a `navigate` notice.
+Residual risk: a timer or emitter subscription created inside a request inherits that request's
+context. If its client has gone, it falls back to the app's behaviour.
 
 ## 8. Access security
 

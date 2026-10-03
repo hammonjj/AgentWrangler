@@ -12,8 +12,9 @@
 import { Menu, type MenuItemConstructorOptions, app, shell } from 'electron';
 import type { AgentWranglerApp } from '../app/createApp';
 import type { WorkbenchSurface } from '../host/hostServices';
-import { ownerContext } from '../core/access';
+import { runInRequest } from '../core/requestScope';
 import { guardSessionActions } from '../ui/guardedActions';
+import { WINDOW_CONTEXT } from './workbenchWindow';
 
 export function installApplicationMenu(
   wrangler: AgentWranglerApp,
@@ -24,8 +25,8 @@ export function installApplicationMenu(
 ): void {
   const mac = process.platform === 'darwin';
   // Session actions pass the access gate like a pane's click does (#123): the
-  // window's own chrome is the owner at this Mac, via 'browser'.
-  const context = ownerContext('browser');
+  // window's own chrome is the owner at this Mac, via 'browser', as the window client (#126).
+  const context = WINDOW_CONTEXT;
   const actions = guardSessionActions(wrangler.actions, { context, gate: wrangler.access });
   // Not `role: 'quit'`: that bypasses the click handler, and then a ⌘Q looks
   // exactly like a script's quit (spike S2). Same accelerator, our handler.
@@ -182,5 +183,22 @@ export function installApplicationMenu(
     },
   ];
 
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  Menu.setApplicationMenu(Menu.buildFromTemplate(asWindowClient(template)));
+}
+
+/**
+ * Every click in `items` run as the window client (#126). The menu and the
+ * menu-bar item are this Mac's chrome, so the pickers and confirmations their
+ * items open appear here, never in a browser and never cancelled for want of
+ * a client. Recurses into submenus.
+ */
+export function asWindowClient(items: MenuItemConstructorOptions[]): MenuItemConstructorOptions[] {
+  return items.map((item) => {
+    const { click, submenu } = item;
+    return {
+      ...item,
+      ...(click ? { click: (...args: Parameters<typeof click>) => runInRequest(WINDOW_CONTEXT, () => click(...args)) } : {}),
+      ...(Array.isArray(submenu) ? { submenu: asWindowClient(submenu) } : {}),
+    };
+  });
 }

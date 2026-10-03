@@ -13,8 +13,9 @@
 import { Menu, type MenuItemConstructorOptions, nativeImage, type NativeImage, Tray } from 'electron';
 import type { AgentWranglerApp } from '../app/createApp';
 import type { Disposable } from '../core/events';
-import { ownerContext } from '../core/access';
 import { guardSessionActions } from '../ui/guardedActions';
+import { asWindowClient } from './menu';
+import { WINDOW_CONTEXT } from './workbenchWindow';
 import { menuBarAgents, menuBarBadge, menuBarCounts, menuBarSummary, type MenuBarSession } from '../core/menuBar';
 import type { WorkbenchSurface } from '../host/hostServices';
 import { displayTitle } from '../shared/model';
@@ -122,7 +123,7 @@ export class MenuBar implements Disposable {
         {
           label: 'Stop…',
           enabled: a.stoppable,
-          click: () => guardSessionActions(app.actions, { context: ownerContext('browser'), gate: app.access }).closeSession(a.key),
+          click: () => guardSessionActions(app.actions, { context: WINDOW_CONTEXT, gate: app.access }).closeSession(a.key),
         },
       ],
     }));
@@ -139,6 +140,6 @@ export class MenuBar implements Disposable {
       { label: 'Quit Agent Wrangler', click: this.opts.quit },
       { label: 'Quit and Stop All Agents', click: this.opts.quitAndStopAll },
     ];
-    this.tray.setContextMenu(Menu.buildFromTemplate(template));
+    this.tray.setContextMenu(Menu.buildFromTemplate(asWindowClient(template)));
   }
 }

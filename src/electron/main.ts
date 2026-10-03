@@ -42,10 +42,13 @@ import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
 import { createRemoteDaemonAgent } from './remoteDaemonAgent';
 import { MenuBar, menuBarSessions } from './tray';
-import { WorkbenchWindow } from './workbenchWindow';
+import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
 import { createBrowserClients, type BrowserClients } from './webPrototype';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
 import { renderBrowserWorkbenchHtml } from '../ui/html';
+import { ClientRegistry } from '../core/clients';
+import { runInRequest } from '../core/requestScope';
+import type { HostDialogs } from '../host/hostServices';
 
 // Git invokes git-lfs through PATH while checking out task worktrees. Finder's
 // environment lacks Homebrew's bin directory even when git-lfs is installed.
@@ -110,6 +113,14 @@ void app.whenReady().then(() => {
     fallbackRunDir: path.join(os.homedir(), '.agentwrangler', 'run'),
     logDir: path.join(userDataDir, 'logs'),
   };
+  // Every client the app has: the window, and each browser of the web
+  // prototype. The app is given the registry's dialogs and surface, which
+  // reach whichever client a request came from (#126); the native dialogs are
+  // the window client's own.
+  const clients = new ClientRegistry({ log, navigationFallback: WINDOW_CONNECTION_ID });
+  let nativeDialogs: HostDialogs | undefined;
+  /** As the user at this Mac: the window client. For the menu, tray, Preferences and notifications. */
+  const asLocalUser = <T,>(fn: () => T): T => runInRequest(WINDOW_CONTEXT, fn);
   const host = createElectronHost({
     userDataDir,
     log,
@@ -124,7 +135,13 @@ void app.whenReady().then(() => {
     // Also why this is a closure over a `let` — the host is built before the
     // window, because the window needs the app, which needs the host.
     parentWindow: () => window?.browserWindow,
+    scopeDialogs: (native) => {
+      nativeDialogs = native;
+      return clients.dialogs;
+    },
+    asLocalUser,
   });
+  const windowDialogs = nativeDialogs!;
 
   const wrangler = createApp(host);
 
@@ -165,8 +182,12 @@ void app.whenReady().then(() => {
       get: () => paneState.get<unknown>('workbench', undefined),
       set: (value) => paneState.update('workbench', value),
     },
+    dialogs: windowDialogs,
   });
-  wrangler.attachSurface(window);
+  // The window is a client for the app's whole life, open or not: the menu and
+  // tray act as it, native dialogs need no window, and navigating to it opens it.
+  host.subscribe(clients.register(windowClientChannel(window, windowDialogs)));
+  wrangler.attachSurface(clients.surface);
 
   // `showQuickPick` and `showInputBox`, which Electron has neither of: renaming
   // a conversation, the session picker behind the menu items that ask *which*,
@@ -186,7 +207,7 @@ void app.whenReady().then(() => {
     log,
     appRoot: APP_ROOT,
     parentWindow: () => window?.browserWindow,
-    runAction: (id) => wrangler.runSettingAction(id),
+    runAction: (id) => asLocalUser(() => wrangler.runSettingAction(id)),
     onDidChangeOpen: () => syncDock(),
     // Orchestration → tier map (#29): the catalog, and each source's health
     // from the same usage reads the dashboard cards use.
@@ -229,7 +250,8 @@ void app.whenReady().then(() => {
         return { dispose: () => subs.forEach((s) => s.dispose()) };
       },
       setPolicy: (change) => wrangler.models.setPolicy(change),
-      localEndpoint: (change) => wrangler.localEndpoints.apply(change),
+      // Can ask for an endpoint's key: as the window, so the question appears there.
+      localEndpoint: (change) => asLocalUser(() => wrangler.localEndpoints.apply(change)),
       // Frozen into each mission recorded after this; a started mission keeps what it had (§10.2).
       setRouting: (value) => host.settingsStore.update(ROUTING_KEY, value),
     },
@@ -392,7 +414,8 @@ void app.whenReady().then(() => {
     }
     if (web && web.port === port) return;
     stopWeb();
-    const clients = createBrowserClients({ app: wrangler, host, ui, log });
+    // Each browser registers with the app's client registry, so what it causes comes back to it (#126).
+    const browsers = createBrowserClients({ app: wrangler, host, ui, clients, log });
     const server = new WebServer({
       port,
       webviewDir: path.join(APP_ROOT, 'dist', 'webview'),
@@ -400,9 +423,9 @@ void app.whenReady().then(() => {
       gate: wrangler.access,
       log,
       page: renderBrowserWorkbenchHtml,
-      onClient: (socket, context) => clients.attach(socket, context),
+      onClient: (socket, context) => browsers.attach(socket, context),
     });
-    const entry = { server, clients, port, listening: false };
+    const entry = { server, clients: browsers, port, listening: false };
     web = entry;
     server.listen().then(
       (bound) => {
@@ -447,7 +470,9 @@ void app.whenReady().then(() => {
       if (decision.confirm) {
         const keeps =
           counts.hosted > 0 ? `\n\n${agentCount(counts.hosted)} running in session hosts keep running.` : '';
-        const choice = await host.dialogs.warn(
+        // Only a menu quit asks, and the menu is this Mac's: ask natively,
+        // never through whichever client happens to be scoped (#126).
+        const choice = await windowDialogs.warn(
           `Quit and stop ${agentCount(counts.local)}?`,
           {
             modal: true,

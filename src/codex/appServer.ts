@@ -16,6 +16,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as readline from 'node:readline';
 import { Emitter, type Disposable } from '../core/events';
+import { outsideRequest } from '../core/requestScope';
 import { resolveCodexBinary } from './binary';
 import { CodexHost } from './codexHost';
 import { connectUnixWebSocket } from './wsClient';
@@ -63,7 +64,10 @@ export function stdioConnector(
     kind: 'stdio',
     persistent: false,
     async connect() {
-      const child: ChildProcessWithoutNullStreams = spawnProcess(resolveCodexBinary(binary()), ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'pipe'] });
+      // Outlives whichever request started it: its events are the app's own (#126).
+      const child: ChildProcessWithoutNullStreams = outsideRequest(() =>
+        spawnProcess(resolveCodexBinary(binary()), ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'pipe'] }),
+      );
       const messageListeners: ((text: string) => void)[] = [];
       const closeListeners: ((reason: string) => void)[] = [];
       let closed: string | undefined;

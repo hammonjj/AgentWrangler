@@ -23,10 +23,10 @@ import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import { Emitter, type Disposable } from '../core/events';
 import type { AgentWranglerApp } from '../app/createApp';
-import type { HostServices, WorkbenchSurface } from '../host/hostServices';
+import type { HostDialogs, HostServices, WorkbenchSurface } from '../host/hostServices';
+import { channelFromDialogs, type ClientChannel } from '../core/clients';
 import { ConversationHost, type ConversationHostUi } from '../ui/conversation/conversationHost';
 import { DashboardHost } from '../ui/dashboardHost';
-import type { SessionActions } from '../ui/actions';
 import { ownerContext, type RequestContext } from '../core/access';
 import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 import { paneChannel, type EnvelopeTransport } from '../ui/paneChannel';
@@ -52,6 +52,48 @@ export interface WorkbenchWindowOptions {
    * was on screen.
    */
   state: { get(): unknown; set(value: unknown): void };
+  /**
+   * The window's own dialogs: native boxes and the palette. Not `host.dialogs`,
+   * which is scoped to whichever client a request came from (#126); what the
+   * window says about itself is said here.
+   */
+  dialogs: HostDialogs;
+}
+
+/**
+ * The window's connection id (#126). The window is one client among several:
+ * its panes, menu, tray, notifications and Preferences all act as it, so what
+ * they cause comes back here and not to a browser.
+ */
+export const WINDOW_CONNECTION_ID = 'window';
+
+/** The window's request context: the owner, via 'browser', as the window client. */
+export const WINDOW_CONTEXT: RequestContext = ownerContext('browser', { connectionId: WINDOW_CONNECTION_ID });
+
+/**
+ * The window as a `ClientChannel`: native dialogs and the palette for its
+ * prompts, its preload toast, and its own navigation.
+ */
+export function windowClientChannel(window: WorkbenchWindow, dialogs: HostDialogs): ClientChannel {
+  return channelFromDialogs({
+    connectionId: WINDOW_CONNECTION_ID,
+    dialogs,
+    isOpen: () => window.isOpen,
+    navigate: (target) => {
+      switch (target.kind) {
+        case 'open':
+          return window.open(target.preserveFocus !== undefined ? { preserveFocus: target.preserveFocus } : undefined);
+        case 'session':
+          return window.show(target.key, target.preserveFocus !== undefined ? { preserveFocus: target.preserveFocus } : undefined);
+        case 'handle':
+          return window.showSession(target.handle, target.preserveFocus !== undefined ? { preserveFocus: target.preserveFocus } : undefined);
+        case 'tab':
+          return window.openInTab(target.key);
+        case 'detail':
+          return window.showDetail(target.detail);
+      }
+    },
+  });
 }
 
 /**
@@ -69,10 +111,9 @@ export function createWorkbenchHosts(
    * with one context; each browser connection brings its own, naming itself.
    */
   context: RequestContext,
-  /** The prototype swaps in actions whose navigation lands in its own document. */
-  actions: SessionActions = app.actions,
 ): { dashboard: DashboardHost; conversation: ConversationHost } {
   const access = { context, gate: app.access };
+  const actions = app.actions;
   const dashboard = new DashboardHost(
     paneChannel(transport, 'dashboard'),
     app.store,
@@ -200,7 +241,7 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
     // One window for now. Showing it rather than doing nothing is the honest
     // half of the request; the toast is the other half.
     this.show(key, { preserveFocus: false });
-    this.opts.host.dialogs.flash('A conversation of its own needs VSCode for now.');
+    this.opts.dialogs.flash('A conversation of its own needs VSCode for now.');
   }
 
   dispose(): void {
@@ -274,7 +315,7 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       if (decision.reload && !win.isDestroyed()) {
         win.webContents.reload();
       } else if (!decision.reload && details.reason !== 'clean-exit') {
-        host.dialogs.error('Agent Wrangler: the window keeps crashing, so it was not reloaded again. Close it and reopen it from the Dock.');
+        this.opts.dialogs.error('Agent Wrangler: the window keeps crashing, so it was not reloaded again. Close it and reopen it from the Dock.');
       }
     });
 
@@ -302,8 +343,9 @@ export class WorkbenchWindow implements WorkbenchSurface, Disposable {
       }),
     );
 
-    // The window is a browser-like client of the core: the owner, via 'browser'.
-    const panes = createWorkbenchHosts(app, host, ui, transport, ownerContext('browser'));
+    // The window is a browser-like client of the core: the owner, via
+    // 'browser', with a connection id of its own so its requests come back here.
+    const panes = createWorkbenchHosts(app, host, ui, transport, WINDOW_CONTEXT);
     this.dashboard = panes.dashboard;
     this.conversation = panes.conversation;
     this.windowSubs.push(this.dashboard, this.conversation);
