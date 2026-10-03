@@ -7,7 +7,7 @@
  *
  * found relative to this executable, so the bundle works wherever it is put.
  * Everything else (starting the core daemon, the sign-in link, the browser)
- * is in src/launcher/*.ts.
+ * is in launch.ts and main.ts beside this file.
  *
  * Why a compiled launcher rather than a shell script, or Node itself as
  * CFBundleExecutable:
