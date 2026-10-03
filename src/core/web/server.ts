@@ -125,7 +125,27 @@ const DEFLATE = {
   clientNoContextTakeover: false,
 } as const;
 
+/** What a route is handed: a request from a signed-in device, on a listener of `scope`. */
+export interface WebRouteContext {
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  url: URL;
+  scope: DeviceScope;
+  deviceId: string;
+}
+
+/**
+ * A route another module adds (#140's file view; downloads and uploads).
+ * Reached only after the host, origin and device checks, GET and HEAD only.
+ */
+export interface WebRoute {
+  match(pathname: string): boolean;
+  handle(ctx: WebRouteContext): Promise<void> | void;
+}
+
 export interface WebServerOptions {
+  /** Routes beyond the page, assets and login (#140). First match wins. */
+  routes?: WebRoute[];
   /** 0 picks a free port (tests). */
   port: number;
   /** `dist/webview`: the only directory served. */
@@ -344,6 +364,18 @@ export class WebServer implements Disposable {
       this.routed(res, url.pathname === FILES_PATH ? this.opts.files.download(ctx, req, res, url) : this.opts.files.dirs(ctx, req, res, url));
       return;
     }
+    // Routes other modules add (#140): reached only by a signed-in device.
+    const route = (this.opts.routes ?? []).find((r) => r.match(url.pathname));
+    if (route) {
+      void Promise.resolve()
+        .then(() => route.handle({ req, res, url, scope: listener.scope, deviceId: device.id }))
+        .catch((err) => {
+          this.opts.log(`web: route ${url.pathname} failed: ${String(err)}`);
+          if (!res.headersSent) text(res, 500, 'Something went wrong.');
+          else res.destroy();
+        });
+      return;
+    }
     // The CA, for a device to install, from the Mac only (#136).
     if (listener.scope === 'loopback' && (url.pathname === '/ca.pem' || url.pathname === '/ca.mobileconfig')) {
       void this.caDownload(url.pathname, res);
@@ -492,7 +524,7 @@ export class WebServer implements Disposable {
     this.wss.handleUpgrade(req, socket, head, (ws) => {
       listener.sockets.add(ws);
       ws.on('close', () => listener.sockets.delete(ws));
-      this.opts.onClient(ws, ownerContext('browser', { deviceId: device.id }));
+      this.opts.onClient(ws, ownerContext('browser', { deviceId: device.id, deviceScope: listener.scope }));
     });
   }
 

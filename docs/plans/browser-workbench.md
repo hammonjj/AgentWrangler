@@ -160,6 +160,33 @@ path are gone).
 feed. The app-feed / own-feed switch in `src/remote/daemon/sources.ts` collapses to the own
 feed.
 
+*Done in #138*, as follows:
+
+- `src/remote/connector.ts` (`RemoteConnector`) is the shared part: a `RemoteControlService`
+  plus the transport made, remade or dropped as the settings and token say. The remote daemon
+  and the core daemon each build one.
+- `src/remote/inProcess.ts` (`createInProcessRemoteControl`) is the core daemon's: fed
+  `remoteSessions` (the core's decorated list), presses applied through the core's own
+  `SessionActions`, guarded as `discord` by the core's access gate, token read from the
+  Keychain on every sync. No socket, no switch. `createApp` builds it when the host supplies
+  `remoteInProcess`, which only `src/daemon/main.ts` does.
+- **Migration, and one connector at a time.** Every connector shares `mirrors.json`, and reads it
+  once. So the core daemon's first sync calls `retireRemoteDaemon`
+  (`src/node/remoteDaemonAgent.ts`) and waits for it before building anything: `bootout` of
+  `com.hammonjj.agentwrangler.remote` and its plist deleted (or SIGTERM, for one the unpackaged
+  app spawned, only while its socket answers), then its socket, token and manifest removed once
+  it has exited. The remote daemon waits for its queued map writes before it exits, and so does
+  the core daemon's stop, so whichever connector is next adopts the open cards instead of
+  posting them again. The other direction needs no step: the app never runs while a core
+  daemon holds the core, and its remote daemon agent refuses to start the daemon if one does.
+- **Electron-core mode stays** until Electron goes: the app feeds the remote daemon as before.
+  The daemon now reads `settings.json` and the Keychain token at start, and the Keychain again
+  on every `configure` (which no longer carries the token), so it no longer waits for the app
+  to be opened after a reboot.
+- **The switch stays for now.** `SourceSwitch`, `AppFeed`, `LocalFeed`, the socket and
+  `src/remoteDaemon/` serve only the Electron-core mode; the core daemon never uses them. They
+  are removed with Electron (slice 19, #142).
+
 ## 5. Browser UI: adapt, don't replace
 
 The bundles are about 12k lines of vanilla TypeScript and CSS: dashboard ~5.2k, conversation

@@ -29,6 +29,7 @@ import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createPathAllowlist, isWithin, type PathAllowlist } from './pathAllowlist';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { RequestContext, AccessGate } from '../access';
@@ -51,8 +52,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_NAME_CHARS = 120;
 const MAX_KEY_CHARS = 256;
 const MAX_PATH_CHARS = 4096;
-/** Path components nothing is downloaded from, even inside an allowed root. */
-const NEVER = new Set(['.ssh', '.gnupg', '.aws']);
 
 const HEADERS: Readonly<Record<string, string>> = {
   'cache-control': 'no-store',
@@ -96,6 +95,8 @@ export class WebFiles implements WebFileRoutes, Disposable {
   private readonly maxBytes: number;
   private readonly perMinute: number;
   private readonly maxEntries: number;
+  /** The one allowlist for what a browser may read: `GET /files`, and `/api/view` (#140) when given this. */
+  readonly allowlist: PathAllowlist;
   private readonly recent = new Map<string, number[]>();
   private timer: NodeJS.Timeout | undefined;
 
@@ -106,6 +107,7 @@ export class WebFiles implements WebFileRoutes, Disposable {
     this.maxBytes = opts.maxUploadBytes ?? MAX_UPLOAD_BYTES;
     this.perMinute = opts.uploadsPerMinute ?? 30;
     this.maxEntries = opts.maxDirEntries ?? MAX_DIR_ENTRIES;
+    this.allowlist = createPathAllowlist(() => [this.root, ...opts.downloadRoots()], { home: this.home });
   }
 
   /** Clean up now and daily. */
@@ -254,18 +256,13 @@ export class WebFiles implements WebFileRoutes, Disposable {
     if (!wanted || wanted.length > MAX_PATH_CHARS || wanted.includes('\0') || !path.isAbsolute(wanted)) {
       return this.refuse(req, res, 400, 'An absolute path is required.');
     }
-    const roots = await this.realRoots(this.downloadRoots());
-    let real: string;
-    try {
-      real = await fs.promises.realpath(wanted);
-    } catch {
-      // Whether it exists is not told to anyone who may not read there anyway.
-      return this.refuse(req, res, roots.some((r) => inside(path.resolve(wanted), r)) ? 404 : 403, 'Not available.');
+    const verdict = await this.allowlist.check(wanted);
+    if (!verdict.ok) {
+      if (verdict.reason === 'not-found') return this.refuse(req, res, 404, 'Not available.');
+      if (verdict.reason !== 'not-absolute') this.opts.log('web: refused a download outside the allowed folders');
+      return this.refuse(req, res, verdict.reason === 'not-absolute' ? 400 : 403, 'Not available.');
     }
-    if (!roots.some((r) => inside(real, r)) || real.split(path.sep).some((c) => NEVER.has(c))) {
-      this.opts.log('web: refused a download outside the allowed folders');
-      return this.refuse(req, res, 403, 'Not available.');
-    }
+    const real = verdict.realPath;
     let st: fs.Stats;
     try {
       st = await fs.promises.stat(real);
@@ -286,19 +283,6 @@ export class WebFiles implements WebFileRoutes, Disposable {
     stream.on('error', () => res.destroy());
     res.on('close', () => stream.destroy());
     stream.pipe(res);
-  }
-
-  private downloadRoots(): string[] {
-    const home = this.home;
-    const roots = [this.root];
-    for (const r of this.opts.downloadRoots()) {
-      if (typeof r !== 'string' || !path.isAbsolute(r)) continue;
-      const resolved = path.resolve(r);
-      // A session started in the home folder (or at `/`) does not make everything below it a project.
-      if (resolved === path.parse(resolved).root || inside(home, resolved)) continue;
-      roots.push(resolved);
-    }
-    return roots;
   }
 
   // ---- folder browser ----
@@ -405,11 +389,7 @@ export class WebFiles implements WebFileRoutes, Disposable {
   }
 }
 
-/** `child` is `root` or below it, lexically (both already resolved). */
-function inside(child: string, root: string): boolean {
-  const rel = path.relative(root, child);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
+const inside = (child: string, root: string): boolean => isWithin(root, child);
 
 function headerValue(v: string | string[] | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;

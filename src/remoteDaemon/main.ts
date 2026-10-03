@@ -7,9 +7,13 @@
  * a reinstall does not delete it from under itself. stdout and stderr go to
  * `logs/remote-daemon.log`.
  *
+ * Only while the Electron app runs the core: the core daemon runs Discord
+ * in-process and retires this one (#138).
+ *
  * Environment:
  * - `AW_RUN_DIR`, `AW_FALLBACK_RUN_DIR`: where the host manifests are and where
  *   its own socket, token and manifest go (default: the app's own);
+ * - `AW_DATA_DIR`: where `settings.json` is (default: the parent of `AW_RUN_DIR`);
  * - `AW_REMOTE_RUNTIME_DIR`: the runtime clone it runs from, recorded in its
  *   manifest so the app does not collect it.
  *
@@ -17,7 +21,9 @@
  * exits cleanly (and launchd, told to restart only on a crash, leaves it).
  */
 import * as net from 'node:net';
+import * as path from 'node:path';
 import { defaultRunDirs } from '../core/control/paths';
+import { KeychainSecrets, systemSecurityRunner } from '../core/keychainSecrets';
 import { RemoteDaemon } from '../remote/daemon/daemon';
 import { remoteDaemonPaths } from '../remote/daemon/paths';
 
@@ -53,12 +59,17 @@ async function main(): Promise<void> {
     log('another remote daemon is already running; exiting');
     process.exit(0);
   }
+  // `run/` is in the data directory, beside `settings.json`.
+  const dataDir = process.env.AW_DATA_DIR || path.dirname(runDirs.runDir);
   const daemon = new RemoteDaemon({
     ...paths,
     runDir: runDirs.runDir,
     build: BUILD_ID,
     runtimeDir: process.env.AW_REMOTE_RUNTIME_DIR || undefined,
     log,
+    // Its own settings and token at start (#138): no waiting for the app after a reboot.
+    settingsFile: path.join(dataDir, 'settings.json'),
+    secrets: new KeychainSecrets(systemSecurityRunner(), log),
   });
 
   let stopping = false;

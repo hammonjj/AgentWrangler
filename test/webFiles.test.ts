@@ -411,6 +411,7 @@ describe('the rule: a client’s path is not a host path', () => {
       const posted: Array<{ body: { type: string; id?: number } }> = [];
       const shell = createShellChannel({
         connectionId: 'web-1',
+        kind: 'loopback',
         post: (e) => posted.push(e as never),
         conversation: () => undefined,
         ...(allowed ? { folderAllowed: allowed } : {}),

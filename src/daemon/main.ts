@@ -30,7 +30,7 @@ import { QUIT_STOP_BOUND_MS, type QuitSource } from '../core/session/quitPolicy'
 import { BUILD_ID, createSessionHostRuntime } from '../core/session/sessionHostRuntime';
 import { toolPath } from '../core/toolPath';
 import { createCoreDaemonAgent } from '../node/coreDaemonAgent';
-import { createRemoteDaemonAgent } from '../node/remoteDaemonAgent';
+import { retireRemoteDaemon } from '../node/remoteDaemonAgent';
 import { startCoreDaemon, type RunningCoreDaemon } from './startCore';
 
 async function main(): Promise<void> {
@@ -59,7 +59,6 @@ async function main(): Promise<void> {
     log,
   });
   const runDirs = { runDir: path.join(dataDir, 'run'), fallbackRunDir };
-  const logDir = path.join(dataDir, 'logs');
   const agent = createCoreDaemonAgent({ dataDir, fallbackRunDir, runtime, isPackaged: where.isPackaged, log });
 
   let daemon: RunningCoreDaemon | undefined;
@@ -91,7 +90,13 @@ async function main(): Promise<void> {
     build: BUILD_ID,
     runtime,
     runtimeDir: process.env.AW_CORE_RUNTIME_DIR || undefined,
-    remoteDaemon: createRemoteDaemonAgent({ runDirs, logDir, runtime, isPackaged: where.isPackaged, log }),
+    // Discord runs here (#138). The remote daemon the app used goes first,
+    // LaunchAgent and all, so only one process ever holds the bot.
+    remoteInProcess: {
+      retireDaemon: async () => {
+        await retireRemoteDaemon({ runDirs, log });
+      },
+    },
     log,
     onOpenAtLoginChange: () => {
       agent.syncPlist().catch((err) => say(`could not update the LaunchAgent: ${String(err)}`));
