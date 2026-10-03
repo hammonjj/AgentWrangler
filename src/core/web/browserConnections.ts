@@ -29,6 +29,7 @@ import type { RawData, WebSocket } from 'ws';
 import { Emitter, type Disposable } from '../events';
 import { ownerContext, type RequestContext } from '../access';
 import type { ClientRegistry } from '../clients';
+import type { HostShell } from '../../host/hostServices';
 import { CommandResults } from './commandResults';
 import { createShellChannel, type ShellConversation } from './shellChannel';
 import { SHELL_PANE, WIRE_PROTOCOL, isCommandId, parseShellToHost, type HostToShell } from '../../shared/shellProtocol';
@@ -77,6 +78,8 @@ export interface BrowserConnectionsOptions {
   isMutating(pane: string, body: unknown): boolean;
   /** The build the page's assets come from; a page from another one reloads. */
   build(): string;
+  /** The Mac's own shell, for a loopback client's explicit "Open on this Mac" (#140). Never for a LAN one. */
+  hostShell?: HostShell;
   /** Shared by every connection, so a resend on a new one is recognised. */
   results?: CommandResults;
   limits?: Partial<ConnectionLimits>;
@@ -157,6 +160,8 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       connectionId,
       post: (envelope) => void transport.postMessage(envelope),
       conversation: () => panes?.conversation,
+      kind: device.deviceScope === 'loopback' ? 'loopback' : 'lan',
+      ...(opts.hostShell ? { hostShell: opts.hostShell } : {}),
     });
     const registration = clients.register(shell.channel);
     const sendShell = (body: HostToShell) => sendNow({ pane: SHELL_PANE, body });
