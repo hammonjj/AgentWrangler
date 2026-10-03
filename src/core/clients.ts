@@ -27,9 +27,13 @@ import type { RequestContext } from './access';
 import type { Disposable } from './events';
 import { currentRequest } from './requestScope';
 import type { SessionHandle } from './session/sessionHandle';
-import type { HostDialogs, HostShell, InputOptions, PickItem, WorkbenchSurface } from '../host/hostServices';
+import type { HostDialogs, HostServices, HostShell, InputOptions, PickItem, WorkbenchSurface } from '../host/hostServices';
 import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 import type { ShellPrompt, ShellPromptValue } from '../shared/shellProtocol';
+import { NoticeDeduper } from '../shared/webCapabilities';
+
+/** The same tag inside this is one ask. */
+const NOTICE_DEDUPE_MS = 5_000;
 
 /** Where a client's conversation pane should go. */
 export type NavigateTarget =
@@ -45,6 +49,15 @@ export type NavigateTarget =
  * each answer by one that cannot.
  */
 export type ClientPrompt = ShellPrompt & { validateInput?: (value: string) => string | undefined };
+
+/** What a browser tab is sent for a notice (#141). Tapping it goes to `sessionKey`. */
+export interface ClientNotice {
+  title: string;
+  body: string;
+  sessionKey?: string;
+  /** One per ask: the same ask arriving twice collapses into one notification. */
+  tag: string;
+}
 
 /**
  * Where a client is, which decides what the host-local actions (open a file,
@@ -75,6 +88,14 @@ export interface ClientCommand {
 export interface ClientChannel {
   /** The `RequestContext.connectionId` its requests carry. */
   readonly connectionId: string;
+  /**
+   * A browser tab that shows OS notifications itself (#141): true only while
+   * its permission is granted. Absent or false: not a place a notice can go
+   * (the Electron window, a tab that has not asked or was refused).
+   */
+  readonly canNotify?: boolean;
+  /** Send a notice to a tab with `canNotify`. The tab decides whether to show it (hidden or unfocused). */
+  notify?(notice: ClientNotice): void;
   readonly kind: ClientKind;
   /** A link, opened where this client is: its own browser, or the default browser on the Mac. */
   openUrl(url: string): void;
@@ -164,6 +185,50 @@ export class ClientRegistry {
         this.opts.log(`clients: toast to ${channel.connectionId} failed: ${String(err)}`);
       }
     }
+  }
+
+  /**
+   * Send a notice to every browser tab that can show one; how many were sent.
+   * Each tab decides for itself whether the user is already looking at it.
+   */
+  notify(notice: ClientNotice): number {
+    let sent = 0;
+    for (const { channel } of this.clients.values()) {
+      if (!channel.canNotify || !channel.notify) continue;
+      try {
+        channel.notify(notice);
+        sent++;
+      } catch (err) {
+        this.opts.log(`clients: notice to ${channel.connectionId} failed: ${String(err)}`);
+      }
+    }
+    return sent;
+  }
+
+  /**
+   * `host.notify`, routed (#141, decision D3). A notice goes to every browser
+   * tab that can show it; the host's own (`native`: the Electron
+   * notification, or `osascript` in the daemon) fires only when no such tab is
+   * connected. A visible tab suppresses its own copy, and the host's stays
+   * quiet too: somebody is looking. Discord is separate and unchanged.
+   *
+   * The same `tag` inside `NOTICE_DEDUPE_MS` is one ask, delivered once.
+   */
+  notifier(native: HostServices['notify'], now: () => number = Date.now): NonNullable<HostServices['notify']> {
+    const dedupe = new NoticeDeduper(NOTICE_DEDUPE_MS);
+    return (notice) => {
+      if (notice.tag !== undefined && !dedupe.first(notice.tag, now())) return;
+      const sent =
+        notice.tag !== undefined
+          ? this.notify({
+              title: notice.title,
+              body: notice.body,
+              tag: notice.tag,
+              ...(notice.sessionKey !== undefined ? { sessionKey: notice.sessionKey } : {}),
+            })
+          : 0;
+      if (sent === 0) native?.(notice);
+    };
   }
 
   private entryFor(ctx: RequestContext | undefined): Entry | undefined {

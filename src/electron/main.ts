@@ -49,6 +49,7 @@ import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChan
 import { createBrowserClients, type BrowserClients } from './webPrototype';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
 import { WEB_DEVICES_FILE, WebDeviceStore } from '../core/web/devices';
+import { createDictationRoute } from '../core/web/dictationRoute';
 import { createFileViewRoute } from '../core/web/fileView';
 import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
 import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
@@ -166,6 +167,8 @@ void app.whenReady().then(async () => {
       nativeDialogs = native;
       return clients.dialogs;
     },
+    // Browser tabs first, this Mac's notification only when none can show it (#141, D3).
+    scopeNotify: (native) => clients.notifier(native),
     scopeShell: (native) => {
       nativeShell = native;
       return clients.shell;
@@ -523,6 +526,8 @@ void app.whenReady().then(async () => {
           allowlist: files.allowlist,
           log,
         }),
+        // A phone's recording, transcribed here (#141).
+        createDictationRoute({ transcribe: (audio, ext) => wrangler.dictation.transcribeAudio(audio, ext), log }),
       ],
       onClient: (socket, context) => browsers.attach(socket, context),
       devices: webDevices,

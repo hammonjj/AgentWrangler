@@ -17,8 +17,10 @@
  *    `<host>.local` or a bound address on the LAN, with the listener's port. A
  *    page that rebinds its own DNS name to us still sends its own name.
  * 2. Anything but GET/HEAD, and every WebSocket upgrade, must carry an
- *    `Origin` equal to this server (`https://…` on the LAN), or **403**. The
- *    only POSTs are `/upload` (#139, `files.ts`) and the pairing forms below;
+ *    `Origin` equal to this server (`https://…` on the LAN), or **403**. A
+ *    POST is `/upload` (#139, `files.ts`), a registered route (`routes` with
+ *    `methods`, #141: the device cookie, then the route's own checks) or a
+ *    pairing form below;
  *    any other that passes is 405.
  * 3. `/login?code=…` exchanges a single-use code for a device cookie of the
  *    listener's scope (`aw web open`, on loopback). Everything else needs that
@@ -170,6 +172,9 @@ export interface WebRouteContext {
   url: URL;
   scope: DeviceScope;
   deviceId: string;
+  /** The device's request context (owner, `via: 'browser'`), for the access gate (#141). */
+  context: RequestContext;
+  gate: AccessGate;
 }
 
 /**
@@ -178,6 +183,8 @@ export interface WebRouteContext {
  */
 export interface WebRoute {
   match(pathname: string): boolean;
+  /** The methods it answers; GET and HEAD when absent. A POST route (#141) says `['POST']`. */
+  methods?: readonly string[];
   handle(ctx: WebRouteContext): Promise<void> | void;
 }
 
@@ -412,6 +419,14 @@ export class WebServer implements Disposable {
         res.writeHead(403, SECURITY_HEADERS).end();
         return;
       }
+      // A POST route (#141): the device cookie first, then the route's own checks.
+      const route = this.postRouteFor(req);
+      if (route) {
+        const device = this.devices.verify(readCookie(req.headers.cookie, cookieName(listener.scope)), listener.scope);
+        if (!device) text(res, 401, 'Not signed in.');
+        else this.runRoute(listener, route.route, req, res, route.url, device.id);
+        return;
+      }
       // A file for the host (#139), from a signed-in device.
       if (req.method === 'POST' && this.opts.files && url.pathname === UPLOAD_PATH) {
         const device = this.devices.verify(readCookie(req.headers.cookie, cookieName(listener.scope)), listener.scope);
@@ -482,15 +497,9 @@ export class WebServer implements Disposable {
       return;
     }
     // Routes other modules add (#140): reached only by a signed-in device.
-    const route = (this.opts.routes ?? []).find((r) => r.match(url.pathname));
+    const route = (this.opts.routes ?? []).find((r) => !r.methods && r.match(url.pathname));
     if (route) {
-      void Promise.resolve()
-        .then(() => route.handle({ req, res, url, scope: listener.scope, deviceId: device.id }))
-        .catch((err) => {
-          this.opts.log(`web: route ${url.pathname} failed: ${String(err)}`);
-          if (!res.headersSent) text(res, 500, 'Something went wrong.');
-          else res.destroy();
-        });
+      this.runRoute(listener, route, req, res, url, device.id);
       return;
     }
     // The CA, for a device to install, from the Mac only (#136).
@@ -499,6 +508,29 @@ export class WebServer implements Disposable {
       return;
     }
     this.asset(url.pathname, res);
+  }
+
+  /** The route that answers this non-GET request, by path and method. */
+  private postRouteFor(req: http.IncomingMessage): { route: WebRoute; url: URL } | undefined {
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://localhost');
+    } catch {
+      return undefined;
+    }
+    const route = this.opts.routes?.find((r) => r.methods?.includes(req.method ?? '') && r.match(url.pathname));
+    return route ? { route, url } : undefined;
+  }
+
+  private runRoute(listener: Listener, route: WebRoute, req: http.IncomingMessage, res: http.ServerResponse, url: URL, deviceId: string): void {
+    const context = ownerContext('browser', { deviceId, deviceScope: listener.scope });
+    void Promise.resolve()
+      .then(() => route.handle({ req, res, url, scope: listener.scope, deviceId, context, gate: this.opts.gate }))
+      .catch((err) => {
+        this.opts.log(`web: route ${url.pathname} failed: ${String(err)}`);
+        if (!res.headersSent) text(res, 500, 'Something went wrong.');
+        else res.destroy();
+      });
   }
 
   /** An async route that fails is a 500, never an unhandled rejection or a hung request. */

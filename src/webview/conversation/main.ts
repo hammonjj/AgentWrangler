@@ -1,3 +1,4 @@
+import { createBrowserDictation, isBrowserHost } from '../common/browserDictation';
 import { renderDelegationOffer } from '../common/delegationOffer';
 import './conversation.css';
 import { fileUriToPath, fileUrisToPaths } from '../../shared/attachments';
@@ -2631,6 +2632,12 @@ function startDictation(): void {
   // back if a tool is missing. Waiting for that first would make the button
   // feel dead for as long as it takes to find ffmpeg.
   setMicState('recording');
+  if (browserMic) {
+    // A browser records its own device's microphone (#141); no previews.
+    dict.livePreview = false;
+    browserMic.start().catch((e: unknown) => onDictationMessage({ type: 'dictation', state: 'idle', message: (e as Error).message }));
+    return;
+  }
   post({ type: 'dictate', action: 'start' });
 }
 
@@ -2638,8 +2645,27 @@ function startDictation(): void {
 function stopDictation(): void {
   if (micState !== 'recording') return;
   setMicState('transcribing');
+  if (browserMic) {
+    browserMic.stop().then(
+      (text) => onDictationMessage({ type: 'dictation', state: 'idle', text }),
+      (e: unknown) => onDictationMessage({ type: 'dictation', state: 'idle', message: (e as Error).message }),
+    );
+    return;
+  }
   post({ type: 'dictate', action: 'stop' });
 }
+
+/** In a browser the microphone is the browser's; in the window the host's. */
+const browserMic = isBrowserHost()
+  ? createBrowserDictation({
+      onLimit: () => {
+        if (micState === 'recording') {
+          flashDictation('info', 'Recording reached its limit and stopped.');
+          stopDictation();
+        }
+      },
+    })
+  : undefined;
 
 function onDictationMessage(m: Extract<HostToConversation, { type: 'dictation' }>): void {
   // A quick second click has already moved this pane on to `transcribing`; the
@@ -2680,7 +2706,8 @@ window.addEventListener('keydown', (e) => {
     resetDictationPreview();
     dict.session = '';
     setMicState('idle');
-    post({ type: 'dictate', action: 'cancel' });
+    if (browserMic) browserMic.cancel();
+    else post({ type: 'dictate', action: 'cancel' });
   }
 });
 

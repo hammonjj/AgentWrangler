@@ -429,6 +429,41 @@ body.aw-shell #wbConv {
   100% { opacity: 0; }
 }
 
+/* The browser's one-line banner (#141): "Enable notifications", or why they
+   cannot work here. Built by the web shim; the Electron window never has one. */
+#awBanner {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(460px, calc(100vw - 24px));
+  padding: 6px 10px;
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background);
+  color: var(--vscode-foreground);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+  font-size: var(--vscode-font-size);
+}
+
+#awBanner[hidden] {
+  display: none;
+}
+
+#awBanner button {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  font: inherit;
+  cursor: pointer;
+}
+
 /* ---- the folder browser (#139, `common/folderBrowser.ts`) ----
    A view that any modal host can mount, and the plain overlay the shim uses
    when there is no modal host. Everything in it is a path on the host. */
