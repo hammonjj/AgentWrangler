@@ -522,11 +522,9 @@ export class DashboardHost {
     // layer answers questions too, and a second write path is a second place
     // for "is this still the question the button was drawn from?" to be got
     // wrong — the same reason `decidePermission` is an action and not a call
-    // into `HookLog` from here.
-    const outcome = await this.actions.answerQuestion(key, requestId, answers);
-    if (outcome === 'stale' || outcome === 'gone') {
-      this.dialogs.flash('Agent Wrangler: that question has already been answered.', 4000);
-    }
+    // into `HookLog` from here. The action tells this client when it was too
+    // late (#132), so saying it here as well would say it twice.
+    await this.actions.answerQuestion(key, requestId, answers);
     this.pushSnapshot();
   }
 
