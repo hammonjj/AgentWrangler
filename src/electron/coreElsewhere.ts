@@ -1,13 +1,14 @@
 /**
- * Whether this app runs the core, or the core daemon does (#130).
+ * Whether this app runs the core, or the core daemon does (#130, #131).
  *
  * Never two cores at once: two would be two session registries willing to
  * resume the same session id. So before `createApp`:
  *
  * - `experimental.coreDaemon` **on**: the app does not run the core. It makes
  *   sure the daemon is running (installing or updating its LaunchAgent when
- *   packaged), says where the core is, and quits. Until the window becomes a
- *   client of the daemon (#131) there is nothing for it to show.
+ *   packaged), and the window becomes a client of the daemon's web workbench
+ *   (`windowClient.ts`). Opened at login, it only makes sure and quits: the
+ *   daemon is what has to be running, not a window.
  * - **off**: the app runs the core as it always has, unless a daemon already
  *   answers on `run/core.sock`. Then it says so and quits instead.
  *
@@ -27,16 +28,22 @@ export interface CoreElsewhereOptions {
   log: (message: string) => void;
 }
 
-/** True: the core is elsewhere and this process is quitting; the caller returns. */
-export async function coreRunsElsewhere(opts: CoreElsewhereOptions): Promise<boolean> {
+/**
+ * - `here`: this process runs the core, as before;
+ * - `daemon`: the daemon runs it and is up; open the window as its client;
+ * - `quitting`: nothing for this process to do; it has said why and is quitting.
+ */
+export type CoreLocation = { kind: 'here' } | { kind: 'daemon' } | { kind: 'quitting' };
+
+export async function whereIsTheCore(opts: CoreElsewhereOptions): Promise<CoreLocation> {
   const { userDataDir, log } = opts;
   const fallbackRunDir = path.join(os.homedir(), '.agentwrangler', 'run');
   const paths = coreDaemonPaths(userDataDir, fallbackRunDir);
-  const quietly = app.isPackaged && app.getLoginItemSettings().wasOpenedAtLogin;
+  const atLogin = app.isPackaged && app.getLoginItemSettings().wasOpenedAtLogin;
 
   if (!readSetting(userDataDir, CORE_DAEMON_SETTING, false)) {
     const holder = await findCoreHolder({ socketPath: paths.socketPath, manifestPath: paths.manifestPath, probe: socketAnswers });
-    if (holder.kind === 'none') return false;
+    if (holder.kind === 'none') return { kind: 'here' };
     log(`not running the core: ${describeCoreHolder(holder)}`);
     await dialog.showMessageBox({
       type: 'warning',
@@ -48,10 +55,10 @@ export async function coreRunsElsewhere(opts: CoreElsewhereOptions): Promise<boo
       buttons: ['Quit'],
     });
     app.quit();
-    return true;
+    return { kind: 'quitting' };
   }
 
-  log('experimental.coreDaemon is on: the core runs in the core daemon, not here');
+  log('experimental.coreDaemon is on: the core runs in the core daemon, and this window is its client');
   const agent = createCoreDaemonAgent({
     dataDir: userDataDir,
     fallbackRunDir,
@@ -62,17 +69,6 @@ export async function coreRunsElsewhere(opts: CoreElsewhereOptions): Promise<boo
   try {
     const { outcome, manifest } = await agent.ensure();
     log(`core daemon: ${outcome}, pid ${manifest.pid}, build ${manifest.build}`);
-    if (!quietly) {
-      await dialog.showMessageBox({
-        type: 'info',
-        message: 'Agent Wrangler runs in the background',
-        detail:
-          `Its core is running as a background service (pid ${manifest.pid}), and keeps running when this window is closed. ` +
-          'Open it in your browser with "aw web open" in a terminal; "aw status" and the other aw commands work as before.\n\n' +
-          'To go back to running it in this window, turn off experimental.coreDaemon in settings.json, run "aw daemon stop", and open Agent Wrangler again.',
-        buttons: ['OK'],
-      });
-    }
   } catch (err) {
     log(`core daemon: could not start it: ${String(err)}`);
     await dialog.showMessageBox({
@@ -81,9 +77,15 @@ export async function coreRunsElsewhere(opts: CoreElsewhereOptions): Promise<boo
       detail: `${err instanceof Error ? err.message : String(err)}\n\nSee ${paths.logFile}.`,
       buttons: ['Quit'],
     });
+    app.quit();
+    return { kind: 'quitting' };
   }
-  app.quit();
-  return true;
+  if (atLogin) {
+    log('opened at login: the core daemon is running; no window');
+    app.quit();
+    return { kind: 'quitting' };
+  }
+  return { kind: 'daemon' };
 }
 
 function capitalise(s: string): string {

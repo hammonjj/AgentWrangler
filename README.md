@@ -955,9 +955,21 @@ aw daemon stop --all     # stop it and end them too, like Quit and Stop All Agen
 - **One core at a time.** Whichever of the app and the daemon answers on `run/core.sock` holds
   the core, and the other refuses to start and says why. Turn on *Run the core in the
   background* (`experimental.coreDaemon`, off by default; takes effect when the app is reopened)
-  and opening the app starts the daemon instead of its own core, then points you to
-  `aw web open`. The window does not open in that mode yet. To switch back, set it to `false`
-  in `settings.json`, run `aw daemon stop` and reopen the app.
+  and opening the app starts the daemon instead of its own core. To switch back, set it to
+  `false` in `settings.json`, run `aw daemon stop` and reopen the app.
+- **The window is a client of the daemon.** With the setting on, the app's window shows the
+  daemon's browser workbench, the same page `aw web open` gives a browser: it signs in with a
+  one-time link it asks the daemon for, and keeps that sign-in (a device in `web-devices.json`)
+  across restarts. The window and every browser tab show the same table and conversations and
+  can all act. Quitting or closing the window ends only the window; the daemon and every agent
+  keep running. Opened at login, the app only makes sure the daemon is running and opens no
+  window. In this mode:
+  - the menu has no agent commands (they are in the page) and there is no menu-bar item;
+  - *Settings* opens `settings.json` (Preferences in the page comes with #135); *Open in
+    Browser* signs a browser in; *View → Reload* signs the window in again;
+  - links open in your browser; the window never leaves `http://127.0.0.1:<web.port>`.
+  - *Open in a browser* (`web.enabled`) must stay on: with it off the window has nothing to
+    show and says so.
 - **Updates and crashes leave conversations running.** They run in session hosts, not in the
   daemon. `aw daemon start` from a newer install (and `npm run app:install`, when the daemon is
   running) rewrites the LaunchAgent, which stops the old daemon and starts the new one; it
@@ -971,9 +983,12 @@ aw daemon stop --all     # stop it and end them too, like Quit and Stop All Agen
 - **Files:** `run/core-daemon.json` (its pid, build and start time) and `logs/core-daemon.log`
   in the app's support folder; it writes the usual `agent-wrangler.log` too. While agents work
   it holds `caffeinate -i -w <pid>`, as the app holds its power blocker.
-- **Not there yet:** the daemon does not serve the browser workbench yet, so `aw web open`
-  says it is off (#131 moves the window and the browser onto the daemon). Dialogs the core
-  would show on the Mac are answered "cancel".
+- **Browser workbench:** the daemon serves it (#131), on the same port, with the same LAN
+  access and settings as the app does when it runs the core, and `aw web open` signs a browser
+  in. Its files are unpacked beside the app's asar (`app.asar.unpacked/dist/webview`), since
+  the daemon runs on plain Node. A question the core asks goes to the window or tab whose click
+  caused it; one nobody caused (a startup check, Discord, `aw`) is shown to every open window
+  and tab as a notice and answered "cancel".
 
 ## Remote control (experimental)
 

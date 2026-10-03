@@ -24,12 +24,10 @@ import { createApp } from '../app/createApp';
 import { createControlBackend } from '../app/controlBackend';
 import { controlSocketPath, controlTokenPath } from '../core/control/paths';
 import { ControlServer, ensurePrivateDir, writeControlToken } from '../core/control/server';
-import { DictationSetupError, defaultModelPath } from '../core/dictation';
 import { shouldPreventAppSuspension } from '../core/menuBar';
 import { agentCount, quitIntentSource, quitPolicy, type QuitSource } from '../core/session/quitPolicy';
 import { sourceStatus } from '../shared/orchestration/sourceHealth';
 import { parseRoutingSettings, ROUTING_KEY } from '../shared/orchestration/executionPolicy';
-import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { registerBundleScheme, serveBundles } from './bundleProtocol';
 import { installContextMenuEverywhere } from './contextMenu';
 import { startFileLog } from '../core/fileLog';
@@ -41,23 +39,17 @@ import { installApplicationMenu } from './menu';
 import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
 import { createRemoteDaemonAgent } from '../node/remoteDaemonAgent';
-import { coreRunsElsewhere } from './coreElsewhere';
+import { whereIsTheCore } from './coreElsewhere';
 import { socketAnswers } from '../core/control/probe';
 import { coreDaemonPaths, findCoreHolder } from '../core/daemon/coreDaemon';
 import { MenuBar, menuBarSessions } from './tray';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
-import { createBrowserClients, type BrowserClients } from './webPrototype';
-import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
+import { startWebWorkbench, type WebWorkbench } from '../app/webWorkbench';
+import { workbenchUi } from '../app/workbenchHosts';
 import { WEB_DEVICES_FILE, WebDeviceStore } from '../core/web/devices';
-import { createDictationRoute } from '../core/web/dictationRoute';
-import { createFileViewRoute } from '../core/web/fileView';
-import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
-import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
-import { createWebFiles } from '../app/webFiles';
-import type { WebFiles } from '../core/web/files';
 import { Emitter } from '../core/events';
-import { renderBrowserWorkbenchHtml } from '../ui/html';
 import { ClientRegistry } from '../core/clients';
+import { runWindowClient } from './windowClient';
 import { runInRequest } from '../core/requestScope';
 import type { HostDialogs, HostShell } from '../host/hostServices';
 
@@ -112,8 +104,14 @@ void app.whenReady().then(async () => {
 
   // The core runs elsewhere (#130): `experimental.coreDaemon` hands it to the
   // LaunchAgent daemon, or a daemon already holds `run/core.sock`. Never two
-  // cores at once; `coreElsewhere.ts` says so and quits.
-  if (await coreRunsElsewhere({ userDataDir, appRoot: APP_ROOT, log })) return;
+  // cores at once. With the setting on, this window is a client of the
+  // daemon's web workbench (#131) and none of the rest of this runs.
+  const core = await whereIsTheCore({ userDataDir, appRoot: APP_ROOT, log });
+  if (core.kind === 'quitting') return;
+  if (core.kind === 'daemon') {
+    await runWindowClient({ userDataDir, appRoot: APP_ROOT, log });
+    return;
+  }
 
   serveBundles(path.join(APP_ROOT, 'dist'));
 
@@ -180,28 +178,8 @@ void app.whenReady().then(async () => {
 
   const wrangler = createApp(host);
 
-  /**
-   * What to do when dictation is asked for and a piece of it is missing.
-   *
-   * The VSCode version offers to run the Homebrew command in a terminal. There
-   * is no terminal here, so it names the command and puts it on the clipboard —
-   * installing software on someone's behalf is not a thing this should do
-   * either way, and the editor version does not do it silently either.
-   */
-  const offerDictationSetup = async (err: DictationSetupError): Promise<void> => {
-    const command =
-      err.remedy === 'download-model'
-        ? `curl -L --create-dirs -o ${defaultModelPath()} https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin`
-        : `brew install ${err.remedy === 'install-whisper' ? 'whisper-cpp' : 'ffmpeg'}`;
-    const choice = await host.dialogs.warn(
-      `Agent Wrangler: ${err.message}`,
-      { detail: `Run this in a terminal, then try dictating again:\n\n${command}` },
-      'Copy command',
-    );
-    if (choice === 'Copy command') await host.clipboard.writeText(command);
-  };
-
-  const ui: ConversationHostUi = { dialogs: host.dialogs, offerDictationSetup };
+  // The panes' dialogs, and the offer to copy a missing dictation tool's install command.
+  const ui = workbenchUi(host);
 
   // What the renderer's `setState` holds — which conversation was showing, and
   // where the divider was. Separate from `workspaceState`, which records what
@@ -233,8 +211,8 @@ void app.whenReady().then(async () => {
     parentWindow: () => window?.browserWindow,
   });
 
-  // LAN access's status for Preferences (#136); `syncWeb` below keeps it current.
-  let lanStatus: LanStatus = { state: 'off', lines: ['Off. Nothing listens beyond this Mac.'] };
+  // LAN access's status for Preferences (#136), from the web workbench started below.
+  let web: WebWorkbench | undefined;
   const webStatusChanged = new Emitter<void>();
   // Browser devices (#137): one store for the process, shared by every web
   // server `syncWeb` starts, `aw web devices` and Preferences, so a revocation
@@ -258,7 +236,10 @@ void app.whenReady().then(async () => {
     onDidChangeOpen: () => syncDock(),
     // The addresses LAN access is bound to (#136), under its switch.
     status: {
-      read: () => ({ 'web.lan.enabled': { ok: lanStatus.state !== 'error', lines: lanStatus.lines } }),
+      read: () => {
+        const lanStatus = web?.lanStatus ?? { state: 'off', lines: ['Off. Nothing listens beyond this Mac.'] };
+        return { 'web.lan.enabled': { ok: lanStatus.state !== 'error', lines: lanStatus.lines } };
+      },
       onDidChange: webStatusChanged.event,
     },
     webDevices: {
@@ -427,8 +408,7 @@ void app.whenReady().then(async () => {
   // The `aw` command-line client's way in (#21). Nothing depends on it, so a
   // failure to serve it is logged and the app carries on.
   const runDirs = { runDir: path.join(userDataDir, 'run'), fallbackRunDir: path.join(os.homedir(), '.agentwrangler', 'run') };
-  // The browser workbench (#127), started below; `aw web open` asks it for a link.
-  let web: { server: WebServer; clients: BrowserClients; lan: LanAccess; files: WebFiles; port: number; listening: boolean } | undefined;
+  // The browser workbench (#127) is started below; `aw web open` asks it for a link.
   let control: ControlServer | undefined;
   try {
     const socketPath = controlSocketPath(runDirs);
@@ -442,8 +422,8 @@ void app.whenReady().then(async () => {
         startedAt: Date.now(),
         flash: (message) => host.dialogs.flash(message, 4000),
         gate: wrangler.access,
-        webLink: () => (web?.listening ? web.server.loginLink() : undefined),
-        webPair: () => web?.server.pairingOffer(),
+        webLink: () => web?.loginLink(),
+        webPair: () => web?.pairingOffer(),
         webDevices,
       }),
     });
@@ -459,111 +439,14 @@ void app.whenReady().then(async () => {
   // `aw web open`. On by default; follows `web.enabled` and `web.port` live.
   // Home-network access (#136) rides on it: https on the Mac's private
   // addresses, only while `web.lan.enabled`, with the local CA in web-tls/.
-  const certs = new LocalCertificates({ dir: path.join(host.dataDir, WEB_TLS_DIR), log });
-  let hostName: Promise<string> | undefined;
-  const macName = () => (hostName ??= localHostName());
-  const lanSettings = () => ({
-    enabled: host.settings.get<boolean>('web.lan.enabled', false) === true,
-    port: Number(host.settings.get<number>('web.lan.port', LAN_DEFAULT_PORT)),
-    certFile: String(host.settings.get<string>('web.lan.certFile', '') ?? '').trim(),
-    keyFile: String(host.settings.get<string>('web.lan.keyFile', '') ?? '').trim(),
-  });
-  const setLanStatus = (status: LanStatus) => {
-    lanStatus = status;
-    webStatusChanged.fire();
-  };
-  const stopWeb = () => {
-    web?.lan.dispose();
-    web?.server.dispose();
-    web?.clients.dispose();
-    web?.files.dispose();
-    web = undefined;
-    setLanStatus(
-      lanSettings().enabled
-        ? { state: 'error', lines: ['Not listening: turn on "Open in a browser" above first.'] }
-        : { state: 'off', lines: ['Off. Nothing listens beyond this Mac.'] },
-    );
-  };
-  const syncWeb = () => {
-    const enabled = host.settings.get<boolean>('web.enabled', true);
-    const wanted = Number(host.settings.get<number>('web.port', WEB_DEFAULT_PORT));
-    const port = Number.isInteger(wanted) && wanted >= 1024 && wanted <= 65535 ? wanted : WEB_DEFAULT_PORT;
-    if (!enabled) {
-      if (web) log('web: off');
-      stopWeb();
-      return;
-    }
-    if (web && web.port === port) {
-      void web.lan.refresh();
-      return;
-    }
-    stopWeb();
-    // Each browser registers with the app's client registry, so what it causes comes back to it (#126).
-    // Uploads, downloads and the folder browser for remote browsers (#139).
-    const files = createWebFiles(wrangler, { dataDir: host.dataDir, log });
-    files.start();
-    const browsers = createBrowserClients({
-      app: wrangler,
-      host,
-      ui: { ...ui, allowRemotePath: (p) => files.isStaged(p) },
-      clients,
-      log,
-      hostShell: macShell,
-      build: () => server.build(),
-      folderAllowed: (dir) => files.folderAllowed(dir),
-    });
-    const server = new WebServer({
-      files,
-      port,
-      webviewDir: path.join(APP_ROOT, 'dist', 'webview'),
-      dataDir: host.dataDir,
-      gate: wrangler.access,
-      log,
-      page: renderBrowserWorkbenchHtml,
-      // The read-only file and diff view that stands in for "open in the editor" (#140).
-      routes: [
-        createFileViewRoute({
-          allowlist: files.allowlist,
-          log,
-        }),
-        // A phone's recording, transcribed here (#141).
-        createDictationRoute({ transcribe: (audio, ext) => wrangler.dictation.transcribeAudio(audio, ext), log }),
-      ],
-      onClient: (socket, context) => browsers.attach(socket, context),
-      devices: webDevices,
-      onDeviceRevoked: (id) => browsers.closeDevice(id),
-      // `/ca.mobileconfig` on loopback. Made on first request, so a device can
-      // be set up before LAN access is switched on. None with the user's own cert.
-      caCertificate: async () => {
-        const s = lanSettings();
-        if (s.certFile && s.keyFile) return undefined;
-        return certs.caCertificate(await macName());
-      },
-    });
-    const lan = new LanAccess({ server, certs, settings: lanSettings, log, hostName: macName, onStatus: setLanStatus });
-    const entry = { server, clients: browsers, lan, files, port, listening: false };
-    web = entry;
-    server.listen().then(
-      (bound) => {
-        entry.listening = true;
-        log(`web: http://127.0.0.1:${bound}/ (sign in with aw web open)`);
-        if (web === entry) void lan.refresh();
-      },
-      (err) => {
-        log(`web: not serving on port ${port}: ${String(err)}`);
-        if (web === entry) stopWeb();
-      },
-    );
-  };
-  syncWeb();
-  host.subscribe(host.settings.onDidChange((affects) => {
-    if (['web.enabled', 'web.port', 'web.lan.enabled', 'web.lan.port', 'web.lan.certFile', 'web.lan.keyFile'].some(affects)) syncWeb();
-  }));
+  // The same service the core daemon runs (`src/app/webWorkbench.ts`, #131).
+  web = startWebWorkbench({ app: wrangler, host, ui, clients, log, hostShell: macShell, devices: webDevices, webviewDir: path.join(APP_ROOT, 'dist', 'webview') });
+  host.subscribe(web.onDidChangeLanStatus(() => webStatusChanged.fire()));
   // Addresses change across sleep (a different network, a new DHCP lease).
-  powerMonitor.on('resume', () => void web?.lan.refresh());
+  powerMonitor.on('resume', () => web?.refresh());
 
   const teardown = () => {
-    stopWeb();
+    web?.dispose();
     control?.dispose();
     menuBar.dispose();
     if (powerBlockId !== undefined) powerSaveBlocker.stop(powerBlockId);

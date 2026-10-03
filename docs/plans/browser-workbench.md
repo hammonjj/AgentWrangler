@@ -49,7 +49,8 @@ workbench to a browser on 127.0.0.1 from the running app.
 **Superseded by #127** (slice 6): the HTTP side is now `src/core/web/server.ts` (hashed
 assets, CSP header, login link and device cookie), on by default (`web.enabled`, `web.port`
 7391), and `aw web open` replaces the token below. The switch and `run/web.token` are gone;
-`webPrototype.ts` keeps only the WebSocket side. The record below is the spike as it ran.
+`webPrototype.ts` kept only the WebSocket side, and #131 moved that to `src/app/webWorkbench.ts`
+so the core daemon serves the workbench too. The record below is the spike as it ran.
 
 **Code**
 
@@ -433,7 +434,9 @@ entry points and drives each with a refusing `authorize`.
 
 1. **Coexistence.** The daemon owns the core. The Electron window becomes a client: a
    `BrowserWindow` loading `http://127.0.0.1:<port>/` with the loopback credential. One code path
-   for the UI from that point on.
+   for the UI from that point on. *Built in #131 behind `experimental.coreDaemon`:
+   `src/electron/windowClient.ts` signs in with a `web.link` over the control socket, and the
+   daemon serves the page (`src/daemon/clients.ts` over `src/app/webWorkbench.ts`).*
 2. **Parity.** Browser features reach the retirement checklist in slice 19.
 3. **Retirement.** Delete `src/electron/`, the preload, the `aw://` scheme, the palette and
    preferences windows, Electron and electron-builder. The `.app` becomes the Node daemon bundle
