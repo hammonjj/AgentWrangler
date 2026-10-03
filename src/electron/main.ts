@@ -32,15 +32,16 @@ import { parseRoutingSettings, ROUTING_KEY } from '../shared/orchestration/execu
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { registerBundleScheme, serveBundles } from './bundleProtocol';
 import { installContextMenuEverywhere } from './contextMenu';
+import { startFileLog } from '../core/fileLog';
+import { JsonStore } from '../core/jsonStore';
+import { BUILD_ID, createSessionHostRuntime } from '../core/session/sessionHostRuntime';
+import { toolPath } from '../core/toolPath';
 import { createElectronHost } from './electronHost';
 import { installApplicationMenu } from './menu';
-import { JsonStore } from './jsonStore';
 import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
-import { BUILD_ID, createSessionHostRuntime } from './sessionHostRuntime';
 import { createRemoteDaemonAgent } from './remoteDaemonAgent';
 import { MenuBar, menuBarSessions } from './tray';
-import { toolPath } from './toolPath';
 import { WorkbenchWindow } from './workbenchWindow';
 import { startWebPrototype, webPrototypePort } from './webPrototype';
 import type { Disposable } from '../core/events';
@@ -87,25 +88,11 @@ if (!isPrimaryInstance) {
 /** Repo root in development (`dist/electron/main.js` → two levels up). */
 const APP_ROOT = path.resolve(__dirname, '..', '..');
 
-function startLog(userDataDir: string): (message: string) => void {
-  const file = path.join(userDataDir, 'agent-wrangler.log');
-  fs.mkdirSync(userDataDir, { recursive: true });
-  // Appended, never rotated by us: it is a developer log for a dev build, and
-  // a rotation scheme is a thing to get wrong before there is a reason for one.
-  const stream = fs.createWriteStream(file, { flags: 'a' });
-  return (message: string) => {
-    const line = `[${new Date().toISOString()}] ${message}`;
-    stream.write(`${line}\n`);
-    // eslint-disable-next-line no-console
-    console.log(line);
-  };
-}
-
 void app.whenReady().then(() => {
   if (!isPrimaryInstance) return; // see the lock above: quit() has not landed yet
 
   const userDataDir = app.getPath('userData');
-  const log = startLog(userDataDir);
+  const log = startFileLog(userDataDir);
   log(`Agent Wrangler starting — Electron ${process.versions.electron}, userData ${userDataDir}`);
 
   serveBundles(path.join(APP_ROOT, 'dist'));

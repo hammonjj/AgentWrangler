@@ -22,6 +22,7 @@ import { Emitter, type Disposable } from '../../core/events';
 import { NdjsonPeer, type IncomingRequest } from '../../core/rpc/ndjsonPeer';
 import { ensurePrivateDir, writeControlToken } from '../../core/control/server';
 import { writeJsonAtomic } from '../../core/session/manifestFile';
+import { watchForSleep } from '../../core/sleepWatcher';
 import type { SessionDTO } from '../../shared/model';
 import type { RemoteNotice } from '../../shared/remote';
 import type { PermissionDecisionOutcome } from '../../ui/actions';
@@ -148,7 +149,7 @@ export class RemoteDaemon implements Disposable {
   /** What the transport was built for; a change means reconnecting. */
   private transportFor?: string;
   private syncing: Promise<void> = Promise.resolve();
-  private sleepTimer?: ReturnType<typeof setInterval>;
+  private sleepWatcher?: Disposable;
 
   constructor(private opts: RemoteDaemonOptions) {
     const log = (m: string) => opts.log(m);
@@ -184,17 +185,12 @@ export class RemoteDaemon implements Disposable {
    * stale across a sleep otherwise takes a missed heartbeat or two to notice.
    */
   private watchForSleep(): void {
-    const everyMs = 5000;
-    let last = Date.now();
-    this.sleepTimer = setInterval(() => {
-      const now = Date.now();
-      if (now - last > everyMs + 30_000) {
+    this.sleepWatcher = watchForSleep({
+      onWake: () => {
         this.opts.log('woke from sleep: rechecking the Discord connection and the hosts');
         this.transport?.wake?.();
-      }
-      last = now;
-    }, everyMs);
-    this.sleepTimer.unref?.();
+      },
+    });
   }
 
   status(): DaemonStatus {
@@ -217,7 +213,7 @@ export class RemoteDaemon implements Disposable {
   }
 
   async dispose(): Promise<void> {
-    clearInterval(this.sleepTimer);
+    this.sleepWatcher?.dispose();
     for (const c of this.conns) c.socket.destroy();
     this.conns.clear();
     this.server?.close();

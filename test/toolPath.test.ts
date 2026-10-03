@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { toolPath } from '../src/electron/toolPath';
+import { toolPath } from '../src/core/toolPath';
 
 describe('toolPath', () => {
   it('makes Homebrew tools visible to a macOS GUI process', () => {

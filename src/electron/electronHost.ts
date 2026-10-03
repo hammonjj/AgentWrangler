@@ -25,7 +25,7 @@ import * as path from 'node:path';
 import { type BrowserWindow, clipboard, dialog, Notification, shell } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostDialogs, HostServices, HostShell, InputOptions, PickItem, PickOptions } from '../host/hostServices';
-import { JsonSettings, JsonStore } from './jsonStore';
+import { JsonSettings, JsonStore } from '../core/jsonStore';
 import { createElectronSecrets } from './secrets';
 import { TOAST } from './channels';
 
