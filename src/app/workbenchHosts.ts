@@ -14,6 +14,7 @@ import type { HostServices } from '../host/hostServices';
 import { ConversationHost, type ConversationHostUi } from '../ui/conversation/conversationHost';
 import { DashboardHost } from '../ui/dashboardHost';
 import { paneChannel, type EnvelopeTransport } from '../ui/paneChannel';
+import { PreferencesHost, type PreferencesBackend } from '../ui/preferencesHost';
 
 /**
  * The two pane hosts for one workbench document, over whatever carries its
@@ -30,7 +31,13 @@ export function createWorkbenchHosts(
    * with one context; each browser connection brings its own, naming itself.
    */
   context: RequestContext,
-): { dashboard: DashboardHost; conversation: ConversationHost } {
+  /**
+   * What Preferences is served from (#135). Given, the document also has a
+   * `preferences` pane for its `#/preferences` route: each browser does. The
+   * Electron window has a window of its own for Preferences and passes none.
+   */
+  preferences?: PreferencesBackend,
+): { dashboard: DashboardHost; conversation: ConversationHost; preferences?: PreferencesHost } {
   const access = { context, gate: app.access };
   const actions = app.actions;
   const dashboard = new DashboardHost(
@@ -71,7 +78,8 @@ export function createWorkbenchHosts(
     access,
     app.taskPanes,
   );
-  return { dashboard, conversation };
+  const prefs = preferences ? new PreferencesHost(paneChannel(transport, 'preferences'), preferences, access) : undefined;
+  return { dashboard, conversation, ...(prefs ? { preferences: prefs } : {}) };
 }
 
 /**

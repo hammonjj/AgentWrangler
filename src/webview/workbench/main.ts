@@ -23,6 +23,8 @@ import './workbench.css';
 import { splitState } from '../common/paneApi';
 import '../dashboard/main';
 import '../conversation/main';
+// Preferences as the `#/preferences` route of the browser shell (#135).
+import '../preferences/pane';
 import { startAppShell } from './shell';
 
 // The app shell (#133): modals and toasts everywhere, routes and the narrow

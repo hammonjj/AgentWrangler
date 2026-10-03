@@ -8,6 +8,7 @@
  * The link's origin, `http://127.0.0.1:<port>`, is the only one the window may
  * show; everything else is the real browser's business or nobody's.
  */
+import { formatRoute } from '../shared/appRoutes';
 
 /**
  * The origin a login link belongs to, if it is one the window may load:
@@ -26,6 +27,15 @@ export function loopbackOrigin(link: string): string | undefined {
   if (!url.port) return undefined;
   if (url.username || url.password) return undefined;
   return url.origin;
+}
+
+/**
+ * Where the Preferences menu item takes the window (#135): the workbench's own
+ * `#/preferences` route. A hash-only change when the page is already loaded,
+ * so the connection and the table stay as they are.
+ */
+export function preferencesUrl(origin: string): string {
+  return `${origin}/${formatRoute({ kind: 'preferences' })}`;
 }
 
 /**

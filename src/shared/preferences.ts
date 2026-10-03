@@ -216,15 +216,22 @@ export type HostToPreferences =
  */
 export function settingUpdate(
   message: PreferencesToHost,
-  specFor: (key: string) => { key: string; type: 'string' | 'boolean' | 'number' } | undefined,
+  specFor: (key: string) => { key: string; type: 'string' | 'boolean' | 'number'; enum?: string[]; minimum?: number; maximum?: number } | undefined,
 ): { key: string; value: string | boolean | number | undefined } | undefined {
   if (!message || typeof message !== 'object') return undefined;
   if (message.type === 'reset') {
-    const spec = specFor(message.key);
+    const spec = typeof message.key === 'string' ? specFor(message.key) : undefined;
     return spec ? { key: spec.key, value: undefined } : undefined;
   }
   if (message.type !== 'set') return undefined;
-  const spec = specFor(message.key);
+  const spec = typeof message.key === 'string' ? specFor(message.key) : undefined;
   if (!spec || typeof message.value !== spec.type) return undefined;
+  // The page checks these too, but a browser is a client the host does not trust (#135).
+  if (typeof message.value === 'number') {
+    if (!Number.isFinite(message.value)) return undefined;
+    if (spec.minimum !== undefined && message.value < spec.minimum) return undefined;
+    if (spec.maximum !== undefined && message.value > spec.maximum) return undefined;
+  }
+  if (typeof message.value === 'string' && spec.enum && !spec.enum.includes(message.value)) return undefined;
   return { key: spec.key, value: message.value };
 }

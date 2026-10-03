@@ -19,7 +19,7 @@ export type AppRoute =
   | { kind: 'analytics' }
   /** No key: whatever the conversation pane is showing (an analytics detail has none). */
   | { kind: 'conversation'; key?: string }
-  /** A placeholder until preferences become a route of their own (#135). */
+  /** Preferences, mounted by `webview/preferences/pane.ts` (#135). */
   | { kind: 'preferences' }
   /** Pairing a device (#137): a page the pairing UI mounts into. */
   | { kind: 'pair' };

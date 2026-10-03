@@ -23,7 +23,9 @@
 import * as path from 'node:path';
 import type { WebSocket } from 'ws';
 import type { AgentWranglerApp } from './createApp';
+import { createPreferencesBackend } from './preferencesBackend';
 import { createWorkbenchHosts } from './workbenchHosts';
+import type { PreferencesBackend } from '../ui/preferencesHost';
 import type { RequestContext } from '../core/access';
 import type { ClientRegistry } from '../core/clients';
 import type { ControlWebLinkResult } from '../core/control/protocol';
@@ -56,6 +58,8 @@ export interface BrowserClientsOptions {
   folderAllowed: (dir: string) => Promise<boolean>;
   /** The Mac's own shell: what a loopback browser's "Open on this Mac" does (#140). */
   hostShell?: HostShell;
+  /** What each browser's `#/preferences` route is served from (#135). Absent: no `preferences` pane. */
+  preferences?: PreferencesBackend;
 }
 
 export interface BrowserClients extends Disposable {
@@ -74,7 +78,7 @@ export function createBrowserClients(opts: BrowserClientsOptions): BrowserClient
     folderAllowed: opts.folderAllowed,
     ...(opts.hostShell ? { hostShell: opts.hostShell } : {}),
     isMutating: isMutatingPaneMessage,
-    createPanes: (transport, context) => createWorkbenchHosts(app, host, ui, transport, context),
+    createPanes: (transport, context) => createWorkbenchHosts(app, host, ui, transport, context, opts.preferences),
   });
 }
 
@@ -149,6 +153,8 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     lanStatus = status;
     statusChanged.fire();
   };
+  // Preferences in every browser (#135): the same backend the Electron window reads.
+  const preferences = createPreferencesBackend({ app, host, devices, lan: { status: () => lanStatus, onDidChange: statusChanged.event } });
 
   const stop = () => {
     web?.lan.dispose();
@@ -188,6 +194,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
       clients,
       log,
       hostShell: opts.hostShell,
+      preferences,
       build: () => server.build(),
       folderAllowed: (dir) => files.folderAllowed(dir),
     });

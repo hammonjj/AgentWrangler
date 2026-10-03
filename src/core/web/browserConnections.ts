@@ -43,6 +43,8 @@ export interface EnvelopeTransport {
 export interface BrowserPanes {
   dashboard: Disposable;
   conversation: ShellConversation & Disposable;
+  /** The `#/preferences` route's host (#135). */
+  preferences?: Disposable;
 }
 
 export interface ConnectionLimits {
@@ -254,6 +256,7 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       shell.dispose();
       panes?.dashboard.dispose();
       panes?.conversation.dispose();
+      panes?.preferences?.dispose();
       panes = undefined;
       connections.delete(ws);
       deviceOf.delete(ws);
