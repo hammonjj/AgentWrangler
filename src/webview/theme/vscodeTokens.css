@@ -490,6 +490,24 @@ body.aw-shell #wbConv {
   font: inherit;
   cursor: pointer;
 }
+/* The banner's × (#134): quiet, square, last on the line. */
+#awBanner .aw-banner-close {
+  padding: 0 6px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-size: 1.25em;
+  line-height: 1;
+}
+#awBanner .aw-banner-close:hover {
+  color: var(--vscode-foreground);
+}
+#awBanner .aw-banner-text {
+  min-width: 0;
+}
+#awBanner .aw-banner-short {
+  display: none;
+}
 
 /* ---- the folder browser (#139, `common/folderBrowser.ts`) ----
    A view that any modal host can mount, and the plain overlay the shim uses
@@ -524,7 +542,12 @@ body.aw-shell #wbConv {
 .aw-fb-title { font-weight: 600; }
 .aw-fb-hint { color: var(--vscode-descriptionForeground); font-size: 0.92em; }
 .aw-fb-bar { display: flex; align-items: center; gap: 8px; }
+/* Right-to-left only so a long path is cut at its start (the ellipsis goes on
+   the left and the folder you are in stays in view). The path itself is an
+   isolated left-to-right run (`bdi`), or the bidi algorithm moves its leading
+   `/` to the far end (#134). */
 .aw-fb-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.aw-fb-path > bdi { direction: ltr; unicode-bidi: isolate; }
 .aw-fb-toggle { white-space: nowrap; color: var(--vscode-descriptionForeground); }
 .aw-fb-list { flex: 1; min-height: 120px; overflow-y: auto; border: 1px solid var(--vscode-widget-border); border-radius: 4px; }
 .aw-fb-heading { padding: 4px 8px; color: var(--vscode-descriptionForeground); font-size: 0.85em; text-transform: uppercase; }

@@ -39,9 +39,17 @@ import {
   type HostToShell,
   type ShellToHost,
 } from '../../shared/shellProtocol';
-import { NoticeDeduper, secureContextProblem, shouldShowNotice, type NotificationState } from '../../shared/webCapabilities';
+import {
+  NOTIFY_BANNER_DISMISS_KEY,
+  NoticeDeduper,
+  parseBannerDismissedAt,
+  secureContextProblem,
+  shouldShowNotice,
+  shouldShowNotifyBanner,
+  type NotificationState,
+} from '../../shared/webCapabilities';
 import { openUrlHere, showHostView } from '../common/hostView';
-import { overlayDock } from '../common/overlayDock';
+import { overlayDock, reserveDockSpace } from '../common/overlayDock';
 
 interface Bridge {
   /** A remote browser: a path here is not a host path (#139). `paneApi.isRemoteHost` reads it. */
@@ -304,28 +312,71 @@ function showNotice(raw: HostToShell): void {
   }
 }
 
-/** One line: "Enable notifications" while permission can still be asked, or why it cannot be here. */
+function readBannerDismissedAt(): number | undefined {
+  try {
+    return parseBannerDismissedAt(localStorage.getItem(NOTIFY_BANNER_DISMISS_KEY));
+  } catch {
+    return undefined;
+  }
+}
+
+function dismissBanner(): void {
+  try {
+    localStorage.setItem(NOTIFY_BANNER_DISMISS_KEY, String(Date.now()));
+  } catch {
+    // Private browsing or a full quota: dismissed for this page only.
+    bannerDismissedHere = true;
+  }
+  renderBanner();
+}
+
+/** Dismissed in a page that could not remember it. */
+let bannerDismissedHere = false;
+
+function span(className: string, text: string): HTMLSpanElement {
+  const s = document.createElement('span');
+  s.className = className;
+  s.textContent = text;
+  return s;
+}
+
+/**
+ * One line: "Enable notifications" while permission can still be asked, or why
+ * it cannot be here, with a × that puts it away for 30 days (#134). While it
+ * shows, the page keeps its height clear (`reserveDockSpace`), so it never
+ * covers the composer or a page's last line.
+ */
 function renderBanner(): void {
   const state = notificationState();
   let banner = document.getElementById('awBanner');
-  const wanted = insecureReason !== undefined || state === 'default';
+  const wanted =
+    !bannerDismissedHere &&
+    shouldShowNotifyBanner({ permission: state, insecure: insecureReason !== undefined, dismissedAt: readBannerDismissedAt(), now: Date.now() });
   if (!wanted) {
     banner?.remove();
+    reserveDockSpace(undefined);
     return;
   }
   if (banner) return;
   banner = document.createElement('div');
   banner.id = 'awBanner';
   banner.setAttribute('role', 'status');
-  const label = document.createElement('span');
-  banner.appendChild(label);
   if (insecureReason) {
-    label.textContent = insecureReason;
+    const label = span('aw-banner-text aw-banner-why', insecureReason);
+    banner.appendChild(label);
   } else {
-    label.textContent = 'Get a notification when an agent needs you.';
+    // The long form on a wide screen, the short one on a phone (CSS picks).
+    const label = document.createElement('span');
+    label.className = 'aw-banner-text';
+    label.append(
+      span('aw-banner-long', 'Get a notification when an agent needs you.'),
+      span('aw-banner-short', 'Get notified when an agent needs you.'),
+    );
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = 'Enable notifications';
+    button.className = 'aw-banner-enable';
+    button.append('Enable', span('aw-banner-long', ' notifications'));
+    button.setAttribute('aria-label', 'Enable notifications');
     // A user gesture: browsers only show the permission prompt for one.
     button.addEventListener('click', () => {
       void Notification.requestPermission().then(() => {
@@ -333,10 +384,19 @@ function renderBanner(): void {
         renderBanner();
       });
     });
-    banner.appendChild(button);
+    banner.append(label, button);
   }
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'aw-banner-close';
+  close.textContent = '×';
+  close.title = 'Dismiss';
+  close.setAttribute('aria-label', 'Dismiss');
+  close.addEventListener('click', dismissBanner);
+  banner.appendChild(close);
   // In the dock, stacked with the app shell's toasts rather than over them.
   overlayDock().prepend(banner);
+  reserveDockSpace(banner);
 }
 
 if (document.body) renderBanner();

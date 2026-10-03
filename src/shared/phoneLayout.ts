@@ -70,6 +70,20 @@ export function viewportFrame(m: ViewportMetrics): ViewportFrame | undefined {
   return { top, height, keyboard: m.layoutHeight - m.height >= KEYBOARD_MIN_PX };
 }
 
+/** The gap between the overlay dock's banner and the page content above it. */
+export const DOCK_GAP_PX = 6;
+
+/**
+ * How much of the page's bottom the overlay dock's banner needs kept clear
+ * (`--aw-dock-h`, #134), in whole pixels: its height plus a gap, or 0 when
+ * there is no banner or it is not drawn (hidden while the keyboard is up).
+ * Toasts are not counted: they come and go, and the page must not jump for them.
+ */
+export function dockReserve(bannerHeight: number | undefined): number {
+  if (!(bannerHeight !== undefined && bannerHeight > 0)) return 0;
+  return Math.ceil(bannerHeight) + DOCK_GAP_PX;
+}
+
 /** A press held this long, without moving, is a long-press: the touch way to a context menu. */
 export const LONG_PRESS_MS = 500;
 /** Moving further than this since touchdown is a scroll, not a long-press. */

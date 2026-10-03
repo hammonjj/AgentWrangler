@@ -1093,10 +1093,21 @@ body,
   cursor: pointer;
 }
 
+/* A code block and its Copy button (`decorateCodeBlocks`). The wrapper takes
+   the block's place in flow and holds the button, so the button is not part of
+   the scrolling `pre`. */
+.codeblock {
+  position: relative;
+  margin: 0.8em 0;
+}
+.codeblock > pre {
+  margin: 0;
+}
 .copy {
   position: absolute;
   top: 4px;
   right: 4px;
+  z-index: 1;
   font-family: inherit;
   font-size: 0.78em;
   padding: 1px 7px;
@@ -1107,7 +1118,7 @@ body,
   cursor: pointer;
   opacity: 0;
 }
-.blk pre:hover .copy,
+.codeblock:hover > .copy,
 .copy:focus {
   opacity: 1;
 }
@@ -2088,9 +2099,27 @@ body,
 #convApp.narrow .blk pre {
   font-size: 0.9em;
 }
-/* Room above the code for the Copy button, which would otherwise sit on it. */
-#convApp.narrow .blk pre:has(> .copy) {
-  padding-top: 30px;
+/* The Copy button gets a strip of its own above the code (here and on touch,
+   below): floating over the block it covered the first line. */
+#convApp.narrow .codeblock,
+#convApp.touch .codeblock {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+}
+#convApp.narrow .codeblock > .copy,
+#convApp.touch .codeblock > .copy {
+  position: static;
+  align-self: flex-end;
+  opacity: 0.8;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  background: var(--vscode-textCodeBlock-background, rgba(128, 128, 128, 0.15));
+}
+#convApp.narrow .codeblock > pre,
+#convApp.touch .codeblock > pre {
+  border-top-right-radius: 0;
 }
 #convApp.narrow .blk code {
   font-size: 0.9em;
@@ -2116,6 +2145,26 @@ body,
 }
 #convApp.narrow #findbar {
   padding: 6px 8px;
+}
+/* Folded behind the header's search button until it is tapped. */
+#convApp.narrow #findbar:not(.open) {
+  display: none;
+}
+#findtoggle {
+  display: none;
+}
+#convApp.narrow #findtoggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+}
+#convApp.narrow #findtoggle.on {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+#convApp.touch #findtoggle {
+  min-width: 44px;
 }
 
 /* ---- touch: finger-sized targets, and nothing that needs a hover ---- */

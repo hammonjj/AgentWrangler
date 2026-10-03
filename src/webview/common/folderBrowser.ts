@@ -45,17 +45,30 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, t
   return e;
 }
 
-export function mountFolderBrowser(container: HTMLElement, options: FolderBrowserOptions): { dispose(): void } {
+/** Mounts so far: each view's title gets an id of its own. */
+let mounted = 0;
+
+export interface FolderBrowserView {
+  /** The id of the view's title, for the framing dialog's `aria-labelledby`. */
+  titleId: string;
+  dispose(): void;
+}
+
+export function mountFolderBrowser(container: HTMLElement, options: FolderBrowserOptions): FolderBrowserView {
   const load = options.fetchDirs ?? fetchDirs;
   let hidden = false;
   let current: DirListing | undefined;
   let done = false;
   let seq = 0;
 
+  // A region, not a dialog: whatever frames it (the modal host, or the plain
+  // overlay below) is the one dialog, labelled by this title (#134).
   const root = el('div', 'aw-fb');
-  root.setAttribute('role', 'dialog');
-  root.setAttribute('aria-label', 'Choose a folder on the host');
+  root.setAttribute('role', 'region');
+  const titleId = `awFbTitle${++mounted}`;
+  root.setAttribute('aria-labelledby', titleId);
   const title = el('div', 'aw-fb-title', 'Choose a folder on the Mac running Agent Wrangler');
+  title.id = titleId;
   const hint = el('div', 'aw-fb-hint', 'These folders are on the host, not on this device.');
   const bar = el('div', 'aw-fb-bar');
   const up = el('button', 'aw-fb-up', 'Up');
@@ -97,7 +110,10 @@ export function mountFolderBrowser(container: HTMLElement, options: FolderBrowse
 
   const render = (l: DirListing): void => {
     current = l;
-    where.textContent = l.path;
+    const text = el('bdi');
+    text.dir = 'ltr';
+    text.textContent = l.path;
+    where.replaceChildren(text);
     where.title = l.path;
     up.disabled = !l.parent;
     choose.disabled = false;
@@ -136,6 +152,7 @@ export function mountFolderBrowser(container: HTMLElement, options: FolderBrowse
 
   void go(undefined);
   return {
+    titleId,
     dispose() {
       done = true;
       root.remove();
@@ -147,6 +164,8 @@ export function mountFolderBrowser(container: HTMLElement, options: FolderBrowse
 export function pickFolderPlain(openLabel?: string): Promise<string | undefined> {
   return new Promise((resolve) => {
     const overlay = el('div', 'aw-fb-overlay');
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
     document.body.appendChild(overlay);
     const view = mountFolderBrowser(overlay, {
       ...(openLabel !== undefined ? { openLabel } : {}),
@@ -156,5 +175,6 @@ export function pickFolderPlain(openLabel?: string): Promise<string | undefined>
         resolve(value);
       },
     });
+    overlay.setAttribute('aria-labelledby', view.titleId);
   });
 }

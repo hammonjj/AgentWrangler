@@ -104,6 +104,7 @@ app.innerHTML = `
   <span id="convUsage" hidden></span>
   <span id="convRateLimit" hidden></span>
   <span id="spacer"></span>
+  <button id="findtoggle" class="hdrbtn" type="button" title="Find in conversation" aria-label="Find in conversation" aria-controls="findbar" aria-expanded="false"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><circle cx="6.8" cy="6.8" r="4.3" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10 10l4 4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
   <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
   <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
 </div>
@@ -168,6 +169,9 @@ const composerWrite = document.getElementById('composerWrite')!;
 const composerNote = document.getElementById('composerNote')!;
 const adoptBtn = document.getElementById('adopt') as HTMLButtonElement;
 const pinBtn = document.getElementById('pin') as HTMLButtonElement;
+// "Own tab" opens a second window in Electron. A browser page is one document,
+// and the host can only answer it with "not available" (#134): no button there.
+if (document.body.classList.contains('aw-web')) pinBtn.remove();
 const releaseBtn = document.getElementById('release') as HTMLButtonElement;
 const modeSel = document.getElementById('mode') as HTMLSelectElement;
 const modelSel = document.getElementById('model') as HTMLSelectElement;
@@ -339,9 +343,19 @@ function appendBlockCopy(el: HTMLElement, b: ConvBlock): void {
   el.prepend(sticky);
 }
 
+/**
+ * A Copy button for each code block. The `pre` is wrapped (`.codeblock`) and
+ * the button is the wrapper's, not the `pre`'s: on a desktop it floats over the
+ * block's top-right corner and shows on hover, and in the narrow or touch form
+ * it is a strip of its own above the code, so it never covers the first line
+ * (#134) and does not scroll away with a block that scrolls sideways.
+ */
 function decorateCodeBlocks(root: HTMLElement): void {
   for (const pre of Array.from(root.querySelectorAll('pre'))) {
-    if (pre.querySelector('.copy')) continue;
+    if (pre.parentElement?.classList.contains('codeblock')) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'codeblock';
+    pre.replaceWith(wrap);
     const btn = document.createElement('button');
     btn.className = 'copy';
     btn.textContent = 'Copy';
@@ -359,7 +373,7 @@ function decorateCodeBlocks(root: HTMLElement): void {
         },
       );
     });
-    pre.appendChild(btn);
+    wrap.append(btn, pre);
   }
 }
 
@@ -841,7 +855,32 @@ notch.addEventListener('click', () => {
   requestArchive('', first, !first && live && 'ts' in live ? live.ts : undefined);
 });
 document.getElementById('findbar')!.addEventListener('submit', (e) => { e.preventDefault(); if (findInput.value.trim()) requestArchive(findInput.value.trim()); });
-document.getElementById('clearfind')!.addEventListener('click', () => { archiveRequest = ''; searchResults.hidden = true; searchResults.replaceChildren(); searchNodes.clear(); searchBlocks.clear(); findInput.value = ''; });
+document.getElementById('clearfind')!.addEventListener('click', () => {
+  archiveRequest = ''; searchResults.hidden = true; searchResults.replaceChildren(); searchNodes.clear(); searchBlocks.clear(); findInput.value = '';
+  setFindOpen(false);
+});
+
+// In the narrow form the find bar is folded behind a search button in the
+// header (#134): a whole row above the transcript is too much of a phone to
+// spend on something used now and then. `.open` unfolds it; wide, it is always there.
+const findBar = document.getElementById('findbar')!;
+const findToggle = document.getElementById('findtoggle') as HTMLButtonElement;
+function setFindOpen(open: boolean): void {
+  findBar.classList.toggle('open', open);
+  findToggle.setAttribute('aria-expanded', String(open));
+  findToggle.classList.toggle('on', open);
+}
+findToggle.addEventListener('click', () => {
+  const open = !findBar.classList.contains('open');
+  setFindOpen(open);
+  if (open) findInput.focus();
+});
+findInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && narrow && findBar.classList.contains('open')) {
+    setFindOpen(false);
+    findToggle.focus();
+  }
+});
 
 // ---- list maintenance ----
 
@@ -1054,6 +1093,7 @@ function setPillReason(): void {
 function setMeta(session: SessionDTO): void {
   activeProvider = session.provider;
   document.getElementById('findbar')!.hidden = activeProvider !== 'claude';
+  document.getElementById('findtoggle')!.hidden = activeProvider !== 'claude';
   (notch as HTMLButtonElement).disabled = activeProvider !== 'claude';
   notch.textContent = activeProvider === 'claude' ? 'Load earlier messages' : 'Earlier messages not shown';
   ttl.textContent = displayTitle(session);
