@@ -21,6 +21,8 @@ import { CommandResults } from '../src/core/web/commandResults';
 import { WebServer } from '../src/core/web/server';
 import type { SessionHandle } from '../src/core/session/sessionHandle';
 import { RECONNECT_EVENT, SHELL_PANE, WIRE_PROTOCOL } from '../src/shared/shellProtocol';
+import { emptyModalHost, modalHostReceive, modalHostStep, type ModalEvent, type ModalHostEffect, type ModalHostState } from '../src/shared/modalModel';
+import { runInRequest } from '../src/core/requestScope';
 import type { AgentSession } from '../src/shared/model';
 import { ConversationHost } from '../src/ui/conversation/conversationHost';
 import { renderBrowserWorkbenchHtml } from '../src/ui/html';
@@ -122,6 +124,10 @@ interface Rig {
   hosts: { conversation: ConversationHost; disposed: boolean }[];
   /** Post as each connection's table host, by connection order. */
   dashboardPosts: ((body: object) => void)[];
+  /** The clients connected, for asking one a question (#126/#133). */
+  clients: ClientRegistry;
+  /** Each connection's own request context, by connection order. */
+  contexts: RequestContext[];
   log: string[];
 }
 
@@ -135,19 +141,22 @@ async function startRig(opts: { limits?: Partial<ConnectionLimits>; snapshot?: (
   const sockets: WebSocket[] = [];
   const hosts: Rig['hosts'] = [];
   const dashboardPosts: Rig['dashboardPosts'] = [];
+  const contexts: RequestContext[] = [];
+  const clients = new ClientRegistry({ log: (m) => log.push(m) });
   const webviewDir = path.join(dir, 'webview');
   fs.mkdirSync(webviewDir, { recursive: true });
   for (const name of ['workbench.js', 'workbench.css', 'theme.css', 'webshim.js']) fs.writeFileSync(path.join(webviewDir, name), `/* ${name} */\n`);
   const gate = createAccessGate();
   let server!: WebServer;
   const conns = createBrowserConnections({
-    clients: new ClientRegistry({ log: (m) => log.push(m) }),
+    clients,
     log: (m) => log.push(m),
     build: () => server.build(),
     isMutating: isMutatingPaneMessage,
     results: new CommandResults(),
     limits: { pingIntervalMs: 0, ...opts.limits },
     createPanes: (transport, context) => {
+      contexts.push(context);
       const conversation = new ConversationHost(
         paneChannel(transport, 'conversation'),
         sessions.store as unknown as HostArgs[1],
@@ -193,7 +202,7 @@ async function startRig(opts: { limits?: Partial<ConnectionLimits>; snapshot?: (
       })
       .on('error', reject);
   });
-  return { server, conns, port, cookie, sessions, updates, sockets, hosts, dashboardPosts, log };
+  return { server, conns, port, cookie, sessions, updates, sockets, hosts, dashboardPosts, clients, contexts, log };
 }
 
 beforeEach(() => {
@@ -546,6 +555,61 @@ describe('the browser shim', () => {
     expect(result.requestId).toBe('r1');
     await new Promise((r) => setTimeout(r, 50));
     expect(rig.sessions.delivered).toEqual(['exactly once']);
+  });
+
+  it('a prompt reaches the page, the in-page modal answers it, and a refused answer is asked again (#133)', async () => {
+    rig = await startRig();
+    const tab = await loadWorkbench(rig);
+    await until(() => tab.seen.dashboard.some((m) => m.type === 'snapshot'), 'connected');
+    // The app shell's half, without a DOM: the shim delivers the prompt as a
+    // message, the modal host's model decides, `shellApi` sends the answer.
+    const { shellApi } = await import('../src/webview/common/paneApi');
+    let modals: ModalHostState = emptyModalHost();
+    const toasts: string[] = [];
+    const run = (effects: ModalHostEffect[]) => {
+      for (const e of effects) {
+        if (e.type === 'send') shellApi.post(e.body);
+        if (e.type === 'toast') toasts.push(e.text);
+      }
+    };
+    shellApi.onMessage((m) => {
+      if (m.type === 'toast') toasts.push(m.text);
+      const s = modalHostReceive(modals, m);
+      modals = s.state;
+      run(s.effects);
+    });
+    const act = (e: ModalEvent) => {
+      const s = modalHostStep(modals, e);
+      modals = s.state;
+      run(s.effects);
+    };
+
+    const answer = runInRequest(rig.contexts[0], () =>
+      rig.clients.dialogs.input({ title: 'Token', password: true, validateInput: (v) => (v.trim() ? undefined : 'A token cannot be blank.') }),
+    );
+    const first = await until(() => modals.current, 'the modal');
+    expect(first.model).toMatchObject({ kind: 'input', title: 'Token', password: true });
+    act({ type: 'text', text: ' ' });
+    act({ type: 'submit' });
+    // Refused host-side: the same question again, with why, and what was typed.
+    const again = await until(() => (modals.current && modals.current.id !== first.id ? modals.current : undefined), 'asked again');
+    expect(again.model).toMatchObject({ kind: 'input', error: 'A token cannot be blank.', value: ' ' });
+    act({ type: 'text', text: 'secret' });
+    act({ type: 'submit' });
+    expect(await answer).toBe('secret');
+
+    // A pick, chosen from the keyboard, comes back as the host's own object.
+    const picked = runInRequest(rig.contexts[0], () =>
+      rig.clients.dialogs.pick([{ label: 'alpha', id: 'a' }, { label: 'beta', id: 'b' }], { placeHolder: 'Which?' }),
+    );
+    await until(() => modals.current, 'the pick');
+    act({ type: 'text', text: 'bt' });
+    act({ type: 'submit' });
+    expect((await picked)?.id).toBe('b');
+
+    // And a toast is a toast.
+    rig.clients.broadcast('Copied');
+    await until(() => toasts.includes('Copied'), 'the toast');
   });
 
   it('a server on another build makes the page reload', async () => {

@@ -23,10 +23,11 @@
  *   mutating one once however often it arrives.
  * - **Visibility.** The tab says when it is hidden, and gets the table less often.
  *
- * It answers the `shell` channel (#126): prompts the host asks *this* browser,
- * toasts, and navigation notices. Prompts use the browser's own `confirm()`
- * and `prompt()` as a stopgap; the app shell (#133) replaces them with
- * in-page modals.
+ * The `shell` channel (#126) is split: the connection's own messages (`hello`,
+ * `ack`, `visibility`) are handled here, and everything else — prompts the host
+ * asks *this* browser, toasts, navigation notices — is delivered to the page as
+ * a `message` event, like pane traffic, for the app shell (#133,
+ * `workbench/shell.ts`) to answer through `paneApi`'s `shellApi`.
  */
 
 import {
@@ -35,8 +36,6 @@ import {
   WIRE_PROTOCOL,
   isCommandId,
   type HostToShell,
-  type ShellPrompt,
-  type ShellToHost,
 } from '../../shared/shellProtocol';
 
 interface Bridge {
@@ -196,100 +195,13 @@ function onFrame(data: string): void {
       for (const id of body.ids) unacked.delete(id);
       return;
     }
-    // A native dialog blocks the page; let this frame's handler return first.
-    setTimeout(() => onShell(body), 0);
-    return;
+    // Prompts, toasts, navigation: the app shell's, delivered as pane traffic is.
   }
   // Same delivery as the preload: a `message` event on the window, which is
   // what `paneApi.onMessage` listens for. Same-origin target, not `*`.
   window.postMessage(message, location.origin);
 }
 
-function sendShell(body: ShellToHost): void {
-  // Not kept for a resend: a prompt is cancelled server-side when its socket drops.
-  if (live) sendRaw({ pane: SHELL_PANE, body });
-}
-
-function onShell(body: HostToShell | undefined): void {
-  if (!body || typeof body !== 'object') return;
-  switch (body.type) {
-    case 'hello':
-    case 'ack':
-      return; // handled as they arrive
-    case 'prompt':
-      sendShell({ type: 'promptResult', id: body.id, value: answer(body.prompt) ?? null });
-      return;
-    case 'toast':
-      toast(body.text, body.timeoutMs);
-      return;
-    case 'navigate':
-      // The conversation pane has already been pointed there by its host; on a
-      // layout where it can be out of view, bring it in.
-      if (body.target === 'conversation') document.getElementById('wbConv')?.scrollIntoView({ block: 'nearest' });
-      return;
-    case 'promptCancel':
-      // A native dialog cannot be closed from script; its answer is ignored.
-      return;
-  }
-}
-
-/** A numbered list for `prompt()`, answered by number. Undefined for cancelled or out of range. */
-function chooseByNumber(heading: string, labels: string[]): number | undefined {
-  const lines = labels.map((label, i) => `${i + 1}. ${label}`);
-  const raw = window.prompt(`${heading}\n\n${lines.join('\n')}\n\nType a number:`, '1');
-  const n = raw === null ? NaN : Number(raw.trim());
-  return Number.isInteger(n) && n >= 1 && n <= labels.length ? n - 1 : undefined;
-}
-
-/** The stopgap: the browser's own dialogs. */
-function answer(p: ShellPrompt): string | number | undefined {
-  switch (p.kind) {
-    case 'message': {
-      const text = p.detail ? `${p.message}\n\n${p.detail}` : p.message;
-      if (p.items.length === 0) {
-        toast(p.message);
-        return undefined;
-      }
-      if (p.items.length === 1) return window.confirm(`${text}\n\nOK: ${p.items[0]}`) ? p.items[0] : undefined;
-      const i = chooseByNumber(text, p.items);
-      return i === undefined ? undefined : p.items[i];
-    }
-    case 'input': {
-      // A password shows as typed in `prompt()`; acceptable only because this
-      // is loopback-only for now, and #133 replaces it with a masked field.
-      const heading = [p.title, p.prompt ?? p.placeHolder].filter(Boolean).join('\n');
-      return window.prompt(heading || 'Enter a value', p.value ?? '') ?? undefined;
-    }
-    case 'pick':
-      return chooseByNumber(
-        p.placeHolder ?? 'Choose one',
-        p.items.map((item) => (item.description ? `${item.label} — ${item.description}` : item.label)),
-      );
-    case 'pickFolder': {
-      const raw = window.prompt(`${p.openLabel ?? 'Folder'}: a path on the Mac running Agent Wrangler`, '');
-      return raw?.trim() || undefined;
-    }
-  }
-}
-
-/** One line of feedback, as the Electron preload draws it. Classes only: the CSP has no inline styles. */
-function toast(text: string, timeoutMs = 4000): void {
-  const show = () => {
-    let toasts = document.getElementById('awToasts');
-    if (!toasts) {
-      toasts = document.createElement('div');
-      toasts.id = 'awToasts';
-      document.body.appendChild(toasts);
-    }
-    const el = document.createElement('div');
-    el.className = 'aw-toast';
-    el.textContent = text;
-    toasts.appendChild(el);
-    setTimeout(() => el.remove(), timeoutMs);
-  };
-  if (document.body) show();
-  else window.addEventListener('DOMContentLoaded', show, { once: true });
-}
 const host: Bridge = {
   postMessage(message) {
     const line = JSON.stringify(message);

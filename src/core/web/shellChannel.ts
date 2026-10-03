@@ -63,11 +63,12 @@ export function createShellChannel(opts: ShellChannelOptions): ShellChannel {
     for (;;) {
       const value = await ask(next);
       // A browser cannot run the check as the user types, so it runs on each
-      // answer, and a refused one is asked again with the complaint showing.
+      // answer, and a refused one is asked again with the complaint showing
+      // beside the original question (the modal marks the field invalid).
       if (next.kind !== 'input' || typeof value !== 'string' || typeof validateInput !== 'function') return value;
       const complaint = (validateInput as (v: string) => string | undefined)(value);
       if (complaint === undefined) return value;
-      next = { ...next, prompt: complaint, value };
+      next = { ...next, error: complaint, value };
     }
   };
 

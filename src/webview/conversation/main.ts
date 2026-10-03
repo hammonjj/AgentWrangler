@@ -51,6 +51,7 @@ import {
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { resetsInText } from '../../shared/usage';
 import { paneApi } from '../common/paneApi';
+import { announceConversation } from '../common/shellBus';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { renderAnalyticsDetail } from './analyticsDetail';
 
@@ -2897,6 +2898,8 @@ vscodeApi.onMessage((body) => {
       updateAskNav();
       // So a window reload brings this pane back on the same conversation.
       vscodeApi.setState({ key: m.session.key });
+      // And so the browser's URL names it (#133).
+      announceConversation({ key: m.session.key });
       break;
     case 'append':
       appendBlocks(m.blocks);
@@ -2916,8 +2919,10 @@ vscodeApi.onMessage((body) => {
         if (draft) { drafts.delete(activeSession); drafts.set(m.session.key, draft); }
         if (dict.session === activeSession) dict.session = m.session.key;
         if (pendingSend) pendingSend = { ...pendingSend, session: m.session.key };
+        const previous = activeSession;
         activeSession = m.session.key;
         vscodeApi.setState({ key: activeSession });
+        announceConversation({ key: activeSession, previous });
       }
       setMeta(m.session);
       setStatus(m.session.status, m.caps.estimated, m.session.statusUncertain);
