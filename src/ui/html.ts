@@ -69,26 +69,39 @@ export interface WebviewHtmlOptions {
    * lose. `body.aw-shell` wins on specificity rather than on order.
    */
   bodyClass?: string;
+  /**
+   * Scripts to run before the bundle, in order, under the same nonce. The
+   * browser prototype (#120) puts its bridge here, because there is no preload.
+   */
+  preScripts?: string[];
+  /**
+   * What `connect-src` allows. Absent, the CSP has none and `default-src
+   * 'none'` blocks every fetch and socket, which is right for a window that
+   * talks over IPC and wrong for a browser that talks over a WebSocket.
+   */
+  connectSrc?: string;
 }
 
 export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
-  const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [], bodyClass } = opts;
+  const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [], bodyClass, preScripts = [], connectSrc } = opts;
   const nonce = getNonce();
   const links = [...extraStylesheets, cssHref].map((href) => `<link rel="stylesheet" href="${href}">`).join('\n');
   const bodyAttr = bodyClass ? ` class="${bodyClass}"` : '';
+  const connect = connectSrc ? ` connect-src ${connectSrc};` : '';
+  const scripts = [...preScripts, jsSrc].map((src) => `<script nonce="${nonce}" src="${src}"></script>`).join('\n');
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'; img-src ${cspSource} data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'; img-src ${cspSource} data:;${connect}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 ${links}
 <title>${title}</title>
 </head>
 <body${bodyAttr}>
 ${BODY[bundleName]}
-<script nonce="${nonce}" src="${jsSrc}"></script>
+${scripts}
 </body>
 </html>`;
 }

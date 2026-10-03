@@ -1695,6 +1695,12 @@ When to escalate: App Nap / power / dock-hide interactions misbehave → Opus Hi
     list, and it applies presses through `SessionActions`), and the daemon follows its own
     feed (Claude provider + passive clients of every live host) otherwise.
   The rest of the core stays in Electron main; this gate stays open for it.
+- **Decided 2026-10-02 (#120): go, for the whole core.** A front end that is not Electron
+  arrived: a browser workbench, including phones on the LAN. The core moves to a LaunchAgent
+  daemon and Electron is retired. Secrets move to the Keychain, the single-instance lock
+  becomes launchd's label plus a socket probe, and no leader lease is needed (one core, and the
+  remote daemon folds into it). The pane hosts are served over a WebSocket rather than
+  `run/core.sock`. See `browser-workbench.md`, which supersedes this stage.
 - **Gate.** Proceed only if a front end that is not Electron must orchestrate while the app is
   **fully quit**, or if launch-at-login without an Electron process becomes a requirement.
 - **If proceeding:**
