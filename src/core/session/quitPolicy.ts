@@ -50,13 +50,30 @@ export function quitPolicy(input: { source: QuitSource; local: number; hosted: n
 export const QUIT_INTENT_MAX_AGE_MS = 60_000;
 
 /**
- * Parse `run/quit-intent`. Its content is the reason (`install`); anything
- * unreadable, unknown or stale is ignored and the quit counts as external.
+ * What a `run/quit-intent` marker may say, and who writes it:
+ * - `install`: `install-app.sh`, before it quits the app;
+ * - `stop`: `aw daemon stop` (#130), before it signals the core daemon. The
+ *   same as a bare SIGTERM: hosts keep running.
+ * - `stop-all`: `aw daemon stop --all`, the daemon's ⌥⌘Q: hosts end too.
+ */
+export type QuitIntent = 'install' | 'stop' | 'stop-all';
+
+const INTENT_SOURCES: Record<QuitIntent, QuitSource> = {
+  install: 'install',
+  stop: 'signal',
+  'stop-all': 'menuStopAll',
+};
+
+/**
+ * Parse `run/quit-intent`. Its content is the reason (a `QuitIntent`);
+ * anything unreadable, unknown or stale is ignored and the quit counts as
+ * whatever the process would otherwise call it (external, or a signal).
  */
 export function quitIntentSource(content: string | undefined, writtenMsAgo: number | undefined): QuitSource | undefined {
   if (content === undefined || writtenMsAgo === undefined) return undefined;
   if (writtenMsAgo < 0 || writtenMsAgo > QUIT_INTENT_MAX_AGE_MS) return undefined;
-  return content.trim() === 'install' ? 'install' : undefined;
+  const intent = content.trim();
+  return Object.prototype.hasOwnProperty.call(INTENT_SOURCES, intent) ? INTENT_SOURCES[intent as QuitIntent] : undefined;
 }
 
 /** "3 agents" / "1 agent". */

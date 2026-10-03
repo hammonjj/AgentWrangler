@@ -812,6 +812,38 @@ another browser.
 - Sign-ins, failed sign-ins and new browsers are recorded in the access log
   (`~/.cache/agent-wrangler/access.log`), by id only.
 
+## Background core (experimental)
+
+Agent Wrangler's core (session tracking, the conversations it runs, Discord, `aw`) can run as a
+background service, the **core daemon**, instead of inside the app. It keeps running with no
+window and no browser open. Plan: `docs/plans/browser-workbench.md` §4.
+
+```bash
+aw daemon start          # install or start it (a LaunchAgent, com.hammonjj.agentwrangler.core)
+aw daemon status         # pid, build and uptime
+aw daemon stop           # stop it; conversations in session hosts keep running
+aw daemon stop --all     # stop it and end them too, like Quit and Stop All Agents
+```
+
+- **One core at a time.** Whichever of the app and the daemon answers on `run/core.sock` holds
+  the core, and the other refuses to start and says why. Turn on *Run the core in the
+  background* (`experimental.coreDaemon`, off by default; takes effect when the app is reopened)
+  and opening the app starts the daemon instead of its own core, then points you to
+  `aw web open`. The window does not open in that mode yet. To switch back, set it to `false`
+  in `settings.json`, run `aw daemon stop` and reopen the app.
+- **Updates and crashes leave conversations running.** They run in session hosts, not in the
+  daemon. `aw daemon start` from a newer install (and `npm run app:install`, when the daemon is
+  running) rewrites the LaunchAgent, which stops the old daemon and starts the new one; it
+  reattaches every host. launchd restarts a daemon that crashes, but not one that was stopped.
+- **Login:** it starts at login only when *Open at login* is on. Otherwise `aw daemon start` (or
+  opening the app with the setting on) starts it.
+- **Files:** `run/core-daemon.json` (its pid, build and start time) and `logs/core-daemon.log`
+  in the app's support folder; it writes the usual `agent-wrangler.log` too. While agents work
+  it holds `caffeinate -i -w <pid>`, as the app holds its power blocker.
+- **Not there yet:** the daemon does not serve the browser workbench yet, so `aw web open`
+  says it is off (#131 moves the window and the browser onto the daemon). Dialogs the core
+  would show on the Mac are answered "cancel".
+
 ## Remote control (experimental)
 
 Answer a permission prompt from your phone. Off by default, and under

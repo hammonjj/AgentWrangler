@@ -35,6 +35,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { SessionHostRuntime } from './hostSupervisor';
 import { REMOTE_MANIFEST_NAME } from '../../remote/daemon/protocol';
+import { CORE_MANIFEST_NAME } from '../daemon/coreDaemon';
 
 declare const AW_BUILD_ID: string | undefined;
 export const BUILD_ID = typeof AW_BUILD_ID === 'string' ? AW_BUILD_ID : 'dev';
@@ -130,6 +131,9 @@ export function createSessionHostRuntime(opts: RuntimeOptions): SessionHostRunti
       const inUse = new Set(hostsInUse);
       const daemonRuntime = remoteDaemonRuntime(path.join(opts.userDataDir, 'run', REMOTE_MANIFEST_NAME));
       if (daemonRuntime) inUse.add(daemonRuntime);
+      // So does the core daemon (#130); its manifest names its runtime the same way.
+      const coreRuntime = remoteDaemonRuntime(path.join(opts.userDataDir, 'run', CORE_MANIFEST_NAME));
+      if (coreRuntime) inUse.add(coreRuntime);
       let names: string[];
       try {
         names = fs.readdirSync(runtimesDir);

@@ -22,7 +22,13 @@ export type Command =
   | { kind: 'delegate' | 'task'; objective: string | undefined; criteria: string[]; folder: string | undefined; harness: 'claude' | 'codex' | undefined; json: boolean }
   | { kind: 'tasks'; json: boolean }
   /** `open`: sign this Mac's default browser in. `url`: print the single-use link instead (#127). */
-  | { kind: 'web'; action: 'open' | 'url' };
+  | { kind: 'web'; action: 'open' | 'url' }
+  /**
+   * The core daemon (#130). `start` installs or starts it; `stop` signals it
+   * (`all`: hosted conversations end too, as ⌥⌘Q); `status` reads its manifest
+   * and probes its socket. None of them need the control socket to answer.
+   */
+  | { kind: 'daemon'; action: 'start' | 'stop' | 'status'; all: boolean; json: boolean };
 
 export const USAGE = `aw — Agent Wrangler from a terminal
 
@@ -44,6 +50,10 @@ Usage:
   aw tasks                  tasks that are not finished
   aw web open               open the workbench in your default browser, signed in
   aw web url                print a single-use sign-in link instead (good once, for 2 minutes)
+  aw daemon start           run the core as a background service (experimental.coreDaemon)
+  aw daemon stop [--all]    stop it; conversations in session hosts keep running
+                            (--all: end them too, like Quit and Stop All Agents)
+  aw daemon status          whether it is running: pid, build, uptime
 
 <id> is a session id, a unique prefix of one (4+ characters), or a key like claude:<id>.
 --json prints the raw result for status, sessions, session, projects, delegate, task and tasks.
@@ -104,6 +114,16 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
       if (action !== 'open' && action !== 'url') return { error: 'aw web: open or url? (aw web open, aw web url)' };
       if (more.length > 0) return { error: `aw web: unexpected "${more[0]}"` };
       return { kind: 'web', action };
+    }
+    case 'daemon': {
+      const [action, ...more] = rest;
+      if (action !== 'start' && action !== 'stop' && action !== 'status') {
+        return { error: 'aw daemon: start, stop or status? (aw daemon start, aw daemon stop [--all], aw daemon status)' };
+      }
+      const bad = action === 'stop' ? allowed('--all') : action === 'status' ? allowed('--json') : allowed();
+      if (bad) return bad;
+      if (more.length > 0) return { error: `aw daemon ${action}: unexpected "${more[0]}"` };
+      return { kind: 'daemon', action, all: flags.has('--all'), json };
     }
     default:
       return { error: `aw: no command "${name}". Run aw help.` };

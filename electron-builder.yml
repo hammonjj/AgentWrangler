@@ -34,6 +34,8 @@ files:
   - dist/sessionHost/**
   # The remote daemon (#74), run by launchd from the same clone the same way.
   - dist/remoteDaemon/**
+  # The core daemon (#130), run by launchd from the same clone the same way.
+  - dist/daemon/**
   # The `aw` CLI (#21), run by bin/aw on the installed bundle's Node.
   - dist/cli/**
   # Qualification stage 2's scratch-repo fixtures (plan §19.6), copied out of
@@ -43,13 +45,18 @@ files:
 
 asar: true
 
-# Plain Node cannot read app.asar, so the three programs the bundled Node runs
+# Plain Node cannot read app.asar, so the four programs the bundled Node runs
 # are unpacked beside it: `Resources/app.asar.unpacked/dist/<name>/main.js`.
 # The Electron main process still reaches them through the asar paths.
+# The qualification fixtures too: the core daemon (#130) runs `createApp`,
+# which copies them out per run. (`dist/webview` joins them when the daemon
+# serves the browser workbench.)
 asarUnpack:
   - dist/sessionHost/**
   - dist/remoteDaemon/**
+  - dist/daemon/**
   - dist/cli/**
+  - dist/qualification-fixtures/**
 
 # The pinned official Node (#129, decision D1), staged in `.node-runtime/` by
 # scripts/fetch-node.mjs, which `npm run app:package` runs first. Ends up at

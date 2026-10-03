@@ -5,7 +5,32 @@
  * only turns these into a `Tray` and a `Menu`.
  */
 
-import type { SessionStatus } from '../shared/model';
+import { displayTitle, type AgentSession, type SessionStatus } from '../shared/model';
+
+/** The parts of the app `menuBarSessions` reads: structural, so core does not depend on `createApp`. */
+export interface MenuBarSource {
+  store: { readonly sessions: readonly AgentSession[] };
+  archive: { isArchived(key: string): boolean };
+  runners: { owns(sessionId: string): boolean };
+  codexRunners: { owns(sessionId: string): boolean };
+}
+
+/**
+ * The store's sessions as the menu bar reads them. Shared by the tray, the
+ * window's power blocker and the daemon's power assertion (#130).
+ */
+export function menuBarSessions(app: MenuBarSource): MenuBarSession[] {
+  return app.store.sessions.map((s) => ({
+    key: s.key,
+    status: s.status,
+    title: displayTitle(s),
+    projectName: s.projectName,
+    archived: app.archive.isArchived(s.key),
+    owned: app.runners.owns(s.sessionId) || app.codexRunners.owns(s.sessionId),
+    pid: s.pid,
+    blockedReason: s.blockedReason,
+  }));
+}
 
 /** The parts of a session the menu bar reads. `owned`: Agent Wrangler runs it. */
 export interface MenuBarSession {

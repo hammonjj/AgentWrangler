@@ -40,7 +40,8 @@ import { createElectronHost } from './electronHost';
 import { installApplicationMenu } from './menu';
 import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
-import { createRemoteDaemonAgent } from './remoteDaemonAgent';
+import { createRemoteDaemonAgent } from '../node/remoteDaemonAgent';
+import { coreRunsElsewhere } from './coreElsewhere';
 import { MenuBar, menuBarSessions } from './tray';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
 import { createBrowserClients, type BrowserClients } from './webPrototype';
@@ -92,12 +93,17 @@ if (!isPrimaryInstance) {
 /** Repo root in development (`dist/electron/main.js` → two levels up). */
 const APP_ROOT = path.resolve(__dirname, '..', '..');
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   if (!isPrimaryInstance) return; // see the lock above: quit() has not landed yet
 
   const userDataDir = app.getPath('userData');
   const log = startFileLog(userDataDir);
   log(`Agent Wrangler starting — Electron ${process.versions.electron}, userData ${userDataDir}`);
+
+  // The core runs elsewhere (#130): `experimental.coreDaemon` hands it to the
+  // LaunchAgent daemon, or a daemon already holds `run/core.sock`. Never two
+  // cores at once; `coreElsewhere.ts` says so and quits.
+  if (await coreRunsElsewhere({ userDataDir, appRoot: APP_ROOT, log })) return;
 
   serveBundles(path.join(APP_ROOT, 'dist'));
 

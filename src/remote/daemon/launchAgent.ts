@@ -1,8 +1,10 @@
 /**
- * The remote daemon's LaunchAgent plist (#74), as text. Pure, so it can be
- * compared with what is installed: an unchanged plist means nothing to reload.
+ * The remote daemon's LaunchAgent plist (#74), as text, and the core
+ * daemon's (#130). Pure, so it can be compared with what is installed: an
+ * unchanged plist means nothing to reload.
  *
- * - `RunAtLoad`: started at login (and when the app bootstraps it);
+ * - `RunAtLoad`: started at login (and when the app bootstraps it); optional
+ *   for the core daemon, which follows "Open at login";
  * - `KeepAlive.SuccessfulExit = false`: restarted after a crash, not after a
  *   clean exit (a second copy that found one already running, or an explicit
  *   stop);
@@ -17,6 +19,12 @@ export interface LaunchAgentSpec {
   args: string[];
   env: Record<string, string>;
   logFile: string;
+  /**
+   * Start it when the agent is loaded, at login included. Default true (the
+   * remote daemon). The core daemon (#130) sets it from "Open at login" and is
+   * otherwise started by `launchctl kickstart`.
+   */
+  runAtLoad?: boolean;
 }
 
 function esc(s: string): string {
@@ -42,7 +50,7 @@ export function renderLaunchAgent(spec: LaunchAgentSpec): string {
       .flatMap((k) => [`    <key>${esc(k)}</key>`, `    <string>${esc(spec.env[k])}</string>`]),
     '  </dict>',
     '  <key>RunAtLoad</key>',
-    '  <true/>',
+    spec.runAtLoad === false ? '  <false/>' : '  <true/>',
     '  <key>KeepAlive</key>',
     '  <dict>',
     '    <key>SuccessfulExit</key>',
