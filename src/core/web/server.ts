@@ -23,12 +23,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import type { TLSSocket } from 'node:tls';
+import { WebSocketServer, type WebSocket } from 'ws';
 import type { Disposable } from '../events';
 import { ownerContext, type AccessGate, type RequestContext } from '../access';
 import { AssetManifest } from './assets';
 import { DEVICE_TTL_MS, WEB_DEVICES_FILE, WebDeviceStore, summarizeUserAgent, type WebDevice } from './devices';
 import { LoginCodes } from './loginLinks';
-import { acceptKey, isLoopbackHost, readCookie } from './wsFrames';
+import { isLoopbackHost, readCookie } from './wsFrames';
 
 export const WEB_DEFAULT_PORT = 7391;
 /** The loopback device cookie. A LAN one (later) gets its own name. */
@@ -49,7 +50,30 @@ export interface WebPageInput {
   asset: (name: string) => string;
   nonce: string;
   connectSrc: string;
+  /** The build the page's assets are (`WebServer.build`); the shim compares it with the server's `hello`. */
+  build: string;
 }
+
+/** The files the browser workbench is made of: its build is their hashes. */
+const PAGE_ASSETS = ['webshim.js', 'workbench.js', 'workbench.css', 'theme.css'];
+
+/**
+ * A message from a browser is a pane message, an image or two at most:
+ * anything bigger is refused (1009) rather than allocated.
+ */
+const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+
+/**
+ * permessage-deflate (#128): the table snapshot is repetitive JSON. Context
+ * takeover is kept both ways, which is what makes the second snapshot cheap;
+ * it costs a zlib window per connection, and there are a handful.
+ */
+const DEFLATE = {
+  threshold: 256,
+  zlibDeflateOptions: { level: 6, memLevel: 8 },
+  serverNoContextTakeover: false,
+  clientNoContextTakeover: false,
+} as const;
 
 export interface WebServerOptions {
   /** 0 picks a free port (tests). */
@@ -63,11 +87,11 @@ export interface WebServerOptions {
   /** The workbench document. Kept out of core so it carries no UI code. */
   page: (input: WebPageInput) => string;
   /**
-   * An upgraded, authenticated WebSocket. `context` is the device's: owner
-   * principal, `via: 'browser'`, its `deviceId`. The callee adds a connection
-   * id and owns the socket from here.
+   * An upgraded, authenticated WebSocket (`ws`, permessage-deflate on).
+   * `context` is the device's: owner principal, `via: 'browser'`, its
+   * `deviceId`. The callee adds a connection id and owns the socket from here.
    */
-  onClient: (socket: Duplex, context: RequestContext) => void;
+  onClient: (socket: WebSocket, context: RequestContext) => void;
   now?: () => number;
 }
 
@@ -76,7 +100,8 @@ export class WebServer implements Disposable {
   private readonly assets: AssetManifest;
   private readonly devices: WebDeviceStore;
   private readonly codes: LoginCodes;
-  private readonly sockets = new Set<Duplex>();
+  private readonly sockets = new Set<WebSocket>();
+  private readonly wss = new WebSocketServer({ noServer: true, perMessageDeflate: DEFLATE, maxPayload: MAX_MESSAGE_BYTES });
   private boundPort: number | undefined;
   private failedLogins = 0;
 
@@ -86,7 +111,24 @@ export class WebServer implements Disposable {
     this.devices = new WebDeviceStore(path.join(opts.dataDir, WEB_DEVICES_FILE), now, opts.log);
     this.codes = new LoginCodes(now);
     this.server = http.createServer((req, res) => this.request(req, res));
-    this.server.on('upgrade', (req: http.IncomingMessage, socket: Duplex) => this.upgrade(req, socket));
+    this.server.on('upgrade', (req: http.IncomingMessage, socket: Duplex, head: Buffer) => this.upgrade(req, socket, head));
+  }
+
+  /**
+   * Which build the page and its assets are: a hash of their hashed names.
+   * A tab loaded before a rebuild has another one, and reloads when the
+   * server's `hello` says so (#128). Recomputed on each call, so a rebuild is
+   * noticed without a restart, as the assets themselves are.
+   */
+  build(): string {
+    const urls = PAGE_ASSETS.map((name) => {
+      try {
+        return this.assets.url(name);
+      } catch {
+        return `${name}:missing`;
+      }
+    });
+    return crypto.createHash('sha256').update(urls.join('\n')).digest('hex').slice(0, 16);
   }
 
   /** Listen on 127.0.0.1. Resolves with the port; rejects if it cannot (in use). */
@@ -115,8 +157,9 @@ export class WebServer implements Disposable {
   }
 
   dispose(): void {
-    for (const s of this.sockets) s.destroy();
+    for (const s of this.sockets) s.terminate();
     this.sockets.clear();
+    this.wss.close();
     this.server.close();
     this.server.closeAllConnections();
   }
@@ -204,7 +247,7 @@ export class WebServer implements Disposable {
     const connectSrc = `'self' ${this.secure(req) ? 'wss' : 'ws'}://${req.headers.host}`;
     let html: string;
     try {
-      html = this.opts.page({ asset: (name) => this.assets.url(name), nonce, connectSrc });
+      html = this.opts.page({ asset: (name) => this.assets.url(name), nonce, connectSrc, build: this.build() });
     } catch (err) {
       this.opts.log(`web: cannot render the page: ${String(err)}`);
       text(res, 500, 'The web workbench is not built. Run npm run build.');
@@ -245,7 +288,11 @@ export class WebServer implements Disposable {
 
   // ---- WebSocket ----
 
-  private upgrade(req: http.IncomingMessage, socket: Duplex): void {
+  /**
+   * The gate, then `ws` (`noServer`): it checks the handshake itself (version,
+   * key; 400 otherwise), negotiates permessage-deflate and frames from there.
+   */
+  private upgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer): void {
     const refuse = (status: string): void => {
       socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     };
@@ -254,21 +301,18 @@ export class WebServer implements Disposable {
     if (!this.sameOrigin(req)) return refuse('403 Forbidden');
     const device = this.devices.verify(readCookie(req.headers.cookie, DEVICE_COOKIE));
     if (!device) return refuse('401 Unauthorized');
-    const key = req.headers['sec-websocket-key'];
     let pathname: string;
     try {
       pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
     } catch {
       return refuse('400 Bad Request');
     }
-    if (pathname !== '/ws' || req.headers['sec-websocket-version'] !== '13' || typeof key !== 'string') return refuse('400 Bad Request');
-    socket.write(
-      'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
-        `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
-    );
-    this.sockets.add(socket);
-    socket.on('close', () => this.sockets.delete(socket));
-    this.opts.onClient(socket, ownerContext('browser', { deviceId: device.id }));
+    if (pathname !== '/ws') return refuse('400 Bad Request');
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.sockets.add(ws);
+      ws.on('close', () => this.sockets.delete(ws));
+      this.opts.onClient(ws, ownerContext('browser', { deviceId: device.id }));
+    });
   }
 
   // ---- helpers ----

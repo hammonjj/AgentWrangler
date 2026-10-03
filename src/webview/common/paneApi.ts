@@ -29,6 +29,7 @@
  */
 
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
+import { RECONNECT_EVENT } from '../../shared/shellProtocol';
 
 declare function acquireVsCodeApi(): WebviewBridge<WorkbenchState>;
 
@@ -67,14 +68,37 @@ export interface PaneApi<S> {
   post(body: unknown): void;
   /** Receive this pane's messages. Anything addressed to the other pane is ignored. */
   onMessage(listener: (body: unknown) => void): void;
+  /**
+   * The connection to the host dropped and is back (a browser, #128). The
+   * host on the other end is a fresh one: send `ready` again. Never fires in
+   * the window, whose host cannot drop.
+   */
+  onReconnect(listener: () => void): void;
   getState(): S | undefined;
   setState(state: S): void;
+}
+
+/**
+ * Unique per document, so a resend after a drop can be recognised and not
+ * acted on twice (#128). Every message gets one: the host decides which are
+ * worth remembering.
+ */
+const tab = randomId();
+let commandSeq = 0;
+
+function randomId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (typeof c?.randomUUID === 'function') return c.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function paneApi<S>(pane: PaneName): PaneApi<S> {
   return {
     post(body) {
-      api.postMessage({ pane, body });
+      api.postMessage({ pane, body, commandId: `${tab}.${++commandSeq}` });
+    },
+    onReconnect(listener) {
+      window.addEventListener(RECONNECT_EVENT, () => listener());
     },
     onMessage(listener) {
       window.addEventListener('message', (e: MessageEvent) => {

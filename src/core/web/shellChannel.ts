@@ -4,8 +4,9 @@
  *
  * Transport-agnostic: it posts `{pane: 'shell', body}` through whatever
  * carries the connection's pane envelopes and is handed the `shell` bodies
- * that come back. The prototype server (`src/electron/webPrototype.ts`) wires
- * it to its WebSocket; the production server (#127) does the same.
+ * that come back. `browserConnections.ts` (#128) wires it to each WebSocket;
+ * the connection's own shell messages (`hello`, `ack`, `visibility`) are
+ * handled there and never reach this.
  *
  * Navigation is applied here, to the connection's own `ConversationHost`:
  * a `SessionHandle` cannot cross a wire, and the pane host already knows how to
@@ -110,7 +111,7 @@ export function createShellChannel(opts: ShellChannelOptions): ShellChannel {
     channel,
     receive(body) {
       const m = parseShellToHost(body);
-      if (!m) return;
+      if (m?.type !== 'promptResult') return;
       const resolve = pending.get(m.id);
       if (!resolve) return;
       pending.delete(m.id);

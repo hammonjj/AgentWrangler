@@ -305,7 +305,12 @@ export type HostToConversation =
   | { type: 'analyticsDetail'; detail: AnalyticsDetail };
 
 export type ConversationToHost =
-  | { type: 'ready' }
+  /**
+   * `key` is the conversation the pane last showed (its saved state). A host
+   * that is not showing anything yet shows that one, so a browser that
+   * reconnects, or reloads, gets its conversation back (#128).
+   */
+  | { type: 'ready'; key?: string }
   /** Back from an analytics detail to the conversation under it (#49). */
   | { type: 'closeDetail' }
   | { type: 'delegationOfferDecision'; offerId: string; outcome: DelegationOfferOutcome }

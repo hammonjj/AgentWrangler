@@ -21,18 +21,20 @@
     "test": "vitest run",
     "bench:analytics": "esbuild scripts/bench-analytics.ts --bundle --platform=node --log-level=warning --outfile=/tmp/aw-bench-analytics.cjs && node --expose-gc /tmp/aw-bench-analytics.cjs",
     "bench:analytics:electron": "esbuild scripts/bench-analytics.ts --bundle --platform=node --log-level=warning --outfile=/tmp/aw-bench-analytics.cjs && ELECTRON_RUN_AS_NODE=1 electron --expose-gc /tmp/aw-bench-analytics.cjs",
-    "test:integration":"vitest run test/sessionHost.integration.test.ts test/sessionLifecycle.integration.test.ts"
+    "test:integration": "vitest run test/sessionHost.integration.test.ts test/sessionLifecycle.integration.test.ts"
   },
   "devDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.268",
     "@types/markdown-it": "14.2.0",
     "@types/node": "^24.0.0",
+    "@types/ws": "8.18.2",
     "electron": "^44.4.3",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "markdown-it": "15.0.2",
     "typescript": "^5.9.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.0.0",
+    "ws": "8.22.0"
   },
   "allowScripts": {
     "electron@44.4.3": true

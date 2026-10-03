@@ -2004,6 +2004,12 @@ setInterval(() => {
 post({ type: 'ready' });
 // Reopened on the Analytics view: it has nothing to draw until the host answers.
 if (tableView === 'analytics') queryAnalytics();
+// A browser whose connection came back is talking to a fresh host (#128):
+// introduce the pane again, and ask again for what it is showing.
+vscodeApi.onReconnect(() => {
+  post({ type: 'ready' });
+  if (tableView === 'analytics') queryAnalytics();
+});
 
 // ---- the Analytics view (#49) ----
 

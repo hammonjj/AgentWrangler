@@ -3009,4 +3009,8 @@ vscodeApi.onMessage((body) => {
   }
 });
 
-post({ type: 'ready' });
+// With the conversation it last showed, so a host that has not been pointed
+// anywhere (a browser's, after a reload or a dropped connection) shows it again (#128).
+const ready = () => post({ type: 'ready', key: vscodeApi.getState()?.key });
+ready();
+vscodeApi.onReconnect(ready);

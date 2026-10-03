@@ -4,7 +4,7 @@ import * as http from 'node:http';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { Duplex } from 'node:stream';
+import type { WebSocket } from 'ws';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createAccessGate, type AccessAuditRecord, type RequestContext } from '../src/core/access';
 import { AssetManifest, isInside } from '../src/core/web/assets';
@@ -32,7 +32,7 @@ let server: WebServer;
 let port: number;
 let host: string;
 let audit: AccessAuditRecord[];
-let clients: { socket: Duplex; context: RequestContext }[];
+let clients: { socket: WebSocket; context: RequestContext }[];
 let clock: number;
 
 beforeEach(async () => {
@@ -56,7 +56,7 @@ beforeEach(async () => {
     page: renderBrowserWorkbenchHtml,
     onClient: (socket, context) => {
       clients.push({ socket, context });
-      socket.end();
+      socket.close();
     },
     now: () => clock,
   });
