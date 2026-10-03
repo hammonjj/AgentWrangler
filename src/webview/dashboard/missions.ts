@@ -13,6 +13,8 @@
  */
 import {
   FINISH_LABEL,
+  FINISH_NOUN,
+  FINISH_PENDING_LABEL,
   ISSUE_LABEL,
   dependencyText,
   missionChips,
@@ -29,10 +31,18 @@ import { localModelName } from '../../shared/modelName';
 import { certaintyMark, certaintyText, LINKED_PHASE_LABEL, linkedTone, outcomeFacts, TASK_PHASE_LABEL } from '../../shared/orchestration/delegatedLabels';
 import type { PlanEdit, PlanOverrides } from '../../shared/orchestration/plan';
 import { TASK_ACTION_LABEL, TASK_STRIP_ACTIONS, routeChipTitle, type TaskViewAction } from '../../shared/orchestration/taskView';
-import { EFFORT_LEVELS, TASK_KINDS, type DependencyKind, type TaskKind } from '../../shared/orchestration/types';
+import { EFFORT_LEVELS, TASK_KINDS, type DependencyKind, type MissionFinish, type TaskKind } from '../../shared/orchestration/types';
+import { PendingActions, pendingAttrs } from '../../shared/pendingActions';
 
 /** What the view remembers between snapshots. Only the pane's own, never the host's. */
 export interface MissionsUiState {
+  /**
+   * Requests sent and not yet answered (`missionAck`), keyed
+   * `mission:<id>:<action>`: the clicked button is busy and the mission's
+   * other actions are off from the click on, before the host's snapshot can
+   * say so. The host's own state (`MissionView.finishing`) takes over from there.
+   */
+  pending: PendingActions;
   /** Missions folded shut, by id. Finished ones start folded. */
   collapsed: Set<string>;
   /** Missions the user opened by hand (so a finished one stays open). */
@@ -46,7 +56,76 @@ export interface MissionsUiState {
 }
 
 export function newMissionsUiState(): MissionsUiState {
-  return { collapsed: new Set(), expanded: new Set(), errors: new Map() };
+  return { pending: new PendingActions(), collapsed: new Set(), expanded: new Set(), errors: new Map() };
+}
+
+/** What a button says while its mission action is under way. Actions not listed are quick and local (edits, opening a conversation). */
+const OP_PENDING_LABEL: Record<string, string> = {
+  approve: 'Starting…',
+  cancel: 'Cancelling…',
+  pause: 'Pausing…',
+  'pause-now': 'Pausing…',
+  resume: 'Resuming…',
+  'plan-again': 'Planning…',
+  'write-plan': 'Opening…',
+  replan: 'Replanning…',
+  'recheck-finish': 'Checking…',
+};
+
+const TASK_PENDING_LABEL: Partial<Record<TaskViewAction, string>> = {
+  accept: 'Accepting…',
+  resume: 'Resuming…',
+  retry: 'Retrying…',
+  'recreate-worktree': 'Recreating…',
+  skip: 'Skipping…',
+  cancel: 'Cancelling…',
+};
+
+/**
+ * The pending-action key and label for a Missions view operation, or
+ * undefined for one that is quick and has no pending state (a plan edit,
+ * opening a conversation). One mission's keys share the `mission:<id>:`
+ * prefix: while any of them is in flight, the mission's other actions are off.
+ */
+export function pendingKeyOf(missionId: string, op: MissionOp): { key: string; label: string } | undefined {
+  const k = (name: string, label: string | undefined) => (label ? { key: `mission:${missionId}:${name}`, label } : undefined);
+  switch (op.kind) {
+    case 'finish':
+      return k(`finish:${op.how}`, FINISH_PENDING_LABEL[op.how]);
+    case 'pause':
+      return k(op.now ? 'pause-now' : 'pause', OP_PENDING_LABEL.pause);
+    case 'task':
+      return k(`task:${op.taskId}:${op.action}`, TASK_PENDING_LABEL[op.action]);
+    case 'approve':
+    case 'cancel':
+    case 'resume':
+    case 'plan-again':
+    case 'write-plan':
+    case 'replan':
+    case 'recheck-finish':
+      return k(op.kind, OP_PENDING_LABEL[op.kind]);
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * A mission action button's state: `busy` (this one is under way), `blocked`
+ * (another action on the mission is), or neither. `key` is its pending key.
+ */
+function opState(ui: MissionsUiState, missionId: string, name: string): { state: 'busy' | 'blocked' | undefined; label?: string } {
+  const mine = ui.pending.get(`mission:${missionId}:${name}`);
+  if (mine) return { state: 'busy', label: mine.label };
+  if (ui.pending.under(`mission:${missionId}:`)) return { state: 'blocked' };
+  return { state: undefined };
+}
+
+/** A mission-level button through the pending-action pattern. `cls` and `title` as the plain button had them. */
+function opButton(ui: MissionsUiState, v: MissionView, op: string, text: string, cls: string, title: string | undefined, blocked = false): string {
+  const s = opState(ui, v.id, op);
+  const state = s.state ?? (blocked ? 'blocked' : undefined);
+  const label = s.state === 'busy' ? (s.label ?? text) : text;
+  return `<button class="mbtn${cls}${state === 'busy' ? ' busy' : ''}" data-mission-op="${esc(op)}"${title ? ` title="${esc(title)}"` : ''}${pendingAttrs(state, `${v.id}:${op}`)}>${esc(label)}</button>`;
 }
 
 function esc(s: string): string {
@@ -118,9 +197,9 @@ function missionHtml(v: MissionView, snap: MissionsSnapshot, ui: MissionsUiState
     if (awaitingPlan) {
       if (v.state === 'planning') body += `<div class="mplanning">The planner is reading the repository. Its plan comes here for review, and nothing runs until you approve it.</div>`;
     } else {
-      body += `<ol class="mtasks">${v.tasks.map((t, i) => (reviewing ? planTaskHtml(v, t, i, snap, ui) : taskRowHtml(t, nowMs))).join('')}</ol>`;
+      body += `<ol class="mtasks">${v.tasks.map((t, i) => (reviewing ? planTaskHtml(v, t, i, snap, ui) : taskRowHtml(v, t, nowMs, ui))).join('')}</ol>`;
     }
-    body += footerHtml(v);
+    body += footerHtml(v, ui);
   }
   return `<section class="mission m-${esc(v.state)}${open ? '' : ' shut'}" data-mission="${esc(v.id)}">
 <div class="mhdr" data-mission-toggle><span class="twist">${open ? '▾' : '▸'}</span><span class="mtitle" title="${esc(v.objective)}">${esc(v.title)}</span><span class="mchips">${chips}</span></div>${body}</section>`;
@@ -146,7 +225,7 @@ function planIssuesHtml(v: MissionView): string {
 }
 
 /** One row of a running or finished mission (§18.2). The title opens the task's conversation. */
-function taskRowHtml(t: MissionTaskView, nowMs: number): string {
+function taskRowHtml(v: MissionView, t: MissionTaskView, nowMs: number, ui: MissionsUiState): string {
   // The row's state comes from the shared task phase (#101): a finished task
   // reads "completed", and whether it was checked is its own labelled fact
   // beside it, so it never reads as one ambiguous "done · ? unverified" (C2).
@@ -166,16 +245,19 @@ function taskRowHtml(t: MissionTaskView, nowMs: number): string {
     .filter(Boolean)
     .join('');
   const acts = t.actions.filter((a) => a !== 'show-session' && TASK_STRIP_ACTIONS.includes(a));
-  const buttons = acts.length > 0 ? `<div class="tacts">${acts.map((a) => actionButton(a)).join('')}</div>` : '';
+  const buttons = acts.length > 0 ? `<div class="tacts">${acts.map((a) => actionButton(v, t, a, ui)).join('')}</div>` : '';
   const openable = t.sessionKey !== undefined;
   return `<li class="mtask ts-${esc(t.state)}${t.phase ? ` tp-${esc(t.phase)}` : ''}${t.needsYou ? ' needs' : ''}" data-task="${esc(t.taskId)}">
 <div class="trow${openable ? ' openable' : ''}"${openable ? ' data-task-open title="Show this task’s conversation"' : ''}><span class="tdot" aria-hidden="true"></span><span class="tkey">${esc(t.key)}</span><span class="ttitle">${esc(t.title)}</span><span class="tstate" title="${esc(state.title)}">${esc(state.text)}</span>${verify}</div>
 ${line2 ? `<div class="tline2">${line2}</div>` : ''}${buttons}</li>`;
 }
 
-function actionButton(a: TaskViewAction): string {
+function actionButton(v: MissionView, t: MissionTaskView, a: TaskViewAction, ui: MissionsUiState): string {
   const cls = a === 'accept' ? ' primary' : a === 'cancel' ? ' danger' : '';
-  return `<button class="tact${cls}" data-task-action="${esc(a)}">${esc(TASK_ACTION_LABEL[a])}</button>`;
+  // Quick, local actions (Open diff, Policy…) are never blocked; the rest share the mission's pending state.
+  const s = TASK_PENDING_LABEL[a] ? opState(ui, v.id, `task:${t.taskId}:${a}`) : { state: undefined };
+  const label = s.state === 'busy' && s.label ? s.label : TASK_ACTION_LABEL[a];
+  return `<button class="tact${cls}${s.state === 'busy' ? ' busy' : ''}" data-task-action="${esc(a)}"${pendingAttrs(s.state, `${v.id}:${t.taskId}:${a}`)}>${esc(label)}</button>`;
 }
 
 /** A task in plan review: a compact line, and the editor when it is the one being edited. */
@@ -254,24 +336,54 @@ function editorHtml(v: MissionView, t: MissionTaskView, snap: MissionsSnapshot):
 </div>`;
 }
 
-function footerHtml(v: MissionView): string {
+/**
+ * Mission review's finish buttons (§18.4), through the pending-action
+ * pattern: from the click until the outcome is recorded the chosen one reads
+ * "Merging…" (`aria-busy`) and every finish button is off — whether the pane
+ * or the host says a finish is under way, so a re-render, a pane reload or a
+ * restart cannot bring them back early. A finish whose outcome could not be
+ * read back keeps them off and offers Check again. A failure is shown with
+ * them, and they are back.
+ */
+function finishHtml(v: MissionView, review: NonNullable<MissionView['review']>, ui: MissionsUiState): string {
+  const local = ui.pending.under(`mission:${v.id}:`);
+  const localFinish = local?.key.startsWith(`mission:${v.id}:finish:`) ? (local.key.slice(`mission:${v.id}:finish:`.length) as MissionFinish) : undefined;
+  const host = v.finishing;
+  const underWay = host && !host.uncertain ? host.how : localFinish;
+  const anyBusy = host !== undefined || local !== undefined;
+  const buttons = review.finishes
+    .map((f) => {
+      const busy = underWay === f;
+      const state = busy ? 'busy' : anyBusy ? 'blocked' : undefined;
+      const cls = `mbtn${f === (review.recommended ?? 'merge-local') ? ' primary' : ''}${f === 'discard' ? ' danger' : ''}${busy ? ' busy' : ''}`;
+      const title = busy ? `${FINISH_PENDING_LABEL[f]} The other finish buttons are off until it ends.` : state === 'blocked' ? 'Another finish is under way for this mission' : undefined;
+      return `<button class="${cls}" data-finish="${esc(f)}"${title ? ` title="${esc(title)}"` : ''}${pendingAttrs(state, `${v.id}:finish:${f}`)}>${esc(busy ? FINISH_PENDING_LABEL[f] : FINISH_LABEL[f])}</button>`;
+    })
+    .join('');
+  let line = '';
+  if (host?.uncertain) {
+    line = `<div class="mfinish uncertain" role="alert"><span>Could not confirm whether the ${esc(FINISH_NOUN[host.how])} went through: ${esc(host.uncertain)} The finish buttons stay off until that is settled.</span>${opButton(ui, v, 'recheck-finish', 'Check again', ' primary', 'Read the outcome back from git again')}</div>`;
+  } else if (underWay) {
+    // Announced once by the live region; the busy button itself carries aria-busy.
+    line = `<div class="mfinish pending" role="status" aria-live="polite"><span class="spin" aria-hidden="true"></span>${esc(FINISH_PENDING_LABEL[underWay])}</div>`;
+  } else if (v.finishFailure) {
+    line = `<div class="mfinish failed" role="alert"><span><b>${esc(FINISH_LABEL[v.finishFailure.how])} did not go through.</b> ${esc(v.finishFailure.why)}</span></div>`;
+  }
+  return `<span class="mstat">${esc(reviewStatText(review))}</span>${buttons}${line}`;
+}
+
+function footerHtml(v: MissionView, ui: MissionsUiState): string {
   const parts: string[] = [];
   if (v.state === 'plan-review') {
     parts.push(`<button class="mbtn" data-plan-op="add"${v.tasks.length >= v.cap ? ` disabled title="At most ${v.cap} tasks"` : ''}>+ Add task</button>`);
     parts.push(
-      `<button class="mbtn primary" data-mission-op="approve"${v.canApprove ? '' : ' disabled'} title="${v.canApprove ? 'Start the first task on the launcher’s model; the rest follow in order' : 'Fix what the plan review lists first'}">Approve and start</button>`,
+      v.canApprove
+        ? opButton(ui, v, 'approve', 'Approve and start', ' primary', 'Start the first task on the launcher’s model; the rest follow in order')
+        : `<button class="mbtn primary" data-mission-op="approve" disabled title="Fix what the plan review lists first">Approve and start</button>`,
     );
   }
-  if (v.canRunProposal) {
-    parts.push(`<button class="mbtn primary" data-mission-op="approve" title="Start the task on the route the router recommended">Run task</button>`);
-  }
-  if (v.review) {
-    const stat = `<span class="mstat">${esc(reviewStatText(v.review))}</span>`;
-    const buttons = v.review.finishes
-      .map((f) => `<button class="mbtn${f === (v.review!.recommended ?? 'merge-local') ? ' primary' : ''}${f === 'discard' ? ' danger' : ''}" data-finish="${esc(f)}">${esc(FINISH_LABEL[f])}</button>`)
-      .join('');
-    parts.push(stat + buttons);
-  }
+  if (v.canRunProposal) parts.push(opButton(ui, v, 'approve', 'Run task', ' primary', 'Start the task on the route the router recommended'));
+  if (v.review) parts.push(finishHtml(v, v.review, ui));
   if (v.finishResult) {
     const r = v.finishResult;
     const text = r.pullRequestUrl ? `Pull request: ${r.pullRequestUrl}` : r.mergeCommit ? `Merged at ${r.mergeCommit.slice(0, 8)}${r.note ? ` (${r.note})` : ''}` : r.note ?? '';
@@ -279,21 +391,21 @@ function footerHtml(v: MissionView): string {
   }
   if (v.canPlanAgain) {
     parts.push(
-      `<button class="mbtn${v.state === 'planning-failed' ? ' primary' : ''}" data-mission-op="plan-again" title="Ask the read-only planner again${v.state === 'plan-review' ? '; the tasks here are replaced by its new plan' : ''}">Plan again…</button>`,
+      opButton(ui, v, 'plan-again', 'Plan again…', v.state === 'planning-failed' ? ' primary' : '', `Ask the read-only planner again${v.state === 'plan-review' ? '; the tasks here are replaced by its new plan' : ''}`),
     );
   }
-  if (v.canWritePlan) parts.push(`<button class="mbtn" data-mission-op="write-plan" title="Start plan review from what the mission has now, and write the tasks yourself">Write it myself</button>`);
+  if (v.canWritePlan) parts.push(opButton(ui, v, 'write-plan', 'Write it myself', '', 'Start plan review from what the mission has now, and write the tasks yourself'));
   if (v.canReplan) {
     parts.push(
-      `<button class="mbtn" data-mission-op="replan" title="Ask the planner for the rest of the plan. Done tasks stay; unfinished work is set aside on a branch of its own; the new plan is reviewed before anything runs.">Replan…</button>`,
+      opButton(ui, v, 'replan', 'Replan…', '', 'Ask the planner for the rest of the plan. Done tasks stay; unfinished work is set aside on a branch of its own; the new plan is reviewed before anything runs.'),
     );
   }
   if (v.canPause) {
-    parts.push(`<button class="mbtn" data-mission-op="pause" title="Start nothing new; what is running carries on">Pause</button>`);
-    parts.push(`<button class="mbtn" data-mission-op="pause-now" title="Start nothing new, and pause the running agents too">Pause now</button>`);
+    parts.push(opButton(ui, v, 'pause', 'Pause', '', 'Start nothing new; what is running carries on'));
+    parts.push(opButton(ui, v, 'pause-now', 'Pause now', '', 'Start nothing new, and pause the running agents too'));
   }
-  if (v.canResume) parts.push(`<button class="mbtn primary" data-mission-op="resume" title="Resume paused agents and start what is ready">Resume</button>`);
-  if (v.canCancel) parts.push(`<button class="mbtn danger" data-mission-op="cancel">Cancel mission</button>`);
+  if (v.canResume) parts.push(opButton(ui, v, 'resume', 'Resume', ' primary', 'Resume paused agents and start what is ready'));
+  if (v.canCancel) parts.push(opButton(ui, v, 'cancel', 'Cancel mission', ' danger', undefined));
   return parts.length > 0 ? `<div class="mfoot">${parts.join('')}</div>` : '';
 }
 
@@ -322,9 +434,11 @@ export function clickIntent(target: HTMLElement, snap: MissionsSnapshot | undefi
   if (!missionId) return undefined;
   if (target.closest('[data-mission-dismiss]')) return { kind: 'dismiss', missionId };
   const btn = target.closest<HTMLButtonElement>('button');
-  if (btn?.disabled) return undefined;
+  // `aria-disabled`: busy or blocked by the pending-action pattern; it keeps focus, so it is refused here.
+  if (btn?.disabled || btn?.getAttribute('aria-disabled') === 'true') return undefined;
   const missionOp = target.closest<HTMLElement>('[data-mission-op]')?.dataset.missionOp;
   if (missionOp === 'approve') return { kind: 'op', missionId, op: { kind: 'approve' } };
+  if (missionOp === 'recheck-finish') return { kind: 'op', missionId, op: { kind: 'recheck-finish' } };
   if (missionOp === 'cancel') return { kind: 'op', missionId, op: { kind: 'cancel' } };
   if (missionOp === 'pause' || missionOp === 'pause-now') return { kind: 'op', missionId, op: { kind: 'pause', ...(missionOp === 'pause-now' ? { now: true } : {}) } };
   if (missionOp === 'resume') return { kind: 'op', missionId, op: { kind: 'resume' } };

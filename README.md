@@ -494,7 +494,12 @@ new worktree and branch of the chosen folder's repository:
     commit in your checkout; a failure leaves the base where it was. Nothing is installed; the
     note says a rebuild or reinstall is needed. *Open pull request* pushes the mission branch and
     runs your `gh`; *Keep* and *Discard* leave the base and the remote alone. Nothing reaches the
-    base or the remote without your click. Each merge, conflict, revert and mission check writes
+    base or the remote without your click. From the click until its outcome is recorded the
+    button reads *Merging…* (or *Opening PR…*) and the other finishes are off; a repeated click
+    joins the one under way, so a mission is merged at most once. The finish is recorded before
+    git runs, so a crash or fault mid-finish is settled on relaunch by reading git (or `gh`)
+    back — merged, or not — never by running it again; if git cannot answer, the buttons stay off
+    and *Check again* asks it again (`docs/plans/pending-actions.md`). Each merge, conflict, revert and mission check writes
     an `integration` usage record (counts and stage names, never file names).
 - **Restarts.** A task's conversation is an ordinary row in the table. It survives quitting and
   reinstalling (Claude tasks need *Keep conversations running when Agent Wrangler quits*, and
