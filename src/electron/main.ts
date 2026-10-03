@@ -42,18 +42,22 @@ import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
 import { createRemoteDaemonAgent } from '../node/remoteDaemonAgent';
 import { coreRunsElsewhere } from './coreElsewhere';
+import { socketAnswers } from '../core/control/probe';
+import { coreDaemonPaths, findCoreHolder } from '../core/daemon/coreDaemon';
 import { MenuBar, menuBarSessions } from './tray';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
 import { createBrowserClients, type BrowserClients } from './webPrototype';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
 import { createDictationRoute } from '../core/web/dictationRoute';
+import { appPathRoots, createFileViewRoute } from '../core/web/fileView';
+import { createPathAllowlist } from '../core/web/pathAllowlist';
 import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
 import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
 import { Emitter } from '../core/events';
 import { renderBrowserWorkbenchHtml } from '../ui/html';
 import { ClientRegistry } from '../core/clients';
 import { runInRequest } from '../core/requestScope';
-import type { HostDialogs } from '../host/hostServices';
+import type { HostDialogs, HostShell } from '../host/hostServices';
 
 // Git invokes git-lfs through PATH while checking out task worktrees. Finder's
 // environment lacks Homebrew's bin directory even when git-lfs is installed.
@@ -129,13 +133,25 @@ void app.whenReady().then(async () => {
   // the window client's own.
   const clients = new ClientRegistry({ log, navigationFallback: WINDOW_CONNECTION_ID });
   let nativeDialogs: HostDialogs | undefined;
+  let nativeShell: HostShell | undefined;
   /** As the user at this Mac: the window client. For the menu, tray, Preferences and notifications. */
   const asLocalUser = <T,>(fn: () => T): T => runInRequest(WINDOW_CONTEXT, fn);
   const host = createElectronHost({
     userDataDir,
     log,
     sessionHosts: { runtime, ...hostDirs },
-    remoteDaemon: createRemoteDaemonAgent({ runDirs: hostDirs, logDir: hostDirs.logDir, runtime, isPackaged: app.isPackaged, log }),
+    remoteDaemon: createRemoteDaemonAgent({
+      runDirs: hostDirs,
+      logDir: hostDirs.logDir,
+      runtime,
+      isPackaged: app.isPackaged,
+      log,
+      // Never beside a core daemon, which runs Discord itself (#138).
+      coreDaemonHolds: async () => {
+        const paths = coreDaemonPaths(userDataDir, hostDirs.fallbackRunDir);
+        return (await findCoreHolder({ socketPath: paths.socketPath, manifestPath: paths.manifestPath, probe: socketAnswers })).kind === 'daemon';
+      },
+    }),
     palette: {
       pick: (items, options) => palette?.pick(items, options) ?? Promise.resolve(undefined),
       input: (options) => palette?.input(options) ?? Promise.resolve(undefined),
@@ -151,9 +167,14 @@ void app.whenReady().then(async () => {
     },
     // Browser tabs first, this Mac's notification only when none can show it (#141, D3).
     scopeNotify: (native) => clients.notifier(native),
+    scopeShell: (native) => {
+      nativeShell = native;
+      return clients.shell;
+    },
     asLocalUser,
   });
   const windowDialogs = nativeDialogs!;
+  const macShell = nativeShell!;
 
   const wrangler = createApp(host);
 
@@ -198,7 +219,7 @@ void app.whenReady().then(async () => {
   });
   // The window is a client for the app's whole life, open or not: the menu and
   // tray act as it, native dialogs need no window, and navigating to it opens it.
-  host.subscribe(clients.register(windowClientChannel(window, windowDialogs)));
+  host.subscribe(clients.register(windowClientChannel(window, windowDialogs, macShell)));
   wrangler.attachSurface(clients.surface);
 
   // `showQuickPick` and `showInputBox`, which Electron has neither of: renaming
@@ -460,7 +481,7 @@ void app.whenReady().then(async () => {
     }
     stopWeb();
     // Each browser registers with the app's client registry, so what it causes comes back to it (#126).
-    const browsers = createBrowserClients({ app: wrangler, host, ui, clients, log, build: () => server.build() });
+    const browsers = createBrowserClients({ app: wrangler, host, ui, clients, log, hostShell: macShell,build: () => server.build() });
     const server = new WebServer({
       port,
       webviewDir: path.join(APP_ROOT, 'dist', 'webview'),
@@ -468,9 +489,16 @@ void app.whenReady().then(async () => {
       gate: wrangler.access,
       log,
       page: renderBrowserWorkbenchHtml,
+      // The read-only file and diff view that stands in for "open in the editor" (#140).
+      routes: [
+        createFileViewRoute({
+          allowlist: createPathAllowlist(appPathRoots(() => wrangler.store.sessions, host.dataDir)),
+          log,
+        }),
+        // A phone's recording, transcribed here (#141).
+        createDictationRoute({ transcribe: (audio, ext) => wrangler.dictation.transcribeAudio(audio, ext), log }),
+      ],
       onClient: (socket, context) => browsers.attach(socket, context),
-      // A phone's recording, transcribed here (#141).
-      routes: [createDictationRoute({ transcribe: (audio, ext) => wrangler.dictation.transcribeAudio(audio, ext), log })],
       // `/ca.mobileconfig` on loopback. Made on first request, so a device can
       // be set up before LAN access is switched on. None with the user's own cert.
       caCertificate: async () => {

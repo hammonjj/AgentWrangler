@@ -67,6 +67,12 @@ export interface ElectronHostOptions {
    */
   scopeNotify?(native: HostServices['notify']): HostServices['notify'];
   /**
+   * The same for `shell` (#140): the registry's scoped shell goes to the app,
+   * and the native one stays with the window client and with a loopback
+   * browser's "Open on this Mac".
+   */
+  scopeShell?(native: HostShell): HostShell;
+  /**
    * Run a notification's click as the user at this Mac (#126): a click on a
    * banner is the window client's request, so what it opens or asks lands
    * in the window.
@@ -259,7 +265,7 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     storageDir,
     dataDir: userDataDir,
     dialogs: opts.scopeDialogs ? opts.scopeDialogs(dialogsFor(opts)) : dialogsFor(opts),
-    shell: shellFor(opts),
+    shell: opts.scopeShell ? opts.scopeShell(shellFor(opts)) : shellFor(opts),
     clipboard: { writeText: async (text) => clipboard.writeText(text) },
     notify: opts.scopeNotify ? opts.scopeNotify(notifierFor(opts)) : notifierFor(opts),
     // The login Keychain, never `settings.json`. `secrets.json` is the old

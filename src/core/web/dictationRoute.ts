@@ -23,7 +23,7 @@ import {
   DICTATION_PATH,
   audioExtension,
 } from '../../shared/webCapabilities';
-import type { WebRoute } from './routes';
+import type { WebRoute } from './server';
 
 export interface DictationRouteOptions {
   /** Audio in, text out: `DictationService.transcribeAudio`; a fake in tests. */
@@ -47,9 +47,10 @@ function reply(res: http.ServerResponse, status: number, body: object): void {
 export function createDictationRoute(opts: DictationRouteOptions): WebRoute {
   let busy = false;
   return {
-    method: 'POST',
-    path: DICTATION_PATH,
-    async handle(req, res, ctx) {
+    methods: ['POST'],
+    match: (pathname) => pathname === DICTATION_PATH,
+    async handle(ctx) {
+      const { req, res } = ctx;
       if (req.headers[DICTATION_HEADER] !== '1') return reply(res, 403, { error: 'Missing the dictation header.' });
       if (!ctx.gate.admit(ctx.context, 'dictation.use')) return reply(res, 403, { error: 'Not permitted.' });
       const ext = audioExtension(req.headers['content-type']);

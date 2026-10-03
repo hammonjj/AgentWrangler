@@ -25,7 +25,7 @@ import {
 
 function browserTab(id: string, permission: 'granted' | 'default' | 'denied' | 'unsupported' = 'granted') {
   const sent: HostToShell[] = [];
-  const shell = createShellChannel({ connectionId: id, post: (e) => sent.push(e.body), conversation: () => undefined });
+  const shell = createShellChannel({ connectionId: id, kind: 'lan', post: (e) => sent.push(e.body), conversation: () => undefined });
   shell.receive({ type: 'notifications', permission });
   return { shell, sent, notices: () => sent.filter((b) => b.type === 'notify') };
 }
@@ -98,7 +98,7 @@ describe('notice routing', () => {
 
   it('a tab that has not reported at all is not a place for it', () => {
     const { registry, notify, native } = rig();
-    const silent = createShellChannel({ connectionId: 'web-9', post: () => undefined, conversation: () => undefined });
+    const silent = createShellChannel({ connectionId: 'web-9', kind: 'lan', post: () => undefined, conversation: () => undefined });
     registry.register(silent.channel);
     notify(notice('a'));
     expect(native).toHaveLength(1);
@@ -160,6 +160,10 @@ describe('notice routing', () => {
     const { registry, notify } = rig();
     const bad: ClientChannel = {
       connectionId: 'bad',
+      kind: 'lan',
+      openUrl: () => undefined,
+      showFile: () => undefined,
+      showCommand: () => undefined,
       isOpen: true,
       canNotify: true,
       notify: () => {
@@ -181,6 +185,7 @@ describe('notice routing', () => {
     const shown: string[] = [];
     const shell = createShellChannel({
       connectionId: 'web-1',
+      kind: 'lan',
       post: (e) => sent.push(e.body),
       conversation: () => ({ show: (k) => shown.push(k), showSession: () => undefined, showDetail: () => undefined }),
     });

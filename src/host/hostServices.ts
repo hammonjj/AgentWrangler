@@ -34,6 +34,8 @@ import type { SessionHandle } from '../core/session/sessionHandle';
 import type { SessionHostRuntime } from '../core/session/hostSupervisor';
 import type { EnsureReason } from '../remote/daemon/client';
 import type { RemoteDaemonPaths } from '../remote/daemon/paths';
+import type { RemoteConfig } from '../remote/service';
+import type { RemoteTransport } from '../remote/transport';
 import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 
 /**
@@ -231,6 +233,23 @@ export interface HostServices {
     ensure(why: EnsureReason): Promise<void>;
     /** Stop it and take it out of login items: remote control was switched off. */
     remove(): Promise<void>;
+  };
+  /**
+   * Remote control in this process (#138): the core daemon. Discord is fed the
+   * core's own list and presses go through its own actions, with no remote
+   * daemon. Takes precedence over `remoteDaemon`, which only the Electron app
+   * (while it runs the core) supplies.
+   */
+  remoteInProcess?: {
+    /**
+     * Stop the remote daemon and remove its LaunchAgent, resolving once it has
+     * exited. Awaited before this process builds its connector, every start:
+     * the two share the mirror map, and only one may run.
+     */
+    retireDaemon(): Promise<void>;
+    /** Tests: a fake Discord, and a private mirror map. */
+    makeTransport?: (token: string, cfg: RemoteConfig) => RemoteTransport;
+    mirrorFile?: string;
   };
   /** Directory for caches this host owns, e.g. the shared usage read. Must exist. */
   storageDir: string;

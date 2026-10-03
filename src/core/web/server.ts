@@ -41,7 +41,6 @@ import { ownerContext, type AccessGate, type RequestContext } from '../access';
 import { AssetManifest } from './assets';
 import { DEVICE_TTL_MS, WEB_DEVICES_FILE, WebDeviceStore, summarizeUserAgent, type DeviceScope, type WebDevice } from './devices';
 import { LoginCodes } from './loginLinks';
-import type { WebRoute } from './routes';
 import { caMobileconfig, MOBILECONFIG_CONTENT_TYPE } from './mobileconfig';
 import { isLoopbackHost, readCookie } from './wsFrames';
 
@@ -125,7 +124,32 @@ const DEFLATE = {
   clientNoContextTakeover: false,
 } as const;
 
+/** What a route is handed: a request from a signed-in device, on a listener of `scope`. */
+export interface WebRouteContext {
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  url: URL;
+  scope: DeviceScope;
+  deviceId: string;
+  /** The device's request context (owner, `via: 'browser'`), for the access gate (#141). */
+  context: RequestContext;
+  gate: AccessGate;
+}
+
+/**
+ * A route another module adds (#140's file view; downloads and uploads).
+ * Reached only after the host, origin and device checks, GET and HEAD only.
+ */
+export interface WebRoute {
+  match(pathname: string): boolean;
+  /** The methods it answers; GET and HEAD when absent. A POST route (#141) says `['POST']`. */
+  methods?: readonly string[];
+  handle(ctx: WebRouteContext): Promise<void> | void;
+}
+
 export interface WebServerOptions {
+  /** Routes beyond the page, assets and login (#140). First match wins. */
+  routes?: WebRoute[];
   /** 0 picks a free port (tests). */
   port: number;
   /** `dist/webview`: the only directory served. */
@@ -148,8 +172,6 @@ export interface WebServerOptions {
    * certificate is in use). Absent: those routes are 404.
    */
   caCertificate?: () => Promise<string | undefined>;
-  /** Extra POST endpoints (#141), each from its own file; see `routes.ts`. */
-  routes?: WebRoute[];
   now?: () => number;
 }
 
@@ -285,9 +307,12 @@ export class WebServer implements Disposable {
         res.writeHead(403, SECURITY_HEADERS).end();
         return;
       }
-      const route = this.routeFor(req);
+      // A POST route (#141): the device cookie first, then the route's own checks.
+      const route = this.postRouteFor(req);
       if (route) {
-        this.runRoute(listener, route, req, res);
+        const device = this.devices.verify(readCookie(req.headers.cookie, cookieName(listener.scope)), listener.scope);
+        if (!device) text(res, 401, 'Not signed in.');
+        else this.runRoute(listener, route.route, req, res, route.url, device.id);
         return;
       }
       res.writeHead(405, { ...SECURITY_HEADERS, allow: 'GET, HEAD' }).end();
@@ -325,6 +350,12 @@ export class WebServer implements Disposable {
       this.page(listener, req, res, cookie);
       return;
     }
+    // Routes other modules add (#140): reached only by a signed-in device.
+    const route = (this.opts.routes ?? []).find((r) => !r.methods && r.match(url.pathname));
+    if (route) {
+      this.runRoute(listener, route, req, res, url, device.id);
+      return;
+    }
     // The CA, for a device to install, from the Mac only (#136).
     if (listener.scope === 'loopback' && (url.pathname === '/ca.pem' || url.pathname === '/ca.mobileconfig')) {
       void this.caDownload(url.pathname, res);
@@ -333,28 +364,27 @@ export class WebServer implements Disposable {
     this.asset(url.pathname, res);
   }
 
-  private routeFor(req: http.IncomingMessage): WebRoute | undefined {
-    let pathname: string;
+  /** The route that answers this non-GET request, by path and method. */
+  private postRouteFor(req: http.IncomingMessage): { route: WebRoute; url: URL } | undefined {
+    let url: URL;
     try {
-      pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+      url = new URL(req.url ?? '/', 'http://localhost');
     } catch {
       return undefined;
     }
-    return this.opts.routes?.find((r) => r.method === req.method && r.path === pathname);
+    const route = this.opts.routes?.find((r) => r.methods?.includes(req.method ?? '') && r.match(url.pathname));
+    return route ? { route, url } : undefined;
   }
 
-  /** A registered route (#141): the device cookie first, then the route's own checks. */
-  private runRoute(listener: Listener, route: WebRoute, req: http.IncomingMessage, res: http.ServerResponse): void {
-    const device = this.devices.verify(readCookie(req.headers.cookie, cookieName(listener.scope)), listener.scope);
-    if (!device) {
-      text(res, 401, 'Not signed in.');
-      return;
-    }
-    const context = ownerContext('browser', { deviceId: device.id });
-    Promise.resolve(route.handle(req, res, { context, scope: listener.scope, gate: this.opts.gate })).catch((err) => {
-      this.opts.log(`web: ${route.path} failed: ${String(err)}`);
-      if (!res.headersSent) text(res, 500, 'Something went wrong.');
-    });
+  private runRoute(listener: Listener, route: WebRoute, req: http.IncomingMessage, res: http.ServerResponse, url: URL, deviceId: string): void {
+    const context = ownerContext('browser', { deviceId, deviceScope: listener.scope });
+    void Promise.resolve()
+      .then(() => route.handle({ req, res, url, scope: listener.scope, deviceId, context, gate: this.opts.gate }))
+      .catch((err) => {
+        this.opts.log(`web: route ${url.pathname} failed: ${String(err)}`);
+        if (!res.headersSent) text(res, 500, 'Something went wrong.');
+        else res.destroy();
+      });
   }
 
   private login(listener: Listener, req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
@@ -488,7 +518,7 @@ export class WebServer implements Disposable {
     this.wss.handleUpgrade(req, socket, head, (ws) => {
       listener.sockets.add(ws);
       ws.on('close', () => listener.sockets.delete(ws));
-      this.opts.onClient(ws, ownerContext('browser', { deviceId: device.id }));
+      this.opts.onClient(ws, ownerContext('browser', { deviceId: device.id, deviceScope: listener.scope }));
     });
   }
 

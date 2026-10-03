@@ -40,6 +40,7 @@ import {
   type ShellToHost,
 } from '../../shared/shellProtocol';
 import { NoticeDeduper, secureContextProblem, shouldShowNotice, type NotificationState } from '../../shared/webCapabilities';
+import { openUrlHere, showHostView } from '../common/hostView';
 
 interface Bridge {
   postMessage(message: unknown): void;
@@ -241,13 +242,21 @@ function onShell(body: HostToShell | undefined): void {
     case 'notify':
       showNotice(body);
       return;
+    // Former host-local actions, answered in this browser (#140).
+    case 'openUrl':
+      openUrlHere(body.url);
+      return;
+    case 'showFile':
+    case 'showCommand':
+      showHostView(body, { sendShell, toast });
+      return;
   }
 }
 
 // ---- notifications (#141) ----
 
 /** The panes ask which microphone to use by looking at this. */
-document.documentElement.dataset.awHost = 'browser';
+if (document.documentElement) document.documentElement.dataset.awHost = 'browser';
 
 const deduper = new NoticeDeduper();
 
@@ -279,7 +288,7 @@ function showNotice(raw: HostToShell): void {
   const state = {
     permission: notificationState(),
     hidden: document.hidden,
-    focused: document.hasFocus(),
+    focused: document.hasFocus?.() ?? true,
   };
   if (!shouldShowNotice(state) || !deduper.first(notice.tag, Date.now())) return;
   try {

@@ -11,7 +11,7 @@
  * - `ProcessType = Interactive`: the Discord gateway's heartbeat must not be
  *   throttled the way a `Background` job's timers are;
  * - `LimitLoadToSessionType = Aqua`: only in a logged-in GUI session, where
- *   the app, the hosts and the keychain it was handed a token from all are.
+ *   the app, the hosts and the login keychain it reads the token from all are.
  */
 export interface LaunchAgentSpec {
   label: string;

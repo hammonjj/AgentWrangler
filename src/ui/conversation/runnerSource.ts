@@ -12,7 +12,7 @@
  * history in front of them.
  */
 import type { Disposable } from '../../core/events';
-import type { CommandOutcome, SessionHandle } from '../../core/session/sessionHandle';
+import type { SessionHandle } from '../../core/session/sessionHandle';
 import type { BlockPatch, ComposerState, ConvBlock, ImageAttachment, PermissionModeName } from '../../shared/conversation';
 import type { ConversationInit, ConversationSource } from './source';
 
@@ -58,17 +58,8 @@ export class LiveSessionSource implements ConversationSource {
     // nothing to do
   }
 
-  async decide(requestId: string, decision: 'allow' | 'always' | 'deny', message?: string): Promise<boolean> {
-    return applied(await this.handle.decide(requestId, decision, message));
-  }
-
-  async answer(requestId: string, answers: Record<string, string>): Promise<boolean> {
-    return applied(await this.handle.answer(requestId, answers));
-  }
-
-  async decidePlan(requestId: string, approve: boolean, feedback?: string): Promise<boolean> {
-    return applied(await this.handle.decidePlan(requestId, approve, feedback));
-  }
+  // No `decide`/`answer`/`decidePlan`: a live session's asks are answered
+  // through `SessionActions` (`src/app/approvals.ts`), never from a pane (#132).
 
   async send(text: string, images?: ImageAttachment[]): Promise<void> {
     if (!this.handle.canSend) throw new Error('The runner stopped; your draft is preserved.');
@@ -105,8 +96,4 @@ export class LiveSessionSource implements ConversationSource {
     this.subs.push(sub);
     return sub;
   }
-}
-
-function applied(outcome: CommandOutcome): boolean {
-  return outcome === 'applied';
 }
