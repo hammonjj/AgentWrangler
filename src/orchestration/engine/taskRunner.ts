@@ -1785,9 +1785,13 @@ export class TaskRunner implements Disposable {
     const manager = await this.managerFor(m);
     const finisher = this.finisherFor(m);
     const base = how === 'merge-local' ? await finisher.baseTipOf(m.base.ref).catch(() => undefined) : undefined;
+    const branchTip = how === 'merge-local' ? await finisher.branchTipOf(branch).catch(() => undefined) : undefined;
     // Write-ahead: from here on a restart or a fault is settled by reading git back.
     const { finishFailure: _previous, ...rest } = m;
-    this.put({ ...rest, pendingFinish: { id: this.id(), how, at: this.now(), branch, ...(base ? { into: base.into, baseTip: base.tip } : {}) } });
+    this.put({
+      ...rest,
+      pendingFinish: { id: this.id(), how, at: this.now(), branch, ...(branchTip ? { branchTip } : {}), ...(base ? { into: base.into, baseTip: base.tip } : {}) },
+    });
     m = this.need(missionId);
 
     let result: Mission['finishResult'];
@@ -1869,6 +1873,7 @@ export class TaskRunner implements Disposable {
         const integration = m.integration !== 'none' && isPlanned(m) ? m.worktrees.find((w) => w.id === (m.integration as { worktreeId: string }).worktreeId) : undefined;
         outcome = await this.finisherFor(m).reconcileMerge({
           branch: p.branch,
+          ...(p.branchTip ? { branchTip: p.branchTip } : {}),
           baseRef: m.base.ref,
           ...(p.into ? { into: p.into } : {}),
           ...(p.baseTip ? { baseTip: p.baseTip } : {}),
@@ -2912,6 +2917,13 @@ export class TaskRunner implements Disposable {
 
   private async recoverMission(id: string): Promise<void> {
     let m = this.need(id);
+    // A finish (Merge locally, Open a PR …) cut off by the restart: settled from git, never re-run. Before
+    // the worktree pass, which would take a gated merge's integration tree, left detached mid-merge, for gone.
+    if (m.pendingFinish) {
+      await this.settleFinish(id).catch((e) => this.log(`task ${id}: could not settle its cut-off finish: ${errorText(e)}`));
+      m = this.need(id);
+      if (m.state !== 'review') return;
+    }
     const branchGone = new Set<string>();
     // Worktrees first (step 5): an attempt is judged knowing whether its tree is still there.
     if (m.worktrees.some((w) => w.state !== 'removed')) {
@@ -2930,12 +2942,6 @@ export class TaskRunner implements Disposable {
     if (m.pendingMerge) {
       await this.recoverMerge(id);
       m = this.need(id);
-    }
-    // A finish (Merge locally, Open a PR …) cut off by the restart: settled from git, not re-run.
-    if (m.pendingFinish) {
-      await this.settleFinish(id).catch((e) => this.log(`task ${id}: could not settle its cut-off finish: ${errorText(e)}`));
-      m = this.need(id);
-      if (m.state !== 'review') return;
     }
     if (m.parallel) {
       await this.recoverParallel(id, branchGone);

@@ -184,6 +184,11 @@ export class MissionFinisher {
    * the merge (write-ahead) so that a cut-off merge can be judged afterwards.
    * Undefined when the checkout is not on a branch; the merge refuses that itself.
    */
+  async branchTipOf(branch: string): Promise<string | undefined> {
+    const tip = await this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+    return tip.code === 0 ? tip.stdout.trim() || undefined : undefined;
+  }
+
   async baseTipOf(baseRef: string): Promise<{ into: string; tip: string } | undefined> {
     let into = baseBranch(baseRef);
     if (!into) {
@@ -203,12 +208,16 @@ export class MissionFinisher {
    * the integration worktree is put back on the mission branch, so that "not
    * merged" also means "nothing half-done is left behind".
    */
-  async reconcileMerge(opts: { branch: string; baseRef: string; into?: string; baseTip?: string; integrationPath?: string }): Promise<Reconciled> {
+  async reconcileMerge(opts: { branch: string; branchTip?: string; baseRef: string; into?: string; baseTip?: string; integrationPath?: string }): Promise<Reconciled> {
     if (!opts.branch.startsWith('aw/')) return { state: 'unknown', why: `${opts.branch} is not a branch Agent Wrangler made.` };
-    const tipRead = await this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${opts.branch}`]);
-    if (tipRead.failure === 'spawn') return { state: 'unknown', why: 'git could not be run.' };
-    if (tipRead.code !== 0) return { state: 'unknown', why: `${opts.branch} is gone, so whether it was merged cannot be read.` };
-    const branchTip = tipRead.stdout.trim();
+    // The tip recorded when the finish began: a merge that went through deletes the branch while tidying up.
+    let branchTip = opts.branchTip;
+    if (!branchTip) {
+      const tipRead = await this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${opts.branch}`]);
+      if (tipRead.failure === 'spawn') return { state: 'unknown', why: 'git could not be run.' };
+      if (tipRead.code !== 0) return { state: 'unknown', why: `${opts.branch} is gone, so whether it was merged cannot be read.` };
+      branchTip = tipRead.stdout.trim();
+    }
 
     const tree = opts.integrationPath;
     if (tree) {

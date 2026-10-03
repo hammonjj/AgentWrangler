@@ -225,6 +225,11 @@ export interface PendingFinish {
   at: Millis;
   /** The result branch being merged or pushed. */
   branch: string;
+  /**
+   * Its tip when the finish began: what "merged" is judged by, since a merge
+   * that went through tidies the branch itself away.
+   */
+  branchTip?: string;
   /** For a merge: the base branch, and its tip when the finish began. */
   into?: string;
   baseTip?: string;
