@@ -42,6 +42,8 @@ import { createRemoteDaemonAgent } from './remoteDaemonAgent';
 import { MenuBar, menuBarSessions } from './tray';
 import { toolPath } from './toolPath';
 import { WorkbenchWindow } from './workbenchWindow';
+import { startWebPrototype, webPrototypePort } from './webPrototype';
+import type { Disposable } from '../core/events';
 
 // Git invokes git-lfs through PATH while checking out task worktrees. Finder's
 // environment lacks Homebrew's bin directory even when git-lfs is installed.
@@ -380,7 +382,20 @@ void app.whenReady().then(() => {
     log(`control socket: not serving: ${String(err)}`);
   }
 
+  // Spike #120: the workbench in a browser on this Mac. Off unless asked for.
+  const webPort = webPrototypePort();
+  let web: Disposable | undefined;
+  if (webPort !== undefined) {
+    try {
+      ensurePrivateDir(runDirs.runDir);
+      web = startWebPrototype({ app: wrangler, host, ui, distDir: path.join(APP_ROOT, 'dist'), runDir: runDirs.runDir, port: webPort, log });
+    } catch (err) {
+      log(`web prototype: not serving: ${String(err)}`);
+    }
+  }
+
   const teardown = () => {
+    web?.dispose();
     control?.dispose();
     menuBar.dispose();
     if (powerBlockId !== undefined) powerSaveBlocker.stop(powerBlockId);
