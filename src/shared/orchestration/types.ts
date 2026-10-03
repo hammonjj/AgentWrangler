@@ -210,6 +210,39 @@ export interface TaskIntegration {
 /** How a mission ended up being finished (§13.3). */
 export type MissionFinish = 'merge-local' | 'pull-request' | 'keep' | 'discard';
 
+/**
+ * A finish the user started, recorded before anything outside AW's own
+ * records is touched (write-ahead, as `pendingMerge`) and cleared once its
+ * outcome is recorded. While it is there the mission's finish buttons are
+ * off, whatever surface asks. Present after a restart, or after a fault
+ * between the side effect and the record of it: the outcome is then read
+ * back from git (or `gh`) before anything is re-enabled.
+ */
+export interface PendingFinish {
+  /** One per finish that got through; a replay of the same request joins it. */
+  id: string;
+  how: MissionFinish;
+  at: Millis;
+  /** The result branch being merged or pushed. */
+  branch: string;
+  /** For a merge: the base branch, and its tip when the finish began. */
+  into?: string;
+  baseTip?: string;
+  /**
+   * Set when the outcome could not be read back (git or `gh` would not
+   * answer). The buttons stay off until a check settles it one way or the
+   * other: re-enabling on a guess could merge twice.
+   */
+  uncertain?: { why: string; at: Millis };
+}
+
+/** The last finish that did not go through: shown with the buttons until the next one starts. */
+export interface FinishFailure {
+  how: MissionFinish;
+  why: string;
+  at: Millis;
+}
+
 export interface Mission {
   id: string;
   /** Schema version of this record (`MISSION_SCHEMA_VERSION`). */
@@ -273,6 +306,10 @@ export interface Mission {
   finish?: MissionFinish;
   /** What finishing left behind: the merge commit, or the pull request's address (#43). */
   finishResult?: { mergeCommit?: string; pullRequestUrl?: string; note?: string };
+  /** A finish under way (or cut off, and not yet reconciled). */
+  pendingFinish?: PendingFinish;
+  /** Why the last finish did not go through. Cleared when the next one starts. */
+  finishFailure?: FinishFailure;
   /**
    * The route a planned mission's tasks run on unless a task pins its own
    * (#43): the launcher's model and effort when the user pressed Approve and

@@ -72,7 +72,14 @@ export type HostToDashboard =
   /** Bring the Missions view up, scrolled to this mission: one was just created, or its notice was clicked. */
   | { type: 'showMissions'; missionId?: string }
   /** A Missions view action was refused or failed; shown beside the mission, not as a modal. */
-  | { type: 'missionError'; missionId: string; text: string }
+  | { type: 'missionError'; missionId: string; text: string; requestId?: string }
+  /**
+   * A Missions view request (`mission` with a `requestId`) has been answered,
+   * however it ended: the pane's pending state for it ends here. Sent after
+   * the snapshot that shows its outcome, so the button never flickers back
+   * on before the host's own state takes over.
+   */
+  | { type: 'missionAck'; missionId: string; requestId: string }
   /**
    * The Analytics view (#49) for the selection the pane last sent. Sent only
    * to a pane that asked (`analyticsQuery`), and again whenever the telemetry
@@ -163,7 +170,7 @@ export type DashboardToHost =
    * a task's action, a finish button. `provider` is the launcher's, which is
    * the route Approve and start gives tasks without a pin of their own.
    */
-  | { type: 'mission'; missionId: string; op: MissionOp; provider?: 'claude' | 'codex' }
+  | { type: 'mission'; missionId: string; op: MissionOp; provider?: 'claude' | 'codex'; requestId?: string }
   /** The launcher's dropdowns: the default a *new* conversation starts on. */
   | { type: 'setRunnerModel'; provider: 'anthropic' | 'openai'; model: string }
   | { type: 'setRunnerEffort'; provider: 'anthropic' | 'openai'; effort: string }

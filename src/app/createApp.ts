@@ -54,7 +54,7 @@ import { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import { LaunchDefaults } from '../core/launchDefaults';
 import { createOrchestration, parseRoutingSettings, ROUTING_KEY } from '../orchestration';
-import { TaskError, type TaskAction, type TaskRoute, type TaskRunner } from '../orchestration/engine/taskRunner';
+import { FinishRefused, TaskError, type TaskAction, type TaskRoute, type TaskRunner } from '../orchestration/engine/taskRunner';
 import { explainRecommendation, targetLabel } from '../orchestration/view/routeExplain';
 import { sourceStatus } from '../shared/orchestration/sourceHealth';
 import { EFFORT_LEVELS, isOrchestrationOrigin, type RouteRecommendation } from '../shared/orchestration/types';
@@ -1689,6 +1689,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
                 actions: (taskId) => tasks.actions(m.id, taskId),
                 finishDefault: m.state === 'review' ? orchestration.repoPolicies?.forFolder(m.repoRoot)?.policy.finish.default : undefined,
                 canPlan: tasks.canPlan,
+                finishing: tasks.finishingOf(m.id),
               }),
             ),
           // A3: each ask once, over the same missions the list draws (#101).
@@ -1740,12 +1741,25 @@ export function createApp(host: HostServices): AgentWranglerApp {
                 const ok = await dialogs.warn('Discard this mission’s result?', { modal: true, detail: 'Its worktrees are removed if they are clean. Its branches are kept until you delete them.' }, 'Discard');
                 if (ok !== 'Discard') return;
               }
-              const done = await tasks.finishMission(missionId, op.how);
+              let done;
+              try {
+                done = await tasks.finishMission(missionId, op.how);
+              } catch (e) {
+                // Recorded on the mission and shown beside its buttons, with the buttons back: not shown twice.
+                if (e instanceof FinishRefused) return;
+                throw e;
+              }
               const r = done.finishResult;
               if (r?.pullRequestUrl) {
                 dialogs.flash(`Pull request opened: ${r.pullRequestUrl}`, 6000);
                 if (/^https:\/\//.test(r.pullRequestUrl)) host.shell.openExternal(r.pullRequestUrl);
               } else dialogs.flash(`Mission ${op.how === 'merge-local' ? 'merged' : op.how === 'keep' ? 'kept' : 'discarded'}${r?.note ? `: ${r.note}` : ''}.`);
+              return;
+            }
+            case 'recheck-finish': {
+              const m = await tasks.recheckFinish(missionId);
+              if (m.pendingFinish?.uncertain) throw new TaskError(`Still cannot tell whether it went through: ${m.pendingFinish.uncertain.why}`);
+              dialogs.flash(m.state === 'review' ? 'It did not go through; the finish buttons are back.' : `Confirmed: ${m.finishResult?.note ?? m.finishResult?.pullRequestUrl ?? 'finished'}.`);
               return;
             }
             case 'task':

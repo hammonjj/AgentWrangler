@@ -101,7 +101,8 @@ import { ulid } from '../domain/ids';
 import { launchRefusal, taskMachine, transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
 import { applyPlanEdit, executionOrder, nextTaskKey, planIssues, planTask, taskCap, tasksFromDraft, type PlanContext } from '../domain/plan';
 import type { PlannedTask, PlanResult, Planner, ReplanContext } from '../policy/planner';
-import { MissionFinisher } from './missionFinish';
+import { MissionFinisher, type Reconciled } from './missionFinish';
+import { FINISH_NOUN } from '../../shared/orchestration/missionView';
 import type { AgentHarness } from '../harness/types';
 import type { Assessor } from '../policy/assessor';
 import type { LoadedRepoPolicy, RepoPolicyStore } from '../policy/repoPolicyStore';
@@ -246,6 +247,19 @@ export class TaskError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'TaskError';
+  }
+}
+
+/**
+ * A finish the finisher refused or undid, so its outcome is known: nothing
+ * outside AW's records changed (or, for a pull request, only the push). The
+ * reason is recorded on the mission (`finishFailure`) and shown beside its
+ * buttons, so a caller need not show it again.
+ */
+export class FinishRefused extends TaskError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FinishRefused';
   }
 }
 
@@ -396,6 +410,13 @@ export class TaskRunner implements Disposable {
   /** Session ids this runner ended itself: their `stopped` is not a person's. */
   private readonly stoppedByUs = new Set<string>();
   private readonly queues = new Map<string, Promise<unknown>>();
+  /**
+   * Finishes asked for in this run and not yet answered, by mission: from the
+   * click until the outcome is recorded, before the write-ahead record exists
+   * too (it is written inside the mission's queue). A second request joins
+   * the first or is refused; it never starts a second merge.
+   */
+  private readonly finishing = new Map<string, { how: MissionFinish; promise: Promise<Mission> }>();
   private readonly managers = new Map<string, Promise<WorktreeManager>>();
   private readonly emitter = new Emitter<void>();
   private readonly subs: Disposable[] = [];
@@ -1697,36 +1718,100 @@ export class TaskRunner implements Disposable {
    * into the base in the primary checkout (`--no-ff`, refused unless that
    * checkout is on the base and clean), push it and open a pull request, keep
    * it, or discard it (its trees go; its branches stay, so nothing is lost).
+   *
+   * At most one finish runs per mission, however many surfaces ask
+   * (`docs/plans/pending-actions.md`): a repeat of the finish under way joins it and gets
+   * its answer; a different one is refused while it runs; a repeat of a
+   * finish that already happened gets the mission back and does nothing
+   * again. The finish is recorded before git is touched (`pendingFinish`), so
+   * a restart or a fault between the merge and its record is settled by
+   * reading git back, never by re-enabling the buttons on a guess.
    */
   finishMission(missionId: string, how: MissionFinish): Promise<Mission> {
-    return this.queue(missionId, async () => {
-      let m = this.need(missionId);
-      if (m.state !== 'review') throw new TaskError('The mission is not waiting for review.');
-      const branch = resultBranch(m);
-      if (!branch) throw new TaskError('The mission has no result branch.');
-      const manager = await this.managerFor(m);
-      const finisher = new MissionFinisher({ exec: this.deps.exec ?? nodeExec, repoRoot: m.repoRoot, log: this.log });
-      let result: Mission['finishResult'];
-      let removeInto: string | undefined;
+    const live = this.finishing.get(missionId);
+    if (live) {
+      if (live.how === how) return live.promise;
+      return Promise.reject(new TaskError(`${capitalise(FINISH_NOUN[live.how])} is already under way for this mission; wait for it to finish.`));
+    }
+    const promise = this.queue(missionId, () => this.runFinish(missionId, how));
+    this.finishing.set(missionId, { how, promise });
+    const settled = () => {
+      if (this.finishing.get(missionId)?.promise !== promise) return;
+      this.finishing.delete(missionId);
+      this.emitter.fire();
+    };
+    promise.then(settled, settled);
+    // Every surface hears at once that a finish is under way, before the queue gets to it.
+    this.emitter.fire();
+    return promise;
+  }
+
+  /**
+   * The finish a mission has under way: asked for in this run, or recorded
+   * and not yet settled. `uncertain`: its outcome could not be read back, and
+   * the buttons stay off until a check settles it.
+   */
+  finishingOf(missionId: string): { how: MissionFinish; uncertain?: string } | undefined {
+    const live = this.finishing.get(missionId);
+    const rec = this.missions.get(missionId)?.pendingFinish;
+    if (live) return { how: live.how };
+    // Recorded, and nothing in this run is working on it: cut off, and not settled yet.
+    if (rec) return { how: rec.how, uncertain: rec.uncertain?.why ?? 'Its outcome has not been read back from git yet.' };
+    return undefined;
+  }
+
+  /** Read a cut-off finish's outcome back from git again (the "Check again" button). */
+  recheckFinish(missionId: string): Promise<Mission> {
+    const live = this.finishing.get(missionId);
+    if (live) return live.promise;
+    return this.queue(missionId, () => this.settleFinish(missionId));
+  }
+
+  /** The finish itself, inside the mission's queue. */
+  private async runFinish(missionId: string, how: MissionFinish): Promise<Mission> {
+    let m = this.need(missionId);
+    if (m.pendingFinish) {
+      // One cut off earlier: what it did is settled from git before anything new starts.
+      m = await this.settleFinish(missionId);
+      if (m.pendingFinish) {
+        throw new TaskError(`Could not tell whether the earlier ${FINISH_NOUN[m.pendingFinish.how]} went through (${m.pendingFinish.uncertain?.why ?? 'unknown'}), so nothing new was started. Check again once that is fixed.`);
+      }
+    }
+    // A replay of a finish that already happened: the same answer, and nothing done twice.
+    if (m.finish === how && (m.state === 'completed' || m.state === 'cancelled')) return m;
+    if (m.state !== 'review') throw new TaskError('The mission is not waiting for review.');
+    const branch = resultBranch(m);
+    if (!branch) throw new TaskError('The mission has no result branch.');
+    const manager = await this.managerFor(m);
+    const finisher = this.finisherFor(m);
+    const base = how === 'merge-local' ? await finisher.baseTipOf(m.base.ref).catch(() => undefined) : undefined;
+    // Write-ahead: from here on a restart or a fault is settled by reading git back.
+    const { finishFailure: _previous, ...rest } = m;
+    this.put({ ...rest, pendingFinish: { id: this.id(), how, at: this.now(), branch, ...(base ? { into: base.into, baseTip: base.tip } : {}) } });
+    m = this.need(missionId);
+
+    let result: Mission['finishResult'];
+    let removeInto: string | undefined;
+    try {
       switch (how) {
         case 'merge-local': {
           if (isPlanned(m) && m.integration !== 'none') {
             // Gated (§13.3 step 5, #46): the merge is made and checked in the integration worktree first.
             const r = await this.mergeGated(m, finisher, branch, manager);
-            if (!r.ok) throw new TaskError(r.why);
+            if (!r.ok) throw new FinishRefused(r.why);
             result = { mergeCommit: r.mergeCommit, note: `merged into ${r.into} after ${r.gate}; nothing was installed, so rebuild or reinstall to run it` };
             removeInto = r.into;
             break;
           }
           const r = await finisher.mergeLocal({ branch, baseRef: m.base.ref, message: `Merge ${branch}: ${m.title}` });
-          if (!r.ok) throw new TaskError(r.why);
+          if (!r.ok) throw new FinishRefused(r.why);
           result = { mergeCommit: r.mergeCommit, note: `merged into ${r.into}` };
           removeInto = r.into;
           break;
         }
         case 'pull-request': {
           const r = await finisher.openPullRequest({ branch, baseRef: m.base.ref, title: m.title, body: pullRequestBody(m) });
-          if (!r.ok) throw new TaskError(r.why);
+          if (!r.ok) throw new FinishRefused(r.why);
           result = { pullRequestUrl: r.url };
           break;
         }
@@ -1737,29 +1822,123 @@ export class TaskRunner implements Disposable {
           result = { note: `discarded; the branches are kept until you delete them` };
           break;
       }
-      // Tidy up what can be tidied without losing anything; a refusal only means a tree stays.
-      for (const wt of this.need(missionId).worktrees) {
-        if (wt.state === 'removed' || wt.state === 'creating' || wt.state === 'in-use') continue;
-        try {
-          if (removeInto) {
-            const out = await manager.remove(wt, { mergedInto: removeInto });
-            if (!out.removed) await manager.release(wt, 'retained').catch(() => undefined);
-          } else if (how === 'discard') {
-            const head = await manager.headOf(wt).catch(() => undefined);
-            if (head) await manager.remove(wt, { mergedInto: head, deleteBranch: false });
-          } else if (wt.state === 'ready') {
-            await manager.release(wt, 'retained');
-          }
-        } catch (e) {
-          this.log(`mission ${missionId}: could not tidy ${wt.branch}: ${errorText(e)}`);
-        }
+    } catch (e) {
+      if (e instanceof FinishRefused) {
+        // The finisher's word: nothing changed (or, for a PR, only the push). Recorded, so the reason outlives the click.
+        this.endFinish(missionId, { how, why: e.message, at: this.now() });
+        throw e;
       }
-      m = { ...this.need(missionId), finish: how, finishResult: result };
-      m = transitionMission(m, how === 'discard' ? 'cancelled' : 'completed', { now: this.now(), reason: result?.note ?? how });
-      this.put(m);
-      this.log(`mission ${missionId}: finished (${how})`);
-      return m;
-    });
+      // Anything else may have happened after the side effect: read it back before anything is re-enabled.
+      this.log(`mission ${missionId}: ${how} stopped with an error; reading its outcome back: ${errorText(e)}`);
+      return this.settleAfterFault(missionId, how, e);
+    }
+    try {
+      return await this.completeFinish(missionId, how, result, removeInto);
+    } catch (e) {
+      // The merge happened but its record did not: the same read-back settles it, here or on the next start.
+      this.log(`mission ${missionId}: ${how} went through but could not be recorded; reading it back: ${errorText(e)}`);
+      return this.settleAfterFault(missionId, how, e);
+    }
+  }
+
+  private async settleAfterFault(missionId: string, how: MissionFinish, cause: unknown): Promise<Mission> {
+    const m = await this.settleFinish(missionId);
+    if (m.finish === how && (m.state === 'completed' || m.state === 'cancelled')) return m;
+    if (m.pendingFinish) {
+      throw new TaskError(
+        `The ${FINISH_NOUN[how]} stopped with an error (${errorText(cause)}), and whether it went through could not be read back (${m.pendingFinish.uncertain?.why ?? 'unknown'}). The finish buttons stay off until a check settles it.`,
+      );
+    }
+    throw new FinishRefused(m.finishFailure?.why ?? `The ${FINISH_NOUN[how]} did not go through: ${errorText(cause)}`);
+  }
+
+  /**
+   * Settle a recorded finish from what git (or `gh`) says actually happened:
+   * done → the mission completes as if the finish had just returned; not done
+   * → the record is cleared, with a reason, and the buttons come back; can't
+   * tell → the record stays, marked uncertain, and the buttons stay off.
+   * Runs inside the mission's queue.
+   */
+  private async settleFinish(missionId: string): Promise<Mission> {
+    const m = this.need(missionId);
+    const p = m.pendingFinish;
+    if (!p) return m;
+    let outcome: Reconciled;
+    try {
+      if (p.how === 'merge-local') {
+        const integration = m.integration !== 'none' && isPlanned(m) ? m.worktrees.find((w) => w.id === (m.integration as { worktreeId: string }).worktreeId) : undefined;
+        outcome = await this.finisherFor(m).reconcileMerge({
+          branch: p.branch,
+          baseRef: m.base.ref,
+          ...(p.into ? { into: p.into } : {}),
+          ...(p.baseTip ? { baseTip: p.baseTip } : {}),
+          ...(integration && integration.state !== 'removed' ? { integrationPath: integration.path } : {}),
+        });
+      } else if (p.how === 'pull-request') {
+        outcome = await this.finisherFor(m).reconcilePullRequest({ branch: p.branch });
+      } else {
+        // Keep and Discard touch nothing outside AW's own worktrees: cut off, they are simply picked again.
+        outcome = { state: 'not-done', note: 'Nothing outside Agent Wrangler’s own worktrees was touched.' };
+      }
+    } catch (e) {
+      outcome = { state: 'unknown', why: errorText(e) };
+    }
+    this.log(`mission ${missionId}: the ${p.how} recorded at ${new Date(p.at).toISOString()} reads back as ${outcome.state}`);
+    switch (outcome.state) {
+      case 'done': {
+        const result: Mission['finishResult'] =
+          p.how === 'pull-request'
+            ? { pullRequestUrl: outcome.url }
+            : { ...(outcome.mergeCommit ? { mergeCommit: outcome.mergeCommit } : {}), note: `merged into ${outcome.into ?? 'the base'} (confirmed from git after an interruption)` };
+        return this.completeFinish(missionId, p.how, result, p.how === 'merge-local' ? outcome.into : undefined);
+      }
+      case 'not-done':
+        this.endFinish(missionId, { how: p.how, why: `The ${FINISH_NOUN[p.how]} was interrupted before it finished. ${outcome.note} You can pick again.`, at: this.now() });
+        return this.need(missionId);
+      case 'unknown': {
+        const cur = this.need(missionId);
+        this.put({ ...cur, pendingFinish: { ...p, uncertain: { why: outcome.why, at: this.now() } } });
+        return this.need(missionId);
+      }
+    }
+  }
+
+  /** Clear the write-ahead record without finishing: the finish did not happen, and why. */
+  private endFinish(missionId: string, failure: Mission['finishFailure']): void {
+    const { pendingFinish: _gone, ...rest } = this.need(missionId);
+    this.put({ ...rest, ...(failure ? { finishFailure: failure } : {}) });
+  }
+
+  /** The finish happened: tidy what can be tidied, then record it, clearing the write-ahead record in the same write. */
+  private async completeFinish(missionId: string, how: MissionFinish, result: Mission['finishResult'], removeInto: string | undefined): Promise<Mission> {
+    const manager = await this.managerFor(this.need(missionId));
+    // Tidy up what can be tidied without losing anything; a refusal only means a tree stays.
+    for (const wt of this.need(missionId).worktrees) {
+      if (wt.state === 'removed' || wt.state === 'creating' || wt.state === 'in-use') continue;
+      try {
+        if (removeInto) {
+          const out = await manager.remove(wt, { mergedInto: removeInto });
+          if (!out.removed) await manager.release(wt, 'retained').catch(() => undefined);
+        } else if (how === 'discard') {
+          const head = await manager.headOf(wt).catch(() => undefined);
+          if (head) await manager.remove(wt, { mergedInto: head, deleteBranch: false });
+        } else if (wt.state === 'ready') {
+          await manager.release(wt, 'retained');
+        }
+      } catch (e) {
+        this.log(`mission ${missionId}: could not tidy ${wt.branch}: ${errorText(e)}`);
+      }
+    }
+    const { pendingFinish: _done, finishFailure: _old, ...rest } = this.need(missionId);
+    let m: Mission = { ...rest, finish: how, finishResult: result };
+    m = transitionMission(m, how === 'discard' ? 'cancelled' : 'completed', { now: this.now(), reason: result?.note ?? how });
+    this.put(m);
+    this.log(`mission ${missionId}: finished (${how})`);
+    return m;
+  }
+
+  private finisherFor(m: Mission): MissionFinisher {
+    return new MissionFinisher({ exec: this.deps.exec ?? nodeExec, repoRoot: m.repoRoot, log: this.log });
   }
 
   /** The gated merge of a planned mission's branch into the base: the repository's gate runs on the merged result (#46). */
@@ -2751,6 +2930,12 @@ export class TaskRunner implements Disposable {
     if (m.pendingMerge) {
       await this.recoverMerge(id);
       m = this.need(id);
+    }
+    // A finish (Merge locally, Open a PR …) cut off by the restart: settled from git, not re-run.
+    if (m.pendingFinish) {
+      await this.settleFinish(id).catch((e) => this.log(`task ${id}: could not settle its cut-off finish: ${errorText(e)}`));
+      m = this.need(id);
+      if (m.state !== 'review') return;
     }
     if (m.parallel) {
       await this.recoverParallel(id, branchGone);

@@ -22,7 +22,14 @@ import { sortSubagents, subagentText } from '../../shared/subagents';
 import { taskChips } from '../../shared/orchestration/taskView';
 import { certaintyText, linkedChip, waitingReasonChip, waitReasonText, type RowChip } from '../../shared/orchestration/delegatedLabels';
 import type { MissionsSnapshot } from '../../shared/orchestration/missionView';
-import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, type MissionIntent } from './missions';
+import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, pendingKeyOf, type MissionIntent } from './missions';
+
+/**
+ * How long the pane alone keeps a button busy without an answer from the
+ * host (a lost message, a host reload). A finish that really is under way
+ * stays off past this on the host's word (`MissionView.finishing`).
+ */
+const PENDING_MAX_AGE_MS = 10 * 60_000;
 import { analyticsClickRef, analyticsDecision, analyticsFilterChange, analyticsHtml } from './analytics';
 import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestration/analyticsView';
 import { orderProjects } from '../../shared/projectOrder';
@@ -211,8 +218,12 @@ function paint(html: string): void {
     typing instanceof HTMLInputElement && typing.classList.contains('qother')
       ? { draft: typing.closest<HTMLElement>('.qstep')?.dataset.draft, at: typing.selectionStart }
       : undefined;
+  // A button pressed from the keyboard turns busy in the next paint; it keeps the focus (`data-fk`), so
+  // Tab order and the screen reader's place survive the "Merging…" re-render.
+  const fk = typing instanceof HTMLElement && app.contains(typing) ? typing.dataset.fk : undefined;
   app.innerHTML = html;
   applyStyles(app);
+  if (fk) app.querySelector<HTMLElement>(`[data-fk="${CSS.escape(fk)}"]`)?.focus();
   if (focused?.draft) {
     const restored = app.querySelector<HTMLInputElement>(`.qstep[data-draft="${CSS.escape(focused.draft)}"] .qother`);
     if (restored) {
@@ -1549,7 +1560,12 @@ vscodeApi.onMessage((body) => {
   }
   if (m.type === 'missionError') {
     missionsUi.errors.set(m.missionId, m.text);
+    if (m.requestId) missionsUi.pending.settle(m.requestId);
     render();
+    return;
+  }
+  if (m.type === 'missionAck') {
+    if (missionsUi.pending.settle(m.requestId) !== undefined) render();
     return;
   }
   if (m.type === 'projectPicked') {
@@ -2041,10 +2057,21 @@ function runMissionIntent(intent: MissionIntent): void {
       missionsUi.errors.delete(intent.missionId);
       render();
       return;
-    case 'op':
+    case 'op': {
+      // The pending-action pattern (docs/plans/pending-actions.md): a slow action's button is busy from the
+      // click, and a second press while it is in flight sends nothing. The host's answer (`missionAck`) ends it.
+      const pending = pendingKeyOf(intent.missionId, intent.op);
+      let requestId: string | undefined;
+      if (pending) {
+        missionsUi.pending.expire(Date.now(), PENDING_MAX_AGE_MS);
+        requestId = missionsUi.pending.begin(pending.key, pending.label);
+        if (!requestId) return;
+      }
       missionsUi.errors.delete(intent.missionId);
-      post({ type: 'mission', missionId: intent.missionId, op: intent.op, provider: launchProvider === 'openai' ? 'codex' : 'claude' });
+      post({ type: 'mission', missionId: intent.missionId, op: intent.op, provider: launchProvider === 'openai' ? 'codex' : 'claude', ...(requestId ? { requestId } : {}) });
+      if (requestId) render();
       return;
+    }
   }
 }
 

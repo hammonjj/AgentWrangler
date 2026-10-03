@@ -346,15 +346,17 @@ export class DashboardHost {
   }
 
   /** A Missions view click. A refusal comes back beside the mission it was about. */
-  private async runMission(missionId: string, op: MissionOp, provider: 'claude' | 'codex'): Promise<void> {
+  private async runMission(missionId: string, op: MissionOp, provider: 'claude' | 'codex', requestId?: string): Promise<void> {
     if (!this.missions) return;
     try {
       await this.missions.run(missionId, op, provider);
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      void this.webview.postMessage({ type: 'missionError', missionId, text } satisfies HostToDashboard);
+      void this.webview.postMessage({ type: 'missionError', missionId, text, ...(requestId ? { requestId } : {}) } satisfies HostToDashboard);
     }
-    this.pushSnapshot();
+    await this.pushSnapshotAsync().catch(() => undefined);
+    // After the snapshot: the pane drops its own pending state once the host's state shows the outcome.
+    if (requestId) void this.webview.postMessage({ type: 'missionAck', missionId, requestId } satisfies HostToDashboard);
   }
 
   private async newMission(cwd: string): Promise<void> {
@@ -460,7 +462,7 @@ export class DashboardHost {
         break;
       case 'mission':
         if (typeof m.missionId === 'string' && m.op && typeof m.op === 'object') {
-          void this.runMission(m.missionId, m.op, m.provider === 'codex' ? 'codex' : 'claude');
+          void this.runMission(m.missionId, m.op, m.provider === 'codex' ? 'codex' : 'claude', typeof m.requestId === 'string' ? m.requestId : undefined);
         }
         break;
       case 'browseProject':

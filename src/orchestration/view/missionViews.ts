@@ -128,6 +128,18 @@ export interface MissionViewContext {
   finishDefault?: MissionFinish;
   /** A planner is running here (#44), so Plan again and Replan can be offered. */
   canPlan?: boolean;
+  /**
+   * The finish under way: the task runner's `finishingOf(missionId)`, which
+   * also knows one asked for in this run and not yet recorded. Absent: read
+   * from the mission's own write-ahead record.
+   */
+  finishing?: { how: MissionFinish; uncertain?: string };
+}
+
+/** The finish a mission's record says is under way, when nothing fresher is known. */
+function recordedFinishing(m: Mission): MissionView['finishing'] {
+  const p = m.pendingFinish;
+  return p ? { how: p.how, ...(p.uncertain ? { uncertain: p.uncertain.why } : {}) } : undefined;
 }
 
 /** The planner's latest run as review shows it (#44). */
@@ -250,6 +262,8 @@ export function missionViewOf(m: Mission, ctx: MissionViewContext): MissionView 
       : {}),
     ...(m.finish ? { finish: m.finish } : {}),
     ...(m.finishResult ? { finishResult: m.finishResult } : {}),
+    ...(m.state === 'review' && (ctx.finishing ?? recordedFinishing(m)) ? { finishing: ctx.finishing ?? recordedFinishing(m) } : {}),
+    ...(m.state === 'review' && m.finishFailure ? { finishFailure: { how: m.finishFailure.how, why: m.finishFailure.why } } : {}),
     canCancel: !['completed', 'cancelled', 'failed', 'review'].includes(m.state),
     canPause: m.planned === true && m.state === 'running',
     canResume: m.state === 'paused',

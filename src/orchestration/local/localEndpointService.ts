@@ -212,8 +212,13 @@ export class LocalEndpointService implements Disposable {
       this.log(`local: probed ${id}: ${probe.reachable ? `${probe.models.length} model(s)` : `unreachable (${probe.error})`}`);
       this.changed();
       if (st.health.state === 'down' && was !== 'down') this.downEmitter.fire(endpointSource(id));
-    })().finally(() => this.probing.delete(id));
+    })().finally(() => {
+      this.probing.delete(id);
+      this.changed();
+    });
     this.probing.set(id, p);
+    // Preferences draws Probe as "Probing…" from `busy`: say so now, not when the probe is over.
+    this.changed();
     return p;
   }
 

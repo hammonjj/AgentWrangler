@@ -179,10 +179,96 @@ export class MissionFinisher {
     return { ok: true, url };
   }
 
+  /**
+   * The base branch a merge would go into, and its tip now: recorded before
+   * the merge (write-ahead) so that a cut-off merge can be judged afterwards.
+   * Undefined when the checkout is not on a branch; the merge refuses that itself.
+   */
+  async baseTipOf(baseRef: string): Promise<{ into: string; tip: string } | undefined> {
+    let into = baseBranch(baseRef);
+    if (!into) {
+      const current = await this.git(['symbolic-ref', '--quiet', '--short', 'HEAD']);
+      into = current.code === 0 ? current.stdout.trim() || undefined : undefined;
+    }
+    if (!into) return undefined;
+    const tip = await this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${into}`]);
+    return tip.code === 0 ? { into, tip: tip.stdout.trim() } : undefined;
+  }
+
+  /**
+   * Did a merge that was cut off (a restart, or a fault before its outcome was
+   * recorded) go through? Read from git, never assumed: the result branch is
+   * in the base branch, or it is not. A merge left half-made by AW — in the
+   * primary checkout, or in the integration worktree — is aborted first, and
+   * the integration worktree is put back on the mission branch, so that "not
+   * merged" also means "nothing half-done is left behind".
+   */
+  async reconcileMerge(opts: { branch: string; baseRef: string; into?: string; baseTip?: string; integrationPath?: string }): Promise<Reconciled> {
+    if (!opts.branch.startsWith('aw/')) return { state: 'unknown', why: `${opts.branch} is not a branch Agent Wrangler made.` };
+    const tipRead = await this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${opts.branch}`]);
+    if (tipRead.failure === 'spawn') return { state: 'unknown', why: 'git could not be run.' };
+    if (tipRead.code !== 0) return { state: 'unknown', why: `${opts.branch} is gone, so whether it was merged cannot be read.` };
+    const branchTip = tipRead.stdout.trim();
+
+    const tree = opts.integrationPath;
+    if (tree) {
+      const inTree = (args: string[]) => this.deps.exec('git', args, { cwd: tree });
+      if ((await inTree(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])).code === 0) await inTree(['merge', '--abort']);
+      const on = await inTree(['symbolic-ref', '--quiet', '--short', 'HEAD']);
+      if (on.failure !== 'spawn' && on.stdout.trim() !== opts.branch) {
+        const back = await inTree(['checkout', '--quiet', opts.branch]);
+        if (back.code !== 0) this.log(`could not put the integration worktree back on ${opts.branch}: ${back.stderr.trim()}`);
+      }
+    }
+    // Only a merge of this very branch is AW's to abort; anything else in progress is the user's.
+    const mergeHead = await this.git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
+    if (mergeHead.code === 0 && mergeHead.stdout.trim() === branchTip) await this.git(['merge', '--abort']);
+
+    let into = opts.into ?? baseBranch(opts.baseRef);
+    if (!into) {
+      const current = await this.git(['symbolic-ref', '--quiet', '--short', 'HEAD']);
+      into = current.code === 0 ? current.stdout.trim() || undefined : undefined;
+    }
+    if (!into) return { state: 'unknown', why: 'Cannot tell which branch the merge was going into.' };
+    const contained = await this.git(['merge-base', '--is-ancestor', branchTip, `refs/heads/${into}`]);
+    if (contained.code === 1) return { state: 'not-done', note: `${opts.branch} is not in ${into}: the merge did not happen, and nothing was left half-done.` };
+    if (contained.code !== 0) return { state: 'unknown', why: `Could not compare ${opts.branch} with ${into}: ${contained.stderr.trim() || `exit ${contained.code}`}` };
+
+    // Merged. The merge commit is the first-parent merge whose second parent is the branch's tip.
+    let mergeCommit: string | undefined;
+    if (opts.baseTip) {
+      const merges = await this.git(['rev-list', '--first-parent', '--merges', '--parents', `${opts.baseTip}..refs/heads/${into}`]);
+      mergeCommit = merges.stdout
+        .split('\n')
+        .map((l) => l.trim().split(' '))
+        .find((ids) => ids.slice(1).includes(branchTip))?.[0];
+    }
+    if (!mergeCommit) mergeCommit = (await this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${into}`])).stdout.trim() || undefined;
+    return { state: 'done', into, ...(mergeCommit ? { mergeCommit } : {}) };
+  }
+
+  /** Was a pull request opened for the branch? Read from `gh`; "no" only when `gh` answered. */
+  async reconcilePullRequest(opts: { branch: string }): Promise<Reconciled> {
+    const pr = await this.deps.exec('gh', ['pr', 'list', '--head', opts.branch, '--state', 'all', '--json', 'url', '--jq', '.[0].url'], { cwd: this.deps.repoRoot, timeoutMs: PUSH_TIMEOUT_MS });
+    if (pr.code !== 0) {
+      const why = pr.failure === 'spawn' ? 'the GitHub CLI (gh) is not installed' : pr.stderr.trim().split('\n').slice(-2).join(' ') || `exit ${pr.code}`;
+      return { state: 'unknown', why: `Could not ask GitHub whether the pull request was opened: ${why}` };
+    }
+    const url = pr.stdout.trim().split('\n').filter(Boolean).at(-1);
+    return url ? { state: 'done', url } : { state: 'not-done', note: `No pull request was opened for ${opts.branch}.` };
+  }
+
   private git(args: string[], timeoutMs?: number) {
     return this.deps.exec('git', args, { cwd: this.deps.repoRoot, timeoutMs });
   }
 }
+
+/** What a cut-off finish turned out to have done, read back from git or GitHub. */
+export type Reconciled =
+  | { state: 'done'; mergeCommit?: string; into?: string; url?: string }
+  | { state: 'not-done'; note: string }
+  /** The record cannot be settled from here: the finish buttons stay off. */
+  | { state: 'unknown'; why: string };
 
 /** A branch name from a base ref: `main`, `refs/heads/main` → `main`; `HEAD` or a commit → undefined. */
 export function baseBranch(ref: string): string | undefined {
