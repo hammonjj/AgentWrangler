@@ -80,9 +80,8 @@ in the app), *Release* (hands it back to a terminal), *Close session* (ends the 
 parks the conversation), *Resume here* for ended sessions, auto-resume of the last session
 after a reload.
 
-**Lifecycle** — Claude conversations can run in **session hosts** (one small detached process
-each, the *Keep conversations running when Agent Wrangler quits* setting, experimental and off
-by default until its default flip): they survive ⌘Q, a crash and a reinstall, reattach on
+**Lifecycle** — Claude conversations run in **session hosts** (one small detached process
+each; since #122 the only way, with no setting): they survive ⌘Q, a crash and a reinstall, reattach on
 relaunch, move to the new build on their next idle message, and are parked after
 *End idle sessions with no Agent Wrangler connected after* (default 24 h) with the app closed.
 ⌥⌘Q (*Quit and Stop All Agents*) ends them; a logout or reboot does too. Codex threads run in

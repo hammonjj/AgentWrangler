@@ -87,17 +87,17 @@ Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
 
 ## Hard rules
 
-- **Restarting the app is allowed, when it cannot end a conversation.** Quitting and
-  reinstalling no longer end hosted sessions: with session hosts on
-  (`"experimental.sessionHosts": true` in `~/Library/Application Support/Agent Wrangler/settings.json`,
-  or the default once #15's flip lands), Claude conversations run in hosts that survive a quit
-  and reattach on relaunch. Codex threads already survive a quit. Restart with
+- **Restarting the app is allowed, when it cannot end a conversation.** Every Claude
+  conversation runs in a session host that survives a quit and reattaches on relaunch; there
+  is no in-process mode and no setting for one (#122). Codex threads survive a quit on the
+  background Codex server (the default). Restart with
   `osascript -e 'quit app "Agent Wrangler"'`, wait for the process to exit, then
   `open -g -a "Agent Wrangler"` (`-g`: never bring it to the front, it must not steal focus),
   and say that you did and which tree the installed build came from. Don't restart if:
-  - the setting is off, or any Claude conversation in the app predates it (`aw status` says
-    how many survive a quit). In-process conversations end with the app, and you may be one
-    of them (`AGENTWRANGLER_HOSTED=1` in your environment means you are in a host);
+  - `aw status` reports any session that ends with the app (a Codex thread with the
+    background server off, or, until the build with #122 is installed, an in-process Claude
+    conversation). You may be one of them: `AGENTWRANGLER_HOSTED=1` in your environment
+    means you are in a host;
   - another agent is mid-`app:install`;
   - a host shows as unreachable. It would stay unreachable after the restart too.
 
