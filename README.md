@@ -530,8 +530,9 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
   It is then local everywhere: on by default, no warning, `local` for routing, `local-only`
   caps and *prefer local*. On any other host the field is ignored. See
   [Serving from another machine](#serving-from-another-machine-on-your-network).
-- **Keys** go in the system keychain (`safeStorage`), never in settings. Storing refuses when
-  the OS cannot encrypt. A Codex thread on the endpoint gets the key per request, and the key
+- **Keys** go in the macOS login Keychain, never in settings (see
+  [Where secrets are kept](#where-secrets-are-kept)). Storing refuses when the Keychain cannot
+  be reached. A Codex thread on the endpoint gets the key per request, and the key
   is never written to the session registry. For a native `/v1/messages` Claude Code session, the
   core resolves the key reference and passes the key to its session host over the authenticated
   socket after boot. Only that session's SDK environment gets the endpoint URL, key (or dummy),
@@ -807,7 +808,7 @@ not already offering.
    bot simply ignoring you.
 5. **Connect Discord…** from the app menu, and paste the token. It is checked
    against Discord before it is saved, so a typo fails there rather than later
-   as a connection error. It goes to the **system keychain**, never to
+   as a connection error. It goes to the **macOS login Keychain**, never to
    `settings.json`.
 6. In **Preferences → Experimental**, fill in the server ID, the channel ID and
    the Discord user IDs allowed to answer. Turn Developer Mode on in Discord
@@ -914,9 +915,9 @@ the thing, and a plan you have read half of is exactly the mistake to avoid.
 **What it does not do yet.** There is no Slack transport, no chat, and no way to
 start or stop an agent remotely.
 
-**Security.** The token is in the keychain, encrypted by the OS, in its own file
-at mode 0600 — never in settings, never logged, and stripped from error
-messages. Presses are accepted only from the configured server and channel, only
+**Security.** The token is in the macOS login Keychain (see
+[Where secrets are kept](#where-secrets-are-kept)) — never in settings, never
+logged, and stripped from error messages. Presses are accepted only from the configured server and channel, only
 from a listed user ID (never a username: those can be changed and reused), and
 only for a prompt Agent Wrangler still has open — a press on a card whose prompt
 has since been answered cannot land on whatever replaced it. Commands are
@@ -949,6 +950,29 @@ first time.
 half-second, whichever decision file lands last wins. This is the same race
 Claude Code's own dialog already has with Agent Wrangler's buttons, and it is
 documented rather than arbitrated.
+
+## Where secrets are kept
+
+The Discord bot token and local-endpoint API keys are items in the macOS **login Keychain**:
+service **Agent Wrangler**, one item per secret, with the secret's key as the account
+(`remote.discord.botToken`, `localEndpoint:<id>`). Keychain Access lists them under
+*Agent Wrangler*.
+
+They are written and read with `/usr/bin/security`. A write sends the command on stdin
+(`security -i`), so the secret never appears in a process's arguments, where `ps` would show
+it. The items' access list trusts `/usr/bin/security`, which does not change when Agent
+Wrangler is rebuilt, so there is no Keychain prompt per build. Secrets must be printable ASCII
+(every token and API key is). Code that needs secrets uses `src/core/keychainSecrets.ts`, which
+does not depend on Electron.
+
+**Upgrading from a build that used `safeStorage`.** Earlier builds kept secrets as Electron
+`safeStorage` ciphertext in `secrets.json` in the app's data folder. On the first start of a
+build with the Keychain store, the app decrypts each entry, writes it to the Keychain, reads it
+back to check, and then deletes `secrets.json`. macOS may first ask to let Agent Wrangler use
+*Agent Wrangler Safe Storage*, as earlier builds sometimes did. If any entry fails, the
+file is kept with just the failed entries, the log says which keys failed (never their values),
+and the next start tries again. Entries that already moved are not written again. This
+migration needs Electron, so it has to ship at least one release before Electron is removed.
 
 ## How status is detected
 
