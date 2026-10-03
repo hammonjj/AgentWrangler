@@ -53,6 +53,18 @@ export interface ElectronHostOptions {
   sessionHosts: HostServices['sessionHosts'];
   /** The remote daemon's LaunchAgent. Built by `main.ts`, for the same reason. */
   remoteDaemon?: HostServices['remoteDaemon'];
+  /**
+   * What the app is given as `dialogs`, made from the native ones (#126):
+   * `main.ts` hands back the client registry's scoped dialogs, and keeps the
+   * native ones for the window's own client. Absent, the native ones.
+   */
+  scopeDialogs?(native: HostDialogs): HostDialogs;
+  /**
+   * Run a notification's click as the user at this Mac (#126): a click on a
+   * banner is the window client's request, so what it opens or asks lands
+   * in the window.
+   */
+  asLocalUser?(fn: () => void): void;
 }
 
 /**
@@ -194,7 +206,7 @@ function notifierFor(opts: ElectronHostOptions): HostServices['notify'] {
     const drop = () => live.delete(n);
     n.on('click', () => {
       drop();
-      onClick?.();
+      if (onClick) (opts.asLocalUser ?? ((fn: () => void) => fn()))(onClick);
     });
     n.on('close', drop);
     n.on('failed', (_event, error) => {
@@ -239,7 +251,7 @@ export function createElectronHost(opts: ElectronHostOptions): ElectronHost {
     remoteDaemon: opts.remoteDaemon,
     storageDir,
     dataDir: userDataDir,
-    dialogs: dialogsFor(opts),
+    dialogs: opts.scopeDialogs ? opts.scopeDialogs(dialogsFor(opts)) : dialogsFor(opts),
     shell: shellFor(opts),
     clipboard: { writeText: async (text) => clipboard.writeText(text) },
     notify: notifierFor(opts),

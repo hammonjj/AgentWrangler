@@ -1,0 +1,305 @@
+/**
+ * The clients connected to the app, and the dialogs and surface that reach the
+ * right one (#126, `docs/plans/browser-workbench.md` §7.3).
+ *
+ * A client is one document the user is looking at: the Electron window, or one
+ * browser tab. Each registers a `ClientChannel`: how to ask it something, how
+ * to show it a line of feedback, and how to point its conversation pane
+ * somewhere. The registry then offers one `HostDialogs` and one
+ * `WorkbenchSurface` to the rest of the app, as before, but scoped: a call made
+ * while handling a client's request (`currentRequest()`, see
+ * `requestScope.ts`) goes to that client and no other.
+ *
+ * With no originating client, because the app is acting by itself
+ * (notifications, startup checks, orchestration, `aw`, Discord) or because
+ * the client that asked has gone:
+ *
+ * - a toast goes to every client;
+ * - a prompt is not shown anywhere. Its text goes to every client as a toast
+ *   and it resolves as cancelled at once, which is each prompt's
+ *   non-interactive default. Nothing ever waits on a modal nobody can see;
+ * - navigation goes to the fallback client (the Electron window) if it is
+ *   open, else nowhere.
+ *
+ * A prompt whose client disconnects while it is open resolves as cancelled.
+ */
+import type { RequestContext } from './access';
+import type { Disposable } from './events';
+import { currentRequest } from './requestScope';
+import type { SessionHandle } from './session/sessionHandle';
+import type { HostDialogs, InputOptions, PickItem, WorkbenchSurface } from '../host/hostServices';
+import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
+import type { ShellPrompt, ShellPromptValue } from '../shared/shellProtocol';
+
+/** Where a client's conversation pane should go. */
+export type NavigateTarget =
+  | { kind: 'open'; preserveFocus?: boolean }
+  | { kind: 'session'; key: string; preserveFocus?: boolean }
+  | { kind: 'handle'; handle: SessionHandle; preserveFocus?: boolean }
+  | { kind: 'tab'; key: string }
+  | { kind: 'detail'; detail: AnalyticsDetail };
+
+/**
+ * A prompt as the app asks it: the wire shape, plus what cannot cross a wire.
+ * `validateInput` is checked live by a client that can (the palette) and on
+ * each answer by one that cannot.
+ */
+export type ClientPrompt = ShellPrompt & { validateInput?: (value: string) => string | undefined };
+
+export interface ClientChannel {
+  /** The `RequestContext.connectionId` its requests carry. */
+  readonly connectionId: string;
+  /** On screen now: the window is open, the tab is connected. */
+  readonly isOpen: boolean;
+  /** Ask; resolves with the answer, or undefined for cancelled. See `ShellPromptValue`. */
+  prompt(request: ClientPrompt): Promise<ShellPromptValue>;
+  toast(text: string, timeoutMs?: number): void;
+  navigate(target: NavigateTarget): void;
+}
+
+export interface ClientRegistryOptions {
+  log(message: string): void;
+  /**
+   * The client that navigation with no originating client goes to, if it is
+   * open: the Electron window, while there is one.
+   */
+  navigationFallback?: string;
+}
+
+interface Entry {
+  channel: ClientChannel;
+  /** Resolves when the client unregisters; every prompt open on it races this. */
+  gone: Promise<void>;
+  leave(): void;
+}
+
+export class ClientRegistry {
+  private readonly clients = new Map<string, Entry>();
+  /** Scoped to the originating client. Hand this to the app as `host.dialogs`. */
+  readonly dialogs: HostDialogs;
+  /** Scoped to the originating client. Hand this to the app as its surface. */
+  readonly surface: WorkbenchSurface;
+
+  constructor(private readonly opts: ClientRegistryOptions) {
+    this.dialogs = this.createDialogs();
+    this.surface = this.createSurface();
+  }
+
+  /** Connect a client. Disposing it disconnects it, and cancels whatever it was being asked. */
+  register(channel: ClientChannel): Disposable {
+    if (this.clients.has(channel.connectionId)) throw new Error(`client ${channel.connectionId} is already registered`);
+    let leave!: () => void;
+    const gone = new Promise<void>((resolve) => (leave = resolve));
+    const entry: Entry = { channel, gone, leave };
+    this.clients.set(channel.connectionId, entry);
+    return {
+      dispose: () => {
+        if (this.clients.get(channel.connectionId) !== entry) return;
+        this.clients.delete(channel.connectionId);
+        entry.leave();
+      },
+    };
+  }
+
+  get size(): number {
+    return this.clients.size;
+  }
+
+  get(connectionId: string): ClientChannel | undefined {
+    return this.clients.get(connectionId)?.channel;
+  }
+
+  /** The client the request being handled came from, while it is still connected. */
+  originating(ctx: RequestContext | undefined = currentRequest()): ClientChannel | undefined {
+    return this.entryFor(ctx)?.channel;
+  }
+
+  /** A line to every client: how the app tells everyone something nobody in particular asked for. */
+  broadcast(text: string, timeoutMs?: number): void {
+    for (const { channel } of this.clients.values()) {
+      try {
+        channel.toast(text, timeoutMs);
+      } catch (err) {
+        this.opts.log(`clients: toast to ${channel.connectionId} failed: ${String(err)}`);
+      }
+    }
+  }
+
+  private entryFor(ctx: RequestContext | undefined): Entry | undefined {
+    const id = ctx?.connectionId;
+    return id === undefined ? undefined : this.clients.get(id);
+  }
+
+  /**
+   * Ask the originating client, or nobody. `notice` is what everyone is told
+   * instead when there is nobody to ask.
+   */
+  private async ask(request: ClientPrompt, notice: string | undefined): Promise<ShellPromptValue> {
+    const entry = this.entryFor(currentRequest());
+    if (!entry) {
+      this.opts.log(`clients: no client to ask (${request.kind}); taking the default`);
+      if (notice) this.broadcast(notice);
+      return undefined;
+    }
+    let answer: Promise<ShellPromptValue>;
+    try {
+      answer = Promise.resolve(entry.channel.prompt(request));
+    } catch (err) {
+      this.opts.log(`clients: prompt on ${entry.channel.connectionId} failed: ${String(err)}`);
+      return undefined;
+    }
+    return Promise.race([
+      answer.catch((err: unknown) => {
+        this.opts.log(`clients: prompt on ${entry.channel.connectionId} failed: ${String(err)}`);
+        return undefined;
+      }),
+      entry.gone.then(() => undefined),
+    ]);
+  }
+
+  private createDialogs(): HostDialogs {
+    const label = (value: ShellPromptValue, items: string[]) =>
+      typeof value === 'string' && items.includes(value) ? value : undefined;
+    return {
+      info: async (message, ...items) => label(await this.ask({ kind: 'message', level: 'info', message, items }, message), items),
+      warn: async (message, options, ...items) =>
+        label(
+          await this.ask(
+            {
+              kind: 'message',
+              level: 'warn',
+              message,
+              items,
+              ...(options.detail !== undefined ? { detail: options.detail } : {}),
+              ...(options.modal ? { modal: true } : {}),
+              ...(options.defaultToCancel ? { defaultToCancel: true } : {}),
+            },
+            message,
+          ),
+          items,
+        ),
+      error: (message) => {
+        void this.ask({ kind: 'message', level: 'error', message, items: [] }, message);
+      },
+      flash: (message, timeoutMs) => {
+        const client = this.originating();
+        if (client) client.toast(message, timeoutMs);
+        else this.broadcast(message, timeoutMs);
+      },
+      input: async (options) => {
+        const value = await this.ask(
+          {
+            kind: 'input',
+            ...pickDefined(options, ['title', 'prompt', 'value', 'placeHolder', 'password']),
+            ...(options.validateInput ? { validateInput: options.validateInput } : {}),
+          },
+          `${options.title ?? options.prompt ?? 'A question'}: no window to answer it in, so it was cancelled.`,
+        );
+        return typeof value === 'string' ? value : undefined;
+      },
+      pick: async <T extends PickItem>(items: T[], options?: Parameters<HostDialogs['pick']>[1]) => {
+        const value = await this.ask(
+          {
+            kind: 'pick',
+            items: items.map((i) => pickDefined(i, ['label', 'description', 'detail'])),
+            ...pickDefined(options ?? {}, ['placeHolder', 'matchOnDescription', 'matchOnDetail']),
+          },
+          `${options?.placeHolder ?? 'A choice'}: no window to choose in, so nothing was chosen.`,
+        );
+        return typeof value === 'number' && Number.isInteger(value) ? items[value] : undefined;
+      },
+      pickFolder: async (options) => {
+        const value = await this.ask(
+          { kind: 'pickFolder', ...(options?.openLabel !== undefined ? { openLabel: options.openLabel } : {}) },
+          'Choosing a folder needs a window, so it was cancelled.',
+        );
+        return typeof value === 'string' && value ? value : undefined;
+      },
+    };
+  }
+
+  private createSurface(): WorkbenchSurface {
+    const registry = this;
+    /** The originating client, or the fallback while it is open. */
+    const target = (): ClientChannel | undefined => {
+      const client = registry.originating();
+      if (client) return client;
+      const fallback = registry.opts.navigationFallback !== undefined ? registry.get(registry.opts.navigationFallback) : undefined;
+      return fallback?.isOpen ? fallback : undefined;
+    };
+    const go = (to: NavigateTarget) => target()?.navigate(to);
+    return {
+      /** The originating client's; with none, whether any client is on screen. */
+      get isOpen() {
+        const client = registry.originating();
+        if (client) return client.isOpen;
+        for (const { channel } of registry.clients.values()) if (channel.isOpen) return true;
+        return false;
+      },
+      open: (options) => go({ kind: 'open', ...options }),
+      show: (key, options) => go({ kind: 'session', key, ...options }),
+      showSession: (handle, options) => go({ kind: 'handle', handle, ...options }),
+      openInTab: (key) => go({ kind: 'tab', key }),
+      showDetail: (detail) => go({ kind: 'detail', detail }),
+    };
+  }
+}
+
+/**
+ * A channel over an ordinary `HostDialogs` and a navigator: the Electron
+ * window's (native dialogs and its palette), and a test's.
+ */
+export function channelFromDialogs(opts: {
+  connectionId: string;
+  dialogs: HostDialogs;
+  isOpen: () => boolean;
+  navigate: (target: NavigateTarget) => void;
+}): ClientChannel {
+  const { dialogs } = opts;
+  return {
+    connectionId: opts.connectionId,
+    get isOpen() {
+      return opts.isOpen();
+    },
+    prompt: async (request) => {
+      switch (request.kind) {
+        case 'message':
+          if (request.level === 'error') {
+            dialogs.error(request.message);
+            return undefined;
+          }
+          if (request.level === 'info' && request.detail === undefined && !request.modal && !request.defaultToCancel) {
+            return dialogs.info(request.message, ...request.items);
+          }
+          return dialogs.warn(
+            request.message,
+            pickDefined(request, ['detail', 'modal', 'defaultToCancel']),
+            ...request.items,
+          );
+        case 'input': {
+          const options: InputOptions = pickDefined(request, ['title', 'prompt', 'value', 'placeHolder', 'password']);
+          if (request.validateInput) options.validateInput = request.validateInput;
+          return dialogs.input(options);
+        }
+        case 'pick': {
+          const picked = await dialogs.pick(
+            request.items.map((item, index) => ({ ...item, index })),
+            pickDefined(request, ['placeHolder', 'matchOnDescription', 'matchOnDetail']),
+          );
+          return picked?.index;
+        }
+        case 'pickFolder':
+          return dialogs.pickFolder(request.openLabel !== undefined ? { openLabel: request.openLabel } : undefined);
+      }
+    },
+    toast: (text, timeoutMs) => dialogs.flash(text, timeoutMs),
+    navigate: opts.navigate,
+  };
+}
+
+/** The named fields of `from` that are set: what crosses a wire, with no `undefined`s or functions. */
+function pickDefined<T extends object, K extends keyof T>(from: T, keys: K[]): Pick<T, K> {
+  const out = {} as Pick<T, K>;
+  for (const k of keys) if (from[k] !== undefined) out[k] = from[k];
+  return out;
+}

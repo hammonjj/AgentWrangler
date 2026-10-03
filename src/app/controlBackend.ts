@@ -29,6 +29,7 @@ import { displayTitle, type AgentSession } from '../shared/model';
 import { TaskError } from '../orchestration/engine/taskRunner';
 import type { AgentWranglerApp } from './createApp';
 import { ownerContext, sessionRef, type AccessGate, type ActionName, type RequestContext } from '../core/access';
+import { scopedMethods } from '../core/requestScope';
 
 export interface ControlBackendDeps {
   build: string;
@@ -106,7 +107,10 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
   // Pinned: the wire's unions must cover the UI's (see protocol.ts's header).
   const lifecycleOf = (h: SessionHandle | undefined): ControlLifecycle | undefined => h?.lifecycle;
 
-  return {
+  // Every method runs as `aw` (#126): it has no window of its own, so a prompt
+  // anything here causes takes its default rather than appearing on whichever
+  // client last did something, and its feedback goes to every client.
+  return scopedMethods<ControlBackend>(CLI_CONTEXT, {
     describe,
 
     status(): ControlStatusResult {
@@ -229,7 +233,7 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       }
       return link;
     },
-  };
+  });
 }
 
 /**

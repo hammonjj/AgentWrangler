@@ -11,6 +11,7 @@
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import type { Disposable } from '../../core/events';
+import { outsideRequest } from '../../core/requestScope';
 import { NdjsonPeer, type IncomingRequest } from '../../core/rpc/ndjsonPeer';
 import type { SessionDTO } from '../../shared/model';
 import type { RemoteNotice } from '../../shared/remote';
@@ -186,7 +187,8 @@ export class RemoteDaemonLink implements Disposable {
   private async connect(): Promise<Promise<void>> {
     const token = fs.readFileSync(this.opts.paths.tokenPath, 'utf8').trim();
     const socket = await new Promise<net.Socket>((resolve, reject) => {
-      const s = net.createConnection(this.opts.paths.socketPath);
+      // Outlives whichever request opened it: its events are the app's own (#126).
+      const s = outsideRequest(() => net.createConnection(this.opts.paths.socketPath));
       s.once('connect', () => resolve(s));
       s.once('error', reject);
     });

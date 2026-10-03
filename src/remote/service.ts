@@ -39,6 +39,10 @@ import type { AuditLog } from './audit';
 import { MirrorStore, type Mirror } from './mirrorStore';
 import { redactForDisplay } from './redact';
 import type { RemoteClose, RemoteInvocation, RemoteTransport } from './transport';
+import { runInRequest } from '../core/requestScope';
+
+/** A press from an allow-listed Discord user: the owner, via 'discord' (#123). */
+const DISCORD_CONTEXT = ownerContext('discord');
 
 /** Just enough of the store to reconcile against, so tests need no real one. */
 export interface SessionSnapshot {
@@ -274,7 +278,10 @@ export class RemoteControlService implements Disposable {
    * posted, which may be minutes or an agent ago.
    */
   private onInvoke(invocation: RemoteInvocation): Promise<void> {
-    return this.enqueue(() => this.applyInvocation(invocation));
+    // As Discord (#126): never as whichever client happened to start the
+    // remote link, which a press would otherwise inherit. Discord has no
+    // window, so anything here that would ask takes its default.
+    return this.enqueue(() => runInRequest(DISCORD_CONTEXT, () => this.applyInvocation(invocation)));
   }
 
   private async applyInvocation(invocation: RemoteInvocation): Promise<void> {
@@ -318,7 +325,7 @@ export class RemoteControlService implements Disposable {
     //     the Discord id stays in the audit as the actor and is never an
     //     identity of ours. Then the same `authorize` every other way in
     //     passes. From here on every line says who and through what.
-    const ctx = ownerContext('discord');
+    const ctx = DISCORD_CONTEXT;
     const who = { ...base, principal: ctx.principal.id, via: ctx.via, action: 'session.decide' as const };
     if (this.authorize(ctx, 'session.decide', { kind: 'session', id: mirror.sessionKey }) !== 'allow') {
       this.audit.write({ event: 'refused-unauthorised', askKey: mirror.askKey, sessionKey: mirror.sessionKey, ...who, choiceId: invocation.choiceId });

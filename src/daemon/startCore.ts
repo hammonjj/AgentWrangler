@@ -167,11 +167,14 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
   // hands each upgraded socket to (`createBrowserClients` in
   // `src/electron/webPrototype.ts`, over `createWorkbenchHosts` in
   // `src/electron/workbenchWindow.ts`) still lives beside Electron and imports
-  // it. Once those move out of `src/electron/` (with #126's client registry),
-  // start it here exactly as `main.ts`'s `syncWeb` does: `new WebServer({ ...,
-  // dataDir: host.dataDir, gate: app.access, onClient })`, follow `web.enabled`
-  // and `web.port`, return its `loginLink()` from `webLink` above, and dispose
-  // it in `teardown` below. Until then `aw web open` says the workbench is off.
+  // it. Once those move out of `src/electron/`, start it here as `main.ts`
+  // does: a `ClientRegistry` (#126) made the host's broker
+  // (`host.useBroker`) and the app's surface (`app.attachSurface`), then
+  // `new WebServer({ ..., dataDir: host.dataDir, gate: app.access, onClient })`
+  // following `web.enabled` and `web.port`; return its `loginLink()` from
+  // `webLink` above and dispose it in `teardown` below. Until then `aw web
+  // open` says the workbench is off, and dialogs get the default broker's
+  // "cancel".
   const web = undefined as Disposable | undefined;
 
   log(`core daemon started: pid ${pid}, build ${opts.build}`);

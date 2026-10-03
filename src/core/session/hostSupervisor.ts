@@ -13,6 +13,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { endProcess, type EndOutcome } from '../../claude/runner/adopt';
 import { isSameProcessAlive, startTimeOf } from '../procStart';
+import { outsideRequest } from '../requestScope';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
 import { parseLaunchPolicy } from '../../shared/launchPolicy';
 import type { HostBoot, HostManifest } from '../../shared/sessionProtocol';
@@ -353,11 +354,14 @@ export class HostSupervisor {
       // Detached: its own session and process group, so it outlives the app
       // and a signal to the app's group never reaches it. Output to a file,
       // never a pipe to the app (a pipe would break when the app goes).
-      const child = spawn(runtime.exe, [runtime.entry], {
-        detached: true,
-        stdio: ['pipe', logFd, logFd],
-        env: hostProcessEnv(process.env, runtime.env, this.opts.hostEnv),
-      });
+      // Outlives whichever request started it: its events are the app's own (#126).
+      const child = outsideRequest(() =>
+        spawn(runtime.exe, [runtime.entry], {
+          detached: true,
+          stdio: ['pipe', logFd, logFd],
+          env: hostProcessEnv(process.env, runtime.env, this.opts.hostEnv),
+        }),
+      );
       pid = child.pid;
       child.once('error', (err) => (exited = String(err)));
       child.once('exit', (code, signal) => (exited = `exited (${code ?? signal})`));

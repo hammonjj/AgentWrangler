@@ -8,6 +8,7 @@ import type { CapabilityCatalog } from '../core/capabilityCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
 import type { DashboardAction, DashboardToHost, HostToDashboard } from '../shared/messages';
 import { sessionRef, type AccessRequest, type ActionName, type BoundAccess, type ResourceRef } from '../core/access';
+import { runInRequest } from '../core/requestScope';
 import type { TaskBadge } from '../shared/orchestration/taskView';
 import type { MissionOp, MissionsSnapshot } from '../shared/orchestration/missionView';
 import { parseDecision, type RoutingProposalDecision } from '../shared/orchestration/proposalsView';
@@ -381,7 +382,9 @@ export class DashboardHost {
   private onMessage(m: DashboardToHost): void {
     const req = dashboardRequest(m);
     if (!this.access.gate.admit(this.access.context, req.action, req.resource)) return;
-    this.dispatch(m);
+    // As this pane's client: the prompts, toasts and navigation it causes go
+    // back to it, however many awaits later (#126, `requestScope.ts`).
+    runInRequest(this.access.context, () => this.dispatch(m));
   }
 
   private dispatch(m: DashboardToHost): void {
