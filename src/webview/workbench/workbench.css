@@ -470,9 +470,9 @@ body.aw-surface-conversation #wbConv {
 /*
  * ---- phones (#134) ----
  *
- * The browser page only (`aw-web`): the Electron window has no such class and
- * is untouched. This is the shell, so it may ask about the viewport and the
- * pointer; the panes key off their own `.narrow` and `.touch` classes instead.
+ * Scoped to `body.aw-web`, which the page the web server renders always has.
+ * This is the shell, so it may ask about the viewport and the pointer; the
+ * panes key off their own `.narrow` and `.touch` classes instead.
  */
 
 /*

@@ -1,11 +1,11 @@
 /*
- * The 56 `--vscode-*` custom properties the panes read, for a host that is not VSCode.
+ * The 56 `--vscode-*` custom properties the panes read.
  *
- * VSCode injects them into every webview, so the pane stylesheets simply use them; a
- * plain Electron BrowserWindow injects nothing and all 56 fall back to nothing, which
- * is what "renders unstyled" means. This file supplies them in Dark Modern and Light
- * Modern values, leaving `dashboard.css`, `conversation.css` and `workbench.css`
- * exactly as the extension ships them, so the same markup renders in both hosts.
+ * The panes were written as VSCode webviews, where VSCode injects these into every
+ * webview, so the pane stylesheets simply use them. A browser page injects nothing and
+ * all 56 would fall back to nothing, which is what "renders unstyled" means. This file
+ * supplies them in Dark Modern and Light Modern values, so `dashboard.css`,
+ * `conversation.css` and `workbench.css` keep their variable names unchanged.
  */
 
 /* ---- dark (the default: this is a developer tool) ---- */
@@ -430,7 +430,7 @@ body.aw-shell #wbConv {
 }
 
 /* The browser's one-line banner (#141): "Enable notifications", or why they
-   cannot work here. Built by the web shim; the Electron window never has one. */
+   cannot work here. Built by the web shim. */
 #awBanner {
   position: fixed;
   left: 12px;
