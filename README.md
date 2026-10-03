@@ -812,6 +812,60 @@ another browser.
 - Sign-ins, failed sign-ins and new browsers are recorded in the access log
   (`~/.cache/agent-wrangler/access.log`), by id only.
 
+### LAN access
+
+Off by default. *Allow devices on my home network* (`web.lan.enabled`, under Browser in
+Preferences, needs *Open in a browser* on) also serves the workbench over **HTTPS** on this
+Mac's home-network addresses, on *HTTPS port* (`web.lan.port`, 7392), so a phone or another
+computer on the same network can open `https://<your-mac>.local:7392/`. Preferences shows the
+addresses it is listening on under the switch. With it off, nothing listens beyond `127.0.0.1`.
+
+It assumes:
+
+- **A home network you trust.** Anyone on it can reach the sign-in page, though nothing
+  behind it without a device credential.
+- **The macOS firewall allows the port.** If the firewall is on, allow Agent Wrangler to
+  accept incoming connections when macOS asks (System Settings → Network → Firewall).
+- **No port forwarding.** Never forward 7392 from your router; this is not for the internet.
+- **Devices are paired one by one.** A LAN device needs its own credential, which only pairing
+  issues. The credential from `aw web open` does not work on the LAN listener, and a LAN one
+  does not work on `127.0.0.1`. *Pairing is not built yet (#137): until it is, the LAN
+  listener answers every request with "not signed in".*
+
+How it is served:
+
+- **One listener per private IPv4 address** (10/8, 172.16/12, 192.168/16), not `0.0.0.0`, so
+  it never answers on a VPN tunnel or a public address. The addresses are re-read every 30
+  seconds and on wake; a new address gets a listener and a new certificate.
+- **TLS from a local certificate authority.** On first use Agent Wrangler makes
+  *Agent Wrangler Local CA (your-mac)*, valid ten years, and a server certificate it
+  signs for `<your-mac>.local`, `localhost` and the current addresses (397 days, re-issued
+  when an address changes or 30 days before expiry). Keys are kept 0600 in `web-tls/` in the
+  support folder; the CA's key never leaves it.
+- **Or your own certificate:** set *Your own certificate* (`web.lan.certFile`) and *Your own
+  private key* (`web.lan.keyFile`) to PEM files and they are used instead. Both must be set.
+- `Host` must be `<your-mac>.local` or one of the addresses, with the port (421 otherwise);
+  `Origin` must be `https://` that host (403 otherwise); the cookie is `Secure` and
+  `__Host-` prefixed.
+
+**Trusting the CA on an iPhone or iPad** (once per device):
+
+1. On the Mac, in a browser signed in with `aw web open`, open
+   `http://127.0.0.1:7391/ca.mobileconfig`. It downloads `agent-wrangler-ca.mobileconfig`
+   (`/ca.pem` is the same certificate as PEM, for other systems). These two addresses work
+   only on the Mac, signed in.
+2. AirDrop the file to the iPhone (or mail it to yourself). iOS says *Profile Downloaded*.
+3. On the iPhone: **Settings → General → VPN & Device Management**, tap the
+   *Agent Wrangler Local CA* profile, then **Install** (it shows as *Not Verified*; that is
+   expected for a CA made on your Mac).
+4. Then **Settings → General → About → Certificate Trust Settings** and turn on full trust for
+   *Agent Wrangler Local CA*. Without this step Safari still refuses the certificate.
+
+On another Mac, double-click the `.mobileconfig` (or the `.pem`), install it in System
+Settings → Privacy & Security → Profiles, and set it to *Always Trust* in Keychain Access.
+To stop trusting it, remove the profile. Deleting `web-tls/` makes a new CA the next time LAN
+access starts, which every device then has to trust again.
+
 ## Background core (experimental)
 
 Agent Wrangler's core (session tracking, the conversations it runs, Discord, `aw`) can run as a

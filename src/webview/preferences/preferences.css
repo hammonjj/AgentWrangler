@@ -418,6 +418,34 @@
   border-left-color: var(--vscode-errorForeground, #ed4245);
 }
 
+/* What a setting is doing now (the LAN addresses, #136): read-only, under
+   the row's description, in the description's column for a checkbox row. */
+#prefsApp .pf-status {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.1));
+  border-left: 3px solid var(--vscode-charts-green, #3ba55d);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.86em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .pf-status[hidden] {
+  display: none;
+}
+
+#prefsApp .pf-status.bad {
+  border-left-color: var(--vscode-errorForeground, #ed4245);
+}
+
+#prefsApp .pf-type-boolean .pf-status {
+  grid-column: 2;
+}
+
 /*
  * Orchestration → tier map: one row per model, not per setting.
  *
