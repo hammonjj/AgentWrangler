@@ -2,8 +2,7 @@
  * Where the plain-Node host (#125) sends everything that needs a person:
  * dialogs, toasts, opening things, the clipboard and notifications.
  *
- * In Electron those were the window's. The daemon has no window; it has
- * browser connections, and which one a prompt belongs to is the business of
+ * The daemon has no window; it has browser connections, and which one a prompt belongs to is the business of
  * the connection-scoped prompts slice (#126), which implements the real
  * broker. This file only defines the seam, and the broker used when there is
  * no client to ask: it never blocks, answers every question with "cancel", and

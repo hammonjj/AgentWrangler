@@ -2,13 +2,11 @@
  * Remote control inside the process that holds the core (#138): the core
  * daemon.
  *
- * The remote daemon (#74) exists because the Electron app comes and goes: it
- * keeps Discord running from a feed of its own while the app is quit, and is
- * fed the app's list over a socket while it runs. The core daemon does not
- * come and go, so none of that is needed. Its `RemoteControlService` is fed the
- * core's own decorated session list and applies presses through the core's own
- * `SessionActions`: the same path the app's end of the remote daemon link
- * takes, with no socket in between, and one LaunchAgent instead of two.
+ * Electron-era builds ran Discord in a separate remote daemon (#74), because
+ * the app came and went. The core daemon does not, so its
+ * `RemoteControlService` is fed the core's own decorated session list and
+ * applies presses through the core's own `SessionActions`, with no socket in
+ * between and one LaunchAgent.
  *
  * The settings are the core's (`getConfig`); the token is read from the login
  * Keychain (#124) on every `sync`, so it is there at login with no window or

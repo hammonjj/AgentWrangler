@@ -1,6 +1,6 @@
 # Agent Wrangler
 
-Local macOS app that monitors every AI agent session on this machine — who is **waiting on you**, who is busy, who looks stuck, and who is done — in one live dashboard.
+Local macOS service that monitors every AI agent session on this machine — who is **waiting on you**, who is busy, who looks stuck, and who is done — in one live dashboard you open in a browser.
 
 Agent Wrangler supports **Claude Code and Codex** sessions across local VSCode windows, terminals, and desktop clients. The dashboard can filter by provider, and conversations started from Agent Wrangler can run through either Claude's Agent SDK or Codex App Server.
 
@@ -8,17 +8,40 @@ Status comes from Claude Code's own hooks when they're installed, so a row that 
 
 ## Run it
 
+Agent Wrangler is a background service, the **core daemon**, plus a web workbench that a
+browser opens (#121, #142). There is no window of its own: Electron was retired in #142.
+
 ```bash
 npm install
-npm run electron          # build, then open the window
-npm run electron:nobuild  # open it against the current dist/
+npm run app:install       # build, package, put it in /Applications, start the daemon
+npm run cli:install       # put `aw` on your PATH
 ```
 
-To install it properly:
+Then open **Agent Wrangler** (Finder, Spotlight, the Dock). Opening it makes sure the core
+daemon is running on this build, asks it for a one-time sign-in link, opens that in your
+default browser, and exits; there is no Dock icon to linger. `aw web open` does the same from
+a terminal. Closing every tab stops nothing.
+
+From a checkout, without installing:
 
 ```bash
-npm run app:install       # build, package, and put it in /Applications
+npm run build
+node dist/launcher/main.js            # start this checkout's daemon (no LaunchAgent) and open a browser
+node dist/launcher/main.js --dry-run  # say what it would do; start, install and open nothing
 ```
+
+**What the app bundle is.** `npm run app:package` (`scripts/package-app.ts`) assembles
+`release/Agent Wrangler.app` with no Electron and no electron-builder:
+
+| Path in the bundle | What it is |
+|---|---|
+| `Contents/Info.plist` | Bundle id `com.hammonjj.agentwrangler`, kept from the Electron builds so privacy grants stay valid; `LSUIElement` (no Dock icon) |
+| `Contents/MacOS/Agent Wrangler` | The launcher: a small compiled C program (`src/launcher/launcher.c`) that execs the bundled Node on `dist/launcher/main.js` |
+| `Contents/Resources/node/bin/node` | The pinned official Node (`scripts/fetch-node.mjs`, #129) |
+| `Contents/Resources/app/dist/…` | The daemon, session host, `aw` and launcher programs, the web page, the qualification fixtures; plain files, no asar |
+
+It is signed with the identity below and checked with `codesign --verify --deep --strict`.
+Hardened runtime stays off, as before.
 
 **Signing, once per machine.** Packaged builds are signed with a self-signed certificate,
 *Agent Wrangler Local Signing*, from your login keychain. Create it before the first
@@ -43,55 +66,57 @@ ad-hoc build, grants made before the switch are stale. Clear them once with
 again. This setup only covers one machine. Distributing the app needs an Apple Developer ID
 certificate and notarization (#57).
 
-Nothing restarts on its own. A running copy keeps the old build until you quit and reopen it.
-What a quit costs depends on where each conversation runs (see *Quitting and coming back*):
-Claude conversations (always in session hosts) and Codex threads keep running through it.
+**Installing and updating.** `npm run app:install` (`scripts/install-app.sh`):
 
-**Closing the window is not quitting.** Agent Wrangler carries on as a menu-bar app: the Dock
-icon goes, and the menu-bar item (a ring with a dot) shows how many agents need you beside it.
-Its menu lists every live agent — needing you first — with **Open** and **Stop…**, and has
-**Open Agent Wrangler**, **Settings…** and both quits. While the window is closed, a session
-that needs permission, is waiting on you, or is done raises a macOS notification; clicking it
-opens that session (*Notify while the window is closed*, on by default; *Notify when an agent
-needs you* does the same while the window is open). Discord keeps answering throughout, and
-after a full quit too (see *Remote control*).
-**Open at login** (off by default) starts it in the menu bar without a window; it is a login
-item only, and nothing relaunches the app after a quit or a crash. While an agent the app runs
-is working or asking permission, it holds an App Nap assertion, which also defers idle sleep.
+1. quits a running Electron-era copy of the app (from before #142) the ordinary way. As a
+   window client it ends nothing; running its own core it ends only Codex threads it ran in its
+   own process. Run inside an agent Agent Wrangler runs, it leaves such a copy alone and tells
+   you to quit it;
+2. replaces `/Applications/Agent Wrangler.app`;
+3. runs `aw daemon start` from the new bundle when the daemon (or an old app) was running. That
+   rewrites the LaunchAgent for the new build; the old daemon stops as `aw daemon stop` does,
+   and the new one reattaches every session host. A daemon you stopped stays stopped;
+4. refreshes an installed `aw` that is a copy of `bin/aw`.
 
-**Quitting and coming back.** A conversation runs in one of three places, and that decides
+**Migrating from an Electron build.** Secrets moved from Electron `safeStorage` to the
+Keychain in #124, and only an Electron build could do that move. A copy older than #124 must
+first run a build that includes #124 but predates #142 (any `main` between the two merges),
+open it once, then install this one. `experimental.coreDaemon` is retired
+and removed from `settings.json` at startup: the daemon always runs the core. The old remote
+daemon's LaunchAgent (`com.hammonjj.agentwrangler.remote`) is removed the first time the core
+daemon starts.
+
+**Restarting** means restarting the core daemon: `aw daemon start` from a newer install, or
+`aw daemon stop` then opening the app. Neither ends a Claude conversation or a Codex thread on
+the background server. Notifications with no tab open come from the Mac (`osascript`), and
+Discord posts its own when it is on (decision D3). There is no menu-bar item (decision D4):
+a tab's title carries the attention count. **Open at login** (off by default) is the
+LaunchAgent's `RunAtLoad`: the daemon starts at login and no browser opens. launchd restarts a
+daemon that crashes, never one that was stopped. While an agent the daemon runs is working or
+asking permission it holds `caffeinate -i`, which also defers idle sleep.
+
+**Stopping and coming back.** A conversation runs in one of three places, and that decides
 what survives what:
 
-| Conversation runs in | ⌘Q, Dock → Quit, `osascript`, `app:install`, app crash | ⌥⌘Q (Quit and Stop All Agents) | Logout, reboot |
+| Conversation runs in | `aw daemon stop`, an update, a daemon crash | `aw daemon stop --all` | Logout, reboot |
 |---|---|---|---|
-| A **session host** (every Claude conversation) | Keeps running; reattaches on relaunch | Ended | Ended |
+| A **session host** (every Claude conversation) | Keeps running; reattaches when the daemon starts | Ended | Ended |
 | The **Codex background server** (on by default) | Keeps running | Keeps running | Ended |
-| The **app process** (Codex, with the background server off) | Ended | Ended | Ended |
+| The **daemon process** (Codex, with the background server off) | Ended | Ended | Ended |
 
-No Claude conversation runs in the app process, and there is no setting that makes one: a
-restart of the app never ends one (#122). A conversation an older build ran in its own process
-ended when that build quit for the update; it comes back as **interrupted**, and resuming it
-runs it in a host.
+No Claude conversation runs in the daemon's process, and there is no setting that makes one: a
+restart never ends one (#122).
 
 *Ended* is never lost: each conversation is its transcript. An ended conversation is stopped
 gracefully (up to ten seconds to finish its turn), shows an **interrupted** chip on the next
 start, and right-click → **Resume here** carries it on with the model, mode and effort it was
 started with. The newest one resumes by itself (the *Resume the last conversation on startup*
-setting).
+setting). Nothing about stopping asks first: there is no window to ask in.
 
-- **⌘Q** asks first only when it would end something ("Quit and stop N agents?", counting
-  Codex threads that run in the app process). When conversations in hosts are left running, a
-  notification says how many.
-- Any other quit never asks: Dock → Quit, a script's `osascript` quit, logout, `kill` (SIGTERM).
-- `npm run app:install` run from a terminal quits the app the same way before replacing it. Run
-  by an agent Agent Wrangler runs, it replaces the bundle and leaves the running copy alone;
-  restart when convenient to pick up the build. Claude conversations and Codex threads on the
-  background server come through that restart.
-
-**Session hosts: Claude conversations keep running when the app quits.** Each Claude
-conversation runs in its own small background process (a *session host*), so quitting,
-reinstalling or a crash of Agent Wrangler does not end it: the turn in flight carries on, a
-permission prompt waits, and Agent Wrangler reconnects to it when it opens again. This is the
+**Session hosts: Claude conversations keep running when the daemon stops.** Each Claude
+conversation runs in its own small background process (a *session host*), so stopping,
+reinstalling or a crash of the core daemon does not end it: the turn in flight carries on, a
+permission prompt waits, and the daemon reconnects to it when it starts again. This is the
 only way Claude conversations run; the *Keep conversations running when Agent Wrangler quits*
 setting that used to switch it is gone, and an old value of it is removed from `settings.json`
 at startup. Codex has its own background server (below).
@@ -125,12 +150,7 @@ at startup. Codex has its own background server (below).
   usual. Never one that is working, waiting on a question or permission, or running background
   tasks, and time the machine spends asleep does not count.
 - While a conversation is working, the Mac is kept from *idle* sleep (a lid close still sleeps).
-  On wake, the core rechecks its hosts, and whichever process holds Discord (the core daemon,
-  or the remote daemon) reconnects it at once.
-- The remote daemon's connection to a host is *passive*: it does not count as Agent Wrangler
-  being connected, so it never keeps an idle conversation from being parked. (A host started
-  by a build older than #74 does not know the flag, and counts it until it next moves to a
-  new build.)
+  On wake, the core daemon rechecks its hosts and reconnects Discord at once.
 - A logout or reboot ends hosts too (macOS ends every process of yours). Each host ends its
   conversation gracefully, and it comes back as **interrupted**, resumable as above.
 
@@ -153,11 +173,6 @@ which the `codex` command line would attach to.
   take it over again.
 - *Keep Codex conversations running across restarts* (on by default) turns this off; Codex then
   runs as a child of the app and ends with it.
-
-`env -u ELECTRON_RUN_AS_NODE` is applied by the scripts: VSCode sets that variable in its
-terminals and it makes the Electron binary behave as plain Node, so without it the app launches
-with every Electron API `undefined`. It reaches `open -a` too, so launching the installed app
-*from a VSCode terminal* fails the same way; from Finder or the Dock it is fine.
 
 Codex discovery reads bounded tails from `~/.codex/sessions`; it does not modify Codex's state
 database. A Codex row carries its originating client when the rollout reports one. External
@@ -204,7 +219,7 @@ including streaming replies, interruption, and approval decisions.
   - *Agent Wrangler: New Conversation…* and the **+** in the view's title bar do the same thing through a quick pick, in the same order, for when your hands are on the keyboard.
   - **Type, interrupt, queue.** Enter sends, Shift+Enter is a newline, and a message sent mid-turn queues behind it with a *queued* chip. While Claude is working the **Send** button becomes **Stop**, which interrupts the turn in flight, and goes back to Send when the turn ends — one button, so the thing to press is always the button under the box. Enter still sends while it says Stop, so a message typed mid-turn queues rather than being eaten by the interrupt. Replies stream in a word at a time.
   - **The composer is one box.** The attachment chips, the text and a toolbar strip along the bottom — paperclip and microphone on the left, **Send** on the right — all live inside a single framed surface that takes the focus ring as a whole. It used to be a flex *row*: a textarea with two 28px icon buttons and a text button balanced on its bottom edge, which ate half the width at the 300px the pane is often used at and left Send stranded far from the text at full width. The frame moved off the textarea and onto the box around it, which is what makes the four parts read as one control.
-  - **Right-click anything typeable for Cut/Copy/Paste.** An Electron app has no context menu unless it builds one, and without it a text field looks broken to a mouse: ⌘C worked, right-click did nothing at all. Editable fields now get undo/redo, cut/copy/paste, *Paste and Match Style* and Select All — greyed out per the field's own `editFlags` — with spelling corrections above them when there is a red underline; a selection anywhere else gets Copy. Installed on every renderer the app creates, so the palette and the Settings window have it too.
+  - **Right-click anything typeable for Cut/Copy/Paste.** The browser's own context menu, spelling suggestions included.
   - **The model dropdown** beside the permission-mode one lists exactly the models your account can use — the list is the CLI's own answer, not a hardcoded one — and switches the model for the next turn.
   - **Permission, question and plan cards are answered here.** A permission ask offers **Allow**, **Deny**, and **Always allow** when the prompt itself suggested a rule (the button's tooltip names the rule it writes). `AskUserQuestion` renders as a form with the options and an *Other* box; a plan renders with **Approve** and **Request changes**, and the feedback goes back to the model. These three are exactly what the hook path cannot do for a session running elsewhere.
   - **An ask is never something you have to go looking for.** When one arrives — and when the pane opens on a session that is already waiting — the view lands on the **top** of its card, at the question itself, rather than at the end of the conversation, which on a card taller than the pane (a long plan, a multi-part question) means landing past it on its buttons. If the card is off screen for any other reason, a strip above the composer says what Claude is waiting on (*↑ Plan ready for approval*) and clicking it brings that card's head back to the top of the view, with a one-second outline so the eye finds it. The strip disappears as soon as the card is visible: it is a pointer, not a second copy of the question. Answering starts the conversation following along again.
@@ -810,8 +825,8 @@ another browser.
   "not signed in" (401).
 - **Settings:** *Open in a browser* (`web.enabled`, on) and its *Port* (`web.port`, 7391), in
   Preferences under Browser. Off closes the listener and every open tab.
-- **Not there yet:** confirmations and pickers still appear on the Mac, and things the app
-  opens by itself (a new conversation, a notification click) open in the window.
+- Confirmations and pickers appear in the tab whose click asked (#126); one nobody's click
+  caused is shown to every tab as a notice and answered "cancel".
 - Sign-ins, failed sign-ins and new browsers are recorded in the access log
   (`~/.cache/agent-wrangler/access.log`), by id only.
 
@@ -917,11 +932,10 @@ phone and a laptop each get one, and a tab you are looking at is the only one th
 
 Where a notice goes:
 
-| Browser tab connected, notifications allowed | The window | Notice goes to |
-|---|---|---|
-| None | Closed | The Mac's own notification (Notification Centre; `osascript` from the background core) |
-| None | Open | The Mac's own notification, as before; clicking it opens the session |
-| One or more | Either | Every such tab, which shows it only if hidden or unfocused. The Mac's own notification stays quiet |
+| Browser tab connected, notifications allowed | Notice goes to |
+|---|---|
+| None | The Mac's own notification (`osascript display notification` from the core daemon; clicking it does nothing) |
+| One or more | Every such tab, which shows it only if hidden or unfocused. The Mac's own notification stays quiet |
 
 A tab that has not asked, was refused, or cannot show notifications does not count: with only
 those connected the Mac's notification still fires. Discord (when remote control is on) posts on
@@ -934,61 +948,46 @@ and some Android browsers refuse `new Notification()` outside a service worker; 
 (`MediaRecorder`: webm/opus where there is one, mp4/AAC on Safari), so it is the phone's
 microphone on a phone. Stopping uploads the recording to `POST /dictation` (the device cookie,
 `Origin`, and an `x-aw-dictation` header; at most 10 MB and five minutes; one at a time), which
-Whisper transcribes on the Mac with the same ffmpeg and model as the window's dictation. The
-text lands in the composer as it does there. There is no live preview in a browser. A refused
-microphone, a missing ffmpeg, whisper or model, and a non-secure page are each said beside the
-composer. The window keeps recording the Mac's microphone.
+Whisper transcribes on the Mac with the same ffmpeg and model the Electron window used. The
+text lands in the composer. There is no live preview in a browser (the Electron window's
+host-microphone recording had one; it went with the window in #142). A refused microphone, a
+missing ffmpeg, whisper or model, and a non-secure page are each said beside the composer.
 
-## Background core (experimental)
+## The core daemon
 
-Agent Wrangler's core (session tracking, the conversations it runs, Discord, `aw`) can run as a
-background service, the **core daemon**, instead of inside the app. It keeps running with no
-window and no browser open. Plan: `docs/plans/browser-workbench.md` §4.
+Agent Wrangler's core (session tracking, the conversations it runs, Discord, `aw`, the web
+workbench) runs as a background service, the **core daemon**: a LaunchAgent,
+`com.hammonjj.agentwrangler.core`, on the app bundle's own Node. It keeps running with no
+browser open. Opening the app starts it if it is not running. Plan:
+`docs/plans/browser-workbench.md` §4.
 
 ```bash
-aw daemon start          # install or start it (a LaunchAgent, com.hammonjj.agentwrangler.core)
+aw daemon start          # install or start it, or move it onto this install's build
 aw daemon status         # pid, build and uptime
 aw daemon stop           # stop it; conversations in session hosts keep running
-aw daemon stop --all     # stop it and end them too, like Quit and Stop All Agents
+aw daemon stop --all     # stop it and end them too
 ```
 
-- **One core at a time.** Whichever of the app and the daemon answers on `run/core.sock` holds
-  the core, and the other refuses to start and says why. Turn on *Run the core in the
-  background* (`experimental.coreDaemon`, off by default; takes effect when the app is reopened)
-  and opening the app starts the daemon instead of its own core. To switch back, set it to
-  `false` in `settings.json`, run `aw daemon stop` and reopen the app.
-- **The window is a client of the daemon.** With the setting on, the app's window shows the
-  daemon's browser workbench, the same page `aw web open` gives a browser: it signs in with a
-  one-time link it asks the daemon for, and keeps that sign-in (a device in `web-devices.json`)
-  across restarts. The window and every browser tab show the same table and conversations and
-  can all act. Quitting or closing the window ends only the window; the daemon and every agent
-  keep running. Opened at login, the app only makes sure the daemon is running and opens no
-  window. In this mode:
-  - the menu has no agent commands (they are in the page) and there is no menu-bar item;
-  - *Settings* opens `settings.json` (Preferences in the page comes with #135); *Open in
-    Browser* signs a browser in; *View → Reload* signs the window in again;
-  - links open in your browser; the window never leaves `http://127.0.0.1:<web.port>`.
-  - *Open in a browser* (`web.enabled`) must stay on: with it off the window has nothing to
-    show and says so.
+- **One core at a time.** Whoever answers on `run/core.sock` holds the core; a second daemon
+  refuses to start and says why. An Electron-era app (before #142) still running its own core
+  is refused the same way: quit it first (`npm run app:install` does).
 - **Updates and crashes leave conversations running.** They run in session hosts, not in the
-  daemon. `aw daemon start` from a newer install (and `npm run app:install`, when the daemon is
-  running) rewrites the LaunchAgent, which stops the old daemon and starts the new one; it
-  reattaches every host. launchd restarts a daemon that crashes, but not one that was stopped.
-- **Login:** it starts at login only when *Open at login* is on. Otherwise `aw daemon start` (or
-  opening the app with the setting on) starts it.
+  daemon. `aw daemon start` from a newer install (and `npm run app:install`) rewrites the
+  LaunchAgent, which stops the old daemon and starts the new one; it reattaches every host.
+  launchd restarts a daemon that crashes, but not one that was stopped.
+- **Login:** it starts at login only when *Open at login* is on. Otherwise opening the app,
+  `aw daemon start` or `aw web open`'s first run starts it.
 - **Discord runs inside it** (#138), with the bot token read from the Keychain, so it works after
-  a reboot with no window or browser open. The separate remote daemon and its LaunchAgent
-  (`com.hammonjj.agentwrangler.remote`) are stopped and removed the first time it starts. See
-  [Remote control](#remote-control-experimental).
+  a reboot with no browser open. The old remote daemon of Electron-era builds and its
+  LaunchAgent (`com.hammonjj.agentwrangler.remote`) are stopped and removed the first time it
+  starts. See [Remote control](#remote-control-experimental).
 - **Files:** `run/core-daemon.json` (its pid, build and start time) and `logs/core-daemon.log`
   in the app's support folder; it writes the usual `agent-wrangler.log` too. While agents work
-  it holds `caffeinate -i -w <pid>`, as the app holds its power blocker.
-- **Browser workbench:** the daemon serves it (#131), on the same port, with the same LAN
-  access and settings as the app does when it runs the core, and `aw web open` signs a browser
-  in. Its files are unpacked beside the app's asar (`app.asar.unpacked/dist/webview`), since
-  the daemon runs on plain Node. A question the core asks goes to the window or tab whose click
-  caused it; one nobody caused (a startup check, Discord, `aw`) is shown to every open window
-  and tab as a notice and answered "cancel".
+  it holds `caffeinate -i -w <pid>`.
+- **Browser workbench:** the daemon serves it (#131), from the bundle's
+  `Contents/Resources/app/dist/webview`. A question the core asks goes to the tab whose click
+  caused it; one nobody caused (a startup check, Discord, `aw`) is shown to every open tab as a
+  notice and answered "cancel".
 
 ## Remote control (experimental)
 
@@ -1022,55 +1021,19 @@ not already offering.
    (User Settings → Advanced) to copy IDs. An empty allowlist means **nobody**,
    and nothing is published at all.
 
-**It keeps working when the app is closed.** Where the Discord connection lives
-depends on where the core runs (see [Background core](#background-core-experimental)):
+**It keeps working with no browser open.** Discord runs inside the core daemon
+(#138; see [The core daemon](#the-core-daemon)), fed the core's own session list,
+with presses applied by the core directly, as they are from the table. It reads
+the bot token from the Keychain itself, so **after a reboot Discord works without
+opening a browser** when *Open at login* is on.
 
-| Core runs in | Discord runs in | LaunchAgents |
-|---|---|---|
-| The core daemon (`experimental.coreDaemon` on) | The core daemon itself, fed its own session list (#138) | One: `com.hammonjj.agentwrangler.core` |
-| The app (the default today) | The *remote daemon* (#74), a separate background service | `com.hammonjj.agentwrangler.remote` |
-
-Either way it reads the bot token from the Keychain itself, so **after a reboot
-Discord works without opening a window or a browser**: the core daemon starts at
-login when *Open at login* is on, and the remote daemon whenever Discord
-integration is on.
-
-- **In the core daemon** there is no second process and nothing to hand over:
-  presses are applied by the core directly, as they are from the table. When it
-  starts it stops the remote daemon and removes its LaunchAgent before it
-  connects, so only one process ever holds the bot, and the cards the remote
-  daemon posted are taken over rather than posted again. Its log lines are in
-  `logs/core-daemon.log`.
-- **In the remote daemon** (while the app runs the core; it goes when Electron
-  does, #142): a LaunchAgent that starts when Discord integration is switched
-  on, runs from the same cloned runtime as session hosts (so a reinstall does
-  not pull it out from under itself), and is restarted by launchd if it
-  crashes. Switching the integration off stops it and removes it. The app never
-  starts it while a core daemon holds the core. The rest of this list is about
-  this mode.
-
-- **While the app runs,** the daemon follows the app's own list, exactly what
-  the table shows, and hands presses back to the app to apply. Nothing about
-  what gets posted changes.
-- **When the app quits, crashes or is being reinstalled,** the daemon carries on
-  from its own view of the machine: the hook log (a permission is answered by
-  writing a decision file) and every live session host, which it follows as a
-  *passive* client (it can answer an ask, and it does not stop an idle host from
-  parking). Permission prompts, questions and plans from hosted conversations,
-  permission prompts from terminal sessions, and "done" messages all keep
-  coming. Codex questions wait for the app: only the app can answer them.
-- A card is not reposted across the handover. Both lists name an ask the same
-  way, and while neither is complete (the few seconds after a switch), nothing is
-  closed and a press is asked to try again.
-- **The daemon reads the settings and the token itself.** At start it reads
-  `settings.json` and the bot token from the login Keychain, so after a reboot
-  or a crash it connects and follows its own feed with the app closed. While
-  the app runs it sends its settings over the daemon's private socket (0700
-  directory, 0600 socket, token-authenticated); the bot token never crosses it,
-  and the daemon reads the Keychain again whenever the settings change, which is
-  how **Connect Discord…** and **Disconnect Discord** reach it.
-- Its log is `~/Library/Application Support/Agent Wrangler/logs/remote-daemon.log`,
-  and **Test remote control** says whether it is running and connected.
+- When the daemon starts it stops the old remote daemon of Electron-era builds
+  (#74) and removes its LaunchAgent before it connects, so only one process ever
+  holds the bot, and the cards that daemon posted are taken over rather than
+  posted again. A daemon restart or update hands its cards to the next one the
+  same way.
+- Its log lines are in `logs/core-daemon.log`, and **Test remote control** says
+  whether it is running and connected.
 
 **What you get.** When an agent hits a permission prompt, one message appears
 naming the agent, repository, branch, worktree and tool, with the command in a
@@ -1117,9 +1080,8 @@ A permission prompt is answerable from anywhere because answering one is a file
 write into a directory every process shares. An `AskUserQuestion` and an
 `ExitPlanMode` are not: they are settled by resolving a callback that exists
 only inside the process running the session. For a conversation in a session
-host, that callback is reachable over the host's socket, by the core (the app or
-the core daemon) or by the remote daemon; for a Codex thread, only the core can
-reach it, so with the remote daemon those are mirrored while the app runs. A session
+host, that callback is reachable over the host's socket by the core daemon; for a
+Codex thread, through the core's link to the Codex server. A session
 running in a terminal still mirrors permissions only: there is no callback
 anywhere to resolve.
 
@@ -1158,10 +1120,9 @@ resolution is appended to `~/.cache/agent-wrangler/remote/audit.log`, which
 records IDs and tool names but not command text — the channel already has that.
 
 **Exactly one gateway socket, always.** Only one process connects: the core
-daemon, or else the remote daemon. There is only ever one of each (launchd runs
-one per label, and a second copy that finds the socket answering exits), and
-never both: the core daemon retires the remote daemon, and waits for it to
-exit, before it connects. Discord will happily let one bot hold
+daemon. There is only ever one (launchd runs one per label, and a second copy
+that finds the socket answering exits), and it retires the old remote daemon of
+Electron-era builds, and waits for it to exit, before it connects. Discord will happily let one bot hold
 several connections at once, and they are not redundancy: every socket receives
 every interaction, all of them race to acknowledge the press, and the losers get
 `404 Unknown interaction` — which the card renders as *"The application didn't
@@ -1199,17 +1160,14 @@ Agent Wrangler runs. This is the same boundary the session hosts' token files al
 process running as you is trusted). `safeStorage` asked before a different program read its key.
 Restricting the items to a signed Agent Wrangler binary would need a native Keychain binding;
 that is a possible later hardening. Secrets must be printable ASCII
-(every token and API key is). Code that needs secrets uses `src/core/keychainSecrets.ts`, which
-does not depend on Electron.
+(every token and API key is). Code that needs secrets uses `src/core/keychainSecrets.ts`.
 
-**Upgrading from a build that used `safeStorage`.** Earlier builds kept secrets as Electron
-`safeStorage` ciphertext in `secrets.json` in the app's data folder. On the first start of a
-build with the Keychain store, the app decrypts each entry, writes it to the Keychain, reads it
-back to check, and then deletes `secrets.json`. macOS may first ask to let Agent Wrangler use
-*Agent Wrangler Safe Storage*, as earlier builds sometimes did. If any entry fails, the
-file is kept with just the failed entries, the log says which keys failed (never their values),
-and the next start tries again. Entries that already moved are not written again. This
-migration needs Electron, so it has to ship at least one release before Electron is removed.
+**Upgrading from a build that used `safeStorage`.** Builds before #124 kept secrets as Electron
+`safeStorage` ciphertext in `secrets.json` in the app's data folder. The Electron builds from
+#124 on moved them to the Keychain on their first start. That move needs Electron, which is gone
+since #142, so a copy older than #124 must first run a build that has #124 and still has
+Electron, then this one (see *Migrating from an Electron build* under *Run it*). A
+`secrets.json` left behind is not read.
 
 ## How status is detected
 
@@ -1331,14 +1289,16 @@ There is no Done toast while delegated work is still going, and none for attempt
 ## Development
 
 ```bash
-npm run watch      # esbuild watch
-npm run typecheck  # tsc --noEmit
-npm test           # vitest: tail parser, status table, live ~/.claude smoke test
+npm run watch             # esbuild watch
+npm run typecheck         # tsc --noEmit
+npm test                  # vitest: tail parser, status table, live ~/.claude smoke test
+npm run test:integration  # session hosts and their lifecycle, end to end
+npm run app:package       # release/Agent Wrangler.app, signed and verified
 ```
 
-Source layout: `src/claude/*` (registry reader, incremental tail parser, transcript→block reducer, status derivation, hook event reducer + log tailer + settings installer, binary resolution, provider, and `runner/` — the Agent SDK session driver and its pure message reducer), `src/core/*` (provider-agnostic store), `src/ui/*` (dashboard host + its two shells — editor tab and panel view — conversation pane host, its two sources and shells, click routing, cross-window relay, status bar, terminal resume), `src/webview/*` (browser bundles: dashboard, conversation). Webview code may only import from `src/shared/*`.
+Source layout: `src/claude/*` (registry reader, incremental tail parser, transcript→block reducer, status derivation, hook event reducer + log tailer + settings installer, binary resolution, provider, and `runner/` — the Agent SDK session driver and its pure message reducer), `src/core/*` (provider-agnostic store), `src/daemon/*` (the core daemon), `src/launcher/*` (what opening the app runs), `src/ui/*` (pane hosts and click routing), `src/webview/*` (browser bundles). Webview code may only import from `src/shared/*` and `src/webview/common/*`.
 
-The Agent SDK is bundled into `dist/electron/main.js`. It is ESM and calls `createRequire(import.meta.url)` at load, which is empty in a CJS bundle, so `esbuild.mjs` defines that expression as this file's own URL — without it the extension throws before it activates.
+The Agent SDK is bundled into `dist/daemon/main.js` and `dist/sessionHost/main.js`. It is ESM and calls `createRequire(import.meta.url)` at load, which is empty in a CJS bundle, so `esbuild.mjs` defines that expression as the bundle's own URL — without it the program throws at load.
 
 ## Conversation continuity
 

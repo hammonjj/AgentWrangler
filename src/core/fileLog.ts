@@ -3,9 +3,8 @@
  * message, also echoed to stdout.
  *
  * Appended, never rotated by us: it is a developer log, and a rotation scheme
- * is a thing to get wrong before there is a reason for one. Shared by the
- * Electron main process and the plain-Node host (#125), so both write the same
- * file in the same format.
+ * is a thing to get wrong before there is a reason for one. Written by the
+ * plain-Node host (#125) in the core daemon.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';

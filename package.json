@@ -1,7 +1,7 @@
 {
   "name": "agent-wrangler",
   "displayName": "Agent Wrangler",
-  "description": "Monitor Claude Code and Codex sessions: who is busy, waiting on you, or done. Open live conversations from one desktop app.",
+  "description": "Monitor Claude Code and Codex sessions: who is busy, waiting on you, or done. Run and open live conversations from a browser.",
   "publisher": "local",
   "version": "0.0.1",
   "private": true,
@@ -11,16 +11,13 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "electron": "npm run build && env -u ELECTRON_RUN_AS_NODE electron dist/electron/main.js",
-    "electron:nobuild": "env -u ELECTRON_RUN_AS_NODE electron dist/electron/main.js",
-    "app:package": "npm run build && node scripts/fetch-node.mjs && electron-builder --mac --dir",
+    "app:package": "npm run build && node scripts/fetch-node.mjs && esbuild scripts/package-app.ts --bundle --platform=node --format=cjs --log-level=warning --outfile=release/.package-app.cjs && node release/.package-app.cjs",
     "app:install": "npm run app:package && bash scripts/install-app.sh",
     "app:signing-setup": "bash scripts/setup-signing-cert.sh",
     "cli:install": "bash scripts/install-cli.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "bench:analytics": "esbuild scripts/bench-analytics.ts --bundle --platform=node --log-level=warning --outfile=/tmp/aw-bench-analytics.cjs && node --expose-gc /tmp/aw-bench-analytics.cjs",
-    "bench:analytics:electron": "esbuild scripts/bench-analytics.ts --bundle --platform=node --log-level=warning --outfile=/tmp/aw-bench-analytics.cjs && ELECTRON_RUN_AS_NODE=1 electron --expose-gc /tmp/aw-bench-analytics.cjs",
     "test:integration": "vitest run test/sessionHost.integration.test.ts test/sessionLifecycle.integration.test.ts"
   },
   "devDependencies": {
@@ -28,15 +25,10 @@
     "@types/markdown-it": "14.2.0",
     "@types/node": "^24.0.0",
     "@types/ws": "8.18.2",
-    "electron": "^44.4.3",
-    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "markdown-it": "15.0.2",
     "typescript": "^5.9.0",
     "vitest": "^3.0.0",
     "ws": "8.22.0"
-  },
-  "allowScripts": {
-    "electron@44.4.3": true
   }
 }

@@ -1,6 +1,6 @@
 /**
- * The workbench in a browser, as a service of whichever process runs the core
- * (#127, #128, #136; moved out of `src/electron/` for the daemon in #131).
+ * The workbench in a browser, as a service of the core daemon (#127, #128,
+ * #131, #136).
  *
  * The HTTP side — page, assets, login link, device cookie and the request
  * guards — is `core/web/server.ts`. The connection itself — handshake, acks
@@ -17,8 +17,7 @@
  * - `web.lan.*` (default off): home-network access over https with the local
  *   CA in `web-tls/` or the user's own certificate (`LanAccess`).
  *
- * Run by the Electron main process while it owns the core, and by the core
- * daemon (`src/daemon/startCore.ts`) when it does. No Electron here.
+ * Run by the core daemon (`src/daemon/startCore.ts`, through `clients.ts`).
  */
 import * as path from 'node:path';
 import type { WebSocket } from 'ws';
@@ -153,7 +152,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     lanStatus = status;
     statusChanged.fire();
   };
-  // Preferences in every browser (#135): the same backend the Electron window reads.
+  // Preferences in every browser (#135): one backend for all of them.
   const preferences = createPreferencesBackend({ app, host, devices, lan: { status: () => lanStatus, onDidChange: statusChanged.event } });
 
   const stop = () => {

@@ -4,9 +4,8 @@
  * Run by launchd from the LaunchAgent `com.hammonjj.agentwrangler.core` (or,
  * from a checkout, spawned detached by `aw daemon start`) as
  * `<runtime node> dist/daemon/main.js`, on the bundled Node, from the session
- * hosts' cloned runtime, unpacked beside the asar. stdout and stderr go to
- * `logs/core-daemon.log`; the app log (`agent-wrangler.log`) gets the same
- * lines the app would write.
+ * hosts' cloned runtime. stdout and stderr go to `logs/core-daemon.log`; the
+ * app log (`agent-wrangler.log`) gets everything else.
  *
  * Environment:
  * - `AW_DATA_DIR`: the data directory (default: the app's own,
@@ -54,7 +53,6 @@ async function main(): Promise<void> {
     appRoot: where.appRoot,
     isPackaged: where.isPackaged,
     execPath: process.execPath,
-    execIsNode: true,
     bundle: where.bundle,
     log,
   });
@@ -90,15 +88,15 @@ async function main(): Promise<void> {
     build: BUILD_ID,
     runtime,
     runtimeDir: process.env.AW_CORE_RUNTIME_DIR || undefined,
-    // Discord runs here (#138). The remote daemon the app used goes first,
-    // LaunchAgent and all, so only one process ever holds the bot.
+    // Discord runs here (#138). The remote daemon Electron-era builds used goes
+    // first, LaunchAgent and all, so only one process ever holds the bot.
     remoteInProcess: {
       retireDaemon: async () => {
         await retireRemoteDaemon({ runDirs, log });
       },
     },
     log,
-    // Beside this file: `dist/webview`, unpacked from the asar in a packaged build (#131).
+    // Beside this file: `dist/webview` (#131).
     webviewDir: path.resolve(__dirname, '..', 'webview'),
     onOpenAtLoginChange: () => {
       agent.syncPlist().catch((err) => say(`could not update the LaunchAgent: ${String(err)}`));

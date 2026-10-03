@@ -1,9 +1,9 @@
 /**
  * Stage the pinned Node runtime the app bundle ships (#129, decision D1).
  *
- * Session hosts, the remote daemon and `bin/aw` run this Node, from
- * `Contents/Resources/node/bin/node`, instead of the Electron binary under
- * `ELECTRON_RUN_AS_NODE`. It is an official nodejs.org build, pinned here by
+ * Everything in the app runs on this Node, from
+ * `Contents/Resources/node/bin/node`: the launcher, the core daemon, session
+ * hosts and `bin/aw`. It is an official nodejs.org build, pinned here by
  * version and SHA-256 (from that release's SHASUMS256.txt), so a build never
  * picks up whatever Node happens to be on the machine.
  *
@@ -17,11 +17,11 @@
  *   `node_modules` symlink, so rebuilds and new worktrees do not download it
  *   again. A cached file is checked against the pinned hash each time.
  * - Only `bin/node` and the licence are staged, into `.node-runtime/`
- *   (ignored by git), which electron-builder copies to `Resources/node`
- *   (`extraResources`) and signs with the rest of the bundle.
+ *   (ignored by git), which scripts/package-app.ts copies to
+ *   `Resources/node` and signs with the rest of the bundle.
  *
  * Usage: `node scripts/fetch-node.mjs` (the host's arch; `AW_NODE_ARCH=x64`
- * for the other one). Run by `npm run app:package` before electron-builder.
+ * for the other one). Run by `npm run app:package` before scripts/package-app.ts.
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';

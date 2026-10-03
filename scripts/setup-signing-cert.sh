@@ -60,7 +60,7 @@ else
 fi
 
 # Self-signed, so nothing vouches for it until you do. Without this it is not a
-# *valid* identity, and electron-builder only looks at valid ones.
+# *valid* identity, and scripts/package-app.ts only uses valid ones.
 echo "Trusting it for code signing — macOS will ask for your login password."
 security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$TMP/cert.pem"
 

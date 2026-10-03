@@ -1,6 +1,6 @@
 /**
  * The plain-Node host (#125): `createApp` on `createNodeHost` starts and stops
- * under vitest, which is plain Node, with no Electron anywhere.
+ * under vitest, which is plain Node.
  *
  * Nothing real is touched. HOME, CLAUDE_CONFIG_DIR and CODEX_HOME point into a
  * temp dir before the app's modules load (every `~/.claude`, `~/.codex`,
@@ -15,11 +15,6 @@ import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { SecurityRunner } from '../src/core/keychainSecrets';
 import type { SessionHostRuntime } from '../src/core/session/hostSupervisor';
-
-// If anything the node host or the app imports reaches for Electron, loading fails here.
-vi.mock('electron', () => {
-  throw new Error('electron was imported under the plain-Node host');
-});
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-node-host-'));
 const home = path.join(root, 'home');
@@ -350,20 +345,19 @@ describe('the sleep watcher', () => {
   });
 });
 
-describe('no Electron under the node host', () => {
-  it('has no electron import in src/node or the core pieces it uses', () => {
-    const srcRoot = path.join(__dirname, '..', 'src');
-    const files = [
-      ...fs.readdirSync(path.join(srcRoot, 'node'), { recursive: true }).map((f) => path.join('node', String(f))),
-      'core/jsonStore.ts',
-      'core/toolPath.ts',
-      'core/fileLog.ts',
-      'core/sleepWatcher.ts',
-      'core/keychainSecrets.ts',
-      'core/session/sessionHostRuntime.ts',
-    ].filter((f) => f.endsWith('.ts'));
-    expect(files.length).toBeGreaterThan(6);
+describe('no Electron anywhere (#142)', () => {
+  it('has no electron import in src, and no electron dependency', () => {
+    const repo = path.join(__dirname, '..');
+    const srcRoot = path.join(repo, 'src');
+    const files = fs
+      .readdirSync(srcRoot, { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith('.ts'));
+    expect(files.length).toBeGreaterThan(100);
     const offenders = files.filter((f) => /from\s+['"]electron['"]|require\(\s*['"]electron['"]\s*\)|import\(\s*['"]electron['"]\s*\)/.test(fs.readFileSync(path.join(srcRoot, f), 'utf8')));
     expect(offenders).toEqual([]);
+    const pkg = JSON.parse(fs.readFileSync(path.join(repo, 'package.json'), 'utf8')) as Record<string, Record<string, string> | undefined>;
+    const deps = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
+    expect(deps.filter((d) => d === 'electron' || d.startsWith('electron-'))).toEqual([]);
   });
 });

@@ -50,9 +50,7 @@ import {
 } from './format';
 import { readOfflineView } from './offline';
 import { runDaemonCommand } from './daemon';
-import { locateInstall } from '../core/daemon/coreDaemon';
-import { createSessionHostRuntime } from '../core/session/sessionHostRuntime';
-import { createCoreDaemonAgent } from '../node/coreDaemonAgent';
+import { coreDaemonAgentFor } from '../node/coreDaemonAgent';
 
 declare const AW_BUILD_ID: string | undefined;
 const BUILD_ID = typeof AW_BUILD_ID === 'string' ? AW_BUILD_ID : 'dev';
@@ -106,7 +104,7 @@ async function run(argv: string[]): Promise<number> {
   const client = await ControlClient.connect(dirs, { build: BUILD_ID });
   if (!client) return offline(cmd, dirs.userDataDir, dirs.runDir);
   if (client.hello.build !== BUILD_ID && BUILD_ID !== 'dev') {
-    process.stderr.write(`note: the running app is build ${client.hello.build} and this aw is ${BUILD_ID}; restart the app to match.\n`);
+    process.stderr.write(`note: the running core is build ${client.hello.build} and this aw is ${BUILD_ID}; run aw daemon start to move it onto this build.\n`);
   }
   try {
     return await online(cmd, client);
@@ -120,21 +118,11 @@ async function run(argv: string[]): Promise<number> {
  * this `aw`, so `aw daemon start` from a newer install is also the update.
  */
 function daemonCommand(cmd: Extract<Command, { kind: 'daemon' }>, dirs: ReturnType<typeof defaultRunDirs>): Promise<number> {
-  const where = locateInstall(__dirname);
   // Quiet: the runtime clone and launchctl log progress, which a terminal does not need.
   const log = (m: string) => {
     if (process.env.AW_DEBUG) process.stderr.write(`${m}\n`);
   };
-  const runtime = createSessionHostRuntime({
-    userDataDir: dirs.userDataDir,
-    appRoot: where.appRoot,
-    isPackaged: where.isPackaged,
-    execPath: process.execPath,
-    execIsNode: true,
-    bundle: where.bundle,
-    log,
-  });
-  const agent = createCoreDaemonAgent({ dataDir: dirs.userDataDir, fallbackRunDir: dirs.fallbackRunDir, runtime, isPackaged: where.isPackaged, log });
+  const agent = coreDaemonAgentFor(__dirname, dirs, log);
   return runDaemonCommand(cmd, agent, {
     out: (t) => process.stdout.write(t),
     err: (t) => process.stderr.write(t),

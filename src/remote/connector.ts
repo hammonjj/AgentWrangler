@@ -1,21 +1,16 @@
 /**
- * One Discord connection and the reconciler behind it, for whichever process
- * holds them (#138).
- *
- * Two processes can: the remote daemon (#74), while the Electron app runs the
- * core, and the core daemon (#130), which runs it in-process
- * (`inProcess.ts`). Both need the same thing: a `RemoteControlService` fed by
- * some session list, and a transport that is made, remade or dropped as the
- * settings and the bot token say. That is this class; what differs between
- * them is only the feed and where the settings come from.
+ * One Discord connection and the reconciler behind it, for the core daemon
+ * (#130, #138), which runs it in-process (`inProcess.ts`): a
+ * `RemoteControlService` fed by the core's session list, and a transport that
+ * is made, remade or dropped as the settings and the bot token say.
  *
  * **One connector at a time.** Every process that builds one shares the mirror
  * map (`~/.cache/agent-wrangler/remote/mirrors.json`), and the map is read
  * once, on the first pass. So a process must not build its connector while
  * another one still runs: it would read a map the other is still writing, and
- * post its own card for an ask the other already posted. The core daemon
- * retires the remote daemon first (`retireRemoteDaemon`), and the Electron app
- * never runs while a core daemon holds the core.
+ * post its own card for an ask the other already posted. Only one core daemon
+ * runs at a time, and it retires the old remote daemon (#74) of Electron-era
+ * builds first (`retireRemoteDaemon`).
  */
 import * as os from 'node:os';
 import { DEFAULT_CONFIG, type WranglerConfig } from '../core/config';

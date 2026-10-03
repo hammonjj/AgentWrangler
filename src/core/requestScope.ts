@@ -19,13 +19,13 @@
  *
  * - connections and processes that outlive the request are created inside
  *   `outsideRequest(…)` (the session-host client and supervisor, the Codex
- *   app-server link, the remote daemon link);
+ *   app-server link);
  * - listeners that are the app acting by itself (the "needs you"
  *   notifications, mission notices) run their bodies in `outsideRequest`,
  *   because an emitter calls its listeners in the context of whoever fired it;
  * - entry points that are not a pane message but are still somebody's click
- *   (the Electron menu, tray, notifications, Preferences, a menu quit) say
- *   whose with an explicit `runInRequest`.
+ *   (Preferences, the control socket, a Discord press) say whose with an
+ *   explicit `runInRequest`.
  *
  * A request with no context, or whose client has gone, is treated as the app
  * acting by itself; see `ClientRegistry` for what that means for a prompt.

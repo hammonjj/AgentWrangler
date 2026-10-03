@@ -1,6 +1,6 @@
 /**
- * Preferences, host side (#135): what the Electron window and each browser's
- * `#/preferences` route are both served by. Everything is a fake: the settings
+ * Preferences, host side (#135): what each browser's `#/preferences` route is
+ * served by. Everything is a fake: the settings
  * store, the orchestration callbacks, the device list and the gate.
  */
 import { describe, expect, it } from 'vitest';

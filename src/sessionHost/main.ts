@@ -3,9 +3,9 @@
  * session so it outlives the Agent Wrangler app (playbook §5, Stage 3).
  *
  * Run by the core as `<runtime exe> dist/sessionHost/main.js`, the exe being
- * the bundle's pinned Node (or, unpackaged, Electron with
- * `ELECTRON_RUN_AS_NODE=1`), detached (its own session and process group,
- * reparented to launchd when the app goes), stdout and stderr to a log file.
+ * the bundle's pinned Node (or, unpackaged, the Node the core runs on),
+ * detached (its own session and process group, reparented to launchd when the
+ * core goes), stdout and stderr to a log file.
  *
  * Life: read the boot line from stdin (token and launch options; never argv,
  * never env), close stdin, listen on the socket, write the manifest, start the

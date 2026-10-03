@@ -2,15 +2,15 @@
  * The core daemon's shared facts (#130, plan §4): where its files are, how it
  * is recognised, and the one rule both sides keep, **never two cores at once**.
  *
- * "The core" is `createApp` plus the control socket. Today it runs in one of
- * two places: the Electron main process, or the core daemon (a LaunchAgent on
- * plain Node, `src/daemon/main.ts`). Whichever is serving `run/core.sock` holds
- * it, and the other refuses to start. Both ask the same question the same way
- * (`findCoreHolder`): does the control socket answer, and if it does, is the
- * daemon's manifest naming a live process?
+ * "The core" is `createApp` plus the control socket, and it runs in the core
+ * daemon (a LaunchAgent on plain Node, `src/daemon/main.ts`). Whoever serves
+ * `run/core.sock` holds it, and a second daemon refuses to start. The
+ * question is asked one way (`findCoreHolder`): does the control socket
+ * answer, and if it does, is the daemon's manifest naming a live process?
+ * An answer with no daemon behind it is an Electron-era app (before #142)
+ * still running its own core; it is quit before the daemon takes over.
  *
- * No Electron and no app imports: the daemon, the Electron main process and
- * `aw` all read this.
+ * No app imports: the daemon, the launcher and `aw` all read this.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -21,12 +21,10 @@ import { quitIntentSource, type QuitIntent, type QuitSource } from '../session/q
 export const CORE_DAEMON_LABEL = 'com.hammonjj.agentwrangler.core';
 /** In `run/`: pid, build and start time of the running daemon. */
 export const CORE_MANIFEST_NAME = 'core-daemon.json';
-/** In `run/`: why the next SIGTERM is coming (`QuitIntent`). Shared with `install-app.sh`. */
+/** In `run/`: why the next SIGTERM is coming (`QuitIntent`), written by `aw daemon stop`. */
 export const QUIT_INTENT_NAME = 'quit-intent';
 /** In `logs/`: the daemon's stdout and stderr. */
 export const CORE_DAEMON_LOG_NAME = 'core-daemon.log';
-/** The Electron app hands the core to the daemon when this is on. Read at startup only. */
-export const CORE_DAEMON_SETTING = 'experimental.coreDaemon';
 
 export interface CoreDaemonPaths extends RunDirs {
   dataDir: string;
@@ -124,7 +122,7 @@ export type CoreHolder =
   | { kind: 'none' }
   /** The core daemon answers on the socket; its manifest says which one. */
   | { kind: 'daemon'; manifest: CoreDaemonManifest }
-  /** Something answers and no live daemon claims it: the Electron app's core. */
+  /** Something answers and no live daemon claims it: an Electron-era app's core (before #142). */
   | { kind: 'app' };
 
 export interface FindCoreHolderOptions {
@@ -138,7 +136,7 @@ export interface FindCoreHolderOptions {
 /**
  * Who serves the control socket. The socket is the authority: a manifest
  * left by a crash means nothing unless something answers, and an answer with
- * no live daemon behind it is the app (which has no manifest).
+ * no live daemon behind it is an Electron-era app (which writes no manifest).
  */
 export async function findCoreHolder(opts: FindCoreHolderOptions): Promise<CoreHolder> {
   if (!(await opts.probe(opts.socketPath))) return { kind: 'none' };
@@ -155,26 +153,14 @@ export function describeCoreHolder(holder: CoreHolder, now: number = Date.now())
     case 'daemon':
       return `the core daemon is running it (pid ${holder.manifest.pid}, build ${holder.manifest.build}, up ${formatUptime(now - holder.manifest.startedAt)})`;
     case 'app':
-      return 'the Agent Wrangler app is running it';
+      return 'an older Agent Wrangler app is running it';
   }
 }
 
 // ---- Launch ----
 
-/**
- * How a plain-Node program of ours (`dist/<name>/main.js`: the daemon, `aw`)
- * was installed, from the directory it runs in:
- * `X.app/Contents/Resources/app.asar.unpacked/dist/<name>` in a bundle or a
- * runtime clone of one, `<checkout>/dist/<name>` otherwise. `appRoot` is what
- * `createSessionHostRuntime` takes; `bundle` is the `.app` to clone.
- */
-export function locateInstall(dir: string): { isPackaged: boolean; appRoot: string; bundle?: string } {
-  if (dir.split(/[\\/]/).includes('app.asar.unpacked')) {
-    const resources = path.resolve(dir, '..', '..', '..');
-    return { isPackaged: true, appRoot: path.join(resources, 'app.asar'), bundle: path.resolve(resources, '..', '..') };
-  }
-  return { isPackaged: false, appRoot: path.resolve(dir, '..', '..') };
-}
+/** Where a program of ours was installed; see `appBundle.ts`. */
+export { locateInstall } from '../appBundle';
 
 /** The session host entry in a runtime → the daemon's, beside it: `.../dist/sessionHost/main.js` → `.../dist/daemon/main.js`. */
 export function coreDaemonEntryFor(sessionHostEntry: string): string {
@@ -184,8 +170,7 @@ export function coreDaemonEntryFor(sessionHostEntry: string): string {
 /**
  * The daemon's environment (the LaunchAgent's `EnvironmentVariables`, or a
  * detached spawn's): its data directory, the fallback run directory, the
- * runtime it runs from, and what the runtime's executable needs to act as
- * Node (`ELECTRON_RUN_AS_NODE` for Electron, nothing for the bundled Node).
+ * runtime it runs from, and whatever extra the runtime asks for.
  */
 export function coreDaemonEnv(
   dirs: { dataDir: string; fallbackRunDir: string },

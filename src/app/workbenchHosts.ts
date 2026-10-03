@@ -2,10 +2,8 @@
  * The two pane hosts behind one workbench document, and what the conversation
  * pane needs from its host to talk to a person.
  *
- * Host-neutral, so the Electron window (`src/electron/workbenchWindow.ts`),
- * the window's own web server and the core daemon's (#131,
- * `webWorkbench.ts`) build the same panes over the same app. Nothing here may
- * import `electron`: the daemon runs on plain Node.
+ * Host-neutral: each browser connection of the core daemon's web workbench
+ * (#131, `webWorkbench.ts`) builds the same panes over the same app.
  */
 import type { AgentWranglerApp } from './createApp';
 import type { RequestContext } from '../core/access';
@@ -18,8 +16,8 @@ import { PreferencesHost, type PreferencesBackend } from '../ui/preferencesHost'
 
 /**
  * The two pane hosts for one workbench document, over whatever carries its
- * envelopes. The window has one document; each connected browser has one of
- * its own, with hosts of its own over the same app.
+ * envelopes. Each connected browser has one of its own, with hosts of its own
+ * over the same app.
  */
 export function createWorkbenchHosts(
   app: AgentWranglerApp,
@@ -27,14 +25,13 @@ export function createWorkbenchHosts(
   ui: ConversationHostUi,
   transport: EnvelopeTransport,
   /**
-   * Who this document's messages act as (#123). The window is one client
-   * with one context; each browser connection brings its own, naming itself.
+   * Who this document's messages act as (#123). Each browser connection
+   * brings its own, naming itself.
    */
   context: RequestContext,
   /**
    * What Preferences is served from (#135). Given, the document also has a
-   * `preferences` pane for its `#/preferences` route: each browser does. The
-   * Electron window has a window of its own for Preferences and passes none.
+   * `preferences` pane for its `#/preferences` route: each browser does.
    */
   preferences?: PreferencesBackend,
 ): { dashboard: DashboardHost; conversation: ConversationHost; preferences?: PreferencesHost } {

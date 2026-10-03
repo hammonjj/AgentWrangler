@@ -2,7 +2,7 @@
  * The core daemon's composition (#130): `startCoreDaemon` builds the core on
  * the plain-Node host, serves the control socket, writes its manifest, refuses
  * to be a second core, and stops by the quit policy, all under vitest (plain
- * Node, no Electron) against temp directories.
+ * Node) against temp directories.
  *
  * As in nodeHost.test.ts: HOME, CLAUDE_CONFIG_DIR and CODEX_HOME point into a
  * temp dir before the app's modules load, the Keychain runner is a fake, and
@@ -17,10 +17,6 @@ import type { SecurityRunner } from '../src/core/keychainSecrets';
 import type { SessionHostRuntime } from '../src/core/session/hostSupervisor';
 import type { PowerAssertion } from '../src/node/powerAssertion';
 import type { RemoteInvocation } from '../src/remote/transport';
-
-vi.mock('electron', () => {
-  throw new Error('electron was imported under the core daemon');
-});
 
 // Short: the control socket path must fit in 104 bytes, and macOS's tmpdir is long.
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-cd-'));
@@ -155,9 +151,9 @@ describe('startCoreDaemon', () => {
       return realStop(ms, o);
     };
     const decision = await daemon.stop('signal');
-    expect(decision).toMatchObject({ stopHosted: false, confirm: false });
+    expect(decision).toMatchObject({ stopHosted: false });
     expect(stopHosted).toEqual([false]);
-    expect(await daemon.stop('menuStopAll')).toBe(decision); // once only
+    expect(await daemon.stop('stopAll')).toBe(decision); // once only
     expect(power.disposed).toBe(true);
     expect(sleepDisposed).toBe(true);
     expect(fs.existsSync(daemon.paths.manifestPath)).toBe(false);
@@ -187,7 +183,7 @@ describe('startCoreDaemon', () => {
       seen.push(o?.includeHosted ?? false);
       return real(ms, o);
     };
-    expect(await result.daemon.stop('menuStopAll')).toMatchObject({ stopHosted: true });
+    expect(await result.daemon.stop('stopAll')).toMatchObject({ stopHosted: true });
     expect(seen).toEqual([true]);
   });
 

@@ -203,8 +203,8 @@ export type HostToPreferences =
 /**
  * What a `set` or `reset` should actually write, or nothing.
  *
- * Separated from the window because it is the part with rules in it and the
- * window is the part with Electron in it. The rules: only a declared key, only
+ * Separated from the page because it is the part with rules in it, and the
+ * part every host must apply the same way. The rules: only a declared key, only
  * a value of that key's declared type, and `reset` writes `undefined` — which
  * removes the key, so the default keeps coming from the declaration rather than
  * being copied into the file. That last one is what makes a changed default

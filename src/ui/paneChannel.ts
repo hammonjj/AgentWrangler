@@ -28,8 +28,8 @@ export interface PaneChannel {
 
 /**
  * The half of this that knows about webviews. Structural rather than typed
- * against `vscode.Webview`, so the Electron shell can hand in its own
- * `webContents` wrapper without this module importing either host.
+ * against `vscode.Webview`, so a browser connection hands in its own
+ * transport without this module importing any host.
  */
 export interface EnvelopeTransport {
   postMessage(msg: unknown): PromiseLike<boolean>;

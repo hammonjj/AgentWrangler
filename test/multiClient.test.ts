@@ -874,21 +874,9 @@ describe('no approval path bypasses SessionActions', () => {
       'src/ui/dashboardHost.ts: this.answerQuestion': 'the table\'s wrapper round actions.answerQuestion',
       'src/ui/conversation/conversationHost.ts: source.decide': 'a transcript card, whose source calls actions.decidePermission',
       'src/ui/conversation/transcriptSource.ts: this.decidePermission': 'the callback ConversationHost builds over actions.decidePermission',
-      'src/remote/daemon/client.ts: a.decidePermission': 'the app end of the remote daemon link: guarded SessionActions',
-      'src/remote/daemon/client.ts: a.answerQuestion': 'the app end of the remote daemon link: guarded SessionActions',
-      'src/remote/daemon/client.ts: a.decidePlan': 'the app end of the remote daemon link: guarded SessionActions',
-      'src/remote/daemon/sources.ts: this.active.decidePermission': 'the daemon feed switch: the app link above, or its local feed',
-      'src/remote/daemon/sources.ts: this.active.answerQuestion': 'the daemon feed switch',
-      'src/remote/daemon/sources.ts: this.active.decidePlan': 'the daemon feed switch',
       // Not an ask: the delegation offer's "not now".
       'src/ui/conversation/conversationHost.ts: this.suggestion.decide': 'a delegation offer, not an agent ask',
-      // Known, and owned by #138: the remote daemon answers by itself while the
-      // app is not running, where there is no SessionActions to go through. It
-      // goes when Discord moves into the core daemon, beside the core's actions.
-      'src/remote/daemon/localFeed.ts: this.hosted.decide': '#138',
-      'src/remote/daemon/localFeed.ts: this.hosted.answer': '#138',
-      'src/remote/daemon/localFeed.ts: this.hosted.decidePlan': '#138',
-      'src/remote/daemon/localFeed.ts: this.provider.decidePermission': '#138',
+      // The old remote daemon's approval bypass (#132) went with it in #142.
     };
     const root = path.resolve(__dirname, '..');
     const files: string[] = [];

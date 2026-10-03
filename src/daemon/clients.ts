@@ -1,18 +1,17 @@
 /**
- * The core daemon's clients (#131): the browsers, and the app's window when
- * it is one of them.
+ * The core daemon's clients (#131): the browsers.
  *
  * - A `ClientRegistry` (#126) becomes the host's broker for dialogs
  *   (`host.useBroker`) and the app's surface (`app.attachSurface`), so a
  *   prompt or a navigation goes to the client whose request caused it, and
  *   one with no originating client is told to everyone and taken as
  *   cancelled. There is no fallback client: the daemon has no window of its
- *   own (the app's window is a browser like any other).
+ *   own.
  * - Opening things, the clipboard and notifications stay with the default
  *   broker: they act on this Mac, which is where a loopback client is.
- * - The web workbench (`src/app/webWorkbench.ts`), the same service the
- *   Electron app runs while it owns the core: loopback, LAN, settings sync.
- *   `loginLink` is what `web.link` (`aw web open`, the window) returns.
+ * - The web workbench (`src/app/webWorkbench.ts`): loopback, LAN, settings
+ *   sync. `loginLink` is what `web.link` (`aw web open`, the app's launcher)
+ *   returns.
  */
 import type { AgentWranglerApp } from '../app/createApp';
 import { startWebWorkbench, type WebWorkbench } from '../app/webWorkbench';

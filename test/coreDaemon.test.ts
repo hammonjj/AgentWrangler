@@ -33,7 +33,7 @@ import type { SessionHostRuntime } from '../src/core/session/hostSupervisor';
 import { cloneLaunch } from '../src/core/session/sessionHostRuntime';
 import { menuBarSessions, shouldPreventAppSuspension } from '../src/core/menuBar';
 import { createCoreDaemonAgent, CoreDaemonError, type CoreDaemonAgent } from '../src/node/coreDaemonAgent';
-import { renderLaunchAgent } from '../src/remote/daemon/launchAgent';
+import { renderLaunchAgent } from '../src/node/launchd';
 import type { AgentSession } from '../src/shared/model';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-core-daemon-'));
@@ -52,8 +52,8 @@ function manifest(over: Partial<CoreDaemonManifest> = {}): CoreDaemonManifest {
 }
 
 describe('plist', () => {
-  it('renders the core LaunchAgent: label, bundled Node on the unpacked daemon, keep-alive on crash only, Aqua, log', () => {
-    const rt = { ...cloneLaunch(HOST_APP, true), runtimeDir: path.dirname(HOST_APP) };
+  it('renders the core LaunchAgent: label, bundled Node on the bundle daemon, keep-alive on crash only, Aqua, log', () => {
+    const rt = { ...cloneLaunch(HOST_APP), runtimeDir: path.dirname(HOST_APP) };
     const text = renderLaunchAgent({
       label: CORE_DAEMON_LABEL,
       program: rt.exe,
@@ -64,7 +64,7 @@ describe('plist', () => {
     });
     expect(text).toContain('<string>com.hammonjj.agentwrangler.core</string>');
     expect(text).toContain(`<string>${HOST_APP}/Contents/Resources/node/bin/Agent Wrangler Host</string>`);
-    expect(text).toContain(`<string>${HOST_APP}/Contents/Resources/app.asar.unpacked/dist/daemon/main.js</string>`);
+    expect(text).toContain(`<string>${HOST_APP}/Contents/Resources/app/dist/daemon/main.js</string>`);
     expect(text).toMatch(/<key>RunAtLoad<\/key>\n {2}<false\/>/);
     expect(text).toMatch(/<key>KeepAlive<\/key>\n {2}<dict>\n {4}<key>SuccessfulExit<\/key>\n {4}<false\/>/);
     expect(text).toContain('<string>Interactive</string>');
@@ -75,16 +75,23 @@ describe('plist', () => {
     expect(text).not.toContain('ELECTRON_RUN_AS_NODE');
   });
 
-  it('keeps RunAtLoad on by default (the remote daemon) and on when asked', () => {
+  it('escapes paths and values, and sorts the environment', () => {
+    const text = renderLaunchAgent({ label: 'com.example.x', program: '/p/<a>', args: [], env: { Z: '1', A: 'x&y' }, logFile: '/l' });
+    expect(text).toContain('<string>/p/&lt;a&gt;</string>');
+    expect(text).toContain('<string>x&amp;y</string>');
+    expect(text.indexOf('<key>A</key>')).toBeLessThan(text.indexOf('<key>Z</key>'));
+  });
+
+  it('keeps RunAtLoad on by default and on when asked', () => {
     const base = { label: 'x', program: '/p', args: [], env: {}, logFile: '/l' };
     expect(renderLaunchAgent(base)).toMatch(/<key>RunAtLoad<\/key>\n {2}<true\/>/);
     expect(renderLaunchAgent({ ...base, runAtLoad: true })).toMatch(/<key>RunAtLoad<\/key>\n {2}<true\/>/);
   });
 
   it('maps a runtime to the daemon entry and environment', () => {
-    expect(coreDaemonEntryFor('/r/app.asar/dist/sessionHost/main.js')).toBe('/r/app.asar/dist/daemon/main.js');
-    expect(coreDaemonEnv({ dataDir: '/d', fallbackRunDir: '/f' }, { env: { ELECTRON_RUN_AS_NODE: '1' } })).toEqual({
-      ELECTRON_RUN_AS_NODE: '1',
+    expect(coreDaemonEntryFor('/r/app/dist/sessionHost/main.js')).toBe('/r/app/dist/daemon/main.js');
+    expect(coreDaemonEnv({ dataDir: '/d', fallbackRunDir: '/f' }, { env: { EXTRA: '1' } })).toEqual({
+      EXTRA: '1',
       AW_DATA_DIR: '/d',
       AW_FALLBACK_RUN_DIR: '/f',
     });
@@ -93,14 +100,21 @@ describe('plist', () => {
 
 describe('locateInstall', () => {
   it('a bundle or runtime clone: packaged, the .app above Resources', () => {
-    expect(locateInstall(`${HOST_APP}/Contents/Resources/app.asar.unpacked/dist/daemon`)).toEqual({
+    expect(locateInstall(`${HOST_APP}/Contents/Resources/app/dist/daemon`)).toEqual({
       isPackaged: true,
-      appRoot: `${HOST_APP}/Contents/Resources/app.asar`,
+      appRoot: `${HOST_APP}/Contents/Resources/app`,
       bundle: HOST_APP,
+    });
+    expect(locateInstall('/Applications/Agent Wrangler.app/Contents/Resources/app/dist/launcher')).toEqual({
+      isPackaged: true,
+      appRoot: '/Applications/Agent Wrangler.app/Contents/Resources/app',
+      bundle: '/Applications/Agent Wrangler.app',
     });
   });
   it('a checkout: unpackaged, the repo root', () => {
     expect(locateInstall('/Users/test/src/aw/dist/cli')).toEqual({ isPackaged: false, appRoot: '/Users/test/src/aw' });
+    // A checkout that happens to be called `app` is not a bundle.
+    expect(locateInstall('/Users/test/app/dist/cli')).toEqual({ isPackaged: false, appRoot: '/Users/test/app' });
   });
 });
 
@@ -133,9 +147,9 @@ describe('paths and manifest', () => {
   it('reads one setting without a host, falling back on absence or a wrong type', () => {
     const dir = tempDir();
     expect(readSetting(dir, 'openAtLogin', false)).toBe(false);
-    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ openAtLogin: true, 'experimental.coreDaemon': 'yes' }));
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ openAtLogin: true, 'web.enabled': 'yes' }));
     expect(readSetting(dir, 'openAtLogin', false)).toBe(true);
-    expect(readSetting(dir, 'experimental.coreDaemon', false)).toBe(false);
+    expect(readSetting(dir, 'web.enabled', false)).toBe(false);
   });
 });
 
@@ -150,7 +164,7 @@ describe('findCoreHolder: one core at a time', () => {
     expect(h).toEqual({ kind: 'daemon', manifest: manifest() });
     expect(describeCoreHolder(h, 1_000 + 65_000)).toBe('the core daemon is running it (pid 4242, build b1, up 1m 5s)');
   });
-  it('answers, with no manifest or a dead pid: the app', async () => {
+  it('answers, with no manifest or a dead pid: an Electron-era app', async () => {
     expect(await findCoreHolder({ ...base, probe: async () => true, read: () => undefined })).toEqual({ kind: 'app' });
     expect(await findCoreHolder({ ...base, probe: async () => true, read: () => manifest(), alive: () => false })).toEqual({ kind: 'app' });
   });
@@ -162,24 +176,23 @@ describe('findCoreHolder: one core at a time', () => {
 });
 
 describe('quit intents', () => {
-  it('maps stop to an ordinary signal stop and stop-all to ⌥⌘Q', () => {
+  it('maps stop to an ordinary signal stop and stop-all to ending everything', () => {
     expect(quitIntentSource('stop', 10)).toBe('signal');
-    expect(quitIntentSource('stop-all\n', 10)).toBe('menuStopAll');
-    expect(quitIntentSource('install', 10)).toBe('install');
+    expect(quitIntentSource('stop-all\n', 10)).toBe('stopAll');
     expect(quitIntentSource('toString', 10)).toBeUndefined();
   });
 
-  it('policy: a plain stop keeps hosts, stop --all ends them, neither asks', () => {
+  it('policy: a plain stop keeps hosts, stop --all ends them', () => {
     const plain = quitPolicy({ source: quitIntentSource('stop', 10)!, local: 2, hosted: 3 });
-    expect(plain).toMatchObject({ confirm: false, stopHosted: false });
+    expect(plain).toMatchObject({ stopHosted: false });
     const all = quitPolicy({ source: quitIntentSource('stop-all', 10)!, local: 2, hosted: 3 });
-    expect(all).toMatchObject({ confirm: false, stopHosted: true });
+    expect(all).toMatchObject({ stopHosted: true });
   });
 
   it('is consumed by the first reader, and ignored once stale', () => {
     const file = path.join(tempDir(), 'run', 'quit-intent');
     writeQuitIntent(file, 'stop-all');
-    expect(takeQuitIntent(file)).toBe('menuStopAll');
+    expect(takeQuitIntent(file)).toBe('stopAll');
     expect(fs.existsSync(file)).toBe(false);
     expect(takeQuitIntent(file)).toBeUndefined();
     writeQuitIntent(file, 'stop-all');
@@ -241,7 +254,7 @@ function setup(opts: { packaged: boolean; build?: string; settings?: Record<stri
     buildId: build,
     prepare: async () =>
       opts.packaged
-        ? { ...cloneLaunch(`/rt/${build}/Agent Wrangler Host.app`, true), runtimeDir: `/rt/${build}` }
+        ? { ...cloneLaunch(`/rt/${build}/Agent Wrangler Host.app`), runtimeDir: `/rt/${build}` }
         : { exe: '/usr/local/bin/node', entry: '/Users/test/src/aw/dist/sessionHost/main.js', env: {} },
     gc: () => undefined,
   };
@@ -294,7 +307,7 @@ describe('createCoreDaemonAgent', () => {
     expect(world.calls[1]).toEqual(['bootstrap', 'gui/501', plistPath]);
     expect(world.calls[2]).toEqual(['kickstart', `gui/501/${CORE_DAEMON_LABEL}`]);
     const text = fs.readFileSync(plistPath, 'utf8');
-    expect(text).toContain('/rt/b2/Agent Wrangler Host.app/Contents/Resources/app.asar.unpacked/dist/daemon/main.js');
+    expect(text).toContain('/rt/b2/Agent Wrangler Host.app/Contents/Resources/app/dist/daemon/main.js');
     expect(text).toMatch(/<key>RunAtLoad<\/key>\n {2}<false\/>/);
   });
 
@@ -335,7 +348,7 @@ describe('createCoreDaemonAgent', () => {
     expect(world.calls.map((c) => c[0])).toEqual(['print', 'kickstart']);
   });
 
-  it('refuses while the app holds the core', async () => {
+  it('refuses while an Electron-era app holds the core', async () => {
     const { agent, world } = setup({ packaged: true });
     world.answering = true; // no manifest: the app
     await expect(agent.ensure()).rejects.toBeInstanceOf(CoreDaemonError);

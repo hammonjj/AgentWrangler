@@ -29,7 +29,7 @@ import { startAppShell } from './shell';
 
 // The app shell (#133): modals and toasts everywhere, routes and the narrow
 // layout only in a browser — the page the web server renders says which
-// (`aw-web`); the Electron window keeps its own frame for now.
+// (`aw-web`), and since Electron went (#142) it is always one.
 startAppShell({ browser: document.body.classList.contains('aw-web') });
 
 /** Neither pane may be squeezed below this. Both stop being usable well before. */

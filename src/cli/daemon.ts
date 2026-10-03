@@ -62,7 +62,7 @@ export async function runDaemonCommand(cmd: DaemonCommand, agent: Pick<CoreDaemo
             io.out('The core daemon is not running.\n');
             return 0;
           case 'app':
-            io.err('The Agent Wrangler app is running the core, not the daemon. Quit the app instead.\n');
+            io.err('An older Agent Wrangler app is running the core, not the daemon. Quit that app instead.\n');
             return 1;
           case 'timeout':
             io.err(`The core daemon (pid ${r.pid}) has not exited yet. It may still be ending agents; check aw daemon status in a moment.\n`);

@@ -6,8 +6,7 @@
  *   conversation staging directory, `<dataDir>/uploads/<hash of the session
  *   key>/<uuid>-<name>`: files 0600 in directories 0700, nothing older than a
  *   week kept (`cleanup`, at start and daily). The reply carries the **host
- *   path**; the conversation pane then refers to the file by it, as it does
- *   for a path dropped in the Electron window. The server has already made
+ *   path**; the conversation pane then refers to the file by it. The server has already made
  *   sure the request came from this site (`Origin`) and from a signed-in
  *   device; this adds the `X-AW-Upload: 1` header, a size cap, and a per-device
  *   rate limit.

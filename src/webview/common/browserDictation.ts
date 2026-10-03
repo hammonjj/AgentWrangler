@@ -1,8 +1,8 @@
 /**
  * Dictation with the browser's own microphone (#141).
  *
- * In the Electron window the host records its microphone with ffmpeg. In a
- * browser, and above all on a phone, the microphone that matters is the
+ * The host can record its own microphone with ffmpeg. In a browser, and
+ * above all on a phone, the microphone that matters is the
  * device's: `MediaRecorder` records it, the audio is uploaded to the daemon's
  * `POST /dictation`, and the same Whisper pipeline transcribes it there.
  * The text goes into the composer through the conversation pane's existing
@@ -22,7 +22,7 @@ import {
   secureContextProblem,
 } from '../../shared/webCapabilities';
 
-/** The workbench is in a browser, not the Electron window (the shim says so on `<html>`). */
+/** The workbench is in a browser with the shim (it says so on `<html>`). */
 export function isBrowserHost(): boolean {
   return document.documentElement.dataset.awHost === 'browser';
 }

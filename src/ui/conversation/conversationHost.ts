@@ -58,8 +58,8 @@ export interface ConversationHostUi {
    */
   offerDictationSetup(err: DictationSetupError): Promise<void>;
   /**
-   * Whether a path named by a *remote* browser (a paired device, never the
-   * Electron window) may be read as a host path: only a staged upload (#139).
+   * Whether a path named by a *remote* browser (a paired device) may be read
+   * as a host path: only a staged upload (#139).
    * Absent: none may. A remote client's paths are its own filesystem's, not
    * the host's, so they are refused before anything is `stat`ed or read.
    */

@@ -4,12 +4,12 @@
  *
  * - the in-process factory applies a press through the core's actions, as
  *   Discord, and through the access gate;
- * - the token comes from the Keychain, in the core daemon and in the remote
- *   daemon at start (no waiting for the app after a reboot);
- * - the remote daemon's LaunchAgent is booted out and removed, and a daemon
- *   the unpackaged app spawned is stopped, before anything connects;
- * - one connector across a mode switch: a card the remote daemon posted is
- *   adopted by the core daemon's connector, not posted again.
+ * - the token comes from the Keychain;
+ * - the old remote daemon's LaunchAgent (Electron-era builds) is booted out
+ *   and removed, and one an unpackaged build spawned is stopped, before
+ *   anything connects;
+ * - one connector after another: a card the last connector posted is adopted
+ *   by the next one (a daemon restart or update), not posted again.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -19,16 +19,13 @@ import { DEFAULT_CONFIG, type WranglerConfig } from '../src/core/config';
 import { Emitter, type Disposable } from '../src/core/events';
 import { KeychainSecrets, type SecurityRunner } from '../src/core/keychainSecrets';
 import { currentRequest } from '../src/core/requestScope';
-import type { SessionHostRuntime } from '../src/core/session/hostSupervisor';
-import { createRemoteDaemonAgent, retireRemoteDaemon } from '../src/node/remoteDaemonAgent';
+import { remoteDaemonPaths, retireRemoteDaemon } from '../src/node/remoteDaemonAgent';
 import { MemoryAuditLog } from '../src/remote/audit';
-import { RemoteDaemon, type OwnFeed } from '../src/remote/daemon/daemon';
-import { remoteDaemonPaths } from '../src/remote/daemon/paths';
 import { createInProcessRemoteControl } from '../src/remote/inProcess';
 import type { RemoteClose, RemoteInvocation, RemoteMessageRef, RemoteTransport } from '../src/remote/transport';
 import type { SessionDTO } from '../src/shared/model';
 import type { RemoteAsk, RemoteNotice } from '../src/shared/remote';
-import type { PermissionDecisionOutcome, SessionActions } from '../src/ui/actions';
+import type { SessionActions } from '../src/ui/actions';
 
 class FakeTransport implements RemoteTransport {
   readonly id = 'fake';
@@ -66,31 +63,6 @@ class FakeTransport implements RemoteTransport {
   press(interactionId: string, choiceId: string) {
     this.invoke.fire({ interactionId, choiceId, actor: { id: 'U1', displayName: 'T' }, scope: { guildId: 'G1', channelId: 'C1' } });
   }
-}
-
-class FakeFeed implements OwnFeed {
-  sessions: SessionDTO[] = [];
-  ready = false;
-  hostCount = 0;
-  private emitter = new Emitter<void>();
-  onDidUpdate = (l: () => void) => this.emitter.event(l);
-  async start() {}
-  redecorate() {}
-  set(sessions: SessionDTO[]) {
-    this.sessions = sessions;
-    this.ready = true;
-    this.emitter.fire();
-  }
-  async decidePermission(): Promise<PermissionDecisionOutcome> {
-    return 'applied';
-  }
-  async answerQuestion(): Promise<PermissionDecisionOutcome> {
-    return 'unsupported';
-  }
-  async decidePlan(): Promise<PermissionDecisionOutcome> {
-    return 'unsupported';
-  }
-  dispose() {}
 }
 
 function blocked(requestId = '100-1'): SessionDTO {
@@ -322,61 +294,6 @@ describe('Discord in the core daemon (createInProcessRemoteControl)', () => {
   });
 });
 
-describe('the remote daemon reads its own settings and token at start (Electron-core mode)', () => {
-  function daemonWith(settings: Record<string, unknown>, security: SecurityRunner, transports: FakeTransport[], own: FakeFeed) {
-    const runDir = path.join(dir, 'run');
-    const settingsFile = path.join(dir, 'settings.json');
-    fs.writeFileSync(settingsFile, JSON.stringify(settings));
-    return new RemoteDaemon({
-      ...remoteDaemonPaths({ runDir, fallbackRunDir: path.join(dir, 'fb') }),
-      runDir,
-      build: 'b1',
-      log: () => undefined,
-      settingsFile,
-      secrets: new KeychainSecrets(security),
-      makeTransport: (t) => {
-        const tr = new FakeTransport(t);
-        transports.push(tr);
-        return tr;
-      },
-      makeOwnFeed: () => own,
-      mirrorFile: path.join(dir, 'mirrors.json'),
-      audit: new MemoryAuditLog(),
-    });
-  }
-
-  const on = {
-    'remote.enabled': true,
-    'remote.discord.guildId': 'G1',
-    'remote.discord.channelId': 'C1',
-    'remote.discord.authorizedUserIds': 'U1',
-  };
-
-  it('connects with the Keychain token and follows its own feed, with no app', async () => {
-    const transports: FakeTransport[] = [];
-    const own = new FakeFeed();
-    const daemon = daemonWith(on, fakeSecurity('tok-kc'), transports, own);
-    await daemon.start();
-    expect(transports.map((t) => t.token)).toEqual(['tok-kc']);
-    expect(daemon.status()).toMatchObject({ hasToken: true, connected: true });
-    own.set([blocked()]);
-    await until(() => transports[0].published.length === 1);
-    expect(daemon.status().source).toBe('daemon');
-    await daemon.dispose();
-  });
-
-  it('waits, reading nothing from the Keychain, while Discord integration is off', async () => {
-    const transports: FakeTransport[] = [];
-    const security = fakeSecurity('tok-kc');
-    const daemon = daemonWith({ ...on, 'remote.enabled': false }, security, transports, new FakeFeed());
-    await daemon.start();
-    expect(security.calls).toEqual([]);
-    expect(transports).toEqual([]);
-    expect(daemon.status()).toMatchObject({ hasToken: false, connected: false });
-    await daemon.dispose();
-  });
-});
-
 describe('retireRemoteDaemon', () => {
   function runFiles() {
     const runDirs = { runDir: path.join(dir, 'run'), fallbackRunDir: path.join(dir, 'fb') };
@@ -464,71 +381,36 @@ describe('retireRemoteDaemon', () => {
   });
 });
 
-describe('the app does not start the remote daemon beside a core daemon', () => {
-  it('ensure starts nothing while the core daemon holds the core', async () => {
-    let prepared = 0;
-    const runtime: SessionHostRuntime = {
-      buildId: 'b1',
-      prepare: () => {
-        prepared++;
-        return Promise.reject(new Error('no runtime in this test'));
-      },
-      gc: () => undefined,
-    };
-    const lines: string[] = [];
-    const agent = createRemoteDaemonAgent({
-      runDirs: { runDir: path.join(dir, 'run'), fallbackRunDir: path.join(dir, 'fb') },
-      logDir: path.join(dir, 'logs'),
-      runtime,
-      isPackaged: false,
-      log: (m) => lines.push(m),
-      coreDaemonHolds: async () => true,
-    });
-    await agent.ensure('start');
-    await agent.ensure('unreachable');
-    expect(prepared).toBe(0);
-    expect(lines).toEqual(['remote daemon: not starting it; the core daemon runs Discord']);
-  });
-});
-
-describe('one connector across a mode switch', () => {
-  it('the core daemon adopts the card the remote daemon posted, rather than posting it again', async () => {
+describe('one connector after another', () => {
+  it('the next daemon adopts the card the last one posted, rather than posting it again', async () => {
     const mirrorFile = path.join(dir, 'mirrors.json');
     const audit = new MemoryAuditLog();
 
-    // Electron-core mode: the remote daemon, from its own feed, posts the card.
-    const runDir = path.join(dir, 'run');
-    const settingsFile = path.join(dir, 'settings.json');
-    fs.writeFileSync(
-      settingsFile,
-      JSON.stringify({ 'remote.enabled': true, 'remote.discord.guildId': 'G1', 'remote.discord.channelId': 'C1', 'remote.discord.authorizedUserIds': 'U1' }),
-    );
+    // The daemon before an update or a restart posts the card.
     const before: FakeTransport[] = [];
-    const own = new FakeFeed();
-    const remote = new RemoteDaemon({
-      ...remoteDaemonPaths({ runDir, fallbackRunDir: path.join(dir, 'fb') }),
-      runDir,
-      build: 'b1',
-      log: () => undefined,
-      settingsFile,
+    const first = createInProcessRemoteControl({
+      sessions: listOf([blocked()]).feed,
+      ready: () => true,
+      actions: recordingActions().actions,
+      gate: recordingGate(),
+      getConfig: () => enabled,
       secrets: new KeychainSecrets(fakeSecurity('tok-kc')),
+      log: () => undefined,
       makeTransport: (t) => {
         const tr = new FakeTransport(t);
         before.push(tr);
         return tr;
       },
-      makeOwnFeed: () => own,
       mirrorFile,
       audit,
     });
-    await remote.start();
-    own.set([blocked()]);
+    await first.sync();
+    await first.reconcile();
     await until(() => before[0]?.published.length === 1);
     const posted = before[0].published[0].interactionId;
 
-    // The switch: the core daemon retires it (bootout → SIGTERM → dispose)
-    // before it builds its own connector.
-    await remote.dispose();
+    // It stops: hung up, the map written, the card left up for the next one.
+    await first.dispose();
     expect(before[0].connected).toBe(false);
     expect(before[0].closed).toEqual([]); // the card stays up
 

@@ -186,7 +186,7 @@ feed.
   to be opened after a reboot.
 - **The switch stays for now.** `SourceSwitch`, `AppFeed`, `LocalFeed`, the socket and
   `src/remoteDaemon/` serve only the Electron-core mode; the core daemon never uses them. They
-  are removed with Electron (slice 19, #142).
+  are removed with Electron (slice 19, #142). *Removed in #142;* `retireRemoteDaemon` stays.
 
 ## 5. Browser UI: adapt, don't replace
 
@@ -440,7 +440,30 @@ entry points and drives each with a refusing `authorize`.
 2. **Parity.** Browser features reach the retirement checklist in slice 19.
 3. **Retirement.** Delete `src/electron/`, the preload, the `aw://` scheme, the palette and
    preferences windows, Electron and electron-builder. The `.app` becomes the Node daemon bundle
-   (§4).
+   (§4). *Built in #142:*
+   - Gone: `src/electron/**`, the palette bundle and the Preferences window's document,
+     `experimental.coreDaemon` (retired; the daemon always runs the core), the remote daemon
+     (`src/remoteDaemon`, `src/remote/daemon/*`: the app link, `SourceSwitch`, `AppFeed`, and the
+     `localFeed` approval bypass #132 listed), the `safeStorage` migration, every
+     `ELECTRON_RUN_AS_NODE` fallback, `electron` and `electron-builder`. The core daemon still
+     retires an installed remote daemon (`retireRemoteDaemon`), for machines coming from an
+     Electron build.
+   - **The bundle** (`src/core/appBundle.ts`, assembled by `scripts/package-app.ts`):
+     `Contents/Info.plist` (same bundle id, `LSUIElement`), `Contents/MacOS/Agent Wrangler`
+     (the launcher), `Contents/Resources/node/bin/node`, `Contents/Resources/app/dist/…`
+     (no asar). Signed with the local identity (node first, then the bundle; hardened runtime
+     off as before) and checked with `codesign --verify --deep --strict`.
+   - **The launcher** is a ~70-line C program (`src/launcher/launcher.c`, built with the system
+     `clang`) that execs the bundled Node on `dist/launcher/main.js`. A signed Mach-O carries the
+     bundle's identity for TCC, which a shell script would not (its identity is the
+     interpreter's); Node itself as `CFBundleExecutable` cannot be given its script, since
+     `LSEnvironment` cannot hold a bundle-relative path. `exec` rather than spawn, so the process
+     LaunchServices started is the one that exits. The script (`src/launcher/launch.ts`) makes
+     sure the daemon runs (`CoreDaemonAgent.ensure`), mints a loopback link (`web.link`),
+     `open`s it and exits; `--dry-run` changes nothing.
+   - **Install and update** (`scripts/install-app.sh`): quit an Electron-era app the ordinary
+     way, replace the bundle, `aw daemon start` from it, refresh an installed `aw`. A copy older
+     than #124 must run a build with #124 (and Electron) first.
 
 **Retirement checklist** (all in a browser, local and on a paired phone):
 

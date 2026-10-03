@@ -21,13 +21,13 @@ import { HostClient } from './hostClient';
 import { readManifest, readManifests, removeHostFiles } from './manifestFile';
 import type { LostAgent } from './orphanSweep';
 
-/** Where a host runs from. The Electron front end clones and signs its own bundle; tests use Node. */
+/** Where a host runs from. The daemon clones and signs its own bundle; tests use Node. */
 export interface SessionHostRuntime {
   readonly buildId: string;
   /**
-   * The executable and entry script for a new host, and any environment the
-   * executable needs to act as Node (`ELECTRON_RUN_AS_NODE` when it is the
-   * Electron binary; nothing for the bundled Node). May clone the running bundle first.
+   * The executable (a Node) and entry script for a new host, and any extra
+   * environment the runtime wants it started with. May clone the running
+   * bundle first.
    */
   prepare(): Promise<{ exe: string; entry: string; runtimeDir?: string; env?: Record<string, string> }>;
   /** Remove cloned runtimes no live host uses. */
@@ -430,10 +430,10 @@ export class HostSupervisor {
 }
 
 /**
- * A host's environment: the app's, plus what the runtime's executable needs
- * to act as Node, plus the caller's extras. `ELECTRON_RUN_AS_NODE` is present
- * only when the runtime asks for it (the Electron binary); a host on the
- * bundled Node never inherits one.
+ * A host's environment: the daemon's, plus the runtime's, plus the caller's
+ * extras. Never `ELECTRON_RUN_AS_NODE`: `aw daemon start` run from an
+ * Electron-based editor's terminal (VSCode's) inherits it, and a host is
+ * plain Node.
  */
 export function hostProcessEnv(
   base: NodeJS.ProcessEnv,

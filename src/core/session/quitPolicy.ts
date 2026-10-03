@@ -1,73 +1,57 @@
 /**
- * What quitting does, by where the quit came from.
+ * What stopping the core daemon does, by why it was stopped.
  *
- * Pure. Electron 44 gives no reason on `before-quit`, so the app labels the
- * sources it owns and treats everything else as external
- * (`docs/plans/session-lifecycle-architecture.md` §7.2, §11.10):
+ * Pure. The daemon is only ever stopped by a signal (launchd's stop, a
+ * bootout on update, `aw daemon stop`), and `aw daemon stop --all` says what
+ * it wants beforehand with a `run/quit-intent` file:
  *
- * - `menu`: the app's own Quit item (⌘Q). A person is at the keyboard.
- * - `menuStopAll`: Quit and Stop All Agents (⌥⌘Q).
- * - `signal`: SIGTERM, caught by the handler registered in `whenReady`.
- * - `install`: `install-app.sh` announced itself with a `run/quit-intent` file.
- * - `external`: anything else (an `osascript` quit, Dock → Quit, logout).
+ * - `signal`: an ordinary stop. Hosted conversations keep running and the next
+ *   daemon reattaches them.
+ * - `stopAll`: `aw daemon stop --all`, which ends them too.
  *
  * Two kinds of session. **Hosted** ones run in session hosts and keep running:
- * only ⌥⌘Q ends them. Every Claude conversation is one (#122). **Local** ones
- * are children of the app and cannot survive a quit, so every quit ends them:
- * only Codex threads with the background Codex server off are. Only a menu
- * quit ever asks first, and only when it would end something: a script, a
- * signal or a logout must never block on a dialog nobody will see.
+ * only `stopAll` ends them. Every Claude conversation is one (#122). **Local**
+ * ones are children of the daemon and cannot survive it, so every stop ends
+ * them: only Codex threads with the background Codex server off are. Nothing
+ * ever asks first: there is no window to ask in.
  */
 
-export type QuitSource = 'menu' | 'menuStopAll' | 'signal' | 'install' | 'external';
+export type QuitSource = 'signal' | 'stopAll';
 
 export interface QuitDecision {
-  /** Ask "Quit and stop N agents?" first. */
-  confirm: boolean;
   /** End hosted sessions too, rather than leaving them running. */
   stopHosted: boolean;
   /** How long to wait for the agents being ended to go, before exiting anyway. */
   stopWithinMs: number;
-  /** Hosted sessions left running, to say so as the app goes (0: say nothing). */
-  announceRunning: number;
 }
 
-/** The bound on a graceful stop at quit. Long enough for an interrupt and a flush, short enough for a logout. */
+/** The bound on a graceful stop. Long enough for an interrupt and a flush, short enough for a logout. */
 export const QUIT_STOP_BOUND_MS = 10_000;
 
 export function quitPolicy(input: { source: QuitSource; local: number; hosted: number }): QuitDecision {
-  const stopHosted = input.source === 'menuStopAll';
-  return {
-    confirm: input.source === 'menu' && input.local > 0,
-    stopHosted,
-    stopWithinMs: QUIT_STOP_BOUND_MS,
-    // A logout is ending everything anyway; there is nobody to tell.
-    announceRunning: stopHosted || input.source === 'signal' ? 0 : input.hosted,
-  };
+  return { stopHosted: input.source === 'stopAll', stopWithinMs: QUIT_STOP_BOUND_MS };
 }
 
 /** How fresh a `quit-intent` marker must be to count. An old one is left over, not an announcement. */
 export const QUIT_INTENT_MAX_AGE_MS = 60_000;
 
 /**
- * What a `run/quit-intent` marker may say, and who writes it:
- * - `install`: `install-app.sh`, before it quits the app;
- * - `stop`: `aw daemon stop` (#130), before it signals the core daemon. The
- *   same as a bare SIGTERM: hosts keep running.
- * - `stop-all`: `aw daemon stop --all`, the daemon's ⌥⌘Q: hosts end too.
+ * What a `run/quit-intent` marker may say. `aw daemon stop` (#130) writes it
+ * before it signals the core daemon:
+ * - `stop`: the same as a bare SIGTERM: hosts keep running;
+ * - `stop-all`: `aw daemon stop --all`: hosts end too.
  */
-export type QuitIntent = 'install' | 'stop' | 'stop-all';
+export type QuitIntent = 'stop' | 'stop-all';
 
 const INTENT_SOURCES: Record<QuitIntent, QuitSource> = {
-  install: 'install',
   stop: 'signal',
-  'stop-all': 'menuStopAll',
+  'stop-all': 'stopAll',
 };
 
 /**
  * Parse `run/quit-intent`. Its content is the reason (a `QuitIntent`);
- * anything unreadable, unknown or stale is ignored and the quit counts as
- * whatever the process would otherwise call it (external, or a signal).
+ * anything unreadable, unknown or stale is ignored and the stop counts as a
+ * plain signal.
  */
 export function quitIntentSource(content: string | undefined, writtenMsAgo: number | undefined): QuitSource | undefined {
   if (content === undefined || writtenMsAgo === undefined) return undefined;

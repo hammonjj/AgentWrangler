@@ -44,7 +44,7 @@ export class ControlClient {
     socket.on('close', () => peer.close(new Error('Agent Wrangler closed the connection')));
     socket.on('error', () => undefined);
     const params: ControlHelloParams = {
-      // `aw`, or the app's window when it is a client of the daemon (#131).
+      // `aw`, or the app's launcher asking for a sign-in link (#142).
       client: { name: client.name ?? 'aw', build: client.build, pid: process.pid },
       protocol: { min: CONTROL_PROTOCOL_VERSION, max: CONTROL_PROTOCOL_VERSION },
       token,

@@ -229,16 +229,16 @@ export const SETTINGS: SettingSpec[] = [
     type: 'boolean',
     default: false,
     description:
-      'Show a notification when a session needs permission, is waiting on you, or is done, while the window is open.',
+      'Show a notification when a session needs permission, is waiting on you, or is done, while Agent Wrangler is open in a browser tab.',
   },
   {
     key: 'notifyWhenWindowClosed',
-    label: 'Notify while the window is closed',
+    label: 'Notify while no tab is open',
     group: 'Agents and status',
     type: 'boolean',
     default: true,
     description:
-      'With the window closed, Agent Wrangler keeps running in the menu bar. Show a macOS notification when a session needs permission, is waiting on you, or is done; clicking it opens that session.',
+      'With no Agent Wrangler tab open, it keeps running in the background. Show a macOS notification on this Mac when a session needs permission, is waiting on you, or is done. Discord integration, when it is on, posts to Discord as well.',
   },
   {
     key: 'openAtLogin',
@@ -247,7 +247,7 @@ export const SETTINGS: SettingSpec[] = [
     type: 'boolean',
     default: false,
     description:
-      'Start Agent Wrangler in the menu bar when you log in, without opening its window. It is never restarted automatically after a quit or a crash.',
+      'Start Agent Wrangler’s background service when you log in, without opening a browser. Either way it is restarted after a crash, never after a stop.',
   },
 
   // ---- Telemetry ----
@@ -500,17 +500,6 @@ export const SETTINGS: SettingSpec[] = [
     description:
       'Post a message when an agent finishes its task, alongside the permission prompts. It has no buttons — nothing is waiting on you — and names the agent, repository and branch, never anything it said. Auto-pause is announced the same way and is not covered by this switch: everything stopping is not optional news.',
   },
-  // The core daemon (#130). Read once at startup by the app, which is why it
-  // says "restart"; with it on the app does not open this window at all.
-  {
-    key: 'experimental.coreDaemon',
-    label: 'Run the core in the background',
-    group: 'Experimental',
-    type: 'boolean',
-    default: false,
-    description:
-      'Run Agent Wrangler’s core (session tracking, the agents it runs, Discord, the aw command) as a background service that keeps running with no window open, instead of inside this app. Opening the app then starts the service and points you to "aw web open"; this window does not open until the browser workbench replaces it. Takes effect when you quit and reopen Agent Wrangler. To switch back, set it to false in settings.json, run "aw daemon stop", and reopen the app.',
-  },
 ];
 
 /**
@@ -518,8 +507,10 @@ export const SETTINGS: SettingSpec[] = [
  * `settings.json`, so a stale value does not read as though it still applied.
  * - `experimental.sessionHosts` (#122): every Claude conversation runs in a
  *   session host; there is nothing left to switch.
+ * - `experimental.coreDaemon` (#142): the core always runs in the background
+ *   service; the Electron window it switched away from is gone.
  */
-export const RETIRED_SETTING_KEYS: readonly string[] = ['experimental.sessionHosts'];
+export const RETIRED_SETTING_KEYS: readonly string[] = ['experimental.sessionHosts', 'experimental.coreDaemon'];
 
 /** Group headings in declaration order, with no duplicates. */
 export function settingGroups(): { group: string; settings: SettingSpec[] }[] {
