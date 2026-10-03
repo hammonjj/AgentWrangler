@@ -38,8 +38,12 @@ import {
   type ShellPrompt,
   type ShellToHost,
 } from '../../shared/shellProtocol';
+import { pickFolderPlain } from '../common/folderBrowser';
+import { openUrlHere, showHostView } from '../common/hostView';
 
 interface Bridge {
+  /** A remote browser: a path here is not a host path (#139). `paneApi.isRemoteHost` reads it. */
+  remote?: boolean;
   postMessage(message: unknown): void;
   getState(): unknown;
   setState(state: unknown): void;
@@ -216,9 +220,17 @@ function onShell(body: HostToShell | undefined): void {
     case 'hello':
     case 'ack':
       return; // handled as they arrive
-    case 'prompt':
-      sendShell({ type: 'promptResult', id: body.id, value: answer(body.prompt) ?? null });
+    case 'prompt': {
+      const { id, prompt } = body;
+      if (prompt.kind === 'pickFolder') {
+        // A folder on the host, chosen from the host's own listing (#139). The
+        // app shell's modal host (#133) can mount `mountFolderBrowser` itself.
+        void pickFolderPlain(prompt.openLabel).then((value) => sendShell({ type: 'promptResult', id, value: value ?? null }));
+        return;
+      }
+      sendShell({ type: 'promptResult', id, value: answer(prompt) ?? null });
       return;
+    }
     case 'toast':
       toast(body.text, body.timeoutMs);
       return;
@@ -229,6 +241,14 @@ function onShell(body: HostToShell | undefined): void {
       return;
     case 'promptCancel':
       // A native dialog cannot be closed from script; its answer is ignored.
+      return;
+    // Former host-local actions, answered in this browser (#140).
+    case 'openUrl':
+      openUrlHere(body.url);
+      return;
+    case 'showFile':
+    case 'showCommand':
+      showHostView(body, { sendShell, toast });
       return;
   }
 }
@@ -265,10 +285,8 @@ function answer(p: ShellPrompt): string | number | undefined {
         p.placeHolder ?? 'Choose one',
         p.items.map((item) => (item.description ? `${item.label} — ${item.description}` : item.label)),
       );
-    case 'pickFolder': {
-      const raw = window.prompt(`${p.openLabel ?? 'Folder'}: a path on the Mac running Agent Wrangler`, '');
-      return raw?.trim() || undefined;
-    }
+    case 'pickFolder':
+      return undefined; // Answered by the folder browser in `onShell`, which is asynchronous.
   }
 }
 
@@ -291,6 +309,7 @@ function toast(text: string, timeoutMs = 4000): void {
   else window.addEventListener('DOMContentLoaded', show, { once: true });
 }
 const host: Bridge = {
+  remote: true,
   postMessage(message) {
     const line = JSON.stringify(message);
     const m = message as { commandId?: unknown; body?: { type?: unknown } } | null;

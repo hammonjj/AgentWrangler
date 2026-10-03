@@ -18,7 +18,7 @@ import type { Disposable } from '../core/events';
 import type { RequestContext } from '../core/access';
 import type { ClientRegistry } from '../core/clients';
 import { createBrowserConnections } from '../core/web/browserConnections';
-import type { HostServices } from '../host/hostServices';
+import type { HostServices, HostShell } from '../host/hostServices';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { isMutatingPaneMessage } from '../ui/paneMutations';
 import { createWorkbenchHosts } from './workbenchWindow';
@@ -32,6 +32,10 @@ export interface BrowserClientsOptions {
   log: (line: string) => void;
   /** The build the served page is (`WebServer.build`). */
   build: () => string;
+  /** Whether a folder a browser chose may be used as a host path (`WebFiles.folderAllowed`, #139). */
+  folderAllowed: (dir: string) => Promise<boolean>;
+  /** The Mac's own shell: what a loopback browser's "Open on this Mac" does (#140). */
+  hostShell?: HostShell;
 }
 
 export interface BrowserClients extends Disposable {
@@ -47,6 +51,8 @@ export function createBrowserClients(opts: BrowserClientsOptions): BrowserClient
     clients,
     log,
     build: opts.build,
+    folderAllowed: opts.folderAllowed,
+    ...(opts.hostShell ? { hostShell: opts.hostShell } : {}),
     isMutating: isMutatingPaneMessage,
     createPanes: (transport, context) => createWorkbenchHosts(app, host, ui, transport, context),
   });

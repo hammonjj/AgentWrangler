@@ -71,9 +71,30 @@ export type HostToShell =
    */
   | { type: 'hello'; protocol: number; build: string }
   /** These pane envelopes (by `commandId`) arrived; the client may forget them. */
-  | { type: 'ack'; ids: string[] };
+  | { type: 'ack'; ids: string[] }
+  /** #140: open this link in the browser that asked, never on the host. http/https only. */
+  | { type: 'openUrl'; url: string }
+  /**
+   * #140: show a file the host named. `intent` is what the app wanted
+   * (open it, or reveal it in the file manager); a browser answers both with
+   * the read-only viewer (`FILE_VIEW_ROUTE`). `hostActions` is true only for a
+   * loopback client, which may also ask for it on the Mac (`hostAction`).
+   */
+  | { type: 'showFile'; id: number; path: string; name: string; intent: 'open' | 'reveal'; hostActions: boolean }
+  /**
+   * #140: a command the user runs in a terminal of their own (`claude --resume
+   * <id>`). The client shows and copies it. Same `hostActions` rule.
+   */
+  | { type: 'showCommand'; id: number; command: string; cwd: string; title: string; hostActions: boolean };
 
 export type ShellToHost =
+  /**
+   * #140: a loopback client asks for what `showFile` / `showCommand` `id`
+   * offered to be done on the Mac ("Open on this Mac"). Anything else, and any
+   * other kind of client, is ignored. Only what the app offered can be asked
+   * for; the client never names a path or a command.
+   */
+  | { type: 'hostAction'; id: number; action: 'open' | 'reveal' | 'run' }
   | { type: 'promptResult'; id: number; value: string | number | null }
   /** The client's half of the handshake (#128): what it was loaded as. */
   | { type: 'hello'; protocol: number; build: string }
@@ -89,6 +110,11 @@ export function parseShellToHost(body: unknown): ShellToHost | undefined {
     return { type: 'hello', protocol: m.protocol, build: m.build };
   }
   if (m.type === 'visibility') return typeof m.hidden === 'boolean' ? { type: 'visibility', hidden: m.hidden } : undefined;
+  if (m.type === 'hostAction') {
+    const a = (body as { action?: unknown }).action;
+    if (typeof m.id !== 'number' || !Number.isInteger(m.id)) return undefined;
+    return a === 'open' || a === 'reveal' || a === 'run' ? { type: 'hostAction', id: m.id, action: a } : undefined;
+  }
   if (m.type !== 'promptResult' || typeof m.id !== 'number' || !Number.isInteger(m.id)) return undefined;
   const value = m.value;
   if (value !== null && value !== undefined && typeof value !== 'string' && typeof value !== 'number') return undefined;
@@ -126,3 +152,33 @@ export function isCommandId(v: unknown): v is string {
  * and the host replies with a fresh snapshot / init: no page reload.
  */
 export const RECONNECT_EVENT = 'agentwrangler:reconnect';
+
+// ---- the read-only file and diff view (#140) ----
+
+/** `GET /api/view?path=<absolute path>` answers a `FileView`; with `&download=1` it sends the file. */
+export const FILE_VIEW_ROUTE = '/api/view';
+
+/** How much of a text file the viewer is sent. The rest is cut and `truncated` says so. */
+export const FILE_VIEW_MAX_BYTES = 256 * 1024;
+
+export interface FileView {
+  path: string;
+  name: string;
+  /** The file's size on disk, in bytes. */
+  size: number;
+  /** `diff` is a unified diff (`.diff`, `.patch`), drawn with its additions and deletions marked. */
+  kind: 'text' | 'diff' | 'binary';
+  /** Absent for `binary`, which is offered as a download instead. */
+  text?: string;
+  truncated: boolean;
+}
+
+/** The viewer's path for a file, and the download's. */
+export function fileViewUrl(path: string, download = false): string {
+  return `${FILE_VIEW_ROUTE}?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`;
+}
+
+/** A unified diff by name. The orchestration writes its diffs as `<mission>-a<n>.diff`. */
+export function isDiffFile(path: string): boolean {
+  return /\.(diff|patch)$/i.test(path);
+}
