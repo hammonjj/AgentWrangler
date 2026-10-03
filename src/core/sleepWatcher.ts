@@ -1,13 +1,12 @@
 /**
- * Noticing that the machine slept, without Electron's `powerMonitor`.
+ * Noticing that the machine slept, on plain Node.
  *
  * A timer set to fire every few seconds fires far later than it was due when
  * the machine was asleep in between: timers do not run during sleep, and the
  * wall clock does. A gap much longer than the interval is a wake. The slack is
  * generous (30 s) so a busy event loop or a slow GC is never mistaken for one.
  *
- * Used by the remote daemon (#74) and by the plain-Node host (#125), neither
- * of which has `powerMonitor`. The timer is unref'd: watching for sleep is
+ * Used by the core daemon (#130). The timer is unref'd: watching for sleep is
  * never a reason for the process to stay up.
  */
 import type { Disposable } from './events';

@@ -1,14 +1,12 @@
 /**
  * Preferences as a route of the browser workbench (#135): `#/preferences`.
  *
- * The same view the Electron window shows (`view.ts`), mounted into the app
- * shell's page and carried by the `preferences` pane of the one WebSocket, so a
- * setting changed from a phone is the same write, through the same gate, as one
- * changed in the window. The shell calls the mounter each time the page is shown.
+ * The shared view (`view.ts`), mounted into the app shell's page and carried
+ * by the `preferences` pane of the one WebSocket, so a setting changed from a
+ * phone is the same write, through the same gate, as one changed on the Mac.
+ * The shell calls the mounter each time the page is shown.
  *
- * Imported for its side effect by the workbench bundle. Where there is no
- * shell (the Electron workbench window) nothing ever calls the mounter, and
- * the Preferences window is what opens.
+ * Imported for its side effect by the workbench bundle.
  */
 
 import type { HostToPreferences, PreferencesToHost } from '../../shared/preferences';

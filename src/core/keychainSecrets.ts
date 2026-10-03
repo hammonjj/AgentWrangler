@@ -1,10 +1,9 @@
 /**
  * Credentials in the macOS login Keychain, through `/usr/bin/security`.
  *
- * Electron's `safeStorage` is the app's own key in the Keychain plus ciphertext
- * in a file, and it works only inside Electron. The daemon that replaces the
- * app's main process (epic #121) has no Electron, so the secrets themselves
- * move into the Keychain, one generic-password item each: service
+ * The Electron builds kept secrets in `safeStorage` ciphertext, which only
+ * Electron could read; they moved them here (#124), and the daemon (epic
+ * #121) reads them here. One generic-password item each: service
  * `Agent Wrangler`, account = the secret's key (`remote.discord.botToken`,
  * `localEndpoint:<id>`). Keychain Access shows them under that name.
  *
@@ -114,12 +113,6 @@ export class KeychainSecrets implements HostSecrets {
     private runner: SecurityRunner = systemSecurityRunner(),
     private log: (message: string) => void = () => undefined,
     private service: string = KEYCHAIN_SERVICE,
-    /**
-     * Awaited before every operation. The Electron app passes its one-time
-     * migration from `secrets.json` here, so nothing reads the Keychain before
-     * the old secrets are in it. Must not reject.
-     */
-    private ready: Promise<unknown> = Promise.resolve(),
   ) {}
 
   get available(): boolean {
@@ -127,7 +120,6 @@ export class KeychainSecrets implements HostSecrets {
   }
 
   async get(key: string): Promise<string | undefined> {
-    await this.ready;
     if (!this.available) return undefined;
     const r = await this.runner.run(['find-generic-password', '-s', this.service, '-a', key, '-w']);
     if (r.code === EXIT_NOT_FOUND) return undefined;
@@ -143,7 +135,6 @@ export class KeychainSecrets implements HostSecrets {
   }
 
   async store(key: string, value: string): Promise<void> {
-    await this.ready;
     if (!this.available) throw new Error('The macOS Keychain is not available here, so the secret was not saved.');
     if (!isStorableSecret(value)) throw new Error('Only printable ASCII secrets can be stored in the Keychain.');
     const r = await this.runner.run(['-i'], addPasswordLine(this.service, key, value));
@@ -157,7 +148,6 @@ export class KeychainSecrets implements HostSecrets {
   }
 
   async delete(key: string): Promise<void> {
-    await this.ready;
     if (!this.available) return;
     const r = await this.runner.run(['delete-generic-password', '-s', this.service, '-a', key]);
     if (r.code !== 0 && r.code !== EXIT_NOT_FOUND) {

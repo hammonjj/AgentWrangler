@@ -1,12 +1,11 @@
 /**
  * Starting, stopping and describing the core daemon (#130), for whoever asks:
- * `aw daemon start|stop|status`, and the Electron app when
- * `experimental.coreDaemon` is on.
+ * `aw daemon start|stop|status`, and the app's launcher (#142) when the app
+ * is opened.
  *
  * Packaged: a LaunchAgent, `com.hammonjj.agentwrangler.core`, that runs the
- * daemon on the bundled Node from the session hosts' cloned runtime (the
- * remote daemon's pattern, `remoteDaemonAgent.ts`), so replacing the bundle
- * never deletes it from under itself. The plist names the runtime, which names
+ * daemon on the bundled Node from the session hosts' cloned runtime, so
+ * replacing the bundle never deletes it from under itself. The plist names the runtime, which names
  * the build, so a new build is a changed plist: rewritten, booted out (the old
  * daemon gets SIGTERM and leaves its hosts running), bootstrapped again. The
  * new daemon reattaches the hosts through `HostSupervisor.scan`, as the app
@@ -40,8 +39,9 @@ import {
 } from '../core/daemon/coreDaemon';
 import { hostProcessEnv, type SessionHostRuntime } from '../core/session/hostSupervisor';
 import { QUIT_STOP_BOUND_MS } from '../core/session/quitPolicy';
-import { renderLaunchAgent } from '../remote/daemon/launchAgent';
-import { bootstrapWithRetry, guiDomain, launchAgentPlistPath, launchctl as systemLaunchctl, type Launchctl } from './launchd';
+import { locateInstall } from '../core/appBundle';
+import { createSessionHostRuntime } from '../core/session/sessionHostRuntime';
+import { bootstrapWithRetry, guiDomain, launchAgentPlistPath, launchctl as systemLaunchctl, renderLaunchAgent, type Launchctl } from './launchd';
 
 export interface CoreDaemonAgentOptions {
   dataDir: string;
@@ -79,12 +79,38 @@ export type CoreStopResult =
   | { outcome: 'stopped'; pid: number }
   /** Nothing answers on the socket. */
   | { outcome: 'not-running' }
-  /** The Electron app holds the core; quit it instead. */
+  /** An Electron-era app (before #142) holds the core; quit it instead. */
   | { outcome: 'app' }
   | { outcome: 'timeout'; pid: number };
 
 /** Something the user has to act on, worded for them. */
 export class CoreDaemonError extends Error {}
+
+const OLD_APP_HOLDS_CORE =
+  'An older Agent Wrangler app is running the core itself. Quit it (your conversations keep running), then try again.';
+
+/**
+ * The agent for the copy of Agent Wrangler a program of ours runs from (`aw`
+ * and the launcher): the daemon it starts is the one beside it, in the same
+ * bundle or checkout, so starting it from a newer install is also the update.
+ * `dir` is the program's own `__dirname`.
+ */
+export function coreDaemonAgentFor(
+  dir: string,
+  dirs: { userDataDir: string; fallbackRunDir: string },
+  log: (message: string) => void,
+): CoreDaemonAgent {
+  const where = locateInstall(dir);
+  const runtime = createSessionHostRuntime({
+    userDataDir: dirs.userDataDir,
+    appRoot: where.appRoot,
+    isPackaged: where.isPackaged,
+    execPath: process.execPath,
+    bundle: where.bundle,
+    log,
+  });
+  return createCoreDaemonAgent({ dataDir: dirs.userDataDir, fallbackRunDir: dirs.fallbackRunDir, runtime, isPackaged: where.isPackaged, log });
+}
 
 export interface CoreDaemonAgent {
   readonly paths: CoreDaemonPaths;
@@ -173,7 +199,7 @@ export function createCoreDaemonAgent(opts: CoreDaemonAgentOptions): CoreDaemonA
     for (;;) {
       const h = await holder();
       if (h.kind === 'daemon' && (!opts.isPackaged || h.manifest.build === opts.runtime.buildId)) return h.manifest;
-      if (h.kind === 'app') throw new CoreDaemonError('The Agent Wrangler app started its own core first; quit it, then try again.');
+      if (h.kind === 'app') throw new CoreDaemonError(OLD_APP_HOLDS_CORE);
       if (Date.now() >= deadline) {
         throw new CoreDaemonError(`The core daemon did not start. See ${paths.logFile}.`);
       }
@@ -187,11 +213,7 @@ export function createCoreDaemonAgent(opts: CoreDaemonAgentOptions): CoreDaemonA
     renderPlist,
     async ensure() {
       const h = await holder();
-      if (h.kind === 'app') {
-        throw new CoreDaemonError(
-          'The Agent Wrangler app is running the core. Quit it first, or turn on "Run the core in the background" in its settings and restart it.',
-        );
-      }
+      if (h.kind === 'app') throw new CoreDaemonError(OLD_APP_HOLDS_CORE);
       // Unpackaged, any daemon will do: there is no LaunchAgent to update.
       if (h.kind === 'daemon' && (!opts.isPackaged || h.manifest.build === opts.runtime.buildId)) {
         return { outcome: 'running', manifest: h.manifest };

@@ -22,8 +22,7 @@
  *
  * Each connection gets its own pane hosts (`createPanes`) and registers as a
  * client, so prompts, toasts and navigation its own clicks cause come back to
- * it (#126). No Electron here: the window's main process today and the daemon
- * later both run this.
+ * it (#126). Run by the core daemon.
  */
 import type { RawData, WebSocket } from 'ws';
 import { Emitter, type Disposable } from '../events';

@@ -56,8 +56,7 @@ export const LOCAL_OWNER: Principal = Object.freeze({ id: 'local-owner' as Princ
 /**
  * The channel a request arrived through.
  *
- * - `browser`: a workbench client: the window today, a browser tab later. The
- *   window's own menu and tray count as this too, until Electron is retired.
+ * - `browser`: a workbench client: a browser tab, on this Mac or a paired device.
  * - `cli`: the `aw` command over the control socket.
  * - `discord`: a press on a remote-control card, from an allow-listed user.
  * - `daemon`: the app acting on its own (auto-pause), with nobody's click behind it.

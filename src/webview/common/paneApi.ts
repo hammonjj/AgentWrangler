@@ -45,9 +45,9 @@ declare function acquireVsCodeApi(): WebviewBridge<WorkbenchState>;
 const api = createWebviewBridge<WorkbenchState>(() => acquireVsCodeApi());
 
 /**
- * This document is a browser on another device (the shim says so), not the
- * Electron window: a file's path in it is not a host path, so files are
- * uploaded rather than named (#139).
+ * This document is a browser (the shim says so), possibly on another device:
+ * a file's path in it is not a host path, so files are uploaded rather than
+ * named (#139).
  */
 export const isRemoteHost = (globalThis as { agentWranglerHost?: { remote?: boolean } }).agentWranglerHost?.remote === true;
 
@@ -135,8 +135,7 @@ export function paneApi<S>(pane: PaneName): PaneApi<S> {
  * server never acknowledges a shell message, so one tracked for resending
  * would be resent forever, and a prompt is cancelled host-side when its
  * connection drops anyway. In the browser the shim delivers the host's shell
- * messages as `message` events like any pane's; the Electron window has no
- * shell channel yet and never sends one.
+ * messages as `message` events like any pane's.
  */
 export const shellApi = {
   post(body: ShellToHost): void {

@@ -2,8 +2,7 @@
  * The clients connected to the app, and the dialogs and surface that reach the
  * right one (#126, `docs/plans/browser-workbench.md` §7.3).
  *
- * A client is one document the user is looking at: the Electron window, or one
- * browser tab. Each registers a `ClientChannel`: how to ask it something, how
+ * A client is one document the user is looking at: a browser tab. Each registers a `ClientChannel`: how to ask it something, how
  * to show it a line of feedback, and how to point its conversation pane
  * somewhere. The registry then offers one `HostDialogs` and one
  * `WorkbenchSurface` to the rest of the app, as before, but scoped: a call made
@@ -18,8 +17,8 @@
  * - a prompt is not shown anywhere. Its text goes to every client as a toast
  *   and it resolves as cancelled at once, which is each prompt's
  *   non-interactive default. Nothing ever waits on a modal nobody can see;
- * - navigation goes to the fallback client (the Electron window) if it is
- *   open, else nowhere.
+ * - navigation goes to the fallback client if there is one and it is open,
+ *   else nowhere. The daemon has none.
  *
  * A prompt whose client disconnects while it is open resolves as cancelled.
  */
@@ -65,7 +64,7 @@ export interface ClientNotice {
  *
  * | kind | Is | Host-local actions |
  * |---|---|---|
- * | `window` | the Electron window, on the Mac | done on the Mac |
+ * | `window` | a native client on the Mac (tests; the Electron window until #142) | done on the Mac |
  * | `loopback` | a browser on this machine | shown in the browser; "Open on this Mac" offered |
  * | `lan` | a browser elsewhere | shown in the browser; nothing is ever done on the host |
  */
@@ -91,7 +90,7 @@ export interface ClientChannel {
   /**
    * A browser tab that shows OS notifications itself (#141): true only while
    * its permission is granted. Absent or false: not a place a notice can go
-   * (the Electron window, a tab that has not asked or was refused).
+   * (a tab that has not asked or was refused).
    */
   readonly canNotify?: boolean;
   /** Send a notice to a tab with `canNotify`. The tab decides whether to show it (hidden or unfocused). */
@@ -115,7 +114,7 @@ export interface ClientRegistryOptions {
   log(message: string): void;
   /**
    * The client that navigation with no originating client goes to, if it is
-   * open: the Electron window, while there is one.
+   * open. The daemon passes none.
    */
   navigationFallback?: string;
 }
@@ -136,8 +135,8 @@ export class ClientRegistry {
   /**
    * Scoped to the originating client (#140). Hand this to the app as
    * `host.shell`: a link, file or command goes to the client that asked and
-   * is shown where that client is. With none, the fallback client if open
-   * (the window), else nothing: the host never opens anything unasked.
+   * is shown where that client is. With none, the fallback client if open,
+   * else nothing: the host never opens anything unasked.
    */
   readonly shell: HostShell;
 
@@ -207,8 +206,8 @@ export class ClientRegistry {
 
   /**
    * `host.notify`, routed (#141, decision D3). A notice goes to every browser
-   * tab that can show it; the host's own (`native`: the Electron
-   * notification, or `osascript` in the daemon) fires only when no such tab is
+   * tab that can show it; the host's own (`native`: `osascript` in the
+   * daemon) fires only when no such tab is
    * connected. A visible tab suppresses its own copy, and the host's stays
    * quiet too: somebody is looking. Discord is separate and unchanged.
    *
@@ -371,8 +370,8 @@ export class ClientRegistry {
 }
 
 /**
- * A channel over an ordinary `HostDialogs` and a navigator: the Electron
- * window's (native dialogs and its palette), and a test's.
+ * A channel over an ordinary `HostDialogs` and a navigator: a native client's
+ * (the Electron window had one until #142), and a test's.
  */
 export function channelFromDialogs(opts: {
   connectionId: string;

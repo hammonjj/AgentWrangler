@@ -1,13 +1,10 @@
 /**
- * Keeping the Mac awake while agents work, without Electron's
- * `powerSaveBlocker` (plan §4).
+ * Keeping the Mac awake while agents work (plan §4).
  *
  * `caffeinate -i -w <pid>` holds an idle-sleep assertion until it is killed or
  * the process it watches exits, so a daemon that crashes cannot leave the
- * machine awake for ever. Toggled the way `syncPowerBlock` in
- * `src/electron/main.ts` toggles its blocker: `set(wanted)` from the store's
- * updates, with `wanted` from `shouldPreventAppSuspension`. Not wired into
- * anything yet; the daemon (#130) does that.
+ * machine awake for ever. The core daemon (#130) calls `set(wanted)` on the
+ * store's updates, with `wanted` from `shouldPreventAppSuspension`.
  */
 import { spawn } from 'node:child_process';
 import type { Disposable } from '../core/events';

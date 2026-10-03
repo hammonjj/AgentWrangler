@@ -3,7 +3,7 @@
  *
  * `createWebviewBridge` looks for `globalThis.agentWranglerHost` before
  * anything else, so supplying that object over a WebSocket is the whole
- * browser-side port — the same claim the Electron preload makes. This script is
+ * browser-side port. This script is
  * loaded before the workbench bundle and must have defined the host by the time
  * `paneApi` evaluates.
  *

@@ -1,8 +1,7 @@
 /**
  * The browser shell's toast host (#133): the one-liners `HostDialogs.flash`
  * produces ("Copied session id …"), and informational prompts with nothing to
- * choose. The Electron preload draws the window's own the same way, into the
- * same `#awToasts`; the rules for both are in `theme/vscodeTokens.css`.
+ * choose, drawn into `#awToasts`; the rules are in `theme/vscodeTokens.css`.
  *
  * Classes only: the CSP has no `unsafe-inline`. The one length that is data —
  * how long this toast lives — is written through the CSSOM, which the CSP

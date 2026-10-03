@@ -1,8 +1,8 @@
 /**
  * The browser shell's in-page modals (#133): what a `prompt` on the shell
  * channel becomes, how it reacts to keys and clicks, and what goes back as the
- * `promptResult`. It replaces the stopgap `confirm()`/`prompt()` in the browser
- * and does in a page what the palette window and native dialogs do in the app.
+ * `promptResult`. It replaced the stopgap `confirm()`/`prompt()` in the browser,
+ * and the palette window and native dialogs of the Electron app (#142).
  *
  * Pure, so it can be tested without a DOM: `src/webview/workbench/modalHost.ts`
  * draws a `ModalModel` and turns DOM events into `ModalEvent`s, and the host

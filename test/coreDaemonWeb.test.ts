@@ -1,7 +1,7 @@
 /**
  * The core daemon serves the browser workbench (#131): `startCoreDaemon`
  * with a `webviewDir` starts the web server over its own app, `web.link` on
- * the control socket (what `aw web open` and the app's window ask) returns a
+ * the control socket (what `aw web open` and the app's launcher ask) returns a
  * sign-in link, the page is served, and a WebSocket client gets the server's
  * `hello` and then a real table snapshot from the daemon's own
  * `DashboardHost`. The client is registered with the daemon's
@@ -9,21 +9,17 @@
  *
  * As in coreDaemonStart.test.ts: HOME, CLAUDE_CONFIG_DIR and CODEX_HOME point
  * into a temp dir before the app's modules load, the Keychain is a fake, and
- * no session host is ever spawned. No Electron anywhere.
+ * no session host is ever spawned.
  */
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import type { SecurityRunner } from '../src/core/keychainSecrets';
 import type { SessionHostRuntime } from '../src/core/session/hostSupervisor';
-
-vi.mock('electron', () => {
-  throw new Error('electron was imported under the core daemon');
-});
 
 // Short: the control socket path must fit in 104 bytes, and macOS's tmpdir is long.
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aw-cw-'));

@@ -1,21 +1,22 @@
 /**
- * The core daemon's composition (#130, plan §4): everything
- * `src/electron/main.ts` builds except windows, on plain Node.
+ * The core daemon's composition (#130, plan §4): Agent Wrangler on plain
+ * Node, with no window (Electron was retired in #142).
  *
  * - `createNodeHost` + `createApp` + `start()`;
- * - the control socket, exactly as the app serves it (`createControlBackend`);
- * - the quit policy: `stop('signal')` is ⌘Q (hosts keep running),
- *   `stop('menuStopAll')` is ⌥⌘Q (they end too);
+ * - the control socket (`createControlBackend`), for `aw` and the launcher;
+ * - the quit policy: `stop('signal')` leaves hosts running,
+ *   `stop('stopAll')` ends them too;
  * - a power assertion (`caffeinate -i -w <pid>`) while an agent it runs is
- *   working, from the same `shouldPreventAppSuspension` the window uses;
+ *   working (`shouldPreventAppSuspension`);
  * - wake handling through the timer-gap watcher, for `onSystemResume`;
  * - the manifest, `run/core-daemon.json`;
  * - its clients and the browser workbench they load (#131, `clients.ts`):
- *   every browser tab, and the app's window when it is a client.
- * - Discord, in-process (#138), once the separate remote daemon is retired.
+ *   every browser tab;
+ * - Discord, in-process (#138), once the old remote daemon is retired.
  *
- * Single instance: the control socket. If anything answers on it, the app or
- * another daemon holds the core, and this refuses before building anything.
+ * Single instance: the control socket. If anything answers on it, another
+ * daemon (or an Electron-era app) holds the core, and this refuses before
+ * building anything.
  *
  * Separate from `main.ts` (signals, env, `process.exit`) so a test can start
  * and stop it against temp directories.
@@ -59,7 +60,7 @@ export interface StartCoreDaemonOptions {
   runtimeDir?: string;
   /**
    * Discord, in this process (#138): fed the core's own list, applying presses
-   * through its own actions. `retireDaemon` stops the separate remote daemon
+   * through its own actions. `retireDaemon` stops the old remote daemon
    * (and removes its LaunchAgent) before the first connect.
    */
   remoteInProcess?: HostServices['remoteInProcess'];
@@ -73,8 +74,7 @@ export interface StartCoreDaemonOptions {
   /** "Open at login" changed: the LaunchAgent's `RunAtLoad` follows it. */
   onOpenAtLoginChange?: () => void;
   /**
-   * `dist/webview`, for the browser workbench (#131): `app.asar.unpacked/dist/webview`
-   * when packaged, since plain Node cannot read the asar. Absent: no web server.
+   * `dist/webview`, for the browser workbench (#131). Absent: no web server.
    */
   webviewDir?: string;
   pid?: number;
@@ -87,7 +87,7 @@ export interface RunningCoreDaemon {
   readonly paths: CoreDaemonPaths;
   readonly manifest: CoreDaemonManifest;
   readonly power: PowerAssertion;
-  /** The browsers (and the app's window, as one of them) and the web workbench they use (#131). */
+  /** The browsers and the web workbench they use (#131). */
   readonly clients: DaemonClients;
   /**
    * Apply the quit policy for `source`, end what it says to end, and dispose
@@ -139,7 +139,7 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
       startedAt,
       flash: (message) => host.dialogs.flash(message, 4000),
       gate: app.access,
-      // The web workbench's sign-in link (#131): `aw web open`, and the app's window.
+      // The web workbench's sign-in link (#131): `aw web open`, and the app's launcher (#142).
       webLink: () => clients?.loginLink(),
       // Pairing and the device list (#137): `aw web pair`, `aw web devices`, `aw web revoke`.
       webPair: () => clients?.pairingOffer(),
@@ -156,7 +156,7 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
   }
   log(`control socket: listening on ${paths.socketPath}`);
 
-  // ---- Clients (#131): the browsers and the app's window, before start so its prompts reach them ----
+  // ---- Clients (#131): the browsers, before start so its prompts reach them ----
   clients = startDaemonClients({ app, host, log, webviewDir: opts.webviewDir, devices: webDevices });
 
   app.start();
@@ -219,7 +219,7 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
         log(`${agentCount(counts.hosted)} keep running in session hosts; the next core reattaches them`);
       }
       // Hang up Discord with the mirror map written, so the next connector
-      // (this daemon again, or the app's remote daemon) adopts the open cards.
+      // (this daemon again, after a restart or an update) adopts the open cards.
       await withTimeout(app.stopRemote(), 5000).catch((err) => log(`remote: stopping failed: ${String(err)}`));
       teardown();
       return decision;

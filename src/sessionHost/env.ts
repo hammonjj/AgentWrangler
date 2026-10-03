@@ -1,13 +1,13 @@
 /**
  * The environment `claude` runs with, built explicitly by the host.
  *
- * A host on the Electron binary (unpackaged, or a build before #129) runs with
- * `ELECTRON_RUN_AS_NODE=1` (that is how an Electron binary runs a plain Node
- * script), and every host inherits the LaunchServices variables
- * the app was started with. Left alone, all of it reaches `claude` and every
- * Bash or npm command it runs: an `electron` launched from a tool would then
- * behave as Node, and the tool would claim to be Agent Wrangler (spike S2,
- * playbook §11.6). Pure, so the rule is testable.
+ * A host inherits whatever the core was started with: the LaunchServices
+ * variables, Agent Wrangler's own `AW_*`, and, when `aw daemon start` ran in
+ * an Electron-based editor's terminal, `ELECTRON_RUN_AS_NODE=1` (hosts before
+ * #129 ran on Electron that way, too). Left alone, all of it reaches `claude`
+ * and every Bash or npm command it runs: an `electron` launched from a tool
+ * would then behave as Node, and the tool would claim to be Agent Wrangler
+ * (spike S2, playbook §11.6). Pure, so the rule is testable.
  */
 
 const STRIPPED_EXACT = new Set(['__CFBundleIdentifier', 'XPC_SERVICE_NAME']);

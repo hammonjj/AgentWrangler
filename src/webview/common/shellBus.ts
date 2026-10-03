@@ -3,7 +3,7 @@
  * document they share.
  *
  * The panes do not know there is a shell, and must keep working without one
- * (the Electron window has none yet): they only *announce* what they show and
+ * (a VSCode-style host has none): they only *announce* what they show and
  * *accept* requests to show something else. The shell (`workbench/shell.ts`)
  * listens to the announcements to keep the URL right, and makes the requests
  * when the URL changes.
@@ -78,7 +78,7 @@ const routeWanted = topic<AppRoute>();
 
 /**
  * Go to a route of the browser shell, as if a link to it were followed. Does
- * nothing where there is no shell (the Electron window). For the pairing UI
+ * nothing where there is no shell. For the pairing UI
  * (#137): `openRoute({ kind: 'pair' })`.
  */
 export const openRoute = (route: AppRoute): void => routeWanted.emit(route);

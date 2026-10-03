@@ -1,21 +1,18 @@
 /**
- * `HostServices` for plain Node: the daemon's host (#125, epic #121).
+ * `HostServices` for plain Node: the daemon's host (#125, epic #121), and
+ * since Electron was retired (#142) the only one.
  *
- * `createApp` takes nothing but a `HostServices`, so the core runs without
- * Electron once something implements it without Electron. Most of it is what
- * `electronHost.ts` already did over plain files:
- *
- * - **Settings and state**: the same four JSON documents in the same data
- *   directory (`settings.json`, `state.json`, `surface.json`, `sessions.json`),
- *   so the daemon and the app read one set of preferences.
- * - **Log**: `<dataDir>/agent-wrangler.log`, the app's log file.
- * - **Secrets**: the login Keychain (`KeychainSecrets`, #124). No migration
- *   here: the old `safeStorage` file only Electron can read is moved by the
- *   Electron build, which ships first.
- * - **Session hosts and the remote daemon**: taken as options. Where they come
- *   from (which bundle, which runtime) is the daemon's decision (#130); a
- *   runtime is built with `createSessionHostRuntime` from
- *   `src/core/session/sessionHostRuntime.ts`, which has no Electron either.
+ * - **Settings and state**: four JSON documents in the data directory
+ *   (`settings.json`, `state.json`, `surface.json`, `sessions.json`), the
+ *   same ones the Electron app kept, so its preferences carried over.
+ * - **Log**: `<dataDir>/agent-wrangler.log`.
+ * - **Secrets**: the login Keychain (`KeychainSecrets`, #124). The Electron
+ *   builds moved the old `safeStorage` file there; an install from before
+ *   #124 must run one of those first.
+ * - **Session hosts and Discord**: taken as options. Where they come from
+ *   (which bundle, which runtime) is the daemon's decision (#130); a runtime
+ *   is built with `createSessionHostRuntime` from
+ *   `src/core/session/sessionHostRuntime.ts`.
  *
  * What differs is everything that needs a person. The daemon has no window,
  * so dialogs, the shell, the clipboard and notifications go to a
@@ -23,7 +20,7 @@
  * (#126) can be attached once the app exists. Until then the default answers
  * every question with "cancel".
  *
- * Nothing under `src/node/` may import `electron`; a test checks.
+ * Nothing in `src/` may import `electron` (#142); a test checks.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -38,15 +35,12 @@ import { createDefaultClientBroker, type ClientBroker } from './clientBroker';
 export interface NodeHostOptions {
   /**
    * The app's data directory: settings, state, the log, `run/`, `runtimes/`.
-   * The Electron app's `userData` (`~/Library/Application Support/Agent
-   * Wrangler`) when the daemon replaces it; a temp dir in tests.
+   * `~/Library/Application Support/Agent Wrangler`; a temp dir in tests.
    */
   dataDir: string;
   /** Where session hosts live and run from. Required (#122). */
   sessionHosts: HostServices['sessionHosts'];
-  /** The remote daemon's controls; absent, remote control is unavailable. */
-  remoteDaemon?: HostServices['remoteDaemon'];
-  /** Remote control in this process (the core daemon, #138). */
+  /** Remote control in this process (the core daemon, #138); absent, it is unavailable. */
   remoteInProcess?: HostServices['remoteInProcess'];
   /** Default: append to `<dataDir>/agent-wrangler.log` and echo to stdout. */
   log?: (message: string) => void;
@@ -55,9 +49,9 @@ export interface NodeHostOptions {
   /** Who answers dialogs and the like. Default: the non-interactive broker. */
   broker?: ClientBroker;
   /**
-   * Add Homebrew's directories to `process.env.PATH`, as the Electron main
-   * process does: launchd, like Finder, starts processes without them, and
-   * git invokes git-lfs through PATH. Default true.
+   * Add Homebrew's directories to `process.env.PATH`: launchd, like Finder,
+   * starts processes without them, and git invokes git-lfs through PATH.
+   * Default true.
    */
   fixToolPath?: boolean;
 }
@@ -120,7 +114,6 @@ export function createNodeHost(opts: NodeHostOptions): NodeHost {
     workspaceState: new JsonStore(path.join(dataDir, 'surface.json')),
     sessionState: new JsonStore(path.join(dataDir, 'sessions.json')),
     sessionHosts: opts.sessionHosts,
-    remoteDaemon: opts.remoteDaemon,
     remoteInProcess: opts.remoteInProcess,
     storageDir,
     dataDir,
@@ -140,7 +133,7 @@ export function createNodeHost(opts: NodeHostOptions): NodeHost {
       broker = next ?? fallback;
     },
     disposeAll: () => {
-      // Copied and cleared first, as in electronHost.ts: a disposer may subscribe.
+      // Copied and cleared first: a disposer may subscribe.
       const pending = disposables.splice(0, disposables.length);
       for (const d of pending) {
         try {

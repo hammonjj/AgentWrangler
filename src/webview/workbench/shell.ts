@@ -3,9 +3,7 @@
  * works without a native window around it.
  *
  * - **Shell channel**, in every host: prompts become in-page modals
- *   (`modalHost.ts`), toasts go to the toast host. The Electron window has no
- *   shell channel yet and keeps its native dialogs and palette window; it gets
- *   these the day its host speaks the channel (#131).
+ *   (`modalHost.ts`), toasts go to the toast host.
  * - **Routes**, in the browser only: Agents, Conversation (`#/c/<key>`),
  *   Missions, Analytics, Preferences and Pair a device, in the URL's hash, with
  *   a bar of links and a heading. The back button works; a route change moves

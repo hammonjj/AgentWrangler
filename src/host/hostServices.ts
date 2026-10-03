@@ -1,28 +1,25 @@
 /**
  * Everything the application needs from whatever is hosting it.
  *
- * Agent Wrangler is a VSCode extension and, on this branch, also an Electron
- * app. The two share all of `src/claude`, `src/codex`, `src/core` and the
- * webview bundles — roughly eight hundred of the thousand lines that used to be
- * `activate()` are about sessions, not about VSCode. What differs is the outer
- * edge: where settings live, where preferences are persisted, what a modal
- * looks like, and what a window is.
+ * Agent Wrangler began as a VSCode extension, became an Electron app, and is
+ * now a daemon on plain Node that browsers connect to (#142). Through all of
+ * it `src/claude`, `src/codex`, `src/core` and the webview bundles stayed
+ * the same; what differed was the outer edge: where settings live, where
+ * preferences are persisted, what a modal looks like, and what a window is.
  *
  * That edge is this interface. `src/app/createApp.ts` is written against it and
- * knows nothing else; `src/host/vscode/*` and `src/electron/*` each implement
- * it. Nothing here may import `vscode` or `electron` — that is the whole point
- * — and nothing here is allowed to be VSCode-shaped for its own sake: a method
- * that only VSCode could implement is a method `createApp` should not be
- * calling.
+ * knows nothing else; `src/node/nodeHost.ts` implements it. Nothing here may
+ * import `vscode` or `electron`, and nothing here is allowed to be shaped by
+ * one host for its own sake: a method only one host could implement is a
+ * method `createApp` should not be calling.
  *
  * Three surfaces are deliberately *not* here:
  *
  * - **The webview.** `PaneChannel` (`src/ui/paneChannel.ts`) already is that
- *   seam, and `createWebviewBridge` is its renderer-side mirror. A host builds
- *   its own window and hands the two hosts a channel each.
- * - **Commands.** The fifteen `agentWrangler.*` commands are a VSCode concept.
- *   Both hosts call the same methods on the object `createApp` returns; VSCode
- *   registers commands that call them and Electron puts them in a menu.
+ *   seam, and `createWebviewBridge` is its renderer-side mirror. Each browser
+ *   connection hands the two pane hosts a channel each.
+ * - **Commands.** The browser workbench, `aw` and Discord call the same
+ *   methods on the object `createApp` returns.
  * - **Anything with no honest desktop equivalent** — the diff editor, the
  *   status bar item, the integrated terminal. Those are capabilities, so they
  *   are optional (`undefined` means "this host cannot") rather than stubs that
@@ -32,16 +29,14 @@
 import type { Disposable } from '../core/events';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import type { SessionHostRuntime } from '../core/session/hostSupervisor';
-import type { EnsureReason } from '../remote/daemon/client';
-import type { RemoteDaemonPaths } from '../remote/daemon/paths';
 import type { RemoteConfig } from '../remote/service';
 import type { RemoteTransport } from '../remote/transport';
 import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
 
 /**
  * Persisted key/value, the same structural shape `ArchiveService` and
- * the runner registry took instead of `vscode.Memento`. VSCode supplied
- * `globalState`/`workspaceState`; Electron supplies a JSON file.
+ * the runner registry took instead of `vscode.Memento`. The node host
+ * supplies a JSON file.
  */
 export interface HostStorage {
   get<T>(key: string, defaultValue: T): T;
@@ -136,8 +131,8 @@ export interface HostShell {
   /**
    * Run a command in a terminal the user can see and keep typing into.
    *
-   * Optional because there is no honest `sendText` outside VSCode: an Electron
-   * build needs `node-pty` and xterm.js, or a shell-out to Terminal.app.
+   * Optional because there is no honest `sendText` outside VSCode: anything
+   * else needs `node-pty` and xterm.js, or a shell-out to Terminal.app.
    * Undefined means *Release* and the dictation install helper are not offered,
    * which is better than a button that appears to work.
    */
@@ -147,11 +142,10 @@ export interface HostShell {
 /**
  * The window the panes live in, from the application's point of view.
  *
- * Every method is "put this in front of the user"; none of them say how. In
- * VSCode that is one editor tab, in Electron one `BrowserWindow`. `openInTab`
- * is the one place the two genuinely differ in kind — a second tab beside your
- * code, versus a second window — which is why it is named for the intent
- * ("give this conversation a surface of its own") rather than for the tab.
+ * Every method is "put this in front of the user"; none of them say how. For
+ * the daemon it is the conversation pane of the browser that asked
+ * (`ClientRegistry.surface`). `openInTab` is named for the intent ("give this
+ * conversation a surface of its own") rather than for a tab.
  */
 export interface WorkbenchSurface {
   readonly isOpen: boolean;
@@ -222,29 +216,16 @@ export interface HostServices {
     logDir: string;
   };
   /**
-   * The remote daemon (#74): the process that holds the Discord connection and
-   * outlives the app. Absent means remote control is not available here.
-   */
-  remoteDaemon?: {
-    paths: RemoteDaemonPaths;
-    /** Replace a daemon of another build (the packaged app); unpackaged, use whatever runs. */
-    replaceOutdated: boolean;
-    /** Install, start, or bring it up to this build. Idempotent. */
-    ensure(why: EnsureReason): Promise<void>;
-    /** Stop it and take it out of login items: remote control was switched off. */
-    remove(): Promise<void>;
-  };
-  /**
-   * Remote control in this process (#138): the core daemon. Discord is fed the
-   * core's own list and presses go through its own actions, with no remote
-   * daemon. Takes precedence over `remoteDaemon`, which only the Electron app
-   * (while it runs the core) supplies.
+   * Remote control (#138): Discord in the core daemon, fed the core's own
+   * list, presses going through its own actions. Absent means remote control
+   * is not available here.
    */
   remoteInProcess?: {
     /**
-     * Stop the remote daemon and remove its LaunchAgent, resolving once it has
-     * exited. Awaited before this process builds its connector, every start:
-     * the two share the mirror map, and only one may run.
+     * Stop the old remote daemon an Electron-era build may have left (#74) and
+     * remove its LaunchAgent, resolving once it has exited. Awaited before
+     * this process builds its connector, every start: the two share the
+     * mirror map, and only one may run.
      */
     retireDaemon(): Promise<void>;
     /** Tests: a fake Discord, and a private mirror map. */

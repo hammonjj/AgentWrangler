@@ -1,12 +1,9 @@
 /**
- * What Preferences reads and calls on the app (#135): the one backend the
- * Electron Preferences window and every browser's `#/preferences` route are
- * served from, so a setting, a button or the orchestration tables cannot be
- * on one and missing from the other.
+ * What Preferences reads and calls on the app (#135): the one backend every
+ * browser's `#/preferences` route is served from, so a setting, a button or
+ * the orchestration tables cannot be on one and missing from another.
  *
- * Host-neutral: the window's main process and the core daemon both build it
- * (through `startWebWorkbench` for the browsers). Nothing here may import
- * `electron`.
+ * Built by the core daemon, through `startWebWorkbench`.
  */
 import type { AgentWranglerApp } from './createApp';
 import type { Disposable } from '../core/events';

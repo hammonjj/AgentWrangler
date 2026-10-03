@@ -182,7 +182,7 @@ export const WIRE_PROTOCOL = 1;
  * Every pane envelope a browser sends carries a `commandId`, unique per tab:
  * `{pane, body, commandId}`. The server acknowledges each one (`ack`), and a
  * mutating one it has already acted on is not acted on again: a resend after
- * a drop gets the first result instead. The Electron window ignores it.
+ * a drop gets the first result instead.
  */
 export interface PaneEnvelope {
   pane: string;

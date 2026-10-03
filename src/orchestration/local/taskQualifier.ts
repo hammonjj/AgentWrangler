@@ -220,11 +220,7 @@ async function runOnce(
   }
 }
 
-/**
- * Copy a fixture's files. By hand with `readdir`/`readFile`, not `fs.cp`:
- * in the packaged app the fixtures are inside `app.asar`, which Electron
- * serves through those calls and not necessarily through `cp`.
- */
+/** Copy a fixture's files: plain files in `dist/qualification-fixtures`, regular files and directories only. */
 async function copyTree(from: string, to: string): Promise<void> {
   await mkdir(to, { recursive: true });
   for (const e of await readdir(from, { withFileTypes: true })) {
@@ -296,14 +292,14 @@ function sumTokens(turnEnds: readonly unknown[], at: number): { inputTokens?: nu
   return any ? { inputTokens: input, outputTokens: output } : {};
 }
 
-/** `node` is this app's own Node, so a check never depends on what is on PATH. */
+/** `node` is this app's own Node (the bundled one, in the daemon), so a check never depends on what is on PATH. */
 function checkFile(argv0: string, deps: TaskQualifierDeps): string {
   return argv0 === 'node' ? (deps.nodePath ?? process.execPath) : argv0;
 }
 
-/** A plain environment for the check: no `ELECTRON_*` but the one that makes the app's binary act as Node. */
+/** A plain environment for the check: PATH, HOME, TMPDIR and the C locale, nothing else of ours. */
 function checkEnv(): Record<string, string> {
-  const env: Record<string, string> = { ELECTRON_RUN_AS_NODE: '1', LC_ALL: 'C' };
+  const env: Record<string, string> = { LC_ALL: 'C' };
   for (const k of ['PATH', 'HOME', 'TMPDIR']) {
     const v = process.env[k];
     if (v) env[k] = v;

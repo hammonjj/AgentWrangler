@@ -59,9 +59,10 @@ Usage:
                             scan and a code to type (good once, for 5 minutes)
   aw web devices            the browsers that can sign in, on this Mac and paired
   aw web devices revoke <id>  sign one out for good; its open tabs disconnect at once
-  aw daemon start           run the core as a background service (experimental.coreDaemon)
+  aw daemon start           start the background service that runs Agent Wrangler, or move it
+                            onto this build (opening the app does the same)
   aw daemon stop [--all]    stop it; conversations in session hosts keep running
-                            (--all: end them too, like Quit and Stop All Agents)
+                            (--all: end them too)
   aw daemon status          whether it is running: pid, build, uptime
 
 <id> is a session id, a unique prefix of one (4+ characters), or a key like claude:<id>.

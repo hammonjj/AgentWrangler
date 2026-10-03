@@ -2,8 +2,7 @@
  * The web workbench's HTTP side (#127, plan §8 and §10): the page, its
  * assets, the login link and the device cookie, and the gate in front of the
  * WebSocket. What happens on the socket once it is open is the caller's
- * (`onClient`), so the window's main process today and the daemon later can
- * both run this unchanged. No Electron here.
+ * (`onClient`). Run by the core daemon.
  *
  * It runs one or more listeners (#136), each with a scope:
  * - **loopback**: plain http on 127.0.0.1, always (while `web.enabled`).

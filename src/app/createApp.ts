@@ -9,17 +9,16 @@
  * between hosting it in an editor and hosting it in an app, and that edge is
  * `HostServices`.
  *
- * So both front ends call this. `src/extension.ts` builds a VSCode host, calls
- * `createApp`, and registers fifteen commands that call the methods it returns.
- * `src/electron/main.ts` builds an Electron host, calls `createApp`, and puts
- * the same methods in a menu.
+ * The core daemon (`src/daemon/startCore.ts`) builds a plain-Node host, calls
+ * `createApp`, and serves what it returns to browsers, `aw` and Discord.
  *
  * The one thing that cannot be built here is the surface the panes live on —
- * an editor tab versus a `BrowserWindow` — and several of these behaviours have
- * to show something on it ("take this session over, then put it in front of
- * me"). It is therefore attached afterwards, through `attachSurface`. Until it
- * is, everything still works; it simply has nowhere to display the result,
- * which is the honest description of an app whose window has been closed.
+ * the conversation pane of whichever browser asked — and several of these
+ * behaviours have to show something on it ("take this session over, then put
+ * it in front of me"). It is therefore attached afterwards, through
+ * `attachSurface`. Until it is, everything still works; it simply has nowhere
+ * to display the result, which is the honest description of a daemon with no
+ * browser open.
  */
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
@@ -134,13 +133,11 @@ import { TurnStats } from '../core/turnStats';
 import { FileUsageCache } from '../core/usageCache';
 import { UsageService } from '../core/usageService';
 import { FileSuggestService } from '../core/fileSuggest';
-import { RemoteDaemonLink } from '../remote/daemon/client';
 import { createInProcessRemoteControl, type InProcessRemoteControl } from '../remote/inProcess';
 import { DISCORD_BOT_TOKEN_KEY, accessAuditFile } from '../remote/paths';
 import { FileAuditLog } from '../remote/audit';
 import { createAccessGate, ownerContext, type AccessGate } from '../core/access';
 import { outsideRequest } from '../core/requestScope';
-import { guardSessionActions } from '../ui/guardedActions';
 import { createApprovalActions } from './approvals';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { PermissionModeName } from '../shared/conversation';
@@ -2380,14 +2377,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (cfg.remoteAuthorizedUserIds.length === 0) bad('No authorised users, so nothing will be published at all');
       else ok(`${cfg.remoteAuthorizedUserIds.length} authorised user(s)`);
 
-      // The connection is this process's in the core daemon (#138), the remote daemon's otherwise (#74).
-      const status = inProcessRemote ? remoteHere?.status() : await remoteLink?.status();
+      // The connection is this process's, in the core daemon (#138).
+      const status = remoteHere?.status();
       if (!status) {
-        bad(
-          inProcessRemote
-            ? 'Discord is not running in the background service yet. It starts when Discord integration is on; see logs/core-daemon.log'
-            : 'The background service that holds the Discord connection is not running. It starts when Discord integration is on; see logs/remote-daemon.log',
-        );
+        bad('Discord is not running in the background service yet. It starts when Discord integration is on; see logs/core-daemon.log');
       } else {
         ok(`The background service is running (pid ${status.pid}), so Discord keeps working when Agent Wrangler is closed`);
         if (!status.hasToken) bad('The background service has no bot token yet');
@@ -2428,8 +2421,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const disconnectDiscord = async (): Promise<{ ok: boolean; lines: string[] }> => {
     await host.secrets.delete(DISCORD_BOT_TOKEN_KEY);
     // Whoever holds the connection reads the Keychain again, finds nothing, and hangs up.
-    if (inProcessRemote) await syncRemote();
-    else await remoteLink?.reconfigure();
+    await syncRemote();
     log('remote: token removed and disconnected');
     return { ok: true, lines: ['✓  The bot token has been removed and the connection closed.'] };
   };
@@ -2736,63 +2728,26 @@ export function createApp(host: HostServices): AgentWranglerApp {
   );
   host.subscribe(remoteSessions);
   /**
-   * Remote control: in this process, or in the remote daemon.
-   *
-   * **In this process** (`host.remoteInProcess`: the core daemon, #138). The
-   * core does not come and go, so Discord runs right here:
+   * Remote control (`host.remoteInProcess`: the core daemon, #138). The core
+   * does not come and go, so Discord runs right here:
    * `createInProcessRemoteControl` is fed `remoteSessions` and applies presses
    * through `actions`, the same calls the dashboard's buttons make, and reads
-   * the bot token from the Keychain itself. The first sync retires the remote
-   * daemon (its LaunchAgent included) and waits for it to exit before anything
-   * is built, since the two share the mirror map. Nothing is built until
-   * `remote.enabled` is on.
+   * the bot token from the Keychain itself. The first sync retires the old
+   * remote daemon an Electron-era build may have left (its LaunchAgent
+   * included) and waits for it to exit before anything is built, since the
+   * two share the mirror map. Nothing is built until `remote.enabled` is on.
    *
-   * **In the remote daemon** (#74; `host.remoteDaemon`: the Electron app while
-   * it runs the core). The daemon holds the Discord connection and the
-   * reconciler, and keeps both going while this app is quit, crashed or being
-   * reinstalled. This process is its best feed while it runs: it hands over
-   * the settings (the daemon reads the token from the Keychain itself),
-   * streams `remoteSessions`, and applies the presses the daemon sends back
-   * through `actions`. Nothing is started until `remote.enabled` is on, so the
-   * default configuration runs no daemon. Goes with Electron (#142).
-   *
-   * Either way, the list is not offered as complete (`ready`) until the Claude
-   * provider's first scan is in and adopted hosts have had a moment to catch
-   * up: until then nothing is closed for asks this process has not seen yet.
+   * The list is not offered as complete (`ready`) until the Claude provider's
+   * first scan is in and adopted hosts have had a moment to catch up: until
+   * then nothing is closed for asks this process has not seen yet.
    */
   let remoteReady = false;
   const inProcessRemote = host.remoteInProcess;
-  const remoteLink = host.remoteDaemon && !inProcessRemote
-    ? new RemoteDaemonLink({
-        paths: host.remoteDaemon.paths,
-        build: host.sessionHosts.runtime.buildId,
-        log: (m) => log(`remote: ${m}`),
-        ensure: (why) => host.remoteDaemon!.ensure(why),
-        replaceOutdated: host.remoteDaemon.replaceOutdated,
-        configure: async () => ({ config: getConfig(), homeDir: os.homedir() }),
-        sessions: remoteSessions,
-        ready: () => remoteReady,
-        extras: () => {
-          const nicknamed: Record<string, string> = {};
-          const archived: string[] = [];
-          for (const s of store.sessions) {
-            const name = nicknames.get(s.key);
-            if (name) nicknamed[s.key] = name;
-            if (archive.isArchived(s.key)) archived.push(s.key);
-          }
-          return { archived, nicknames: nicknamed };
-        },
-        // A press the daemon relays was already authorised there; it is
-        // authorised again here, where `SessionActions` actually runs.
-        actions: guardSessionActions(actions, { context: ownerContext('discord'), gate: access }),
-      })
-    : undefined;
-  if (remoteLink) host.subscribe(remoteLink);
   /** Discord in this process, once retired-and-enabled has built it. */
   let remoteHere: InProcessRemoteControl | undefined;
   let remoteDaemonRetired = false;
   let remoteStopped = false;
-  announceRemote = (notice) => void (remoteHere ? remoteHere.notify(notice) : remoteLink?.notify(notice));
+  announceRemote = (notice) => void remoteHere?.notify(notice);
 
   /** In this process: retire the remote daemon once, then build, reconfigure or hang up. */
   const syncRemoteHere = async (here: NonNullable<HostServices['remoteInProcess']>): Promise<void> => {
@@ -2819,32 +2774,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
     await remoteHere.sync();
   };
 
-  /** Start following the daemon, hand it new settings, or stop it: whichever `remote.enabled` now says. */
-  let remoteWanted = false;
+  /** Build Discord, hand it new settings, or hang it up: whichever `remote.enabled` now says. */
   let remoteSyncing: Promise<void> = Promise.resolve();
   const syncRemote = (): Promise<void> => {
     remoteSyncing = remoteSyncing.then(async () => {
-      if (inProcessRemote) {
-        await syncRemoteHere(inProcessRemote).catch((err) => log(`remote: ${String(err)}`));
-        return;
-      }
-      if (!remoteLink || !host.remoteDaemon) return;
-      if (getConfig().remoteEnabled) {
-        if (!remoteWanted) {
-          remoteWanted = true;
-          remoteLink.start(); // configures on connect
-        } else {
-          await remoteLink.reconfigure();
-        }
-        return;
-      }
-      if (remoteWanted) {
-        remoteWanted = false;
-        // Told first, so it closes its cards and hangs up before it is stopped.
-        await remoteLink.reconfigure();
-        await remoteLink.stop();
-      }
-      await host.remoteDaemon.remove().catch((err) => log(`remote: could not remove the daemon: ${String(err)}`));
+      if (!inProcessRemote) return;
+      await syncRemoteHere(inProcessRemote).catch((err) => log(`remote: ${String(err)}`));
     });
     return remoteSyncing;
   };
@@ -2866,10 +2801,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }),
   );
 
-  // "Needs you" notifications, with a per-session cooldown. Opt-in while the
-  // window is open; on by default while it is closed, when the menu bar and
-  // these are the only way to hear about it (Stage 6). An OS notification
-  // where the host has one: it takes no focus, where a message box does.
+  // "Needs you" notifications, with a per-session cooldown. Opt-in while a
+  // browser has the workbench open; on by default while none does, when these
+  // are the only way to hear about it (Stage 6). An OS notification where the
+  // host has one: it takes no focus, where a message box does.
   const lastToastAt = new Map<string, number>();
   host.subscribe(
     // The app's own notice, not part of whichever request changed the store (#126).
@@ -2892,7 +2827,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
             // One tag per ask (#141): the session and what it is waiting for.
             tag: `attention:${s.key}:${s.status}`,
             sessionKey: s.key,
-            // Clicked: the user asked for it, so the window comes forward.
+            // Clicked: the user asked for it, so the session comes forward.
             onClick: () => surface?.show(s.key, { preserveFocus: false }),
           });
           continue;
@@ -3312,17 +3247,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
       void checkHookHealth();
       // Off by default, so this normally reads the setting and stops.
       void syncRemote();
-      // The list the daemon follows is complete once the Claude provider's
+      // The list Discord follows is complete once the Claude provider's
       // first scan is in, Codex threads are rejoined, and every adopted host
       // has caught up (its view has left `starting`/`connecting`, so its
-      // pending asks are known), or after 30 s at most. Until then the daemon
-      // keeps following its own feed, which already sees those hosts' asks.
+      // pending asks are known), or after 30 s at most. Until then nothing is
+      // closed for an ask this process has not seen yet.
       void Promise.all([remoteFirstScan, startupSettled]).then(async () => {
         const deadline = Date.now() + 30_000;
         const catchingUp = () => runners.list().some((r) => r.hosted && (r.lifecycle === 'starting' || r.lifecycle === 'connecting'));
         while (Date.now() < deadline && catchingUp()) await new Promise((r) => setTimeout(r, 250));
         remoteReady = true;
-        remoteLink?.pushSoon();
         void remoteHere?.reconcile();
       });
       // After the store's first scan, so "is it running elsewhere?" has an answer.

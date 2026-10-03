@@ -1,5 +1,5 @@
 /**
- * The Preferences view: the window's content, and the `#/preferences` route's.
+ * The Preferences view: the `#/preferences` route's content.
  *
  * Rendered entirely from `src/shared/settings.ts`, so adding a setting is one
  * edit there and nothing here: the sections, their order, and the sidebar that
@@ -11,8 +11,7 @@
  * and a modal that batches changes would only add a way to lose them.
  *
  * It does not know what carries its messages: `mountPreferences` is given the
- * wire (`PreferencesIO`). The Electron window's own document (`main.ts`) gives
- * it the preload's bridge; the browser workbench gives it the `preferences`
+ * wire (`PreferencesIO`): the browser workbench gives it the `preferences`
  * pane of its one WebSocket (`pane.ts`, #135).
  */
 

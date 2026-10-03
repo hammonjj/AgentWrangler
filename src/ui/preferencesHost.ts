@@ -1,13 +1,12 @@
 /**
- * The host end of Preferences (#135): what the Preferences window and the
- * `#/preferences` route of the browser workbench are both served by.
+ * The host end of Preferences (#135): what the `#/preferences` route of the
+ * browser workbench is served by.
  *
- * It is written against a `PaneChannel`, so the Electron window (its own IPC
- * channel) and each browser connection (the `preferences` envelope on the
- * WebSocket) share every rule below: which messages write, how a setting is
- * checked, what an action reports, how the orchestration view and the device
- * list reach the page. What differs is only who is on the other end, and that
- * is the `RequestContext` it acts as.
+ * It is written against a `PaneChannel` (the `preferences` envelope on each
+ * browser connection's WebSocket), so every client shares every rule below:
+ * which messages write, how a setting is checked, what an action reports, how
+ * the orchestration view and the device list reach the page. What differs is
+ * only who is on the other end, and that is the `RequestContext` it acts as.
  *
  * Every message is one request, classified by `preferencesRequest` and admitted
  * through the access gate (#123) before anything it asks for runs, the same as
@@ -41,9 +40,9 @@ import { SETTINGS } from '../shared/settings';
 import type { PaneChannel } from './paneChannel';
 
 /**
- * What Preferences reads and calls on the app. One per process, shared by the
- * window and every browser connection; built by `createPreferencesBackend`
- * (`src/app/preferencesBackend.ts`) so Electron and the daemon offer the same.
+ * What Preferences reads and calls on the app. One per process, shared by
+ * every browser connection; built by `createPreferencesBackend`
+ * (`src/app/preferencesBackend.ts`).
  */
 export interface PreferencesBackend {
   settings: HostSettings;
