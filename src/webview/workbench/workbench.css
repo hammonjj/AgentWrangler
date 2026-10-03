@@ -494,7 +494,9 @@ body.aw-web {
   height: var(--aw-vv-h, 100dvh);
   padding-top: max(10px, env(safe-area-inset-top));
   padding-right: max(12px, env(safe-area-inset-right));
-  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  /* `--aw-dock-h`: the notification banner's height plus a gap while it shows
+     (`common/overlayDock.ts`), so the banner sits below the app, never on it. */
+  padding-bottom: calc(max(12px, env(safe-area-inset-bottom)) + var(--aw-dock-h, 0px));
   padding-left: max(12px, env(safe-area-inset-left));
   /* Taps respond at once (no double-tap-to-zoom wait) and the page behind a
      scrolling list does not rubber-band. */
@@ -528,7 +530,12 @@ body.aw-web.aw-kbd #awDock {
 }
 body.aw-web #awBanner {
   max-width: 100%;
-  flex-wrap: wrap;
+  box-sizing: border-box;
+}
+/* With the keyboard up there is no room for it, and the page's reserve for it
+   (`--aw-dock-h`) drops to 0 with it. */
+body.aw-web.aw-kbd #awBanner {
+  display: none;
 }
 body.aw-web .aw-toast {
   max-width: 100%;
@@ -569,8 +576,41 @@ body.aw-web .aw-fb {
     padding-top: max(6px, env(safe-area-inset-top));
     padding-right: max(8px, env(safe-area-inset-right));
     padding-left: max(8px, env(safe-area-inset-left));
-    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    padding-bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--aw-dock-h, 0px));
     gap: 6px;
+  }
+  /* The notification banner: one line, the short wording, a small button and
+     the ×. The full width of the screen, so its height is the same everywhere. */
+  body.aw-web #awDock {
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
+    bottom: max(8px, env(safe-area-inset-bottom));
+  }
+  body.aw-web #awDock > #awBanner {
+    align-self: stretch;
+    gap: 6px;
+    padding: 2px 2px 2px 10px;
+  }
+  body.aw-web #awBanner .aw-banner-text {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Why notifications cannot work here is worth two lines, not one cut short. */
+  body.aw-web #awBanner .aw-banner-why {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    white-space: normal;
+    font-size: 0.92em;
+  }
+  body.aw-web #awBanner .aw-banner-long {
+    display: none;
+  }
+  body.aw-web #awBanner .aw-banner-short {
+    display: inline;
   }
   body.aw-web.aw-kbd {
     padding-bottom: 4px;
@@ -664,6 +704,16 @@ body.aw-surface-page #bar {
     min-height: 44px;
     padding-left: 16px;
     padding-right: 16px;
+  }
+  #awBanner .aw-banner-enable {
+    min-height: 40px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  #awBanner .aw-banner-close {
+    min-width: 40px;
+    min-height: 40px;
+    padding: 0;
   }
   .aw-fb-row {
     min-height: 48px;

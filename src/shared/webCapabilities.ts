@@ -42,6 +42,35 @@ export function shouldShowNotice(s: { permission: NotificationState; hidden: boo
   return s.permission === 'granted' && (s.hidden || !s.focused);
 }
 
+/** Where a browser remembers that its notification banner was dismissed (`localStorage`, per browser). */
+export const NOTIFY_BANNER_DISMISS_KEY = 'aw.notifyBanner.dismissedAt';
+/** A dismissed banner comes back after this long if permission is still undecided. */
+export const NOTIFY_BANNER_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The stored dismissal time, or undefined when there is none or it is not a time. */
+export function parseBannerDismissedAt(raw: string | null | undefined): number | undefined {
+  if (!raw) return undefined;
+  const at = Number(raw);
+  return Number.isFinite(at) && at > 0 ? at : undefined;
+}
+
+/**
+ * Whether the browser's notification banner shows (#134): while permission can
+ * still be asked, or when the page cannot have notifications at all (it then
+ * says why), unless the user dismissed it within the last 30 days. A
+ * dismissal stamped in the future (a clock moved back) counts as recent.
+ */
+export function shouldShowNotifyBanner(s: {
+  permission: NotificationState;
+  insecure: boolean;
+  dismissedAt: number | undefined;
+  now: number;
+}): boolean {
+  if (!s.insecure && s.permission !== 'default') return false;
+  if (s.dismissedAt !== undefined && s.now - s.dismissedAt < NOTIFY_BANNER_SNOOZE_MS) return false;
+  return true;
+}
+
 /**
  * Remembers the tags of notices shown lately, so one ask that arrives twice
  * (two events for one prompt, a resend after a reconnect) is shown once. The

@@ -175,6 +175,7 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
     pickList = pickField = undefined;
     dialog.className = 'aw-modal aw-modal-view';
     dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-labelledby', 'awModalTitle');
     dialog.removeAttribute('aria-describedby');
     const title = el('h2', 'aw-modal-title', hostViewTitle(msg));
     title.id = 'awModalTitle';
@@ -220,6 +221,7 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
     dialog.replaceChildren();
     pickList = pickField = undefined;
     dialog.className = `aw-modal aw-modal-${m.kind}`;
+    dialog.setAttribute('aria-labelledby', 'awModalTitle');
     const title = el('h2', 'aw-modal-title', m.title);
     title.id = 'awModalTitle';
     dialog.appendChild(title);
@@ -238,6 +240,9 @@ export function createModalHost(opts: ModalHostOptions): ModalHost {
         onChoose: (path) => dispatch({ type: 'choose', path }),
       });
       unmount = () => view.dispose();
+      // This dialog is the one dialog role; the view is a region inside it,
+      // and its title (the visible one) names both.
+      dialog.setAttribute('aria-labelledby', view.titleId);
       // The first control in the browser: Up, then the list.
       queueMicrotask(() => holder.querySelector<HTMLElement>('button:not([disabled])')?.focus());
     } else if (m.kind === 'message') {
