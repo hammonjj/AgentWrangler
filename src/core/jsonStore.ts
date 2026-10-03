@@ -16,7 +16,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Emitter, type Disposable } from '../core/events';
+import { Emitter, type Disposable } from './events';
 import type { HostSettings, HostStorage } from '../host/hostServices';
 
 type Document = Record<string, unknown>;
