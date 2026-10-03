@@ -23,7 +23,10 @@ import {
   type ControlSessionResult,
   type ControlStatusResult,
   type ControlWebLinkResult,
+  type ControlWebDevice,
+  type ControlWebPairResult,
 } from '../core/control/protocol';
+import type { WebDevice, WebDeviceStore } from '../core/web/devices';
 import { ControlError, type ControlBackend, type ControlSubscription } from '../core/control/server';
 import { displayTitle, type AgentSession } from '../shared/model';
 import { TaskError } from '../orchestration/engine/taskRunner';
@@ -49,6 +52,13 @@ export interface ControlBackendDeps {
    * and goes with its setting.
    */
   webLink?: () => ControlWebLinkResult | undefined;
+  /**
+   * Start pairing a device (#137), or undefined while LAN access is not
+   * listening. Looked up per call, like `webLink`.
+   */
+  webPair?: () => ControlWebPairResult | undefined;
+  /** The process's browser devices (#137). Revoking closes the device's connections (the server listens). */
+  webDevices?: Pick<WebDeviceStore, 'list' | 'revoke'>;
 }
 
 /** What `aw` is, to `authorize`. One context for every connection: the token is per user, not per client. */
@@ -233,7 +243,56 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       }
       return link;
     },
+
+    webPair: () => {
+      admit('web.pair.start');
+      const offer = deps.webPair?.();
+      if (!offer) {
+        throw new ControlError(
+          RPC_UNSUPPORTED,
+          'Home-network access is not listening, so there is nowhere to pair a device. Turn on "Allow devices on my home network" in Preferences (web.lan.enabled), or check the log.',
+        );
+      }
+      deps.flash?.('aw started pairing a device');
+      return offer;
+    },
+
+    webDevices: () => {
+      admit('view.read');
+      return (deps.webDevices?.list() ?? []).map(deviceView);
+    },
+
+    webRevoke: (ref) => {
+      // Resolve first (a read), so the audit names the device, not a prefix.
+      const id = resolveDeviceRef(deps.webDevices?.list() ?? [], ref);
+      if (!deps.gate.admit(CLI_CONTEXT, 'web.device.revoke', { kind: 'device', id })) {
+        throw new ControlError(RPC_UNAUTHORIZED, 'not permitted: web.device.revoke');
+      }
+      const gone = deps.webDevices?.revoke(id);
+      if (!gone) throw new ControlError(RPC_NOT_FOUND, `no device matches "${ref}"`);
+      deps.flash?.(`aw revoked the browser device "${gone.name}"`);
+      return { device: deviceView(gone) };
+    },
   });
+}
+
+function deviceView(d: WebDevice): ControlWebDevice {
+  return { id: d.id, name: d.name, scope: d.scope, createdAt: d.createdAt, lastSeen: d.lastSeen };
+}
+
+/** A device by id, or by a unique prefix of four characters or more (any case). */
+export function resolveDeviceRef(devices: readonly WebDevice[], ref: string): string {
+  const wanted = ref.trim().toLowerCase();
+  const exact = devices.find((d) => d.id.toLowerCase() === wanted);
+  if (exact) return exact.id;
+  const matches = wanted.length >= 4 ? devices.filter((d) => d.id.toLowerCase().startsWith(wanted)) : [];
+  if (matches.length === 1) return matches[0].id;
+  if (matches.length > 1) {
+    throw new ControlError(RPC_AMBIGUOUS, `"${ref}" matches ${matches.length} devices`, {
+      matches: matches.map((d) => ({ key: d.id, sessionId: d.id, title: d.name })),
+    });
+  }
+  throw new ControlError(RPC_NOT_FOUND, `no device matches "${ref}"`);
 }
 
 /**

@@ -85,6 +85,12 @@ export interface BrowserConnectionsOptions {
 export interface BrowserConnections extends Disposable {
   /** An upgraded socket from an authenticated device. Owned from here on. */
   attach(ws: WebSocket, device: RequestContext): void;
+  /**
+   * Close every connection of a revoked device now (#137): its client
+   * registrations go (and its prompts resolve as cancelled) and its pane hosts
+   * are disposed in this call. The number closed.
+   */
+  closeDevice(deviceId: string): number;
   /** Open connections (tests, diagnostics). */
   readonly size: number;
 }
@@ -102,6 +108,8 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
   const results = opts.results ?? new CommandResults();
   /** Each open socket, and how to close it. */
   const connections = new Map<WebSocket, () => void>();
+  /** Each open socket's device, for revocation (#137). */
+  const deviceOf = new Map<WebSocket, string | undefined>();
 
   function attach(ws: WebSocket, device: RequestContext): void {
     const incoming = new Emitter<unknown>();
@@ -240,10 +248,12 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       panes?.conversation.dispose();
       panes = undefined;
       connections.delete(ws);
+      deviceOf.delete(ws);
       log(`web: browser disconnected (${connections.size} open)`);
     }
 
     connections.set(ws, () => close(1001, 'going away'));
+    deviceOf.set(ws, device.deviceId);
     log(`web: browser connected (${connections.size} open)`);
 
     ws.on('message', onMessage);
@@ -256,6 +266,11 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
 
   return {
     attach,
+    closeDevice: (deviceId) => {
+      const mine = [...deviceOf].filter(([, id]) => id === deviceId).map(([ws]) => ws);
+      for (const ws of mine) connections.get(ws)?.();
+      return mine.length;
+    },
     get size() {
       return connections.size;
     },

@@ -49,7 +49,19 @@ export type PreferencesToHost =
    * numbers in front of them (#42); only then may `auto` be set over an unmet gate.
    */
   | { type: 'routingPolicy'; mode: LauncherRoutingMode; policy: ExecutionPolicy; overrideGate?: boolean }
+  /** Revoke a browser device (#137): its credential stops working and its tabs disconnect. */
+  | { type: 'revokeWebDevice'; id: string }
   | { type: 'close' };
+
+/** One browser device in Preferences → Browser (#137). Never a credential. */
+export interface WebDeviceView {
+  id: string;
+  name: string;
+  /** `loopback`: a browser on this Mac. `lan`: paired over the home network. */
+  scope: 'loopback' | 'lan';
+  createdAt: number;
+  lastSeen: number;
+}
 
 /** What Preferences → Orchestration shows: the catalog, each source's health, and the routing defaults. */
 export interface OrchestrationPrefsView {
@@ -137,6 +149,14 @@ export function modelPolicyChange(message: unknown): ModelPolicyChange | undefin
   return out;
 }
 
+/** A `revokeWebDevice` message's id, or nothing if it is not well formed (#137). */
+export function revokeWebDeviceId(message: unknown): string | undefined {
+  if (!message || typeof message !== 'object') return undefined;
+  const m = message as { type?: unknown; id?: unknown };
+  if (m.type !== 'revokeWebDevice' || typeof m.id !== 'string' || m.id.length === 0 || m.id.length > 64) return undefined;
+  return m.id;
+}
+
 /** The actions Preferences can invoke. A closed set: the host switches on it. */
 export type SettingActionId = 'connectDiscord' | 'testRemote' | 'disconnectDiscord';
 
@@ -163,6 +183,8 @@ export type HostToPreferences =
     }
   /** Every setting's current status, by key. A key that is absent has none. */
   | { type: 'status'; status: Record<string, SettingStatus> }
+  /** The browser devices (#137), whole, whenever one is added, seen or revoked. */
+  | { type: 'webDevices'; devices: WebDeviceView[] }
   /**
    * What an action did, shown in the window that asked rather than in a dialog
    * over it. A check with six separate results is a thing to read next to the

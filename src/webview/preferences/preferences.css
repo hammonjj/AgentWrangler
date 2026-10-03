@@ -743,3 +743,43 @@
   gap: 8px;
   margin-top: 8px;
 }
+
+/* Browser → Devices (#137). */
+#prefsApp .pf-devicelist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+#prefsApp .pf-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-panel-border, #3c3c3c);
+  border-radius: 6px;
+}
+
+#prefsApp .pf-devicetext {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+#prefsApp .pf-devicename {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#prefsApp .pf-devicemeta {
+  font-size: 0.86em;
+  opacity: 0.75;
+}
+
+#prefsApp .pf-device .pf-action {
+  flex: none;
+}

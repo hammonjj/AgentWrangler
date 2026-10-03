@@ -16,6 +16,7 @@ import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBri
 import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId, SettingStatus } from '../../shared/preferences';
 import { settingGroups, SETTINGS, type SettingSpec } from '../../shared/settings';
 import { ORCHESTRATION_GROUP, onRoutingResult, renderOrchestration, setLocalEndpointResult } from './orchestration';
+import { WEB_DEVICES_GROUP, createWebDevicesBlock, setWebDevices } from './webDevices';
 
 declare function acquireVsCodeApi(): WebviewBridge<unknown>;
 
@@ -516,6 +517,8 @@ function render(): void {
     // The Discord buttons live inside the reveal, under the fields they act on.
     const wrapper = dependents.get('remote.enabled');
     if (group === 'Experimental' && wrapper) wrapper.firstElementChild!.appendChild(renderActions(group));
+    // The browser devices (#137), after the settings that let them in.
+    if (group === WEB_DEVICES_GROUP) section.appendChild(createWebDevicesBlock(post));
     main.appendChild(section);
   }
 
@@ -568,6 +571,10 @@ window.addEventListener('message', (event: MessageEvent) => {
     const before = Object.keys(statuses);
     statuses = message.status ?? {};
     for (const key of new Set([...before, ...Object.keys(statuses)])) applyStatus(key);
+    return;
+  }
+  if (message.type === 'webDevices') {
+    setWebDevices(message.devices ?? []);
     return;
   }
   if (message.type === 'localEndpointResult') {

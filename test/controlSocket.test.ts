@@ -89,6 +89,15 @@ function fakeBackend() {
       calls.push('webLink');
       return { url: 'http://127.0.0.1:1/login?code=synthetic', expiresAt: 1 };
     },
+    webPair: () => {
+      calls.push('webPair');
+      return { url: 'https://test-mac.local:1/pair?code=ABCD2345', code: 'ABCD2345', expiresAt: 1 };
+    },
+    webDevices: () => [{ id: 'device-synthetic-1', name: 'Safari on iOS', scope: 'lan', createdAt: 1, lastSeen: 1 }],
+    webRevoke: (id) => {
+      calls.push(`webRevoke ${id}`);
+      return { device: { id: 'device-synthetic-1', name: 'Safari on iOS', scope: 'lan', createdAt: 1, lastSeen: 1 } };
+    },
   };
   return { backend, calls, origins, emit: (e: SessionViewEvent) => emit?.(e), close: (r: 'ended') => close?.(r), disposed: () => disposed };
 }
@@ -296,6 +305,24 @@ describe('control socket', () => {
     expect(r.url).toContain('/login?code=');
     expect(fake.calls).toEqual(['webLink']);
     expect(logs).toEqual([`control socket: web.link by aw pid ${process.pid}`]);
+    client.close();
+  });
+
+  it('web.pair, web.devices and web.devices.revoke reach the backend; the code is never logged (#137)', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    const pair = await client.request<{ url: string; code: string }>('web.pair');
+    expect(pair.code).toBe('ABCD2345');
+    const list = await client.request<{ devices: { id: string }[] }>('web.devices');
+    expect(list.devices.map((d) => d.id)).toEqual(['device-synthetic-1']);
+    await client.request('web.devices.revoke', { id: ' devi ' });
+    expect(await codeOf(client.request('web.devices.revoke', {}))).toBe(RPC_INVALID_PARAMS);
+    expect(fake.calls).toEqual(['webPair', 'webRevoke devi']);
+    expect(logs.join('\n')).not.toContain('ABCD2345');
+    expect(logs).toEqual([`control socket: web.pair by aw pid ${process.pid}`, `control socket: web.devices.revoke  devi  by aw pid ${process.pid}`]);
+    server!.stopMutations();
+    expect(await codeOf(client.request('web.pair'))).toBe(RPC_UNSUPPORTED);
     client.close();
   });
 
