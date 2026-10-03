@@ -9,7 +9,9 @@
  * - a power assertion (`caffeinate -i -w <pid>`) while an agent it runs is
  *   working, from the same `shouldPreventAppSuspension` the window uses;
  * - wake handling through the timer-gap watcher, for `onSystemResume`;
- * - the manifest, `run/core-daemon.json`.
+ * - the manifest, `run/core-daemon.json`;
+ * - its clients and the browser workbench they load (#131, `clients.ts`):
+ *   every browser tab, and the app's window when it is a client.
  *
  * Single instance: the control socket. If anything answers on it, the app or
  * another daemon holds the core, and this refuses before building anything.
@@ -42,6 +44,7 @@ import { watchForSleep } from '../core/sleepWatcher';
 import type { HostServices } from '../host/hostServices';
 import { createNodeHost, type NodeHost } from '../node/nodeHost';
 import { createPowerAssertion, type PowerAssertion } from '../node/powerAssertion';
+import { startDaemonClients, type DaemonClients } from './clients';
 
 export interface StartCoreDaemonOptions {
   /** `~/Library/Application Support/Agent Wrangler`, or a temp dir in tests. */
@@ -62,6 +65,11 @@ export interface StartCoreDaemonOptions {
   watchSleep?: (onWake: (gapMs: number) => void) => Disposable;
   /** "Open at login" changed: the LaunchAgent's `RunAtLoad` follows it. */
   onOpenAtLoginChange?: () => void;
+  /**
+   * `dist/webview`, for the browser workbench (#131): `app.asar.unpacked/dist/webview`
+   * when packaged, since plain Node cannot read the asar. Absent: no web server.
+   */
+  webviewDir?: string;
   pid?: number;
   now?: () => number;
 }
@@ -72,6 +80,8 @@ export interface RunningCoreDaemon {
   readonly paths: CoreDaemonPaths;
   readonly manifest: CoreDaemonManifest;
   readonly power: PowerAssertion;
+  /** The browsers (and the app's window, as one of them) and the web workbench they use (#131). */
+  readonly clients: DaemonClients;
   /**
    * Apply the quit policy for `source`, end what it says to end, and dispose
    * everything. Safe to call twice; the second call returns the first's
@@ -110,6 +120,7 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
   // ---- The control socket (#21), before start: it is this daemon's claim on the core ----
   ensurePrivateDir(paths.runDir);
   ensurePrivateDir(path.dirname(paths.socketPath));
+  let clients: DaemonClients | undefined;
   const control = new ControlServer({
     token: writeControlToken(paths.tokenPath),
     log,
@@ -119,8 +130,8 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
       startedAt,
       flash: (message) => host.dialogs.flash(message, 4000),
       gate: app.access,
-      // WEB SERVER CALL SITE (#127 → #131): see the section below.
-      webLink: () => undefined,
+      // The web workbench's sign-in link (#131): `aw web open`, and the app's window.
+      webLink: () => clients?.loginLink(),
     }),
   });
   try {
@@ -132,6 +143,9 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
     throw new Error(`control socket: not serving on ${paths.socketPath}: ${String(err)}`);
   }
   log(`control socket: listening on ${paths.socketPath}`);
+
+  // ---- Clients (#131): the browsers and the app's window, before start so its prompts reach them ----
+  clients = startDaemonClients({ app, host, log, webviewDir: opts.webviewDir });
 
   app.start();
 
@@ -154,6 +168,7 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
   const sleep = (opts.watchSleep ?? ((onWake) => watchForSleep({ onWake })))((gap) => {
     log(`woke after ${Math.round(gap / 1000)} s`);
     app.onSystemResume();
+    clients?.refresh();
   });
 
   // ---- Open at login → the LaunchAgent's RunAtLoad ----
@@ -161,27 +176,13 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
     if (affects('openAtLogin')) opts.onOpenAtLoginChange?.();
   }));
 
-  // ---- WEB SERVER CALL SITE (#127 → #131) ----
-  //
-  // The HTTP side (`src/core/web/server.ts`) is host-neutral, but what it
-  // hands each upgraded socket to (`createBrowserClients` in
-  // `src/electron/webPrototype.ts`, over `createWorkbenchHosts` in
-  // `src/electron/workbenchWindow.ts`) still lives beside Electron and imports
-  // it. Once those move out of `src/electron/`, start it here as `main.ts`
-  // does: a `ClientRegistry` (#126) made the host's broker
-  // (`host.useBroker`) and the app's surface (`app.attachSurface`), then
-  // `new WebServer({ ..., dataDir: host.dataDir, gate: app.access, onClient })`
-  // following `web.enabled` and `web.port`; return its `loginLink()` from
-  // `webLink` above and dispose it in `teardown` below. Until then `aw web
-  // open` says the workbench is off, and dialogs get the default broker's
-  // "cancel".
-  const web = undefined as Disposable | undefined;
+  const web = clients;
 
   log(`core daemon started: pid ${pid}, build ${opts.build}`);
 
   let stopping: Promise<QuitDecision> | undefined;
   const teardown = () => {
-    web?.dispose();
+    web.dispose();
     sleep.dispose();
     power.dispose();
     control.dispose();
@@ -209,5 +210,5 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
       return decision;
     })());
 
-  return { started: true, daemon: { app, host, paths, manifest, power, stop } };
+  return { started: true, daemon: { app, host, paths, manifest, power, clients: web, stop } };
 }

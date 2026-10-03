@@ -49,14 +49,15 @@ asar: true
 # are unpacked beside it: `Resources/app.asar.unpacked/dist/<name>/main.js`.
 # The Electron main process still reaches them through the asar paths.
 # The qualification fixtures too: the core daemon (#130) runs `createApp`,
-# which copies them out per run. (`dist/webview` joins them when the daemon
-# serves the browser workbench.)
+# which copies them out per run. And `dist/webview`: the daemon serves the
+# browser workbench's page and assets from it (#131).
 asarUnpack:
   - dist/sessionHost/**
   - dist/remoteDaemon/**
   - dist/daemon/**
   - dist/cli/**
   - dist/qualification-fixtures/**
+  - dist/webview/**
 
 # The pinned official Node (#129, decision D1), staged in `.node-runtime/` by
 # scripts/fetch-node.mjs, which `npm run app:package` runs first. Ends up at

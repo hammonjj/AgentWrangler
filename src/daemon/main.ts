@@ -93,6 +93,8 @@ async function main(): Promise<void> {
     runtimeDir: process.env.AW_CORE_RUNTIME_DIR || undefined,
     remoteDaemon: createRemoteDaemonAgent({ runDirs, logDir, runtime, isPackaged: where.isPackaged, log }),
     log,
+    // Beside this file: `dist/webview`, unpacked from the asar in a packaged build (#131).
+    webviewDir: path.resolve(__dirname, '..', 'webview'),
     onOpenAtLoginChange: () => {
       agent.syncPlist().catch((err) => say(`could not update the LaunchAgent: ${String(err)}`));
     },

@@ -19,7 +19,9 @@ Nothing may import `vscode`, and `HostServices` has one implementation.
   it; `npm run app:signing-setup` creates it (once per machine, needs James's password).
 - `aw daemon start|stop|stop --all|status` — the core daemon (#130): the core as a LaunchAgent
   (`com.hammonjj.agentwrangler.core`) instead of inside the app. Only one core runs at a time;
-  `experimental.coreDaemon` (off by default) makes opening the app start the daemon instead.
+  `experimental.coreDaemon` (off by default) makes opening the app start the daemon instead,
+  and the window becomes a client of the daemon's web workbench (#131, `src/electron/windowClient.ts`:
+  no `createApp`, no preload or IPC bridge, no tray).
   From a checkout it spawns the checkout's `dist/daemon/main.js` against the real data dir, so
   in tests point `HOME` (and `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) at a temp dir. Never install the
   LaunchAgent on James's machine unless asked.
@@ -112,7 +114,8 @@ Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
   A running copy on the old build is the usual cause of "my fix didn't work".
 
   **When the core daemon runs the core** (`aw daemon status` says running; `experimental.coreDaemon`
-  on), restarting the app restarts nothing: the app only starts the daemon and quits. Restart
+  on), restarting the app restarts nothing but the window: it is a browser on the daemon's web
+  workbench, and quitting it ends no agent. Restart
   the core with `aw daemon start` from the new install instead (`app:install` does it for you when
   the daemon is running): it reloads the LaunchAgent, the old daemon stops as `aw daemon stop`
   does, and the new one reattaches the hosts. The same "don't restart if" list applies. Never
@@ -143,7 +146,8 @@ Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
 `src/claude/*` Claude Code provider (registry, transcript tail/index, hook events + log +
 installer, status) · `src/codex/*` Codex provider and runner · `src/core/*` provider-agnostic
 store, config, services · `src/remote/*` remote control, with `discord/` below the transport
-boundary · `src/app/createApp.ts` the application, minus the window · `src/daemon/*` the core daemon
+boundary · `src/app/createApp.ts` the application, minus the window (`src/app/webWorkbench.ts` is the
+browser workbench, served by whichever process runs the core) · `src/daemon/*` the core daemon
 (plain Node, no Electron) · `src/node/*` plain-Node host services and LaunchAgent installers ·
 `src/electron/*` the main
 process, windows and menu · `src/host/*` the seam the app is written against · `src/ui/*`

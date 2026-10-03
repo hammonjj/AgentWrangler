@@ -21,7 +21,7 @@ export class ControlClient {
    * Connect to the running app. `undefined` means it is not running (no
    * token, no socket, or nothing listening on it); anything else wrong throws.
    */
-  static async connect(dirs: RunDirs, client: { build: string }): Promise<ControlClient | undefined> {
+  static async connect(dirs: RunDirs, client: { build: string; name?: string }): Promise<ControlClient | undefined> {
     let token: string;
     try {
       token = fs.readFileSync(controlTokenPath(dirs), 'utf8').trim();
@@ -44,7 +44,8 @@ export class ControlClient {
     socket.on('close', () => peer.close(new Error('Agent Wrangler closed the connection')));
     socket.on('error', () => undefined);
     const params: ControlHelloParams = {
-      client: { name: 'aw', build: client.build, pid: process.pid },
+      // `aw`, or the app's window when it is a client of the daemon (#131).
+      client: { name: client.name ?? 'aw', build: client.build, pid: process.pid },
       protocol: { min: CONTROL_PROTOCOL_VERSION, max: CONTROL_PROTOCOL_VERSION },
       token,
     };

@@ -25,11 +25,12 @@ import { Emitter, type Disposable } from '../core/events';
 import type { AgentWranglerApp } from '../app/createApp';
 import type { HostDialogs, HostServices, WorkbenchSurface } from '../host/hostServices';
 import { channelFromDialogs, type ClientChannel } from '../core/clients';
-import { ConversationHost, type ConversationHostUi } from '../ui/conversation/conversationHost';
-import { DashboardHost } from '../ui/dashboardHost';
+import type { ConversationHost, ConversationHostUi } from '../ui/conversation/conversationHost';
+import type { DashboardHost } from '../ui/dashboardHost';
 import { ownerContext, type RequestContext } from '../core/access';
 import type { AnalyticsDetail } from '../shared/orchestration/analyticsView';
-import { paneChannel, type EnvelopeTransport } from '../ui/paneChannel';
+import type { EnvelopeTransport } from '../ui/paneChannel';
+import { createWorkbenchHosts } from '../app/workbenchHosts';
 import { documentUrl } from './bundleProtocol';
 import { STATE_GET, STATE_SET, TO_HOST, TO_WEBVIEW } from './channels';
 import { shouldReloadRenderer } from './rendererRecovery';
@@ -94,65 +95,6 @@ export function windowClientChannel(window: WorkbenchWindow, dialogs: HostDialog
       }
     },
   });
-}
-
-/**
- * The two pane hosts for one workbench document, over whatever carries its
- * envelopes. The window has one document; the browser prototype (#120) has one
- * per connected browser, each with hosts of its own over the same app.
- */
-export function createWorkbenchHosts(
-  app: AgentWranglerApp,
-  host: HostServices,
-  ui: ConversationHostUi,
-  transport: EnvelopeTransport,
-  /**
-   * Who this document's messages act as (#123). The window is one client
-   * with one context; each browser connection brings its own, naming itself.
-   */
-  context: RequestContext,
-): { dashboard: DashboardHost; conversation: ConversationHost } {
-  const access = { context, gate: app.access };
-  const actions = app.actions;
-  const dashboard = new DashboardHost(
-    paneChannel(transport, 'dashboard'),
-    app.store,
-    app.archive,
-    actions,
-    app.provider,
-    app.usage,
-    app.codexUsage,
-    app.columns,
-    app.runnerOwnership,
-    app.projects,
-    app.launcher,
-    app.pause,
-    host.settings,
-    host.dialogs,
-    app.models,
-    access,
-    app.taskPanes,
-    app.missions,
-    app.analytics,
-  );
-  const conversation = new ConversationHost(
-    paneChannel(transport, 'conversation'),
-    app.store,
-    app.provider,
-    app.codexProvider,
-    app.sessions,
-    app.runners,
-    actions,
-    app.dictation,
-    app.files,
-    // The window is the whole workbench, not one conversation, so its title
-    // does not follow the session — the pane shows the name in its header.
-    () => undefined,
-    ui,
-    access,
-    app.taskPanes,
-  );
-  return { dashboard, conversation };
 }
 
 export class WorkbenchWindow implements WorkbenchSurface, Disposable {
