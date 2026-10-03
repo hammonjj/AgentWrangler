@@ -1,7 +1,7 @@
 /**
  * The Claude Code adapter (plan §6.2): an attempt becomes one
- * `SessionExecutors.launch` of a Claude session, in-process or in a session
- * host as #4 decides. The id is chosen here, before launch, so the attempt
+ * `SessionExecutors.launch` of a Claude session, which runs in a session host
+ * like every other (#122). The id is chosen here, before launch, so the attempt
  * can hold it before the session exists (§23.2).
  */
 import { randomUUID } from 'node:crypto';

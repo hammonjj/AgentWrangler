@@ -418,7 +418,7 @@ void app.whenReady().then(() => {
     void (async () => {
       const counts = wrangler.sessionCounts();
       const decision = quitPolicy({ source, ...counts });
-      log(`Agent Wrangler quitting (${source}); ${counts.local} in-process and ${counts.hosted} hosted session(s)`);
+      log(`Agent Wrangler quitting (${source}); ${counts.hosted} hosted and ${counts.local} in-app Codex session(s)`);
       if (decision.confirm) {
         const keeps =
           counts.hosted > 0 ? `\n\n${agentCount(counts.hosted)} running in session hosts keep running.` : '';

@@ -115,7 +115,8 @@ includes:
 answers the #20 objection that a daemon "moves the problem": an update restarts the daemon,
 not the agents, which is the same contract the window has today. One prerequisite follows. The
 in-process Claude path (`experimental.sessionHosts` is still `false` by default) must go,
-otherwise a daemon restart ends conversations. See slice 1.
+otherwise a daemon restart ends conversations. See slice 1 (done in #122: the setting and the
+path are gone).
 
 **Runtime.** A signed `Agent Wrangler.app` that contains a pinned official Node binary and
 `dist/`. It no longer contains Electron.

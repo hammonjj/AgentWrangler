@@ -1535,6 +1535,18 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
   - **Not done here:** the §16 manual rows and the gating acceptance test (James's, during the
     soak); M3 (logout); CP3; the default flip and removing the setting; staggering the replay of
     several busy hosts at startup (§15.2 open item).
+- **Outcome (2026-10-03, #122): the flip and the removal, in one step.** The browser workbench
+  (`browser-workbench.md` §4) makes the core a daemon that restarts on every update, so an
+  in-process conversation could not be allowed to exist. `experimental.sessionHosts` and the
+  in-process path are gone: `RunnerService` starts every session through `spawnHostedClaude`,
+  `HostServices.sessionHosts` is required, and orchestration's G1 refusal (Claude attempts need
+  hosts) has nothing left to refuse. A stale value is removed from `settings.json` at startup
+  (`RETIRED_SETTING_KEYS`). An in-process conversation from the build before is cut off by that
+  build's quit, classified `interrupted` (`app-restart`) at the next start, and resumes in a
+  host. `lifecycle.orphanIdleHours` no longer hangs off the switch. Tests drive `RunnerService`
+  over `inProcessHosts` (`src/sessionHost/inProcessHosts.ts`), a `HostSupervisor` stand-in whose
+  sessions run in the test's process and read as hosted, so they take the app's code path. CP3
+  and the manual rows were not run first.
 
 ```text
 Recommended model: Opus

@@ -1,12 +1,14 @@
 /**
- * A Claude session run in this process: `RunnerView` (translation, the handle)
- * over `ClaudeSdkSession` (execution). Stage 3 adds the remote twin, the same
- * `RunnerView` fed by a session host over a socket.
+ * Tests only: a `RunnerView` (translation, the handle) straight over a
+ * `ClaudeSdkSession` (execution) in this process, with no host in between,
+ * for tests of the view itself. The app has no such path: every Claude
+ * conversation runs in a session host (#122). Tests that need a whole
+ * `RunnerService` use `inProcessHosts` instead.
  */
-import { ClaudeSdkSession, type QueryFn } from '../../claude/runner/claudeSdkSession';
-import { RunnerView } from '../../claude/runner/runnerView';
-import type { ConversationHistory } from '../../claude/transcriptHistory';
-import type { LaunchRequest } from './sessionHandle';
+import { ClaudeSdkSession, type QueryFn } from '../../src/claude/runner/claudeSdkSession';
+import { RunnerView } from '../../src/claude/runner/runnerView';
+import type { ConversationHistory } from '../../src/claude/transcriptHistory';
+import type { LaunchRequest } from '../../src/core/session/sessionHandle';
 
 const IN_PROCESS_RING_BYTES = 1024 * 1024;
 

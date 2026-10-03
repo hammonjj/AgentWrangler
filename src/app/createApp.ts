@@ -50,6 +50,7 @@ import { checkoutFor } from '../core/checkout';
 import { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerView } from '../claude/runner/runnerView';
 import type { HostManifest } from '../shared/sessionProtocol';
+import { RETIRED_SETTING_KEYS } from '../shared/settings';
 import { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import { LaunchDefaults } from '../core/launchDefaults';
@@ -259,16 +260,16 @@ export interface AgentWranglerApp {
   attachSurface(surface: WorkbenchSurface): void;
 
   // --- the behaviours commands and menus invoke ---
-  /** Start a conversation this process runs itself. No cwd: ask which folder. */
+  /** Start a conversation this app runs (Claude: in a session host). No cwd: ask which folder. */
   newConversation(cwd?: string): Promise<SessionHandle | undefined>;
   /**
-   * Live sessions, for the quit decision: `hosted` Claude ones run in session
-   * hosts and survive a quit; `local` ones (in-process Claude, and Codex
-   * threads without the background server) do not. Codex threads on the
+   * Live sessions, for the quit decision: `hosted` are the Claude ones, which
+   * all run in session hosts and survive a quit; `local` are Codex threads
+   * without the background server, which do not. Codex threads on the
    * background server are in neither: they keep running on their own terms.
    */
   sessionCounts(): { hosted: number; local: number };
-  /** Who runs this session: AW somewhere that survives a quit, AW in-process, or not AW. */
+  /** Who runs this session: AW somewhere that survives a quit, AW in its own process (Codex `--stdio`), or not AW. */
   runBy(sessionId: string): RunBy;
   /**
    * End the process running a session, with no dialog: `aw stop`. The menu's
@@ -293,10 +294,10 @@ export interface AgentWranglerApp {
   /** Tasks that are not finished, newest first. Empty while orchestration is off. */
   taskList(): TaskSummary[];
   /**
-   * The app is quitting: end the sessions that cannot survive it (and hosted
-   * ones too with `includeHosted`), awaited and bounded by `withinMs`. Ended
-   * ones stay resumable (interrupted); hosted ones left running are adopted
-   * on the next start.
+   * The app is quitting. Hosted Claude sessions are left running and adopted
+   * on the next start, unless `includeHosted` (Quit and Stop All Agents),
+   * which ends them, awaited and bounded by `withinMs`. Ended ones stay
+   * resumable (interrupted).
    */
   stopAllForQuit(withinMs: number, opts?: { includeHosted?: boolean }): Promise<void>;
   /**
@@ -394,19 +395,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // left running in hosts that are still alive. Nothing may classify, resume
   // or adopt a session before this is known, or AW could end or double-resume
   // its own surviving session.
-  const hostSupervisor = host.sessionHosts
-    ? new HostSupervisor({
-        runDir: host.sessionHosts.runDir,
-        fallbackRunDir: host.sessionHosts.fallbackRunDir,
-        logDir: host.sessionHosts.logDir,
-        runtime: host.sessionHosts.runtime,
-        log,
-        build: host.sessionHosts.runtime.buildId,
-        orphanIdleHours: () => host.settings.get<number>('lifecycle.orphanIdleHours', 24),
-        endpointKey: (ref) => localEndpoints.keyByRef(ref),
-      })
-    : undefined;
-  const hostScan = hostSupervisor?.scan() ?? { alive: [], dead: [], foreign: [] };
+  const hostSupervisor = new HostSupervisor({
+    runDir: host.sessionHosts.runDir,
+    fallbackRunDir: host.sessionHosts.fallbackRunDir,
+    logDir: host.sessionHosts.logDir,
+    runtime: host.sessionHosts.runtime,
+    log,
+    build: host.sessionHosts.runtime.buildId,
+    orphanIdleHours: () => host.settings.get<number>('lifecycle.orphanIdleHours', 24),
+    endpointKey: (ref) => localEndpoints.keyByRef(ref),
+  });
+  const hostScan = hostSupervisor.scan();
   // Then classify what the last run left behind (§7.3): every session that
   // was live is interrupted, except those still running in a host (including
   // one this build cannot talk to, which must not look ownerless), and those
@@ -415,6 +414,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // interrupted list exists, so auto-resume never picks a session whose host
   // finished, failed or crashed. The old runner registry is imported once
   // from the surface store.
+  // A conversation an older build ran in its own process (before #122 made
+  // hosts the only way) is one of the interrupted: it ended with that build,
+  // its transcript is intact, and its row offers Resume, which runs it in a host.
   const sessionRegistry = new SessionRegistry(host.sessionState, { legacy: host.workspaceState });
   const startup = sessionRegistry.startup(
     new Set(
@@ -428,7 +430,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
   for (const m of hostScan.foreign) {
     log(`host ${m.hostId} (session ${m.sessionId}) runs a manifest version this build does not know; leaving it alone`);
   }
-  hostSupervisor?.collect(hostScan);
+  hostSupervisor.collect(hostScan);
+  // Settings that no longer do anything (`experimental.sessionHosts`, #122).
+  // Left in settings.json they would read as though they still did.
+  for (const key of RETIRED_SETTING_KEYS) {
+    if (host.settings.get<unknown>(key, undefined) === undefined) continue;
+    log(`removing the retired "${key}" setting`);
+    void host.settings.update(key, undefined);
+  }
 
   // ---- The orphan sweep (§7.3) ----
   //
@@ -443,10 +452,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
     if (running) return running;
     const sweep = sweepOrphans(sessionId, {
       entries: () => readProcessEntries(sessionsDir()),
-      heldAgentPids: () => hostSupervisor?.heldAgentPids() ?? new Set(),
+      heldAgentPids: () => hostSupervisor.heldAgentPids(),
       // The only processes it may end: agents a dead host's manifest names
       // (pid + start time, #62). Anything else is take-over, confirmed.
-      lostAgents: (id) => hostSupervisor?.lostAgents(id) ?? [],
+      lostAgents: (id) => hostSupervisor.lostAgents(id),
       isAlive: isPidAlive,
       startTimeOf,
       parentOf: parentPidOf,
@@ -477,7 +486,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     log(`host ${m.hostId} (session ${m.sessionId}) died without an exit record; sweeping for its agent`);
     void sweepSession(m.sessionId)
       .then((r) => {
-        if (r.clear) hostSupervisor?.forget(m);
+        if (r.clear) hostSupervisor.forget(m);
       })
       .catch((err) => log(`orphan sweep for ${m.sessionId} failed: ${String(err)}`));
   }
@@ -559,23 +568,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }),
   );
 
-  // Sessions this process runs itself, through the Agent SDK. The binary is
-  // resolved per start so changing the setting does not need a restart.
-  // `rememberModels`: what the launcher's model dropdown offers is the list the
-  // last conversation reported, since the launcher has no running CLI to ask.
+  // Claude sessions this app runs, each in a session host of its own (#122:
+  // never in this process, so a quit or a restart of the core ends none of
+  // them). The binary is resolved per start so changing the setting does not
+  // need a restart. `rememberModels`: what the launcher's model dropdown
+  // offers is the list the last conversation reported, since the launcher has
+  // no running CLI to ask. A local endpoint's key reaches a host through the
+  // supervisor's `endpointKey`.
   const runners = new RunnerService({
-    query: sdkQuery,
     binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath),
     log,
     registry: sessionRegistry,
     locate,
     rememberModels: (list) => models.remember('anthropic', list),
-    localKey: (ref) => localEndpoints.keyByRef(ref),
-    // Experimental until the Stage 4 soak: new sessions run in hosts only
-    // with the setting on. Surviving hosts are adopted either way.
-    hosts: hostSupervisor
-      ? { supervisor: hostSupervisor, enabled: () => host.settings.get<boolean>('experimental.sessionHosts', false) }
-      : undefined,
+    hosts: { supervisor: hostSupervisor },
     beforeResume,
     onHostLost: (id) => void sweepSession(id).catch((err) => log(`orphan sweep for ${id} failed: ${String(err)}`)),
   });
@@ -749,8 +755,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
     dataDir: host.dataDir,
     sessions,
     registry: sessionRegistry,
-    // G1: an attempt must survive `app:install`, so Claude attempts need hosts.
-    hostsEnabled: () => !!hostSupervisor && host.settings.get<boolean>('experimental.sessionHosts', false) === true,
     onTurnRecord: (listener) => turnRecords.event(listener),
     telemetry: {
       append: (record) => appendTelemetry(record),
@@ -866,11 +870,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const handle = sessions.get(id);
       return handle ? (await handle.decidePlan(requestId, approve, feedback)) === 'applied' : false;
     },
-    // Hosted sessions only: an in-process runner's prompt still reaches the
-    // hook file, which the row answers as for any session.
+    // Every runner is hosted, and a hosted session's permission prompt reaches
+    // the row and the remote only from here, not through the hook file.
     pendingPermission: (id: string | undefined) => {
       const handle = runners.get(id);
-      if (!handle?.hosted) return undefined;
+      if (!handle) return undefined;
       const ask = hostedPermissions(handle).at(-1);
       return ask
         ? { requestId: ask.requestId, toolName: ask.toolName, ask: { summary: ask.summary, body: ask.body, isCommand: ask.isCommand } }
@@ -899,7 +903,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // A live session host this app is not following holds it (one whose
     // manifest this build cannot read): never taken over or resumed around
     // it (§7.3). Stopping that host is offered instead.
-    const held = hostSupervisor?.heldBy(s.sessionId);
+    const held = hostSupervisor.heldBy(s.sessionId);
     if (held && !runners.owns(s.sessionId)) {
       await offerStopHost(held.manifest, displayLabel(s));
       return;
@@ -999,7 +1003,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       'Stop host',
       'Leave',
     );
-    if (choice !== 'Stop host' || !hostSupervisor) return;
+    if (choice !== 'Stop host') return;
     const outcome = await hostSupervisor.stopHost(manifest);
     if (outcome === 'refused') {
       dialogs.error(`Agent Wrangler: the host holding ${label} did not stop. See the log.`);
@@ -1096,7 +1100,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (now.pid !== undefined && pause.isPaused(now.pid)) pause.resume(now.pid);
       await runners.end(runner);
       log(`closed ${now.sessionId}: ended the runner in this window`);
-    } else if (now.provider === 'claude' && hostSupervisor?.heldBy(now.sessionId)) {
+    } else if (now.provider === 'claude' && hostSupervisor.heldBy(now.sessionId)) {
       // A host this app cannot follow: stop the host, which ends its agent
       // gracefully, rather than kill the agent out from under it.
       if (now.pid !== undefined && pause.isPaused(now.pid)) pause.resume(now.pid);
@@ -2799,7 +2803,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const remoteLink = host.remoteDaemon
     ? new RemoteDaemonLink({
         paths: host.remoteDaemon.paths,
-        build: host.sessionHosts?.runtime.buildId ?? 'dev',
+        build: host.sessionHosts.runtime.buildId,
         log: (m) => log(`remote: ${m}`),
         ensure: (why) => host.remoteDaemon!.ensure(why),
         replaceOutdated: host.remoteDaemon.replaceOutdated,
@@ -3206,18 +3210,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
     sessions,
     sessionRegistry,
     sessionCounts: () => {
-      const claude = runners.counts();
       const codex = codexKeepAlive
         ? 0
         : codexRunners.list().filter((h) => h.lifecycle !== 'ended' && h.lifecycle !== 'error').length;
-      return { hosted: claude.hosted, local: claude.local + codex };
+      return { hosted: runners.liveCount(), local: codex };
     },
     runBy: (sessionId) => {
-      const claude = runners.get(sessionId);
-      if (claude) return claude.hosted ? 'hosted' : 'app';
+      // Every Claude runner is in a session host (#122).
+      if (runners.get(sessionId)) return 'hosted';
       if (codexRunners.owns(sessionId)) return codexKeepAlive ? 'hosted' : 'app';
       // A host this app holds but is not following (Close stops it as ours).
-      if (hostSupervisor?.heldBy(sessionId)) return 'hosted';
+      if (hostSupervisor.heldBy(sessionId)) return 'hosted';
       return 'external';
     },
     async stopSession(key, opts = {}) {
@@ -3230,15 +3233,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
     delegate,
     taskList: () => (tasks ? tasks.list().filter((m) => !['completed', 'cancelled'].includes(m.state)).map(taskSummary) : []),
     async stopAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}) {
-      const { hosted, local } = runners.counts();
-      const ending = local + (opts.includeHosted ? hosted : 0);
+      // Claude sessions all run in hosts: an ordinary quit lets them go (in
+      // `dispose`) and they keep running. Only Quit and Stop All Agents ends
+      // them, with the graceful end sequence, awaited and bounded. Codex
+      // threads are left to `dispose`: with the background server that only
+      // closes the connection, and they keep running; with `--stdio` the
+      // child goes, and them with it.
+      if (!opts.includeHosted) return;
+      const ending = runners.liveCount();
       if (ending > 0) log(`quitting: ending ${ending} session(s), waiting up to ${withinMs} ms`);
-      // The Claude CLIs get the graceful end sequence, awaited and bounded;
-      // hosted ones are let go of (and keep running) unless asked to stop
-      // them too. Codex threads are left to `dispose`: with the background
-      // server that only closes the connection, and they keep running; with
-      // `--stdio` the child goes, and them with it.
-      await runners.endAllForQuit(withinMs, opts);
+      await runners.endAllForQuit(withinMs);
     },
     onSystemResume() {
       // The Discord connection is the daemon's, which notices the sleep itself.

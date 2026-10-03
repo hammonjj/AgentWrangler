@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { modelPolicyChange, settingUpdate, type PreferencesToHost } from '../src/shared/preferences';
-import { dependentParentKeys, SETTINGS, validateDependencies, type SettingSpec } from '../src/shared/settings';
+import { dependentParentKeys, RETIRED_SETTING_KEYS, SETTINGS, validateDependencies, type SettingSpec } from '../src/shared/settings';
 
 /**
  * The Preferences window writes straight through to the settings file, so what
@@ -133,17 +133,29 @@ describe('validateDependencies', () => {
 describe('dependentParentKeys', () => {
   it('lists each switch once, in the order it is first depended on', () => {
     expect(dependentParentKeys(SETTINGS)).toEqual([
-      'experimental.sessionHosts',
       'orchestration.enabled',
       'autoPause.enabled',
       'remote.enabled',
     ]);
   });
 
-  it('the two example groups from #76 are both switches with a dependent field', () => {
-    const keys = dependentParentKeys(SETTINGS);
-    expect(keys).toContain('remote.enabled');
-    expect(keys).toContain('experimental.sessionHosts');
+  it('the remaining example group from #76 is a switch with a dependent field', () => {
+    expect(dependentParentKeys(SETTINGS)).toContain('remote.enabled');
+  });
+});
+
+describe('session hosts are not optional (#122)', () => {
+  it('no setting turns them off: the retired switch is gone and listed for removal', () => {
+    expect(RETIRED_SETTING_KEYS).toContain('experimental.sessionHosts');
+    const keys = SETTINGS.map((s) => s.key);
+    for (const retired of RETIRED_SETTING_KEYS) expect(keys).not.toContain(retired);
+    expect(keys.filter((k) => /sessionHost/i.test(k))).toEqual([]);
+  });
+
+  it('the idle-orphan rule stays, hanging off nothing: it applies to every conversation', () => {
+    const idle = SETTINGS.find((s) => s.key === 'lifecycle.orphanIdleHours');
+    expect(idle).toMatchObject({ type: 'number', default: 24, minimum: 0 });
+    expect(idle?.dependsOn).toBeUndefined();
   });
 });
 

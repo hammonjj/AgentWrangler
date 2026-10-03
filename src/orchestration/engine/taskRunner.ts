@@ -275,8 +275,6 @@ export interface TaskRunnerDeps {
   /** A worktree manager for a repository under its policy, recording every assignment through `record`. */
   openWorktrees: (policy: LoadedRepoPolicy, record: (a: WorktreeAssignment) => void) => Promise<WorktreeManager>;
   launchDefaults: Pick<LaunchDefaults, 'for'>;
-  /** Why an attempt on this harness cannot start now (G1: Claude attempts need session hosts), or undefined. */
-  cannotLaunch?: (harness: HarnessId) => string | undefined;
   /**
    * Describes what the work is like (#37). Absent: tasks run unassessed, as
    * they did before P5. It never gates a launch — the route here is the
@@ -3113,8 +3111,6 @@ export class TaskRunner implements Disposable {
   private checkRoute(route: TaskRoute): AgentHarness {
     const harness = this.deps.harnesses.get(route.harness);
     if (!harness) throw new TaskError(`No ${route.harness} harness to run the task with.`);
-    const why = this.deps.cannotLaunch?.(route.harness);
-    if (why) throw new TaskError(why);
     return harness;
   }
 

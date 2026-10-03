@@ -8,27 +8,25 @@
  * process tree says nothing useful about who drives it. Ownership is therefore
  * decided here, by session id, and never by pid.
  *
- * It is the Claude `SessionExecutor`. Its handles are `RunnerView`s, over an
- * in-process `ClaudeSdkSession` or, with session hosts on (Stage 3), over a
- * `HostClient` talking to a detached host that outlives the app.
+ * It is the Claude `SessionExecutor`. Its handles are `RunnerView`s over a
+ * `HostClient` talking to a detached session host that outlives the app.
+ * Every session runs in one: there is no in-process alternative and no
+ * setting, so neither a quit, a reinstall nor a restart of the core ends a
+ * conversation (#122).
  */
 import { randomUUID } from 'node:crypto';
 import { Emitter, type Disposable } from '../../core/events';
-import type { HostSupervisor } from '../../core/session/hostSupervisor';
-import { createLocalClaudeHandle } from '../../core/session/localClaudeHandle';
 import { HOST_LOST } from '../../core/session/recovery';
-import { adoptHostedClaude, spawnHostedClaude } from '../../core/session/remoteClaudeHandle';
+import { adoptHostedClaude, spawnHostedClaude, type SessionHosts } from '../../core/session/remoteClaudeHandle';
 import type { LaunchRequest, SessionExecutor } from '../../core/session/sessionHandle';
 import { resumePolicy, type ExecutorRegistry, type SessionRecord } from '../../core/session/sessionRegistry';
 import type { ModelChoice, PermissionModeName } from '../../shared/conversation';
 import { parseLaunchPolicy } from '../../shared/launchPolicy';
 import type { HostManifest } from '../../shared/sessionProtocol';
 import { loadResumeHistory, type ConversationHistory } from '../transcriptHistory';
-import type { QueryFn } from './claudeSdkSession';
 import type { RunnerView } from './runnerView';
 
 export interface RunnerServiceDeps {
-  query: QueryFn;
   /** Re-read per start, so changing the setting does not need a reload. */
   binary: () => string;
   log: (msg: string) => void;
@@ -44,9 +42,11 @@ export interface RunnerServiceDeps {
    * `CapabilityCatalog`.
    */
   rememberModels?: (models: ModelChoice[] | undefined) => void;
-  localKey?: (ref: string) => Promise<string | undefined>;
-  /** Session hosts: where new sessions run when `enabled()` says so, and how surviving ones are adopted. */
-  hosts?: { supervisor: HostSupervisor; enabled: () => boolean };
+  /**
+   * Session hosts: where every session runs, and how surviving ones are
+   * adopted. The app's `HostSupervisor`; tests pass `inProcessHosts`.
+   */
+  hosts: { supervisor: SessionHosts };
   /**
    * The orphan sweep (§7.3): resolves once nothing else runs the id, rejects
    * (with a sentence for the user) when something still does. Awaited before
@@ -75,13 +75,16 @@ export class RunnerService implements SessionExecutor, Disposable {
   start(opts: RunnerStartOptions): RunnerView {
     const binary = this.deps.binary();
     const loadHistory = this.deps.loadHistory ?? loadResumeHistory;
-    const hosts = this.deps.hosts?.enabled() ? this.deps.hosts : undefined;
     // A hosted session's id is chosen here, so its manifest, the registry and
     // the pane all know it before the first turn.
-    const launch = hosts && !opts.resume && !opts.sessionId ? { ...opts, sessionId: randomUUID() } : opts;
-    const session = hosts
-      ? spawnHostedClaude(launch, { supervisor: hosts.supervisor, binary, log: this.deps.log, loadHistory, beforeResume: this.deps.beforeResume })
-      : createLocalClaudeHandle(launch, { query: this.deps.query, binary, log: this.deps.log, loadHistory, localKey: this.deps.localKey });
+    const launch = !opts.resume && !opts.sessionId ? { ...opts, sessionId: randomUUID() } : opts;
+    const session = spawnHostedClaude(launch, {
+      supervisor: this.deps.hosts.supervisor,
+      binary,
+      log: this.deps.log,
+      loadHistory,
+      beforeResume: this.deps.beforeResume,
+    });
     const place = this.deps.locate?.(opts.cwd) ?? {};
     this.track(session, (id) =>
       this.deps.registry?.live({
@@ -95,7 +98,7 @@ export class RunnerService implements SessionExecutor, Disposable {
         origin: opts.origin,
       }),
     );
-    this.deps.log(`runner started in ${opts.cwd}${opts.resume ? ` (resuming ${opts.resume})` : ''}${hosts ? ' in a session host' : ''}`);
+    this.deps.log(`runner started in ${opts.cwd}${opts.resume ? ` (resuming ${opts.resume})` : ''} in a session host`);
     if (opts.initialPrompt) void session.send(opts.initialPrompt);
     return session;
   }
@@ -106,8 +109,8 @@ export class RunnerService implements SessionExecutor, Disposable {
    * it was launched.
    */
   adopt(manifest: HostManifest, record?: SessionRecord): RunnerView | undefined {
-    const supervisor = this.deps.hosts?.supervisor;
-    if (!supervisor || !manifest.sessionId) return undefined;
+    const supervisor = this.deps.hosts.supervisor;
+    if (!manifest.sessionId) return undefined;
     const session = adoptHostedClaude(
       manifest,
       {
@@ -200,16 +203,11 @@ export class RunnerService implements SessionExecutor, Disposable {
     return [...this.sessions];
   }
 
-  /** Live sessions, split by whether they survive the app quitting. */
-  counts(): { hosted: number; local: number } {
-    let hosted = 0;
-    let local = 0;
-    for (const s of this.sessions) {
-      if (s.lifecycle === 'ended' || s.lifecycle === 'error') continue;
-      if (s.hosted) hosted++;
-      else local++;
-    }
-    return { hosted, local };
+  /** Live sessions. All of them run in hosts, so all of them survive the app quitting. */
+  liveCount(): number {
+    let n = 0;
+    for (const s of this.sessions) if (s.lifecycle !== 'ended' && s.lifecycle !== 'error') n++;
+    return n;
   }
 
   /**
@@ -233,14 +231,13 @@ export class RunnerService implements SessionExecutor, Disposable {
   }
 
   /**
-   * The app is quitting. In-process sessions cannot survive it, so they are
-   * ended, awaited and bounded. Hosted ones are left running and merely let go
-   * of, unless `includeHosted` (Quit and Stop All Agents). Either way the
-   * registry keeps them `live`: a hosted one is adopted on the next start, an
-   * ended one comes back as interrupted.
+   * Quit and Stop All Agents (⌥⌘Q): end every session, awaited and bounded.
+   * An ordinary quit calls nothing here; `dispose` lets the sessions go and
+   * they keep running. The registry keeps these `live`, so each comes back
+   * as interrupted, and resumable, on the next start.
    */
-  async endAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}): Promise<void> {
-    const toEnd = [...this.sessions].filter((s) => !s.hosted || opts.includeHosted);
+  async endAllForQuit(withinMs: number): Promise<void> {
+    const toEnd = [...this.sessions];
     for (const s of toEnd) this.ending.add(s);
     await Promise.race([
       Promise.allSettled(toEnd.map((s) => s.end())),
@@ -249,14 +246,10 @@ export class RunnerService implements SessionExecutor, Disposable {
   }
 
   dispose(): void {
-    // In-process sessions die with the app anyway; ending them first gives the
-    // CLI its chance to flush the transcript. Hosted ones are only let go of:
-    // they keep running and the next start adopts them. The registry is left
-    // alone either way; this is exactly what the next startup wants to know.
-    for (const s of this.sessions) {
-      if (s.hosted) s.detach();
-      else void s.end();
-    }
+    // Every session runs in a host, so it is only let go of: it keeps running
+    // and the next start adopts it. The registry is left alone; this is
+    // exactly what the next startup wants to know.
+    for (const s of this.sessions) s.detach();
     this.sessions.clear();
     this.changeEmitter.dispose();
   }

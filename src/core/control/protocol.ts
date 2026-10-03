@@ -118,7 +118,7 @@ export interface ControlStatusResult {
   startedAt: number;
   /** Sessions shown in the table (archived ones excluded), by status. */
   byStatus: Partial<Record<ControlStatus, number>>;
-  /** Sessions AW runs: in hosts (survive a quit) and in-process (do not). */
+  /** Sessions AW runs: in hosts (survive a quit; every Claude one) and as children of the app (do not; Codex `--stdio`). */
   running: { hosted: number; app: number };
 }
 

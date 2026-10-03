@@ -18,6 +18,7 @@ import { codexPolicyParams, CodexRunnerService } from '../src/codex/runner';
 import { parseLaunchPolicy, type LaunchPolicy } from '../src/shared/launchPolicy';
 import { emptyHostState, type HostEvent, type HostSnapshot } from '../src/shared/sessionProtocol';
 import { localClaudeEnv } from '../src/sessionHost/env';
+import { inProcessHosts } from '../src/sessionHost/inProcessHosts';
 import { CONVERSATION_DELEGATION_INSTRUCTIONS, withConversationDelegation } from '../src/shared/conversationDelegation';
 
 const POLICY: LaunchPolicy = {
@@ -230,7 +231,13 @@ describe('a resume gets the policy back', () => {
       return (async function* () {})() as any;
     };
     const registry = new SessionRegistry(memento());
-    const service = new RunnerService({ query, binary: () => '/fake/claude', log: () => undefined, registry, loadHistory: async () => ({ blocks: [], truncated: false }) });
+    const service = new RunnerService({
+      binary: () => '/fake/claude',
+      log: () => undefined,
+      registry,
+      loadHistory: async () => ({ blocks: [], truncated: false }),
+      hosts: { supervisor: inProcessHosts({ query }) },
+    });
     await service.launch({ provider: 'claude', cwd: '/Users/test/proj', sessionId: 'aaaaaaaa-0000-4000-8000-000000000001', policy: POLICY });
     expect(registry.get('aaaaaaaa-0000-4000-8000-000000000001')?.launch.policy).toEqual(POLICY);
     expect(seen[0].disallowedTools).toEqual(['Bash(git push:*)']);
