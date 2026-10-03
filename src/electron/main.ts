@@ -32,18 +32,20 @@ import { parseRoutingSettings, ROUTING_KEY } from '../shared/orchestration/execu
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { registerBundleScheme, serveBundles } from './bundleProtocol';
 import { installContextMenuEverywhere } from './contextMenu';
+import { startFileLog } from '../core/fileLog';
+import { JsonStore } from '../core/jsonStore';
+import { BUILD_ID, createSessionHostRuntime } from '../core/session/sessionHostRuntime';
+import { toolPath } from '../core/toolPath';
 import { createElectronHost } from './electronHost';
 import { installApplicationMenu } from './menu';
-import { JsonStore } from './jsonStore';
 import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
-import { BUILD_ID, createSessionHostRuntime } from './sessionHostRuntime';
 import { createRemoteDaemonAgent } from './remoteDaemonAgent';
 import { MenuBar, menuBarSessions } from './tray';
-import { toolPath } from './toolPath';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
-import { startWebPrototype, webPrototypePort } from './webPrototype';
-import type { Disposable } from '../core/events';
+import { createBrowserClients, type BrowserClients } from './webPrototype';
+import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
+import { renderBrowserWorkbenchHtml } from '../ui/html';
 import { ClientRegistry } from '../core/clients';
 import { runInRequest } from '../core/requestScope';
 import type { HostDialogs } from '../host/hostServices';
@@ -90,25 +92,11 @@ if (!isPrimaryInstance) {
 /** Repo root in development (`dist/electron/main.js` → two levels up). */
 const APP_ROOT = path.resolve(__dirname, '..', '..');
 
-function startLog(userDataDir: string): (message: string) => void {
-  const file = path.join(userDataDir, 'agent-wrangler.log');
-  fs.mkdirSync(userDataDir, { recursive: true });
-  // Appended, never rotated by us: it is a developer log for a dev build, and
-  // a rotation scheme is a thing to get wrong before there is a reason for one.
-  const stream = fs.createWriteStream(file, { flags: 'a' });
-  return (message: string) => {
-    const line = `[${new Date().toISOString()}] ${message}`;
-    stream.write(`${line}\n`);
-    // eslint-disable-next-line no-console
-    console.log(line);
-  };
-}
-
 void app.whenReady().then(() => {
   if (!isPrimaryInstance) return; // see the lock above: quit() has not landed yet
 
   const userDataDir = app.getPath('userData');
-  const log = startLog(userDataDir);
+  const log = startFileLog(userDataDir);
   log(`Agent Wrangler starting — Electron ${process.versions.electron}, userData ${userDataDir}`);
 
   serveBundles(path.join(APP_ROOT, 'dist'));
@@ -382,6 +370,8 @@ void app.whenReady().then(() => {
   // The `aw` command-line client's way in (#21). Nothing depends on it, so a
   // failure to serve it is logged and the app carries on.
   const runDirs = { runDir: path.join(userDataDir, 'run'), fallbackRunDir: path.join(os.homedir(), '.agentwrangler', 'run') };
+  // The browser workbench (#127), started below; `aw web open` asks it for a link.
+  let web: { server: WebServer; clients: BrowserClients; port: number; listening: boolean } | undefined;
   let control: ControlServer | undefined;
   try {
     const socketPath = controlSocketPath(runDirs);
@@ -395,6 +385,7 @@ void app.whenReady().then(() => {
         startedAt: Date.now(),
         flash: (message) => host.dialogs.flash(message, 4000),
         gate: wrangler.access,
+        webLink: () => (web?.listening ? web.server.loginLink() : undefined),
       }),
     });
     control.listen(socketPath).then(
@@ -405,20 +396,55 @@ void app.whenReady().then(() => {
     log(`control socket: not serving: ${String(err)}`);
   }
 
-  // Spike #120: the workbench in a browser on this Mac. Off unless asked for.
-  const webPort = webPrototypePort();
-  let web: Disposable | undefined;
-  if (webPort !== undefined) {
-    try {
-      ensurePrivateDir(runDirs.runDir);
-      web = startWebPrototype({ app: wrangler, host, ui, clients, distDir: path.join(APP_ROOT, 'dist'), runDir: runDirs.runDir, port: webPort, log });
-    } catch (err) {
-      log(`web prototype: not serving: ${String(err)}`);
+  // The workbench in a browser on this Mac (#127): 127.0.0.1 only, sign-in by
+  // `aw web open`. On by default; follows `web.enabled` and `web.port` live.
+  const stopWeb = () => {
+    web?.server.dispose();
+    web?.clients.dispose();
+    web = undefined;
+  };
+  const syncWeb = () => {
+    const enabled = host.settings.get<boolean>('web.enabled', true);
+    const wanted = Number(host.settings.get<number>('web.port', WEB_DEFAULT_PORT));
+    const port = Number.isInteger(wanted) && wanted >= 1024 && wanted <= 65535 ? wanted : WEB_DEFAULT_PORT;
+    if (!enabled) {
+      if (web) log('web: off');
+      stopWeb();
+      return;
     }
-  }
+    if (web && web.port === port) return;
+    stopWeb();
+    // Each browser registers with the app's client registry, so what it causes comes back to it (#126).
+    const browsers = createBrowserClients({ app: wrangler, host, ui, clients, log });
+    const server = new WebServer({
+      port,
+      webviewDir: path.join(APP_ROOT, 'dist', 'webview'),
+      dataDir: host.dataDir,
+      gate: wrangler.access,
+      log,
+      page: renderBrowserWorkbenchHtml,
+      onClient: (socket, context) => browsers.attach(socket, context),
+    });
+    const entry = { server, clients: browsers, port, listening: false };
+    web = entry;
+    server.listen().then(
+      (bound) => {
+        entry.listening = true;
+        log(`web: http://127.0.0.1:${bound}/ (sign in with aw web open)`);
+      },
+      (err) => {
+        log(`web: not serving on port ${port}: ${String(err)}`);
+        if (web === entry) stopWeb();
+      },
+    );
+  };
+  syncWeb();
+  host.subscribe(host.settings.onDidChange((affects) => {
+    if (affects('web.enabled') || affects('web.port')) syncWeb();
+  }));
 
   const teardown = () => {
-    web?.dispose();
+    stopWeb();
     control?.dispose();
     menuBar.dispose();
     if (powerBlockId !== undefined) powerSaveBlocker.stop(powerBlockId);

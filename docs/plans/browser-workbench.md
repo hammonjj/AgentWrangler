@@ -46,6 +46,11 @@ This revisits two recorded positions:
 The prototype is the `AW_WEB_PROTOTYPE=<port>` switch. It is off by default and serves the
 workbench to a browser on 127.0.0.1 from the running app.
 
+**Superseded by #127** (slice 6): the HTTP side is now `src/core/web/server.ts` (hashed
+assets, CSP header, login link and device cookie), on by default (`web.enabled`, `web.port`
+7391), and `aw web open` replaces the token below. The switch and `run/web.token` are gone;
+`webPrototype.ts` keeps only the WebSocket side. The record below is the spike as it ran.
+
 **Code**
 
 | File | Role |

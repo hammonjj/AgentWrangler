@@ -1,186 +1,62 @@
 /**
- * Spike #120: the workbench, served to an ordinary browser on this Mac.
+ * The workbench, in an ordinary browser on this Mac: the WebSocket side.
  *
- * Off unless the app is started with `AW_WEB_PROTOTYPE=<port>`. It answers on
- * 127.0.0.1 only, and every request needs the token written to
- * `run/web.token` (once, as `?token=`, which becomes an HttpOnly cookie).
- * Findings and the plan it informs are in `docs/plans/browser-workbench.md`.
- *
- * What it proves: the existing pane bundles run unchanged in a browser once a
- * script supplies `agentWranglerHost` (`src/webview/webshim`), and the existing
- * `DashboardHost`/`ConversationHost` run unchanged per browser over a WebSocket
- * `EnvelopeTransport` — one pair per connection, all over the one app.
+ * The HTTP side — page, assets, login link, device cookie and the request
+ * guards — is `core/web/server.ts` (#127). It hands each authenticated,
+ * upgraded socket here with its device's `RequestContext`, and this gives it
+ * its own `DashboardHost`/`ConversationHost` pair over a WebSocket
+ * `EnvelopeTransport`, all over the one app. The bridge on the page is
+ * `src/webview/webshim`. Plan: `docs/plans/browser-workbench.md`.
  *
  * Each browser is a client of its own (#126): confirmations, pickers, toasts
  * and navigation its own clicks cause come back to it over the `shell`
  * channel (`src/core/web/shellChannel.ts`), answered for now with the
- * browser's `confirm()`/`prompt()`. What it does not do, and the plan says who
- * does: in-page modals (#133), TLS, LAN, pairing.
+ * browser's `confirm()`/`prompt()`. What it does not do yet, and the plan says
+ * who does: in-page modals (#133), TLS, LAN.
  */
-import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
-import * as http from 'node:http';
-import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import type { AgentWranglerApp } from '../app/createApp';
 import { Emitter, type Disposable } from '../core/events';
-import { ownerContext } from '../core/access';
-import type { HostServices } from '../host/hostServices';
-import type { ConversationHostUi } from '../ui/conversation/conversationHost';
+import { ownerContext, type RequestContext } from '../core/access';
 import type { ClientRegistry } from '../core/clients';
 import { createShellChannel } from '../core/web/shellChannel';
+import type { HostServices } from '../host/hostServices';
 import { SHELL_PANE } from '../shared/shellProtocol';
-import { renderWebviewHtml } from '../ui/html';
+import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import type { EnvelopeTransport } from '../ui/paneChannel';
-import {
-  acceptKey,
-  encodeClose,
-  encodePong,
-  encodeText,
-  isLoopbackHost,
-  isSameOrigin,
-  readCookie,
-  tokenMatches,
-  WsDecoder,
-} from '../core/web/wsFrames';
+import { encodeClose, encodePong, encodeText, WsDecoder } from '../core/web/wsFrames';
 import { createWorkbenchHosts } from './workbenchWindow';
 
-const COOKIE = 'aw_web';
 /** A browser that stops reading is dropped rather than buffered without end. */
 const MAX_BUFFERED_BYTES = 32 * 1024 * 1024;
 
-const TYPES: Record<string, string> = {
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
-};
+/**
+ * Per process, not per `createBrowserClients`: the server is rebuilt when the
+ * port changes, and a new connection must never reuse an id the registry
+ * still holds for one that is closing.
+ */
+let connectionSeq = 0;
 
-export interface WebPrototypeOptions {
+export interface BrowserClientsOptions {
   app: AgentWranglerApp;
   host: HostServices;
   ui: ConversationHostUi;
   /** Each browser registers as a client, so what it causes comes back to it (#126). */
   clients: ClientRegistry;
-  distDir: string;
-  runDir: string;
-  port: number;
   log: (line: string) => void;
 }
 
-/** The port to serve on, or undefined when the prototype is off. */
-export function webPrototypePort(env: NodeJS.ProcessEnv = process.env): number | undefined {
-  const port = Number(env.AW_WEB_PROTOTYPE);
-  return Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : undefined;
+export interface BrowserClients extends Disposable {
+  /** An upgraded socket from an authenticated device. Owned from here on. */
+  attach(socket: Duplex, device: RequestContext): void;
 }
 
-export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
-  const { app, host, ui, clients, port, log } = opts;
-  const root = path.resolve(opts.distDir, 'webview');
-  const token = crypto.randomBytes(32).toString('hex');
-  const tokenFile = path.join(opts.runDir, 'web.token');
-  fs.writeFileSync(tokenFile, token, { mode: 0o600 });
+export function createBrowserClients(opts: BrowserClientsOptions): BrowserClients {
+  const { app, host, ui, clients, log } = opts;
+  /** Each open socket, and how to close it. */
+  const connections = new Map<Duplex, () => void>();
 
-  const connections = new Set<Duplex>();
-
-  const securityHeaders = {
-    'cache-control': 'no-store',
-    'x-content-type-options': 'nosniff',
-    'referrer-policy': 'no-referrer',
-    'x-frame-options': 'DENY',
-  };
-
-  const server = http.createServer((req, res) => {
-    if (!isLoopbackHost(req.headers.host, port)) {
-      res.writeHead(421, securityHeaders).end();
-      return;
-    }
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-    if (req.method !== 'GET') {
-      res.writeHead(405, securityHeaders).end();
-      return;
-    }
-
-    // The link carries the token once; from then on it is a cookie the page's
-    // scripts cannot read, and the token is out of the address bar and history.
-    if (url.pathname === '/' && url.searchParams.has('token')) {
-      if (!tokenMatches(token, url.searchParams.get('token'))) {
-        res.writeHead(403, securityHeaders).end('Wrong token.');
-        return;
-      }
-      res.writeHead(303, {
-        ...securityHeaders,
-        'set-cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/`,
-        location: '/',
-      });
-      res.end();
-      return;
-    }
-    if (!tokenMatches(token, readCookie(req.headers.cookie, COOKIE))) {
-      res.writeHead(401, { ...securityHeaders, 'content-type': 'text/plain; charset=utf-8' });
-      res.end('Open the link with ?token= from run/web.token.');
-      return;
-    }
-
-    if (url.pathname === '/') {
-      const html = renderWebviewHtml({
-        bundleName: 'workbench',
-        title: 'Agent Wrangler',
-        cssHref: '/workbench.css',
-        jsSrc: '/workbench.js',
-        cspSource: "'self'",
-        extraStylesheets: ['/theme.css'],
-        bodyClass: 'aw-shell',
-        preScripts: ['/webshim.js'],
-        // Explicit as well as 'self': older Safari does not count ws: as 'self'.
-        connectSrc: `'self' ws://${req.headers.host}`,
-      });
-      res.writeHead(200, { ...securityHeaders, 'content-type': 'text/html; charset=utf-8' });
-      res.end(html);
-      return;
-    }
-
-    const name = decodeURIComponent(url.pathname).replace(/^\/+/, '');
-    const file = path.resolve(root, name);
-    if (!file.startsWith(root + path.sep) || !TYPES[path.extname(file)]) {
-      res.writeHead(404, securityHeaders).end();
-      return;
-    }
-    fs.readFile(file, (err, body) => {
-      if (err) {
-        res.writeHead(404, securityHeaders).end();
-        return;
-      }
-      res.writeHead(200, { ...securityHeaders, 'content-type': TYPES[path.extname(file)] });
-      res.end(body);
-    });
-  });
-
-  server.on('upgrade', (req: http.IncomingMessage, socket: Duplex) => {
-    const refuse = (status: string) => {
-      socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
-    };
-    const key = req.headers['sec-websocket-key'];
-    if (
-      new URL(req.url ?? '/', 'http://x').pathname !== '/ws' ||
-      !isLoopbackHost(req.headers.host, port) ||
-      !isSameOrigin(req.headers.origin, req.headers.host) ||
-      !tokenMatches(token, readCookie(req.headers.cookie, COOKIE)) ||
-      req.headers['sec-websocket-version'] !== '13' ||
-      typeof key !== 'string'
-    ) {
-      refuse('403 Forbidden');
-      return;
-    }
-    socket.write(
-      'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
-        `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
-    );
-    attach(socket);
-  });
-
-  let connectionSeq = 0;
-  function attach(socket: Duplex): void {
-    connections.add(socket);
+  function attach(socket: Duplex, device: RequestContext): void {
     const incoming = new Emitter<unknown>();
     const decoder = new WsDecoder();
     let open = true;
@@ -199,16 +75,16 @@ export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
       onDidReceiveMessage: (listener) => incoming.event(listener),
     };
 
-    // The cookie is the owner's, so the owner it is; the connection id is for
-    // the audit and for sending this browser's prompts, toasts and navigation
-    // back to it (#126), never identity (#123).
+    // The device cookie is the owner's, so the owner it is; the device and
+    // connection ids are for the audit and for sending this browser's prompts,
+    // toasts and navigation back to it (#126), never identity (#123).
     const connectionId = `web-${++connectionSeq}`;
     let panes: ReturnType<typeof createWorkbenchHosts> | undefined = createWorkbenchHosts(
       app,
       host,
       ui,
       transport,
-      ownerContext('browser', { connectionId }),
+      ownerContext('browser', { deviceId: device.deviceId, connectionId }),
     );
     const shell = createShellChannel({
       connectionId,
@@ -220,7 +96,6 @@ export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
       if (m && typeof m === 'object' && m.pane === SHELL_PANE) shell.receive(m.body);
     });
     const registration = clients.register(shell.channel);
-    log(`web prototype: browser connected (${connections.size} open)`);
 
     const close = (code?: number) => {
       if (!open) return;
@@ -237,6 +112,8 @@ export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
       connections.delete(socket);
       log(`web prototype: browser disconnected (${connections.size} open)`);
     };
+    connections.set(socket, () => close());
+    log(`web prototype: browser connected (${connections.size} open)`);
 
     socket.on('data', (chunk: Buffer) => {
       for (const ev of decoder.push(chunk)) {
@@ -262,14 +139,12 @@ export function startWebPrototype(opts: WebPrototypeOptions): Disposable {
     socket.on('error', () => close());
   }
 
-  server.on('error', (err) => log(`web prototype: not serving: ${String(err)}`));
-  server.listen(port, '127.0.0.1', () => log(`web prototype: http://127.0.0.1:${port}/?token=<run/web.token>`));
-
   return {
+    attach,
     dispose: () => {
-      for (const s of connections) s.destroy();
-      server.close();
-      fs.rmSync(tokenFile, { force: true });
+      // Closed here, not on the sockets' later 'close' events, so every client
+      // is unregistered (and its prompts cancelled) before this returns.
+      for (const close of [...connections.values()]) close();
     },
   };
 }

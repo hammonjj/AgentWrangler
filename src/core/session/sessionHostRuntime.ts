@@ -25,12 +25,16 @@
  *
  * Unpackaged (`npm run electron`), there is no bundle worth cloning: hosts run
  * straight from the Electron binary and the repo's `dist/`.
+ *
+ * No Electron import, so a plain-Node caller (the daemon, #125/#130) builds the
+ * same runtime: it passes `execIsNode`, and when its `execPath` is the bundled
+ * Node rather than the bundle's main executable, the `bundle` to clone.
  */
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { SessionHostRuntime } from '../core/session/hostSupervisor';
-import { REMOTE_MANIFEST_NAME } from '../remote/daemon/protocol';
+import type { SessionHostRuntime } from './hostSupervisor';
+import { REMOTE_MANIFEST_NAME } from '../../remote/daemon/protocol';
 
 declare const AW_BUILD_ID: string | undefined;
 export const BUILD_ID = typeof AW_BUILD_ID === 'string' ? AW_BUILD_ID : 'dev';
@@ -49,9 +53,16 @@ export interface HostLaunchSpec {
   env: Record<string, string>;
 }
 
-/** Unpackaged: the Electron binary as Node, on the repo's `dist/`. */
-export function devLaunch(appRoot: string, execPath: string): HostLaunchSpec {
-  return { exe: execPath, entry: path.join(appRoot, 'dist', 'sessionHost', 'main.js'), env: { ELECTRON_RUN_AS_NODE: '1' } };
+/**
+ * Unpackaged: the running executable on the repo's `dist/`. The Electron
+ * binary needs `ELECTRON_RUN_AS_NODE` to act as Node; plain Node needs nothing.
+ */
+export function devLaunch(appRoot: string, execPath: string, execIsNode = false): HostLaunchSpec {
+  return {
+    exe: execPath,
+    entry: path.join(appRoot, 'dist', 'sessionHost', 'main.js'),
+    env: execIsNode ? {} : { ELECTRON_RUN_AS_NODE: '1' },
+  };
 }
 
 /**
@@ -78,6 +89,18 @@ export interface RuntimeOptions {
   isPackaged: boolean;
   /** `process.execPath`. */
   execPath: string;
+  /**
+   * True when `execPath` is plain Node (the daemon), not Electron. Only the
+   * unpackaged launch reads it: a packaged clone knows what it contains.
+   */
+  execIsNode?: boolean;
+  /**
+   * The `.app` to clone. Defaults to the bundle `execPath` is the main
+   * executable of (`X.app/Contents/MacOS/X`), which is right for Electron; a
+   * caller running the bundled Node (`X.app/Contents/Resources/node/bin/node`)
+   * says which bundle it is in.
+   */
+  bundle?: string;
   log: (msg: string) => void;
 }
 
@@ -86,11 +109,11 @@ export function createSessionHostRuntime(opts: RuntimeOptions): SessionHostRunti
   let preparing: Promise<HostLaunchSpec & { runtimeDir?: string }> | undefined;
 
   const prepare = async () => {
-    if (!opts.isPackaged) return devLaunch(opts.appRoot, opts.execPath);
+    if (!opts.isPackaged) return devLaunch(opts.appRoot, opts.execPath, opts.execIsNode);
     const runtimeDir = path.join(runtimesDir, BUILD_ID);
     const hostApp = path.join(runtimeDir, HOST_APP);
     // The clone moves into place in one step, so its executable means it is whole.
-    if (!fs.existsSync(path.join(hostApp, 'Contents', 'MacOS', HOST_EXE))) await cloneRuntime(bundleOf(opts.execPath), runtimeDir, opts.log);
+    if (!fs.existsSync(path.join(hostApp, 'Contents', 'MacOS', HOST_EXE))) await cloneRuntime(opts.bundle ?? bundleOf(opts.execPath), runtimeDir, opts.log);
     return { ...cloneLaunch(hostApp, fs.existsSync(path.join(hostApp, ...NODE_DIR, HOST_EXE))), runtimeDir };
   };
 

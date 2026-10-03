@@ -25,6 +25,8 @@ export type AuditEvent =
   | 'publish-failed'
   | 'pressed'
   | 'refused-unauthorised'
+  /** A browser login link that was unknown, used or expired (#127). No principal. */
+  | 'login-failed'
   | 'refused-out-of-scope'
   | 'refused-stale'
   | 'refused-unknown'

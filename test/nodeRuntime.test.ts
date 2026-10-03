@@ -9,7 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { hostProcessEnv } from '../src/core/session/hostSupervisor';
-import { cloneLaunch, createSessionHostRuntime, devLaunch } from '../src/electron/sessionHostRuntime';
+import { cloneLaunch, createSessionHostRuntime, devLaunch } from '../src/core/session/sessionHostRuntime';
 import { daemonEntryFor, remoteDaemonEnv, renderLaunchAgent } from '../src/remote/daemon/launchAgent';
 
 const HOST_APP = '/Users/test/Library/Application Support/Agent Wrangler/runtimes/b1/Agent Wrangler Host.app';
@@ -69,6 +69,14 @@ describe('host launch specs', () => {
       exe: '/Users/test/proj/node_modules/electron/dist/Electron',
       entry: '/Users/test/proj/dist/sessionHost/main.js',
       env: { ELECTRON_RUN_AS_NODE: '1' },
+    });
+  });
+
+  it('runs unpackaged hosts on plain Node with no Electron environment (#125)', () => {
+    expect(devLaunch('/Users/test/proj', '/usr/local/bin/node', true)).toEqual({
+      exe: '/usr/local/bin/node',
+      entry: '/Users/test/proj/dist/sessionHost/main.js',
+      env: {},
     });
   });
 

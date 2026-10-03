@@ -51,7 +51,7 @@ export const RPC_AMBIGUOUS = -32005;
 /** The session exists, but not in a way that allows this (e.g. `send` to one AW does not run). */
 export const RPC_UNSUPPORTED = -32006;
 
-export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks'] as const;
+export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'web.link'] as const;
 export type ControlMethod = (typeof CONTROL_METHODS)[number];
 /** Methods that change something. Logged by the core (method and session, never content). */
 export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate'];
@@ -303,6 +303,17 @@ export interface ControlDelegateResult {
   /** For `multiple`: the plan's tasks, in the order they would run. */
   tasks?: { key: string; title: string }[];
   note?: string;
+}
+
+/**
+ * `web.link` (#127): a single-use sign-in link for the browser workbench,
+ * good for `expiresAt - now` (two minutes). `aw web open` opens it; `aw web
+ * url` prints it. Refused with `RPC_UNSUPPORTED` when the workbench is off or
+ * not listening.
+ */
+export interface ControlWebLinkResult {
+  url: string;
+  expiresAt: number;
 }
 
 /**

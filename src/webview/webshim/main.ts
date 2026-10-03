@@ -7,7 +7,7 @@
  * loaded before the workbench bundle and must have defined the host by the time
  * `paneApi` evaluates.
  *
- * Prototype only (`AW_WEB_PROTOTYPE`). What it does not do yet, on purpose:
+ * Served by `core/web/server.ts` (#127). What it does not do yet, on purpose:
  * resume a dropped connection (it reloads the page, and the panes re-initialise
  * from the host's `ready` replies).
  *
@@ -113,7 +113,7 @@ function answer(p: ShellPrompt): string | number | undefined {
     }
     case 'input': {
       // A password shows as typed in `prompt()`; acceptable only because this
-      // is the prototype on loopback, and #133 replaces it with a masked field.
+      // is loopback-only for now, and #133 replaces it with a masked field.
       const heading = [p.title, p.prompt ?? p.placeHolder].filter(Boolean).join('\n');
       return window.prompt(heading || 'Enter a value', p.value ?? '') ?? undefined;
     }
