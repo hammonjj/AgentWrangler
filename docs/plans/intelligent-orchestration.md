@@ -2653,7 +2653,7 @@ MVP ships caps and admission thresholds (Phase 9); the strategies above are Futu
 
 ---
 
-## 22. Session specialization and hierarchical orchestration (22.1 built by #54; 22.2 deferred)
+## 22. Session specialization and hierarchical orchestration (22.1 built by #54; 22.2 deferred by #55)
 
 ### 22.1 Specialization
 
@@ -2785,6 +2785,49 @@ evidence-gated conditions the contract document states in full, with worker auth
 Implementation is #114 (ownership/result domain and store) through #118 (live journey
 validation); see the contract document for the full comparison of approaches and the lifecycle
 transitions it is built on.
+
+**Decision (2026-10-02, #55): defer. The gate is not met, and the data points away from it.** A
+lead agent that supervises workers and replans continuously is not built. Neither is a planner
+upgrade on its account: the evidence shows neither static plans nor the planner limiting missions.
+
+Evidence: every mission and telemetry record on the development machine, 2026-09-27 to
+2026-10-02 (counts only; no content was read).
+
+| Question | What the records show |
+|---|---|
+| How many missions, how big | 38 missions (26 completed, 11 cancelled, 1 draft). 36 have one task, 2 have three. |
+| How often plans needed replanning | 23 planning runs, all `kind: plan`, all proposed in one round. **0 replans**: the explicit Replan (§11.4) exists and was never used. |
+| Did the planner's plans need fixing | 21 of 23 plans were `single`. Both multi-task plans were approved with **0 edits** and all six of their tasks ended `done` (4 on the first attempt, 2 on the second). |
+| Did any task fail as too large | 0 `context` failures, 0 `split-task` proposals across 31 escalations. |
+| Where missions stalled | 31 escalations over 10 missions: 21 `infra` (19 API errors), 7 `stuck` (wall clock), 2 `lost` (local server), 1 `quality-new`. The 11 `needs-human` stops are 7 infra, 2 lost, 2 stuck. |
+| Why missions were cancelled | 10 by the user, 1 discarded. 5 never started an attempt. The 3 with 3–6 attempts were repeated infra failures, not plan failures. |
+| What replanning cost | Nothing, because there was none. For scale: a planning run took a median 5.3 minutes, and the 23 runs cost $56 together (about $2.40 each, API-equivalent estimate). A supervisor that re-plans continuously would pay something like that at every checkpoint. |
+| Where acceptance happened | 24 of 26 done tasks were accepted by the user, 2 by verification. Only 1 task passed verification on its first attempt. |
+
+What this says:
+
+- **Static plans are not the bottleneck.** Work is overwhelmingly single-task (the planner
+  follows §11.3's "one task is the default"), and the multi-task plans ran as approved. A lead
+  agent supervises a graph; there is hardly a graph to supervise.
+- **The bottlenecks are elsewhere.** Provider and infrastructure failures, wall-clock stalls,
+  and acceptance that depends on the user rather than verification. A supervising agent fixes
+  none of these: an API error stops a lead agent as readily as a worker, and it would add one more
+  long-lived session that can fail the same way.
+- **Compared with improving the planner and replanning:** no record shows that either needs
+  improving yet. The cheaper levers for the observed failures are retry and escalation (§15),
+  verification coverage (§14) and, for handback, #102's event-triggered follow-up turn, which
+  already gives the delegating conversation the "react to a result" step without a standing
+  supervisor.
+- **Inside a session, hierarchy stays the harness's.** Claude Code subagents and workflows and
+  Codex subagents remain opaque inside an attempt, as above.
+
+**Revisit when**, over at least 20 planned multi-task missions, either: at least 1 in 5 used a
+replan or got a `split-task` / context-overflow escalation; or the time between a task failing
+and a user replan or retry is a large share (say over a quarter) of mission wall clock. Both are
+computable from existing records (`plan` with `kind: replan`, `escalation`, `task-final`,
+`attempt`). If that happens, the first thing to try is a replan *proposed* automatically by
+escalation and reviewed as today (§11.4); a standing lead agent comes after that. It would be an attempt like any other: routed,
+bounded and recorded, with no new authority.
 
 ---
 
@@ -3828,7 +3871,7 @@ integration proving accepted handoffs preserve origin, omit harness pins and wai
 | Historical routing suggestions | ~1,000 attempts, or enough in the cohorts that matter (§20.4) | #52 |
 | Budget strategies | P9 and P10 done; evidence that caps are not enough | #53 |
 | Session reuse | P9 done; evidence that start-up context is a significant cost | #54 |
-| Hierarchical orchestration | evidence that static plans are the bottleneck (§22.2) | #55 |
+| Hierarchical orchestration | evidence that static plans are the bottleneck (§22.2); decided 2026-10-02: deferred, gate not met, revisit trigger in §22.2 | #55 |
 
 ---
 
@@ -4000,7 +4043,7 @@ subagent by whoever runs the issue.
 | **Adaptive routing** | cohort statistics; proposals; the acceptance UI; bounded automatic adjustment | telemetry with assessment snapshots and outcomes from P1/P3; shadow data from P5; the corpus veto |
 | **Budget optimisation** | strategies (§21); usage-window-aware scheduling across missions | budget-blind router; resolver ranking hook; admission control (P9) |
 | **Specialization** | `reuse` and `fork` assignments; warm-session ranking | `AgentAssignment` separate from `RoutingDecision`; `continue` mode already exists |
-| **Hierarchical orchestration** | a lead agent that supervises and replans | the planner is an attempt; replanning is a plan diff |
+| **Hierarchical orchestration** (deferred by #55, §22.2) | a lead agent that supervises and replans | the planner is an attempt; replanning is a plan diff |
 | **Phase-split routes** | one task planned on one tier and executed on another (Claude Code's `opusplan`, Aider's architect/editor) | `RouteRequirement` is a value object that can gain a `planning` part; the `plan-first` gate already marks candidates |
 
 ---
