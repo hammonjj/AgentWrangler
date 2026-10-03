@@ -8,12 +8,12 @@ This document finalizes what #102's research left open: who owns a delegated mis
 worker finishes, what the origin conversation is told and when, what a versioned completion
 payload looks like, and when Agent Wrangler may close a GitHub issue on the user's behalf. It is
 the shared contract for #114 (ownership/result domain and store) and #105 (origin reconsumption),
-and it records the decisions the user approved on 2026-10-01.
+and it records the decisions the user approved on 2026-10-01 (§3) and 2026-10-02 (§10).
 
 Every factual claim below is marked **Observed** (with a file/function reference, read 2026-10-02
 against the same commit lineage as #101/#102's research, `a67953e` and ancestors) or
 **Hypothesis** (a reasoned expectation this repository does not yet prove). Nothing here is
-**Decided** by implication; decisions are called out explicitly in §3.
+**Decided** by implication; decisions are called out explicitly in §3 and §10.
 
 ---
 
@@ -257,7 +257,7 @@ export interface DelegationOutcome {
 /** D2/D3 delivery bookkeeping — durable, not model memory. */
 export interface FollowUpObligation {
   state: 'pending' | 'delivered' | 'queued' | 'undeliverable';
-  /** Why `undeliverable`: 'unsupported-harness' | 'archived' | 'ended' | 'deleted' | 'no-signal'. */
+  /** Why `undeliverable`: 'unsupported-harness' | 'archived' | 'ended' | 'deleted' | 'no-signal' | 'user-released' (§10, Q5). */
   reason?: string;
   deliveredAt?: number;
   /** The origin turn this answers (K2, status-contract §6), when known. */
@@ -338,8 +338,7 @@ is still running): left open, the obligation (§5) says what's missing, and the 
 it's fixed.
 
 **Refused** when the objective never authorized closeout, or no issue reference exists: this is not
-an error state, it is the common case, and it is what keeps #102 itself open per its own
-instructions below.
+an error state, it is the common case: most objectives never ask AW to close anything.
 
 **Audit trail.** Every `permitted` or attempted closeout writes an `IntegrationRecord`-shaped
 telemetry entry (reusing `intelligent-orchestration.md` §16.2's existing telemetry discipline:
@@ -378,22 +377,23 @@ do about it."
 | **#115** — terminal recovery, persistent cards and outstanding-work fallback | Fix the gap in §1.3 point 6: expose terminal missions (and their `DelegationOutcome`) to recovery and to a persistent "needs a home" card that does not expire with the 24h linked-work window | A mission that finished more than 24h ago, or across a restart, is still discoverable from the origin's row/Missions with its outcome intact; recovery (§23.3) re-checks `pending` obligations once | #114 |
 | **#116** — durable delivery and automatic bounded parent continuation | The D2/D3 behavior: resume the origin (idle) or queue (busy) and deliver a bounded follow-up turn carrying the `DelegationOutcome`; mark `delivered`; handle `undeliverable` (§6) | A terminal, unseen mission produces exactly one delivered follow-up turn per origin turn-start boundary (K2), queued correctly under a busy origin, marked `undeliverable` for an archived/ended/deleted origin, with no duplicate turns across a restart | #114, the `reuse`/`continue` resume capability (§22.1), status-contract K2 |
 | **#117** — authorized evidence-gated GitHub closeout | The §7 state machine and its capability check, audit telemetry, and the retry path | A closeout only ever reaches `permitted` when all four §7 conditions hold, verified by tests for each condition failing individually (never defaults to permitted); every attempted closeout, success or not, is audited | #114, #116 (closeout often rides the same follow-up turn that reports the result) |
-| **#118** — cross-component failure simulations and end-to-end UX validation | The live screenshot-journey demonstration: proposal-only mission → corrective mission → approval → execution → merge → origin reconciliation, across Status/Missions, surviving a restart, with the two/four repros from §1.2-§1.3 run live, not just read statically | The exact sequence in the issue's "Regression requirements" passes live, including the switching-between-Status/Missions and restart-recovery cases; **this is validation of #114-#117, and does not by itself close #102** — #102 stays open until its own repository-documentation deliverables (this document, and the pointers in §10) are complete, per the issue's own instruction |
+| **#118** — cross-component failure simulations and end-to-end UX validation | The live screenshot-journey demonstration: proposal-only mission → corrective mission → approval → execution → merge → origin reconciliation, across Status/Missions, surviving a restart, with the two/four repros from §1.2-§1.3 run live, not just read statically | The exact sequence in the issue's "Regression requirements" passes live, including the switching-between-Status/Missions and restart-recovery cases; **this is validation of #114-#117** — #102 itself closes on its documentation deliverables (this document and the §10 decisions, complete 2026-10-02), per the issue's own instruction; the live demonstration is owned here |
 
 ---
 
-## 10. Open product questions (pending user confirmation)
+## 10. Product questions 2, 3, 5, 6, 7 (DECIDED 2026-10-02)
 
-Pulled directly from the issue's "Product questions to answer with the user" (questions 2, 3, 5,
-6, 7 — 1 and 4 are **Decided**, §3):
+Pulled directly from the issue's "Product questions to answer with the user" (1 and 4 were
+decided on 2026-10-01, §3). The user accepted each recommendation below as written on
+2026-10-02; these are now settled inputs for #114-#118, not open questions.
 
-| # | Question | Recommendation (pending user confirmation) |
+| # | Question | Decision |
 |---|---|---|
-| **2** | What does the parent own after delegation: summarize, validate evidence, request review, integrate, close issues, propose further tasks? Which are deterministic and which warrant another model turn? | **Pending confirmation.** Recommend: summarizing the result and validating evidence against §7's conditions are **deterministic** (AW's own code, no model call — matches "deterministic evidence/authorization gates" from the issue's own research note). Requesting review, drafting a closeout comment, and proposing further tasks are **model-turn** work (the bounded follow-up turn of §6/#116), because they involve judgment and natural language the user reads. Integration (merge/PR) stays exactly where it is today — a user click on a `MissionOp` (`finish`), never automatic. |
-| **3** | What should the user see when code is merged but verification or external closeout remains outstanding? | **Pending confirmation.** Recommend: the existing C1-C3 text (status-contract §11, unchanged) *plus* the `DelegationOutcome`/`obligation` surfaced as a persistent card (not just a toast) in the origin and in Missions, worded as a to-do, e.g. "Merged · unverified (no checks configured) · closing the issue needs your say-so" — rather than inventing new status vocabulary. |
-| **5** | How are multiple missions represented without overwhelming the conversation, and how does the user transfer or end ownership? | **Pending confirmation.** Recommend: keep the existing single-headline-chip-plus-"+N" pattern (`headlineOf`, unchanged) for the row; the conversation's own delegated-work strip lists every `LinkedWork` (already built). For transferring/ending ownership: recommend a single explicit action on a `LinkedWork` entry — "stop tracking this" — that sets `FollowUpObligation.state: 'undeliverable'` with `reason: 'user-released'` (a new reason, not in §6's list, to add alongside it) rather than silent abandonment; no automatic transfer between conversations is proposed, since nothing in this codebase has a notion of "the other conversation" to transfer to. |
-| **6** | When issue closure was part of the authorized objective, can the parent perform it automatically once its conditions are met? What should happen when permissions, credentials or evidence are missing? | **Answered by §7, pending user confirmation of the specific four-condition list.** Recommend adopting §7 as written: automatic only when all four conditions hold (objective said so, C1+strict C2, a resolved issue reference, and a working credential); missing permissions/credentials/evidence always produce `deferred` with the specific gap named, never a silent `refused`-as-`yours` downgrade. |
-| **7** | What notification should appear, and where, if the origin is unavailable or follow-through fails? | **Pending confirmation.** Recommend: reuse the existing OS notification mechanism (`linkedNotices`, N1 dedupe) for the *first* occurrence of `undeliverable`, worded "Delegated work finished, but its conversation is gone — see Missions"; subsequent occurrences (e.g. repeated restarts) do not re-notify (N1's existing dedupe-by-key discipline), relying instead on the persistent card in Missions (#115) as the durable record so the user is never notification-spammed for one stuck obligation. |
+| **2** | What does the parent own after delegation: summarize, validate evidence, request review, integrate, close issues, propose further tasks? Which are deterministic and which warrant another model turn? | **Decided.** Summarizing the result and validating evidence against §7's conditions are **deterministic** (AW's own code, no model call — matches "deterministic evidence/authorization gates" from the issue's own research note). Requesting review, drafting a closeout comment, and proposing further tasks are **model-turn** work (the bounded follow-up turn of §6/#116), because they involve judgment and natural language the user reads. Integration (merge/PR) stays exactly where it is today — a user click on a `MissionOp` (`finish`), never automatic. |
+| **3** | What should the user see when code is merged but verification or external closeout remains outstanding? | **Decided.** The existing C1-C3 text (status-contract §11, unchanged) *plus* the `DelegationOutcome`/`obligation` surfaced as a persistent card (not just a toast) in the origin and in Missions, worded as a to-do, e.g. "Merged · unverified (no checks configured) · closing the issue needs your say-so" — rather than inventing new status vocabulary. |
+| **5** | How are multiple missions represented without overwhelming the conversation, and how does the user transfer or end ownership? | **Decided.** Keep the existing single-headline-chip-plus-"+N" pattern (`headlineOf`, unchanged) for the row; the conversation's own delegated-work strip lists every `LinkedWork` (already built). To end ownership: a single explicit action on a `LinkedWork` entry — "Stop tracking" — that sets `FollowUpObligation.state: 'undeliverable'` with `reason: 'user-released'` (added to §5's reason list) rather than silent abandonment. No transfer between conversations, since nothing in this codebase has a notion of "the other conversation" to transfer to. |
+| **6** | When issue closure was part of the authorized objective, can the parent perform it automatically once its conditions are met? What should happen when permissions, credentials or evidence are missing? | **Decided: §7 as written.** Automatic only when all four conditions hold (objective said so, C1+strict C2, a resolved issue reference, and a working credential); missing permissions/credentials/evidence always produce `deferred` with the specific gap named, never a silent `refused`-as-`yours` downgrade. |
+| **7** | What notification should appear, and where, if the origin is unavailable or follow-through fails? | **Decided.** Reuse the existing OS notification mechanism (`linkedNotices`, N1 dedupe) for the *first* occurrence of `undeliverable`, worded "Delegated work finished, but its conversation is gone — see Missions"; subsequent occurrences (e.g. repeated restarts) do not re-notify (N1's existing dedupe-by-key discipline), relying instead on the persistent card in Missions (#115) as the durable record so the user is never notification-spammed for one stuck obligation. |
 
 ---
 
