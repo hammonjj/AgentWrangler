@@ -247,6 +247,30 @@ where the user is. Seeing those windows is a separate matter:
 | Stale actions | Already modelled: `decidePermission` checks `expectedRequestId` and returns `stale`. `answer`/`plan` require the request id. A second client approving the same ask gets `stale` and a toast saying it was already answered. |
 | Backpressure | Each connection has a buffered-bytes ceiling. A client over it is closed and reconnects to a fresh snapshot. The session-host protocol uses the same model. |
 
+**Built (#128).** `ws` in `noServer` mode behind `WebServer`'s upgrade checks, with
+permessage-deflate (context takeover both ways). The connection is
+`src/core/web/browserConnections.ts`; the client half is `src/webview/webshim`.
+
+- **Build** is a hash of the page's hashed asset names (`WebServer.build()`), carried by the page
+  as `<meta name="aw-build">`. It changes exactly when what a reload would fetch changes.
+- **`commandId`** is put on *every* pane envelope by `paneApi`, not only mutating ones. The server
+  acknowledges each (`shell.ack`, batched per tick), and the shim resends whatever was not
+  acknowledged when the socket dropped, except old `ready`s (each pane sends a new one first).
+  Only mutating messages (`isMutatingPaneMessage`, from the #123 classifiers) are remembered:
+  a resent read runs again, which is what a client that lost the answer wants. The "result" is the
+  reply naming the request (`sendResult`, `missionAck`, `missionError`). A resend that arrives
+  while the first is still running gets that result when it is posted.
+- **Ceiling** 8 MB of `bufferedAmount`; over it, close 1013. A ping every 30 s drops a peer that
+  did not answer the last one.
+- **Coalescing** happens in the connection's transport, so the window is untouched. A held
+  snapshot is flushed before any other table message (`missionAck` must follow its snapshot) and
+  is re-stamped (`nowMs`) when sent late.
+- **Measured** (`test/webSocketApi.test.ts`, `AW_WS_BENCH=1` prints it): a synthetic 87 KB table,
+  40 updates over 10 s. No deflate, every update: 347 KB/s. Deflate only: 72 KB/s (about 4.8:1).
+  Deflate and 1/s: 20 KB/s. Hidden: 3.6 KB/s. At the prototype's idle rate (11 KB/s, a snapshot
+  every 8 s or so) deflate alone brings it to about 2.3 KB/s. The synthetic rows are full of random
+  ids, so real tables should compress better. Deltas are still not needed.
+
 ### 7.3 Connection-scoped UI: the main structural change
 
 `HostDialogs` and `WorkbenchSurface` are app-wide singletons today. They become **per request

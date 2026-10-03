@@ -321,7 +321,7 @@ describe.skipIf(!HAS_OPENSSL)('the LAN listener (https on 127.0.0.1, LAN-style n
       page: renderBrowserWorkbenchHtml,
       onClient: (socket, context) => {
         upgrades.push(context.deviceId ?? '');
-        socket.end();
+        socket.close();
       },
       caCertificate: async () => caPem,
     });

@@ -487,6 +487,14 @@ export class ConversationHost {
         // recording; nothing on screen could stop the microphone now.
         this.cancelDictation();
         this.ready = true;
+        // A pane that remembers a conversation gets it back, but only on a host
+        // that has not been pointed anywhere yet (a fresh browser connection):
+        // where the host was told what to show, that wins.
+        if (typeof m.key === 'string' && m.key && !this.binding && this.pendingKey === undefined) {
+          // `bind` sends the init; one not in the store yet is bound when it appears.
+          this.show(m.key);
+          return;
+        }
         await this.sendInit();
         // A reloaded pane that was showing a detail shows it again, over the conversation.
         if (this.detail) this.post({ type: 'analyticsDetail', detail: this.detail });

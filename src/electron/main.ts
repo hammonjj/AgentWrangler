@@ -457,7 +457,7 @@ void app.whenReady().then(async () => {
     }
     stopWeb();
     // Each browser registers with the app's client registry, so what it causes comes back to it (#126).
-    const browsers = createBrowserClients({ app: wrangler, host, ui, clients, log });
+    const browsers = createBrowserClients({ app: wrangler, host, ui, clients, log, build: () => server.build() });
     const server = new WebServer({
       port,
       webviewDir: path.join(APP_ROOT, 'dist', 'webview'),

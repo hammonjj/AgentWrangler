@@ -85,11 +85,14 @@ export interface WebviewHtmlOptions {
    * a header (#127) generates it, so the header and the document agree.
    */
   nonce?: string;
+  /** `<meta name content>` pairs for the scripts to read (the browser's build, #128). */
+  meta?: Record<string, string>;
 }
 
 export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
   const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [], bodyClass, preScripts = [], connectSrc } = opts;
   const nonce = opts.nonce ?? getNonce();
+  const metas = Object.entries(opts.meta ?? {}).map(([name, content]) => `\n<meta name="${attr(name)}" content="${attr(content)}">`).join('');
   const links = [...extraStylesheets, cssHref].map((href) => `<link rel="stylesheet" href="${href}">`).join('\n');
   const bodyAttr = bodyClass ? ` class="${bodyClass}"` : '';
   const connect = connectSrc ? ` connect-src ${connectSrc};` : '';
@@ -100,7 +103,7 @@ export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'; img-src ${cspSource} data:;${connect}">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">${metas}
 ${links}
 <title>${title}</title>
 </head>
@@ -116,8 +119,10 @@ ${scripts}
  * preload, and every asset by the URL the server's manifest gives it (hashed,
  * so it can be cached for good).
  */
-export function renderBrowserWorkbenchHtml(opts: { asset: (name: string) => string; nonce: string; connectSrc: string }): string {
+export function renderBrowserWorkbenchHtml(opts: { asset: (name: string) => string; nonce: string; connectSrc: string; build: string }): string {
   return renderWebviewHtml({
+    // What the shim compares the server's `hello` with (#128).
+    meta: { 'aw-build': opts.build },
     bundleName: 'workbench',
     title: 'Agent Wrangler',
     cssHref: opts.asset('workbench.css'),
@@ -129,4 +134,8 @@ export function renderBrowserWorkbenchHtml(opts: { asset: (name: string) => stri
     connectSrc: opts.connectSrc,
     nonce: opts.nonce,
   });
+}
+
+function attr(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
