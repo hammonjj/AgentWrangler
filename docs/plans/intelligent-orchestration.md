@@ -2784,7 +2784,13 @@ poll or supervise; and GitHub issue closeout is permitted only behind determinis
 evidence-gated conditions the contract document states in full, with worker authority unchanged.
 Implementation is #114 (ownership/result domain and store) through #118 (live journey
 validation); see the contract document for the full comparison of approaches and the lifecycle
-transitions it is built on.
+transitions it is built on. Product questions 2, 3, 5, 6 and 7 were settled on 2026-10-02 (contract
+§10): AW summarizes and checks evidence deterministically while review requests, closeout comments
+and next-task proposals run as the bounded follow-up turn; merge/PR stays a user click; a merged
+but unverified or unclosed result shows as a persistent to-do card in the origin and in Missions;
+several missions keep the headline chip plus "+N", with a per-mission "Stop tracking" and no
+transfer between conversations; the four-condition closeout gate stands as written; and an
+unreachable origin raises one deduplicated notification, then relies on the Missions card.
 
 **Decision (2026-10-02, #55): defer. The gate is not met, and the data points away from it.** A
 lead agent that supervises workers and replans continuously is not built. Neither is a planner
