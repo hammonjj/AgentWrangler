@@ -33,6 +33,12 @@ export interface ShellChannelOptions {
   /** Send one envelope down the connection. */
   post(envelope: { pane: typeof SHELL_PANE; body: HostToShell }): void;
   conversation(): ShellConversation | undefined;
+  /**
+   * Whether a folder a client chose may be used as a host path (#139). The
+   * client's answer is only a string it sent, so it is checked against what the
+   * folder browser may offer. Absent: no folder is accepted.
+   */
+  folderAllowed?(dir: string): Promise<boolean>;
   /** `loopback` may offer "Open on this Mac"; `lan` never acts on the host (#140). */
   kind: 'loopback' | 'lan';
   /**
@@ -76,6 +82,9 @@ export function createShellChannel(opts: ShellChannelOptions): ShellChannel {
     let next = wire as ShellPrompt;
     for (;;) {
       const value = await ask(next);
+      if (next.kind === 'pickFolder') {
+        return typeof value === 'string' && value && opts.folderAllowed && (await opts.folderAllowed(value)) ? value : undefined;
+      }
       // A browser cannot run the check as the user types, so it runs on each
       // answer, and a refused one is asked again with the complaint showing.
       if (next.kind !== 'input' || typeof value !== 'string' || typeof validateInput !== 'function') return value;

@@ -48,10 +48,11 @@ import { MenuBar, menuBarSessions } from './tray';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
 import { createBrowserClients, type BrowserClients } from './webPrototype';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
-import { appPathRoots, createFileViewRoute } from '../core/web/fileView';
-import { createPathAllowlist } from '../core/web/pathAllowlist';
+import { createFileViewRoute } from '../core/web/fileView';
 import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
 import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
+import { createWebFiles } from '../app/webFiles';
+import type { WebFiles } from '../core/web/files';
 import { Emitter } from '../core/events';
 import { renderBrowserWorkbenchHtml } from '../ui/html';
 import { ClientRegistry } from '../core/clients';
@@ -410,7 +411,7 @@ void app.whenReady().then(async () => {
   // failure to serve it is logged and the app carries on.
   const runDirs = { runDir: path.join(userDataDir, 'run'), fallbackRunDir: path.join(os.homedir(), '.agentwrangler', 'run') };
   // The browser workbench (#127), started below; `aw web open` asks it for a link.
-  let web: { server: WebServer; clients: BrowserClients; lan: LanAccess; port: number; listening: boolean } | undefined;
+  let web: { server: WebServer; clients: BrowserClients; lan: LanAccess; files: WebFiles; port: number; listening: boolean } | undefined;
   let control: ControlServer | undefined;
   try {
     const socketPath = controlSocketPath(runDirs);
@@ -456,6 +457,7 @@ void app.whenReady().then(async () => {
     web?.lan.dispose();
     web?.server.dispose();
     web?.clients.dispose();
+    web?.files.dispose();
     web = undefined;
     setLanStatus(
       lanSettings().enabled
@@ -478,8 +480,21 @@ void app.whenReady().then(async () => {
     }
     stopWeb();
     // Each browser registers with the app's client registry, so what it causes comes back to it (#126).
-    const browsers = createBrowserClients({ app: wrangler, host, ui, clients, log, hostShell: macShell,build: () => server.build() });
+    // Uploads, downloads and the folder browser for remote browsers (#139).
+    const files = createWebFiles(wrangler, { dataDir: host.dataDir, log });
+    files.start();
+    const browsers = createBrowserClients({
+      app: wrangler,
+      host,
+      ui: { ...ui, allowRemotePath: (p) => files.isStaged(p) },
+      clients,
+      log,
+      hostShell: macShell,
+      build: () => server.build(),
+      folderAllowed: (dir) => files.folderAllowed(dir),
+    });
     const server = new WebServer({
+      files,
       port,
       webviewDir: path.join(APP_ROOT, 'dist', 'webview'),
       dataDir: host.dataDir,
@@ -489,7 +504,7 @@ void app.whenReady().then(async () => {
       // The read-only file and diff view that stands in for "open in the editor" (#140).
       routes: [
         createFileViewRoute({
-          allowlist: createPathAllowlist(appPathRoots(() => wrangler.store.sessions, host.dataDir)),
+          allowlist: files.allowlist,
           log,
         }),
       ],
@@ -503,7 +518,7 @@ void app.whenReady().then(async () => {
       },
     });
     const lan = new LanAccess({ server, certs, settings: lanSettings, log, hostName: macName, onStatus: setLanStatus });
-    const entry = { server, clients: browsers, lan, port, listening: false };
+    const entry = { server, clients: browsers, lan, files, port, listening: false };
     web = entry;
     server.listen().then(
       (bound) => {

@@ -57,6 +57,13 @@ export interface ConversationHostUi {
    * simply report it.
    */
   offerDictationSetup(err: DictationSetupError): Promise<void>;
+  /**
+   * Whether a path named by a *remote* browser (a paired device, never the
+   * Electron window) may be read as a host path: only a staged upload (#139).
+   * Absent: none may. A remote client's paths are its own filesystem's, not
+   * the host's, so they are refused before anything is `stat`ed or read.
+   */
+  allowRemotePath?(file: string): boolean;
 }
 
 /**
@@ -706,8 +713,14 @@ export class ConversationHost {
       wanted.length = MAX_DROPPED_PATHS;
     }
 
+    // A paired device is remote: what it names is on its machine, not here.
+    const remote = this.access.context.deviceId !== undefined;
     for (const file of wanted) {
       const name = path.basename(file);
+      if (remote && !(path.isAbsolute(file) && this.ui.allowRemotePath?.(file))) {
+        notes.push(`Could not use ${name}: it is not on the host. Attach it with the paperclip to upload it.`);
+        continue;
+      }
       let stat: Awaited<ReturnType<typeof fs.stat>>;
       try {
         stat = await fs.stat(file);
