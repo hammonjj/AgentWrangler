@@ -13,7 +13,7 @@
     "watch": "node esbuild.mjs --watch",
     "electron": "npm run build && env -u ELECTRON_RUN_AS_NODE electron dist/electron/main.js",
     "electron:nobuild": "env -u ELECTRON_RUN_AS_NODE electron dist/electron/main.js",
-    "app:package": "npm run build && electron-builder --mac --dir",
+    "app:package": "npm run build && node scripts/fetch-node.mjs && electron-builder --mac --dir",
     "app:install": "npm run app:package && bash scripts/install-app.sh",
     "app:signing-setup": "bash scripts/setup-signing-cert.sh",
     "cli:install": "bash scripts/install-cli.sh",

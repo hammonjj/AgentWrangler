@@ -2,8 +2,8 @@
  * The remote daemon (#74): Discord, kept running while the app is not.
  *
  * Run by launchd from the app's LaunchAgent (or, unpackaged, spawned detached
- * by the app) as `<runtime exe> dist/remoteDaemon/main.js` with
- * `ELECTRON_RUN_AS_NODE=1`, from the same cloned runtime session hosts use, so
+ * by the app) as `<runtime exe> dist/remoteDaemon/main.js`, on the same Node
+ * and from the same cloned runtime session hosts use, so
  * a reinstall does not delete it from under itself. stdout and stderr go to
  * `logs/remote-daemon.log`.
  *

@@ -1,8 +1,9 @@
 /**
  * The environment `claude` runs with, built explicitly by the host.
  *
- * The host itself runs with `ELECTRON_RUN_AS_NODE=1` (that is how an Electron
- * binary runs a plain Node script), and inherits the LaunchServices variables
+ * A host on the Electron binary (unpackaged, or a build before #129) runs with
+ * `ELECTRON_RUN_AS_NODE=1` (that is how an Electron binary runs a plain Node
+ * script), and every host inherits the LaunchServices variables
  * the app was started with. Left alone, all of it reaches `claude` and every
  * Bash or npm command it runs: an `electron` launched from a tool would then
  * behave as Node, and the tool would claim to be Agent Wrangler (spike S2,

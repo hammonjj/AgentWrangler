@@ -63,6 +63,24 @@ export function renderLaunchAgent(spec: LaunchAgentSpec): string {
   return lines.join('\n');
 }
 
+/**
+ * The daemon's own environment (the LaunchAgent's `EnvironmentVariables`):
+ * where the run directories are, which runtime it runs from, and whatever the
+ * runtime's executable needs to act as Node (`ELECTRON_RUN_AS_NODE` for the
+ * Electron binary, nothing for the bundled Node, #129).
+ */
+export function remoteDaemonEnv(
+  runDirs: { runDir: string; fallbackRunDir: string },
+  rt: { runtimeDir?: string; env?: Record<string, string> },
+): Record<string, string> {
+  return {
+    ...rt.env,
+    AW_RUN_DIR: runDirs.runDir,
+    AW_FALLBACK_RUN_DIR: runDirs.fallbackRunDir,
+    ...(rt.runtimeDir ? { AW_REMOTE_RUNTIME_DIR: rt.runtimeDir } : {}),
+  };
+}
+
 /** The session host entry in a runtime → the daemon's, beside it: `.../dist/sessionHost/main.js` → `.../dist/remoteDaemon/main.js`. */
 export function daemonEntryFor(sessionHostEntry: string): string {
   return sessionHostEntry.replace(/([\\/])sessionHost([\\/])main\.js$/, '$1remoteDaemon$2main.js');

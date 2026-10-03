@@ -62,7 +62,8 @@ const electronMain = {
 
 /**
  * The session host (playbook §5, Stage 3): a plain Node program the app runs
- * detached, from a clone of its own bundle with `ELECTRON_RUN_AS_NODE=1`. It
+ * detached, from a clone of its own bundle, on the bundle's pinned Node
+ * (scripts/fetch-node.mjs, #129; keep `target` in step with its version). It
  * owns one Claude session and outlives the app. No `electron` import at all.
  */
 const sessionHost = {
@@ -82,7 +83,7 @@ const sessionHost = {
 /**
  * The remote daemon (#74): holds the Discord connection and outlives the app.
  * Plain Node, no `electron`; run by launchd from the session hosts' cloned
- * runtime with ELECTRON_RUN_AS_NODE.
+ * runtime, on its bundled Node.
  */
 const remoteDaemon = {
   ...sessionHost,
@@ -92,8 +93,8 @@ const remoteDaemon = {
 
 /**
  * The `aw` command-line client (#21). Plain Node, no `electron`: `bin/aw` runs
- * it with the installed app's own binary under ELECTRON_RUN_AS_NODE, straight
- * out of app.asar, the way session hosts run.
+ * it on the installed app's bundled Node, from `app.asar.unpacked`, the way
+ * session hosts run.
  */
 const cli = {
   entryPoints: ['src/cli/main.ts'],
