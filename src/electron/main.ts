@@ -26,8 +26,7 @@ import { controlSocketPath, controlTokenPath } from '../core/control/paths';
 import { ControlServer, ensurePrivateDir, writeControlToken } from '../core/control/server';
 import { shouldPreventAppSuspension } from '../core/menuBar';
 import { agentCount, quitIntentSource, quitPolicy, type QuitSource } from '../core/session/quitPolicy';
-import { sourceStatus } from '../shared/orchestration/sourceHealth';
-import { parseRoutingSettings, ROUTING_KEY } from '../shared/orchestration/executionPolicy';
+import { createPreferencesBackend } from '../app/preferencesBackend';
 import { registerBundleScheme, serveBundles } from './bundleProtocol';
 import { installContextMenuEverywhere } from './contextMenu';
 import { startFileLog } from '../core/fileLog';
@@ -218,81 +217,29 @@ void app.whenReady().then(async () => {
   // server `syncWeb` starts, `aw web devices` and Preferences, so a revocation
   // from any of them closes the device's connections on whichever is running.
   const webDevices = new WebDeviceStore(path.join(host.dataDir, WEB_DEVICES_FILE), () => Date.now(), log);
-  const revokeWebDevice = (id: string) =>
-    asLocalUser(() => {
-      if (wrangler.access.admit(WINDOW_CONTEXT, 'web.device.revoke', { kind: 'device', id })) webDevices.revoke(id);
-    });
 
   // ⌘, — the app's answer to VSCode's settings UI. It renders
   // `src/shared/settings.ts`, which is also what `package.json`'s
   // `contributes.configuration` is tested against, so both front ends offer
   // the same settings and a new one is declared once.
+  // The same backend every browser's Preferences route reads (#135); as the
+  // window client, so a prompt (a local endpoint's key) appears in this window.
   const preferences = new PreferencesWindow({
-    settings: host.settingsStore,
+    backend: createPreferencesBackend({
+      app: wrangler,
+      host,
+      // The addresses LAN access is bound to (#136), under its switch.
+      lan: {
+        status: () => web?.lanStatus ?? { state: 'off', lines: ['Off. Nothing listens beyond this Mac.'] },
+        onDidChange: webStatusChanged.event,
+      },
+      devices: webDevices,
+    }),
+    access: { context: WINDOW_CONTEXT, gate: wrangler.access },
     log,
     appRoot: APP_ROOT,
     parentWindow: () => window?.browserWindow,
-    runAction: (id) => asLocalUser(() => wrangler.runSettingAction(id)),
     onDidChangeOpen: () => syncDock(),
-    // The addresses LAN access is bound to (#136), under its switch.
-    status: {
-      read: () => {
-        const lanStatus = web?.lanStatus ?? { state: 'off', lines: ['Off. Nothing listens beyond this Mac.'] };
-        return { 'web.lan.enabled': { ok: lanStatus.state !== 'error', lines: lanStatus.lines } };
-      },
-      onDidChange: webStatusChanged.event,
-    },
-    webDevices: {
-      list: () => webDevices.list().map(({ id, name, scope, createdAt, lastSeen }) => ({ id, name, scope, createdAt, lastSeen })),
-      revoke: revokeWebDevice,
-      onDidChange: webDevices.onDidChange,
-    },
-    // Orchestration → tier map (#29): the catalog, and each source's health
-    // from the same usage reads the dashboard cards use.
-    orchestration: {
-      view: () => {
-        const routing = parseRoutingSettings(host.settingsStore.get<unknown>(ROUTING_KEY, undefined));
-        return {
-          catalog: wrangler.models.catalog,
-          sources: [
-            sourceStatus('anthropic', wrangler.usage.usage, Date.now()),
-            sourceStatus('openai', wrangler.codexUsage.usage, Date.now()),
-            ...Object.values(wrangler.localEndpoints.statuses()),
-          ],
-          // Local endpoints (#51): the registry, and what each model has done (§19.4).
-          local: {
-            endpoints: wrangler.localEndpoints.view(wrangler.models.catalog),
-            summaries: wrangler.localMetrics.summaries(),
-            secretsAvailable: host.secrets.available,
-          },
-          // The global scope of pins and caps (#40), with anything in settings.json that was ignored.
-          // With automatic routing's gate and the shadow comparison report (#42).
-          routing: {
-            mode: routing.mode,
-            policy: routing.policy,
-            ignored: routing.errors.map((e) => `${e.path}: ${e.message}`),
-            ...(routing.autoOverride ? { autoOverride: routing.autoOverride } : {}),
-            ...wrangler.autoRouting(),
-          },
-        };
-      },
-      onDidChange: (listener) => {
-        const subs = [
-          wrangler.models.onDidChange(listener),
-          wrangler.usage.onDidChange(listener),
-          wrangler.codexUsage.onDidChange(listener),
-          wrangler.localEndpoints.onDidChange(listener),
-          wrangler.localMetrics.onDidChange(listener),
-          wrangler.onDidChangeRoutingEvidence(listener),
-        ];
-        return { dispose: () => subs.forEach((s) => s.dispose()) };
-      },
-      setPolicy: (change) => wrangler.models.setPolicy(change),
-      // Can ask for an endpoint's key: as the window, so the question appears there.
-      localEndpoint: (change) => asLocalUser(() => wrangler.localEndpoints.apply(change)),
-      // Frozen into each mission recorded after this; a started mission keeps what it had (§10.2).
-      setRouting: (value) => host.settingsStore.update(ROUTING_KEY, value),
-    },
   });
 
   // ---- Windowless (playbook Stage 6) ----

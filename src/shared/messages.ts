@@ -105,7 +105,7 @@ export type HostToDashboard =
  * conversation share one webview, and their message unions overlap (`ready`,
  * `openExternal`), so every message is addressed rather than sniffed.
  */
-export type PaneName = 'dashboard' | 'conversation';
+export type PaneName = 'dashboard' | 'conversation' | 'preferences';
 
 export type DashboardAction =
   /** Open the conversation in a tab of its own that row clicks never swap away. */

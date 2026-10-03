@@ -51,12 +51,14 @@ const api = createWebviewBridge<WorkbenchState>(() => acquireVsCodeApi());
  */
 export const isRemoteHost = (globalThis as { agentWranglerHost?: { remote?: boolean } }).agentWranglerHost?.remote === true;
 
-export type PaneName = 'dashboard' | 'conversation';
+export type PaneName = 'dashboard' | 'conversation' | 'preferences';
 
 /** What `setState` holds: a slot per pane, plus the shared split. */
 interface WorkbenchState {
   dashboard?: unknown;
   conversation?: unknown;
+  /** Preferences keeps no state of its own (#135). */
+  preferences?: unknown;
   /** Fraction of the width given to the table, 0–1. */
   split?: number;
 }

@@ -783,3 +783,92 @@
 #prefsApp .pf-device .pf-action {
   flex: none;
 }
+
+/*
+ * As a route of the browser shell (#135). The shell's page (`#awPage`) gives
+ * the settings the whole window, so the sidebar and the settings scroll
+ * inside it as they do in the Preferences window, and its own heading is the
+ * page title, so the sidebar's is not repeated.
+ */
+#awPage:has(> #awPageBody > #prefsApp) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+#awPage:has(> #awPageBody > #prefsApp) > h2 {
+  padding: 10px 16px 6px;
+  margin: 0;
+}
+
+#awPage:has(> #awPageBody > #prefsApp) > #awPageBody {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#awPage #prefsApp .pf-navtitle {
+  display: none;
+}
+
+/*
+ * Narrow: a phone, or a pane that is not wide. Set from the pane's own width
+ * (`watchWidth` in view.ts), never from the viewport. One column: the
+ * sections become a row of chips above the settings, and controls get room to
+ * be touched.
+ */
+#prefsApp.narrow {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+#prefsApp.narrow .pf-nav {
+  height: auto;
+  padding: 8px 10px;
+  border-right: none;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  overflow: visible;
+}
+
+#prefsApp.narrow .pf-navlist {
+  flex-direction: row;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+#prefsApp.narrow .pf-navlink {
+  flex: none;
+  min-height: 34px;
+  white-space: nowrap;
+}
+
+#prefsApp.narrow .pf-main {
+  padding: 4px 14px 40vh;
+}
+
+#prefsApp.narrow .pf-head {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+#prefsApp.narrow .pf-key {
+  flex: 1 1 100%;
+}
+
+#prefsApp.narrow .pf-input,
+#prefsApp.narrow .pf-select,
+#prefsApp.narrow .pf-action {
+  min-height: 34px;
+  /* 16px stops a phone zooming the page when a field is focused. */
+  font-size: 16px;
+}
+
+#prefsApp.narrow input.pf-input,
+#prefsApp.narrow .pf-select {
+  max-width: none;
+}
+
+#prefsApp.narrow .pf-check {
+  width: 20px;
+  height: 20px;
+}

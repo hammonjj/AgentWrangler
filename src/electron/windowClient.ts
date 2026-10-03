@@ -32,7 +32,7 @@ import type { ControlWebLinkResult } from '../core/control/protocol';
 import { CORE_DAEMON_SETTING } from '../core/daemon/coreDaemon';
 import { BUILD_ID } from '../core/session/sessionHostRuntime';
 import { shouldReloadRenderer } from './rendererRecovery';
-import { loopbackOrigin, navigationVerdict, shouldSignInAgain, waitForLoginLink } from './windowClientPolicy';
+import { loopbackOrigin, navigationVerdict, preferencesUrl, shouldSignInAgain, waitForLoginLink } from './windowClientPolicy';
 
 export interface WindowClientOptions {
   userDataDir: string;
@@ -178,9 +178,20 @@ export async function runWindowClient(opts: WindowClientOptions): Promise<void> 
     origin !== undefined && requestingOrigin === origin,
   );
 
+  /** Preferences is a route of the workbench the window shows: go there, in this window (#135). */
+  const openPreferences = async (): Promise<void> => {
+    if (!window || window.isDestroyed() || !origin) await signIn();
+    if (!window || window.isDestroyed() || !origin) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+    await window.loadURL(preferencesUrl(origin)).catch((err: unknown) => log(`window client: could not open Preferences: ${String(err)}`));
+  };
+
   installClientMenu({
     settingsFile,
     logFile: path.join(userDataDir, 'agent-wrangler.log'),
+    openPreferences: () => void openPreferences(),
     reload: () => void signIn(),
     openInBrowser: () => {
       void loginLink().then(openExternal, (err: unknown) => {
@@ -226,20 +237,21 @@ function safeScheme(url: string): string {
  * The menu while the window is a client. The workbench's own commands (new
  * conversation, pause all, refresh) are in the page, which is where every
  * client has them; what is left needs no core, or goes through the control
- * socket as `aw` does. Preferences is a route of the web workbench later
- * (#135); until then Settings opens `settings.json`, which is honest about
- * where the settings are.
+ * socket as `aw` does. Settings… (⌘,) is the workbench's `#/preferences`
+ * route, shown in this window (#135); `settings.json` stays one item away.
  */
 function installClientMenu(actions: {
   settingsFile: string;
   logFile: string;
+  openPreferences: () => void;
   reload: () => void;
   openInBrowser: () => void;
 }): void {
   const mac = process.platform === 'darwin';
   const openFile = (file: string) => void shell.openPath(file);
   const settingsItems: MenuItemConstructorOptions[] = [
-    { label: 'Open Settings File', accelerator: 'CmdOrCtrl+,', click: () => openFile(actions.settingsFile) },
+    { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: actions.openPreferences },
+    { label: 'Open Settings File', click: () => openFile(actions.settingsFile) },
     { label: 'Open in Browser', click: actions.openInBrowser },
     { label: 'Show Log', click: () => openFile(actions.logFile) },
   ];

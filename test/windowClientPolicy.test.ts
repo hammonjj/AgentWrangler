@@ -10,6 +10,7 @@ import {
   LoginLinkError,
   loopbackOrigin,
   navigationVerdict,
+  preferencesUrl,
   shouldSignInAgain,
   waitForLoginLink,
 } from '../src/electron/windowClientPolicy';
@@ -36,6 +37,13 @@ describe('loopbackOrigin', () => {
     expect(loopbackOrigin('http://user:pw@127.0.0.1:7391/')).toBeUndefined();
     expect(loopbackOrigin('file:///Users/test/proj/index.html')).toBeUndefined();
     expect(loopbackOrigin('not a url')).toBeUndefined();
+  });
+});
+
+describe('preferencesUrl', () => {
+  it('is the workbench route, on the origin the window already shows', () => {
+    expect(preferencesUrl(ORIGIN)).toBe(`${ORIGIN}/#/preferences`);
+    expect(navigationVerdict(preferencesUrl(ORIGIN), ORIGIN)).toBe('allow');
   });
 });
 
