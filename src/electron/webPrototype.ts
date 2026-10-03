@@ -32,6 +32,8 @@ export interface BrowserClientsOptions {
   log: (line: string) => void;
   /** The build the served page is (`WebServer.build`). */
   build: () => string;
+  /** Whether a folder a browser chose may be used as a host path (`WebFiles.folderAllowed`, #139). */
+  folderAllowed: (dir: string) => Promise<boolean>;
 }
 
 export interface BrowserClients extends Disposable {
@@ -45,6 +47,7 @@ export function createBrowserClients(opts: BrowserClientsOptions): BrowserClient
     clients,
     log,
     build: opts.build,
+    folderAllowed: opts.folderAllowed,
     isMutating: isMutatingPaneMessage,
     createPanes: (transport, context) => createWorkbenchHosts(app, host, ui, transport, context),
   });

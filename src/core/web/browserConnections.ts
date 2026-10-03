@@ -77,6 +77,8 @@ export interface BrowserConnectionsOptions {
   isMutating(pane: string, body: unknown): boolean;
   /** The build the page's assets come from; a page from another one reloads. */
   build(): string;
+  /** Whether a folder a browser chose is one the folder browser may offer (#139); see `ShellChannelOptions`. */
+  folderAllowed?(dir: string): Promise<boolean>;
   /** Shared by every connection, so a resend on a new one is recognised. */
   results?: CommandResults;
   limits?: Partial<ConnectionLimits>;
@@ -157,6 +159,7 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       connectionId,
       post: (envelope) => void transport.postMessage(envelope),
       conversation: () => panes?.conversation,
+      ...(opts.folderAllowed ? { folderAllowed: opts.folderAllowed } : {}),
     });
     const registration = clients.register(shell.channel);
     const sendShell = (body: HostToShell) => sendNow({ pane: SHELL_PANE, body });

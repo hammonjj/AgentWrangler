@@ -50,7 +50,8 @@ import {
 } from '../../shared/orchestration/delegatedLabels';
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { resetsInText } from '../../shared/usage';
-import { paneApi } from '../common/paneApi';
+import { isRemoteHost, paneApi } from '../common/paneApi';
+import { uploadFile } from '../common/upload';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { renderAnalyticsDetail } from './analyticsDetail';
 
@@ -2273,11 +2274,42 @@ function renderAttachments(): void {
  * fires a `change`.
  */
 attachBtn.addEventListener('click', () => attachPick.click());
+if (isRemoteHost) {
+  // A remote browser can send any file: images stay inline, the rest go to the host (#139).
+  attachPick.removeAttribute('accept');
+  attachBtn.title = 'Attach a file';
+  attachBtn.setAttribute('aria-label', 'Attach a file');
+}
 attachPick.addEventListener('change', () => {
-  for (const file of Array.from(attachPick.files ?? [])) addImageFile(file);
+  addFiles(Array.from(attachPick.files ?? []));
   attachPick.value = '';
   msgEl.focus();
 });
+
+const isImageFile = (f: File): boolean => IMAGE_MEDIA_TYPES.includes(f.type as (typeof IMAGE_MEDIA_TYPES)[number]);
+
+/**
+ * Files from a picker or a drop with no paths. Images are read here, as ever.
+ * In a remote browser anything else is uploaded and then referred to by the
+ * host path the upload was answered with, which `dropPaths` turns into a
+ * mention like any other (the host refuses any other path from a remote
+ * browser: what it names is on this device, not on the host).
+ */
+function addFiles(files: File[]): void {
+  for (const f of files) {
+    if (isImageFile(f) || !isRemoteHost) addImageFile(f);
+    else void uploadAndMention(f);
+  }
+}
+
+async function uploadAndMention(file: File): Promise<void> {
+  try {
+    const uploaded = await uploadFile(file, activeSession || 'none');
+    post({ type: 'dropPaths', paths: [uploaded.path] });
+  } catch (err) {
+    note(err instanceof Error ? err.message : `Could not upload ${file.name}.`);
+  }
+}
 
 /** Read one clipboard/dropped file into the shape the wire wants. */
 function addImageFile(file: File): void {
@@ -2312,7 +2344,7 @@ msgEl.addEventListener('paste', (e: ClipboardEvent) => {
     .filter((f): f is File => f !== null);
   if (files.length === 0) return; // ordinary text paste, leave it alone
   e.preventDefault();
-  for (const f of files) addImageFile(f);
+  addFiles(files);
 });
 
 // ---- drag and drop ----
@@ -2393,7 +2425,8 @@ app.addEventListener('drop', (e: DragEvent) => {
   e.preventDefault();
   endDrag();
 
-  const paths = droppedPaths(t!);
+  // A remote browser's paths are on its own device, never the host's.
+  const paths = isRemoteHost ? [] : droppedPaths(t!);
   if (paths.length > 0) {
     // The host says what each one turns into; it comes back as `dropped`.
     post({ type: 'dropPaths', paths });
@@ -2404,6 +2437,11 @@ app.addEventListener('drop', (e: DragEvent) => {
   // No path came with the drop, so there is nothing to mention and the bytes
   // are all we have — which only helps for an image.
   const files = Array.from(t!.files);
+  if (isRemoteHost) {
+    addFiles(files);
+    msgEl.focus();
+    return;
+  }
   const images = files.filter((f) => IMAGE_MEDIA_TYPES.includes(f.type as (typeof IMAGE_MEDIA_TYPES)[number]));
   for (const f of images) addImageFile(f);
   const rest = files.length - images.length;
