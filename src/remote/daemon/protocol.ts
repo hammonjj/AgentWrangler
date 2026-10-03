@@ -4,9 +4,9 @@
  * The daemon owns the Discord connection and the reconciler, and outlives the
  * app. The app is its best source of truth while it runs, so it connects and:
  *
- * - `configure`s it: the settings, and the bot token, which never leaves the
- *   app's `safeStorage` except over this socket (0600, in the 0700 run dir,
- *   token-authenticated), and is held by the daemon in memory only;
+ * - `configure`s it: the settings. The bot token is not sent (#138): it is in
+ *   the login Keychain (#124), which the daemon reads itself at start and on
+ *   every `configure`, so it connects after a reboot without the app;
  * - streams its decorated session list (`sessions`), and says once the list
  *   is complete (`ready`), so a half-scanned list never closes cards;
  * - forwards notices (`notify`), and asks how things stand (`status`).
@@ -61,8 +61,12 @@ export interface ConfigureParams {
   config: WranglerConfig;
   /** Folded to `~` in anything published. */
   homeDir: string;
-  /** Null: there is none (never stored, or disconnected). */
-  botToken: string | null;
+  /**
+   * Not sent since #138: the daemon reads the token from the Keychain itself,
+   * at start and on every `configure`. A non-empty one (an app from before
+   * #138) is still used as it is.
+   */
+  botToken?: string | null;
 }
 
 export interface SessionsParams {
@@ -79,7 +83,7 @@ export interface DaemonStatus {
   build: string;
   pid: number;
   startedAt: number;
-  /** Holding a bot token (handed over since the daemon last started). */
+  /** Holding a bot token (read from the Keychain, or handed over by an older app). */
   hasToken: boolean;
   /** Connected to the Discord gateway. */
   connected: boolean;
