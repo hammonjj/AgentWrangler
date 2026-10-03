@@ -195,10 +195,10 @@ export interface HostServices {
   /** The session registry's document (`sessions.json`): every session AW runs and what became of it. */
   sessionState: HostStorage;
   /**
-   * Where session hosts live and run from (playbook §5, Stage 3). Absent means
-   * this front end cannot run hosts, and every session runs in-process.
+   * Where session hosts live and run from (playbook §5, Stage 3). Required:
+   * every Claude conversation runs in one, never in the app's process (#122).
    */
-  sessionHosts?: {
+  sessionHosts: {
     runtime: SessionHostRuntime;
     /** `run/`: manifests, tokens, sockets. 0700. */
     runDir: string;

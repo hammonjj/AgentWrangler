@@ -1,18 +1,28 @@
 /**
- * A Claude session run in a session host: the same `RunnerView` as an
- * in-process one, fed by a `HostClient` over the host's socket instead of by
- * a `ClaudeSdkSession` in this process (playbook §5.1, Stage 3).
+ * A Claude session run in a session host: a `RunnerView` fed by a
+ * `HostClient` over the host's socket (playbook §5.1, Stage 3). It is the
+ * only way the app runs a Claude session (#122).
  */
 import { RunnerView, type ClaudeExecution, type MigrateExecution } from '../../claude/runner/runnerView';
 import type { ConversationHistory } from '../../claude/transcriptHistory';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
 import type { HostManifest } from '../../shared/sessionProtocol';
 import type { PermissionModeName } from '../../shared/conversation';
-import type { HostSupervisor } from './hostSupervisor';
+import type { HostLaunch } from './hostSupervisor';
 import type { LaunchRequest } from './sessionHandle';
 
+/**
+ * What a hosted handle needs from the supervisor: start a host, reattach to
+ * one. `HostSupervisor` in the app; tests drive the same path with
+ * `inProcessHosts` (`src/sessionHost/inProcessHosts.ts`).
+ */
+export interface SessionHosts {
+  spawn(launch: HostLaunch): { client: ClaudeExecution };
+  attach(manifest: HostManifest, transcriptUuids: Promise<Set<string>>): ClaudeExecution;
+}
+
 export interface RemoteClaudeDeps {
-  supervisor: HostSupervisor;
+  supervisor: SessionHosts;
   binary: string;
   log: (msg: string) => void;
   loadHistory?: (sessionId: string, cwd: string) => Promise<ConversationHistory>;

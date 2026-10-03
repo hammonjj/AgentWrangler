@@ -150,25 +150,16 @@ export const SETTINGS: SettingSpec[] = [
       'After a window reload, resume the conversation this window was running. Only the most recent one, only if it was running in the last few hours, and never one something else has picked up in the meantime.',
   },
   {
-    key: 'experimental.sessionHosts',
-    label: 'Keep conversations running when Agent Wrangler quits (experimental)',
-    group: 'Conversations',
-    type: 'boolean',
-    default: false,
-    description:
-      'Run each new Claude conversation in its own small background process, so quitting, reinstalling or a crash of Agent Wrangler no longer ends it: it keeps working, and Agent Wrangler reconnects when it opens again. ⌘Q then leaves those conversations running; Quit and Stop All Agents (⌥⌘Q) ends them. Applies to conversations started after it is switched on.',
-  },
-  {
+    // Every Claude conversation runs in a session host that outlives the app
+    // (#122), so this applies to all of them: it no longer hangs off a switch.
     key: 'lifecycle.orphanIdleHours',
     label: 'End idle sessions with no Agent Wrangler connected after (hours)',
     group: 'Conversations',
     type: 'number',
     default: 24,
     minimum: 0,
-    // Drop with the setting it hangs off when session hosts become the default.
-    dependsOn: 'experimental.sessionHosts',
     description:
-      'A conversation left running in the background while Agent Wrangler is quit is ended after this many hours with nothing connected to it, but only if it is idle: never one that is working, waiting on a question or permission, or running background tasks. It can be resumed afterwards with nothing lost. Time the machine spends asleep does not count. 0 = never.',
+      'Claude conversations keep running in the background when Agent Wrangler quits. One left that way is ended after this many hours with nothing connected to it, but only if it is idle: never one that is working, waiting on a question or permission, or running background tasks. It can be resumed afterwards with nothing lost. Time the machine spends asleep does not count. 0 = never.',
   },
   {
     key: 'orchestration.enabled',
@@ -177,7 +168,7 @@ export const SETTINGS: SettingSpec[] = [
     type: 'boolean',
     default: false,
     description:
-      'Adds a Tasks button beside + New. A task is an objective and its acceptance criteria, run by one agent on the launcher’s model and effort in a new git worktree and branch beside the repository, never in the checkout you work in. It survives quitting and reinstalling Agent Wrangler, and ends with a branch and a diff for you to review. Claude tasks need Keep conversations running when Agent Wrangler quits. Takes effect after a restart.',
+      'Adds a Tasks button beside + New. A task is an objective and its acceptance criteria, run by one agent on the launcher’s model and effort in a new git worktree and branch beside the repository, never in the checkout you work in. It survives quitting and reinstalling Agent Wrangler, and ends with a branch and a diff for you to review. Takes effect after a restart.',
   },
   {
     key: 'orchestration.parallelTasks',
@@ -443,6 +434,14 @@ export const SETTINGS: SettingSpec[] = [
       'Post a message when an agent finishes its task, alongside the permission prompts. It has no buttons — nothing is waiting on you — and names the agent, repository and branch, never anything it said. Auto-pause is announced the same way and is not covered by this switch: everything stopping is not optional news.',
   },
 ];
+
+/**
+ * Keys a setting once had and no longer does. Startup removes them from
+ * `settings.json`, so a stale value does not read as though it still applied.
+ * - `experimental.sessionHosts` (#122): every Claude conversation runs in a
+ *   session host; there is nothing left to switch.
+ */
+export const RETIRED_SETTING_KEYS: readonly string[] = ['experimental.sessionHosts'];
 
 /** Group headings in declaration order, with no duplicates. */
 export function settingGroups(): { group: string; settings: SettingSpec[] }[] {

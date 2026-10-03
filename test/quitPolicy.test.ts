@@ -17,7 +17,7 @@ describe('quitPolicy', () => {
     ['signal', 3, false],
     ['install', 3, false],
     ['external', 3, false],
-  ])('%s quit with %i in-process sessions: confirm = %s', (source, local, confirm) => {
+  ])('%s quit with %i in-app (Codex --stdio) sessions: confirm = %s', (source, local, confirm) => {
     expect(quitPolicy({ source, local, hosted: 0 }).confirm).toBe(confirm);
   });
 

@@ -46,22 +46,12 @@ export const ORCHESTRATION_ENABLED_KEY = 'orchestration.enabled';
  */
 export const PARALLEL_TASKS_KEY = 'orchestration.parallelTasks';
 
-/** Why a Claude attempt cannot start with session hosts off (G1, plan §35.4). */
-export const HOSTS_REQUIRED =
-  'Running a task needs “Keep conversations running when Agent Wrangler quits” (Preferences → Conversations): an attempt has to survive a quit or a reinstall.';
-
 export interface OrchestrationDeps {
   settings: { get<T>(key: string, defaultValue: T): T };
   /** The app's data directory; missions live under `orchestration/missions/`. */
   dataDir: string;
   sessions: Pick<SessionExecutors, 'launch' | 'get' | 'list' | 'onDidChange'>;
   registry: Pick<SessionRegistry, 'all' | 'get'> & Partial<Pick<SessionRegistry, 'restoreOrigin'>>;
-  /**
-   * Whether new Claude sessions run in session hosts. An attempt must survive
-   * `app:install`, so a Claude attempt is refused while this is false (G1).
-   * Codex threads survive a quit either way. Absent: refused.
-   */
-  hostsEnabled?: () => boolean;
   /** Turn records as #27 writes them, to sum each attempt's usage. */
   onTurnRecord?: (listener: (record: TurnRecord) => void) => Disposable;
   /** Where `attempt` records go: the telemetry log. */
@@ -249,7 +239,6 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
         { record, exec: deps.exec, log },
       ),
     launchDefaults: deps.launchDefaults,
-    cannotLaunch: (harness) => (harness === 'claude-code' && deps.hostsEnabled?.() !== true ? HOSTS_REQUIRED : undefined),
     assessor,
     reviewer,
     planner,

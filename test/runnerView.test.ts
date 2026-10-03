@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ClaudeSdkSession, type QueryFn } from '../src/claude/runner/claudeSdkSession';
 import { RunnerView, type ClaudeExecution } from '../src/claude/runner/runnerView';
-import { createLocalClaudeHandle, type LocalClaudeDeps } from '../src/core/session/localClaudeHandle';
+import { createLocalClaudeHandle, type LocalClaudeDeps } from './support/localClaudeHandle';
 import { MAX_BLOCK_CHARS, type ConvBlock, type ImageAttachment } from '../src/shared/conversation';
 
 /**

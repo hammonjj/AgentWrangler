@@ -11,9 +11,10 @@
  * - `install`: `install-app.sh` announced itself with a `run/quit-intent` file.
  * - `external`: anything else (an `osascript` quit, Dock → Quit, logout).
  *
- * Two kinds of session. **Local** ones run in this process and cannot survive
- * a quit, so every quit ends them, gracefully and bounded. **Hosted** ones run
- * in session hosts (Stage 3) and keep running: only ⌥⌘Q ends them. Only a menu
+ * Two kinds of session. **Hosted** ones run in session hosts and keep running:
+ * only ⌥⌘Q ends them. Every Claude conversation is one (#122). **Local** ones
+ * are children of the app and cannot survive a quit, so every quit ends them:
+ * only Codex threads with the background Codex server off are. Only a menu
  * quit ever asks first, and only when it would end something: a script, a
  * signal or a logout must never block on a dialog nobody will see.
  */

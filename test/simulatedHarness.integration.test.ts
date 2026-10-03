@@ -36,14 +36,11 @@ function memento() {
 function hostedRig() {
   const registry = new SessionRegistry(memento());
   const runners = new RunnerService({
-    query: () => {
-      throw new Error('hosted sessions never run in-process');
-    },
     binary: () => '/fake',
     log: () => undefined,
     registry,
     loadHistory: noHistory,
-    hosts: { supervisor: h.supervisor(), enabled: () => true },
+    hosts: { supervisor: h.supervisor() },
   });
   return { registry, runners, sessions: new SessionExecutors([runners]) };
 }

@@ -50,7 +50,7 @@ export interface ElectronHostOptions {
     input(options: InputOptions): Promise<string | undefined>;
   };
   /** Where session hosts live and run from. Built by `main.ts`, which knows the bundle. */
-  sessionHosts?: HostServices['sessionHosts'];
+  sessionHosts: HostServices['sessionHosts'];
   /** The remote daemon's LaunchAgent. Built by `main.ts`, for the same reason. */
   remoteDaemon?: HostServices['remoteDaemon'];
 }

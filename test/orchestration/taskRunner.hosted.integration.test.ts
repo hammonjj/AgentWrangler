@@ -94,13 +94,10 @@ function core(attempt: SimAttempt, opts: { adopt?: boolean } = {}) {
   const registry = new SessionRegistry(registryDoc);
   registry.startup(new Set(scan.alive.map((m) => m.sessionId!).filter(Boolean)), outcomesFromDeadHosts(scan.dead));
   const runners = new RunnerService({
-    query: () => {
-      throw new Error('hosted sessions never run in-process');
-    },
     binary: () => '/fake',
     log: () => undefined,
     registry,
-    hosts: { supervisor: sup, enabled: () => true },
+    hosts: { supervisor: sup },
     loadHistory: noHistory,
   });
   if (opts.adopt) for (const m of scan.alive) runners.adopt(m, registry.get(m.sessionId));
