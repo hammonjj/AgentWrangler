@@ -12,6 +12,7 @@
  * - the manifest, `run/core-daemon.json`;
  * - its clients and the browser workbench they load (#131, `clients.ts`):
  *   every browser tab, and the app's window when it is a client.
+ * - Discord, in-process (#138), once the separate remote daemon is retired.
  *
  * Single instance: the control socket. If anything answers on it, the app or
  * another daemon holds the core, and this refuses before building anything.
@@ -55,7 +56,12 @@ export interface StartCoreDaemonOptions {
   runtime: SessionHostRuntime;
   /** The runtime clone this daemon runs from, for the manifest (and so the GC keeps it). */
   runtimeDir?: string;
-  remoteDaemon?: HostServices['remoteDaemon'];
+  /**
+   * Discord, in this process (#138): fed the core's own list, applying presses
+   * through its own actions. `retireDaemon` stops the separate remote daemon
+   * (and removes its LaunchAgent) before the first connect.
+   */
+  remoteInProcess?: HostServices['remoteInProcess'];
   log: (message: string) => void;
   /** Tests: the Keychain, PATH, the socket probe, power and sleep. */
   securityRunner?: SecurityRunner;
@@ -112,7 +118,7 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
     securityRunner: opts.securityRunner,
     fixToolPath: opts.fixToolPath,
     sessionHosts: { runtime: opts.runtime, runDir: paths.runDir, fallbackRunDir: paths.fallbackRunDir, logDir: paths.logDir },
-    remoteDaemon: opts.remoteDaemon,
+    remoteInProcess: opts.remoteInProcess,
   });
   const app = createApp(host);
   const startedAt = now();
@@ -206,9 +212,22 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
       if (!decision.stopHosted && counts.hosted > 0) {
         log(`${agentCount(counts.hosted)} keep running in session hosts; the next core reattaches them`);
       }
+      // Hang up Discord with the mirror map written, so the next connector
+      // (this daemon again, or the app's remote daemon) adopts the open cards.
+      await withTimeout(app.stopRemote(), 5000).catch((err) => log(`remote: stopping failed: ${String(err)}`));
       teardown();
       return decision;
     })());
 
   return { started: true, daemon: { app, host, paths, manifest, power, clients: web, stop } };
+}
+
+/** `p`, or a rejection after `ms`: a stop must not hang on Discord. */
+function withTimeout(p: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<void>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
 }

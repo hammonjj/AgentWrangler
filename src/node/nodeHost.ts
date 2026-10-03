@@ -46,6 +46,8 @@ export interface NodeHostOptions {
   sessionHosts: HostServices['sessionHosts'];
   /** The remote daemon's controls; absent, remote control is unavailable. */
   remoteDaemon?: HostServices['remoteDaemon'];
+  /** Remote control in this process (the core daemon, #138). */
+  remoteInProcess?: HostServices['remoteInProcess'];
   /** Default: append to `<dataDir>/agent-wrangler.log` and echo to stdout. */
   log?: (message: string) => void;
   /** How `security` is run for the Keychain. Default: `/usr/bin/security`. */
@@ -119,6 +121,7 @@ export function createNodeHost(opts: NodeHostOptions): NodeHost {
     sessionState: new JsonStore(path.join(dataDir, 'sessions.json')),
     sessionHosts: opts.sessionHosts,
     remoteDaemon: opts.remoteDaemon,
+    remoteInProcess: opts.remoteInProcess,
     storageDir,
     dataDir,
     dialogs,

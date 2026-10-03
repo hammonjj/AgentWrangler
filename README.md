@@ -125,7 +125,8 @@ at startup. Codex has its own background server (below).
   usual. Never one that is working, waiting on a question or permission, or running background
   tasks, and time the machine spends asleep does not count.
 - While a conversation is working, the Mac is kept from *idle* sleep (a lid close still sleeps).
-  On wake, the app rechecks its hosts, and the remote daemon reconnects Discord at once.
+  On wake, the core rechecks its hosts, and whichever process holds Discord (the core daemon,
+  or the remote daemon) reconnects it at once.
 - The remote daemon's connection to a host is *passive*: it does not count as Agent Wrangler
   being connected, so it never keeps an idle conversation from being parked. (A host started
   by a build older than #74 does not know the flag, and counts it until it next moves to a
@@ -903,6 +904,10 @@ aw daemon stop --all     # stop it and end them too, like Quit and Stop All Agen
   reattaches every host. launchd restarts a daemon that crashes, but not one that was stopped.
 - **Login:** it starts at login only when *Open at login* is on. Otherwise `aw daemon start` (or
   opening the app with the setting on) starts it.
+- **Discord runs inside it** (#138), with the bot token read from the Keychain, so it works after
+  a reboot with no window or browser open. The separate remote daemon and its LaunchAgent
+  (`com.hammonjj.agentwrangler.remote`) are stopped and removed the first time it starts. See
+  [Remote control](#remote-control-experimental).
 - **Files:** `run/core-daemon.json` (its pid, build and start time) and `logs/core-daemon.log`
   in the app's support folder; it writes the usual `agent-wrangler.log` too. While agents work
   it holds `caffeinate -i -w <pid>`, as the app holds its power blocker.
@@ -945,12 +950,32 @@ not already offering.
    (User Settings → Advanced) to copy IDs. An empty allowlist means **nobody**,
    and nothing is published at all.
 
-**It keeps working when the app is closed.** The Discord connection is not held
-by the app but by a small background service, the *remote daemon* (#74): a
-LaunchAgent (`com.hammonjj.agentwrangler.remote`) that starts when Discord
-integration is switched on, runs from the same cloned runtime as session hosts
-(so a reinstall does not pull it out from under itself), and is restarted by
-launchd if it crashes. Switching the integration off stops it and removes it.
+**It keeps working when the app is closed.** Where the Discord connection lives
+depends on where the core runs (see [Background core](#background-core-experimental)):
+
+| Core runs in | Discord runs in | LaunchAgents |
+|---|---|---|
+| The core daemon (`experimental.coreDaemon` on) | The core daemon itself, fed its own session list (#138) | One: `com.hammonjj.agentwrangler.core` |
+| The app (the default today) | The *remote daemon* (#74), a separate background service | `com.hammonjj.agentwrangler.remote` |
+
+Either way it reads the bot token from the Keychain itself, so **after a reboot
+Discord works without opening a window or a browser**: the core daemon starts at
+login when *Open at login* is on, and the remote daemon whenever Discord
+integration is on.
+
+- **In the core daemon** there is no second process and nothing to hand over:
+  presses are applied by the core directly, as they are from the table. When it
+  starts it stops the remote daemon and removes its LaunchAgent before it
+  connects, so only one process ever holds the bot, and the cards the remote
+  daemon posted are taken over rather than posted again. Its log lines are in
+  `logs/core-daemon.log`.
+- **In the remote daemon** (while the app runs the core; it goes when Electron
+  does, #142): a LaunchAgent that starts when Discord integration is switched
+  on, runs from the same cloned runtime as session hosts (so a reinstall does
+  not pull it out from under itself), and is restarted by launchd if it
+  crashes. Switching the integration off stops it and removes it. The app never
+  starts it while a core daemon holds the core. The rest of this list is about
+  this mode.
 
 - **While the app runs,** the daemon follows the app's own list, exactly what
   the table shows, and hands presses back to the app to apply. Nothing about
@@ -965,10 +990,13 @@ launchd if it crashes. Switching the integration off stops it and removes it.
 - A card is not reposted across the handover. Both lists name an ask the same
   way, and while neither is complete (the few seconds after a switch), nothing is
   closed and a press is asked to try again.
-- **The token stays in the app.** The app hands it to the daemon over its
-  private socket (0700 directory, 0600 socket, token-authenticated), and the
-  daemon keeps it in memory only. So after a reboot, or if the daemon itself
-  restarts, it waits, connected to nothing, until you open Agent Wrangler once.
+- **The daemon reads the settings and the token itself.** At start it reads
+  `settings.json` and the bot token from the login Keychain, so after a reboot
+  or a crash it connects and follows its own feed with the app closed. While
+  the app runs it sends its settings over the daemon's private socket (0700
+  directory, 0600 socket, token-authenticated); the bot token never crosses it,
+  and the daemon reads the Keychain again whenever the settings change, which is
+  how **Connect Discord…** and **Disconnect Discord** reach it.
 - Its log is `~/Library/Application Support/Agent Wrangler/logs/remote-daemon.log`,
   and **Test remote control** says whether it is running and connected.
 
@@ -1017,9 +1045,9 @@ A permission prompt is answerable from anywhere because answering one is a file
 write into a directory every process shares. An `AskUserQuestion` and an
 `ExitPlanMode` are not: they are settled by resolving a callback that exists
 only inside the process running the session. For a conversation in a session
-host, that callback is reachable over the host's socket, by the app or by the
-remote daemon; for one running inside the app (hosts off, or a Codex thread),
-only the app can reach it, so those are mirrored while the app runs. A session
+host, that callback is reachable over the host's socket, by the core (the app or
+the core daemon) or by the remote daemon; for a Codex thread, only the core can
+reach it, so with the remote daemon those are mirrored while the app runs. A session
 running in a terminal still mirrors permissions only: there is no callback
 anywhere to resolve.
 
@@ -1057,9 +1085,11 @@ your home directory is folded to `~`. Every publish, press, refusal and
 resolution is appended to `~/.cache/agent-wrangler/remote/audit.log`, which
 records IDs and tool names but not command text — the channel already has that.
 
-**Exactly one gateway socket, always.** Only the remote daemon connects, and
-there is only ever one daemon (launchd runs one per label, and a second copy
-that finds the socket answering exits). Discord will happily let one bot hold
+**Exactly one gateway socket, always.** Only one process connects: the core
+daemon, or else the remote daemon. There is only ever one of each (launchd runs
+one per label, and a second copy that finds the socket answering exits), and
+never both: the core daemon retires the remote daemon, and waits for it to
+exit, before it connects. Discord will happily let one bot hold
 several connections at once, and they are not redundancy: every socket receives
 every interaction, all of them race to acknowledge the press, and the losers get
 `404 Unknown interaction` — which the card renders as *"The application didn't

@@ -32,7 +32,11 @@ import { createBrowserConnections } from '../core/web/browserConnections';
 import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
 import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
-import type { HostServices } from '../host/hostServices';
+import type { WebFiles } from '../core/web/files';
+import { createFileViewRoute } from '../core/web/fileView';
+import type { WebRoute } from '../core/web/server';
+import type { HostServices, HostShell } from '../host/hostServices';
+import { createWebFiles } from './webFiles';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { renderBrowserWorkbenchHtml } from '../ui/html';
 import { isMutatingPaneMessage } from '../ui/paneMutations';
@@ -46,6 +50,10 @@ export interface BrowserClientsOptions {
   log: (line: string) => void;
   /** The build the served page is (`WebServer.build`). */
   build: () => string;
+  /** Whether a folder a browser chose may be used as a host path (`WebFiles.folderAllowed`, #139). */
+  folderAllowed: (dir: string) => Promise<boolean>;
+  /** The Mac's own shell: what a loopback browser's "Open on this Mac" does (#140). */
+  hostShell?: HostShell;
 }
 
 export interface BrowserClients extends Disposable {
@@ -59,6 +67,8 @@ export function createBrowserClients(opts: BrowserClientsOptions): BrowserClient
     clients,
     log,
     build: opts.build,
+    folderAllowed: opts.folderAllowed,
+    ...(opts.hostShell ? { hostShell: opts.hostShell } : {}),
     isMutating: isMutatingPaneMessage,
     createPanes: (transport, context) => createWorkbenchHosts(app, host, ui, transport, context),
   });
@@ -77,6 +87,14 @@ export interface WebWorkbenchOptions {
   /** `dist/webview`: the only directory served. In a packaged build, the unpacked copy (plain Node cannot read app.asar). */
   webviewDir: string;
   log: (line: string) => void;
+  /** The Mac's own shell, for a loopback browser's "Open on this Mac" (#140). */
+  hostShell?: HostShell;
+  /**
+   * More of what a server and its clients are made of, for features that add
+   * routes or hooks (pairing, notifications). Called once per server built,
+   * with the pieces it shares.
+   */
+  extend?: (parts: { files: WebFiles }) => { routes?: WebRoute[] };
 }
 
 export interface WebWorkbench extends Disposable {
@@ -93,6 +111,7 @@ export interface WebWorkbench extends Disposable {
 
 interface Running {
   server: WebServer;
+  files: WebFiles;
   browsers: BrowserClients;
   lan: LanAccess;
   port: number;
@@ -124,6 +143,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     web?.lan.dispose();
     web?.server.dispose();
     web?.browsers.dispose();
+    web?.files.dispose();
     web = undefined;
     setLanStatus(
       lanSettings().enabled ? { state: 'error', lines: ['Not listening: turn on "Open in a browser" above first.'] } : LAN_OFF,
@@ -146,8 +166,24 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     }
     stop();
     // Each browser registers with the app's client registry, so what it causes comes back to it (#126).
-    const browsers = createBrowserClients({ app, host, ui, clients, log, build: () => server.build() });
+    // Uploads, downloads and the folder browser for remote browsers (#139).
+    const files = createWebFiles(app, { dataDir: host.dataDir, log });
+    files.start();
+    const extra = opts.extend?.({ files });
+    const browsers = createBrowserClients({
+      app,
+      host,
+      ui: { ...ui, allowRemotePath: (p) => files.isStaged(p) },
+      clients,
+      log,
+      hostShell: opts.hostShell,
+      build: () => server.build(),
+      folderAllowed: (dir) => files.folderAllowed(dir),
+    });
     const server = new WebServer({
+      files,
+      // The read-only file and diff view that stands in for "open in the editor" (#140), on the shared allowlist.
+      routes: [createFileViewRoute({ allowlist: files.allowlist, log }), ...(extra?.routes ?? [])],
       port,
       webviewDir: opts.webviewDir,
       dataDir: host.dataDir,
@@ -164,7 +200,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
       },
     });
     const lan = new LanAccess({ server, certs, settings: lanSettings, log, hostName: macName, onStatus: setLanStatus });
-    const entry: Running = { server, browsers, lan, port, listening: false };
+    const entry: Running = { server, files, browsers, lan, port, listening: false };
     web = entry;
     server.listen().then(
       (bound) => {
@@ -201,6 +237,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
       web?.lan.dispose();
       web?.server.dispose();
       web?.browsers.dispose();
+      web?.files.dispose();
       web = undefined;
       statusChanged.dispose();
     },

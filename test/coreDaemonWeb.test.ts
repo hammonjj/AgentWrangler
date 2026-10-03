@@ -157,6 +157,11 @@ describe('the core daemon serves the web workbench', () => {
       expect(page.body).toContain('aw-build');
       expect(page.body).toContain('webshim');
 
+      // The files side (#139, #140) is wired too: the folder browser and the file view answer a signed-in device, and 401 without one.
+      expect((await get('/api/dirs', {})).status).toBe(401);
+      expect((await get('/api/dirs', { cookie })).status).not.toBe(404);
+      expect((await get(`/api/view?path=${encodeURIComponent('/etc/hosts')}`, { cookie })).status).not.toBe(404);
+
       // A WebSocket client: hello first, then the table's snapshot on `ready`.
       const frames: Frame[] = [];
       const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { origin: `http://127.0.0.1:${port}`, cookie } });

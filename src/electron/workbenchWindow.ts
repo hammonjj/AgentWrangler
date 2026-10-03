@@ -23,7 +23,7 @@ import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import { Emitter, type Disposable } from '../core/events';
 import type { AgentWranglerApp } from '../app/createApp';
-import type { HostDialogs, HostServices, WorkbenchSurface } from '../host/hostServices';
+import type { HostDialogs, HostServices, HostShell, WorkbenchSurface } from '../host/hostServices';
 import { channelFromDialogs, type ClientChannel } from '../core/clients';
 import type { ConversationHost, ConversationHostUi } from '../ui/conversation/conversationHost';
 import type { DashboardHost } from '../ui/dashboardHost';
@@ -75,10 +75,12 @@ export const WINDOW_CONTEXT: RequestContext = ownerContext('browser', { connecti
  * The window as a `ClientChannel`: native dialogs and the palette for its
  * prompts, its preload toast, and its own navigation.
  */
-export function windowClientChannel(window: WorkbenchWindow, dialogs: HostDialogs): ClientChannel {
+export function windowClientChannel(window: WorkbenchWindow, dialogs: HostDialogs, shell: HostShell): ClientChannel {
   return channelFromDialogs({
     connectionId: WINDOW_CONNECTION_ID,
+    kind: 'window',
     dialogs,
+    shell,
     isOpen: () => window.isOpen,
     navigate: (target) => {
       switch (target.kind) {

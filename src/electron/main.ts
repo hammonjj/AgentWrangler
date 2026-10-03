@@ -40,6 +40,8 @@ import { PaletteWindow } from './paletteWindow';
 import { PreferencesWindow } from './preferencesWindow';
 import { createRemoteDaemonAgent } from '../node/remoteDaemonAgent';
 import { whereIsTheCore } from './coreElsewhere';
+import { socketAnswers } from '../core/control/probe';
+import { coreDaemonPaths, findCoreHolder } from '../core/daemon/coreDaemon';
 import { MenuBar, menuBarSessions } from './tray';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
 import { startWebWorkbench, type WebWorkbench } from '../app/webWorkbench';
@@ -48,7 +50,7 @@ import { Emitter } from '../core/events';
 import { ClientRegistry } from '../core/clients';
 import { runWindowClient } from './windowClient';
 import { runInRequest } from '../core/requestScope';
-import type { HostDialogs } from '../host/hostServices';
+import type { HostDialogs, HostShell } from '../host/hostServices';
 
 // Git invokes git-lfs through PATH while checking out task worktrees. Finder's
 // environment lacks Homebrew's bin directory even when git-lfs is installed.
@@ -130,13 +132,25 @@ void app.whenReady().then(async () => {
   // the window client's own.
   const clients = new ClientRegistry({ log, navigationFallback: WINDOW_CONNECTION_ID });
   let nativeDialogs: HostDialogs | undefined;
+  let nativeShell: HostShell | undefined;
   /** As the user at this Mac: the window client. For the menu, tray, Preferences and notifications. */
   const asLocalUser = <T,>(fn: () => T): T => runInRequest(WINDOW_CONTEXT, fn);
   const host = createElectronHost({
     userDataDir,
     log,
     sessionHosts: { runtime, ...hostDirs },
-    remoteDaemon: createRemoteDaemonAgent({ runDirs: hostDirs, logDir: hostDirs.logDir, runtime, isPackaged: app.isPackaged, log }),
+    remoteDaemon: createRemoteDaemonAgent({
+      runDirs: hostDirs,
+      logDir: hostDirs.logDir,
+      runtime,
+      isPackaged: app.isPackaged,
+      log,
+      // Never beside a core daemon, which runs Discord itself (#138).
+      coreDaemonHolds: async () => {
+        const paths = coreDaemonPaths(userDataDir, hostDirs.fallbackRunDir);
+        return (await findCoreHolder({ socketPath: paths.socketPath, manifestPath: paths.manifestPath, probe: socketAnswers })).kind === 'daemon';
+      },
+    }),
     palette: {
       pick: (items, options) => palette?.pick(items, options) ?? Promise.resolve(undefined),
       input: (options) => palette?.input(options) ?? Promise.resolve(undefined),
@@ -150,9 +164,14 @@ void app.whenReady().then(async () => {
       nativeDialogs = native;
       return clients.dialogs;
     },
+    scopeShell: (native) => {
+      nativeShell = native;
+      return clients.shell;
+    },
     asLocalUser,
   });
   const windowDialogs = nativeDialogs!;
+  const macShell = nativeShell!;
 
   const wrangler = createApp(host);
 
@@ -177,7 +196,7 @@ void app.whenReady().then(async () => {
   });
   // The window is a client for the app's whole life, open or not: the menu and
   // tray act as it, native dialogs need no window, and navigating to it opens it.
-  host.subscribe(clients.register(windowClientChannel(window, windowDialogs)));
+  host.subscribe(clients.register(windowClientChannel(window, windowDialogs, macShell)));
   wrangler.attachSurface(clients.surface);
 
   // `showQuickPick` and `showInputBox`, which Electron has neither of: renaming
@@ -403,7 +422,7 @@ void app.whenReady().then(async () => {
   // Home-network access (#136) rides on it: https on the Mac's private
   // addresses, only while `web.lan.enabled`, with the local CA in web-tls/.
   // The same service the core daemon runs (`src/app/webWorkbench.ts`, #131).
-  web = startWebWorkbench({ app: wrangler, host, ui, clients, log, webviewDir: path.join(APP_ROOT, 'dist', 'webview') });
+  web = startWebWorkbench({ app: wrangler, host, ui, clients, log, hostShell: macShell, webviewDir: path.join(APP_ROOT, 'dist', 'webview') });
   host.subscribe(web.onDidChangeLanStatus(() => webStatusChanged.fire()));
   // Addresses change across sleep (a different network, a new DHCP lease).
   powerMonitor.on('resume', () => web?.refresh());

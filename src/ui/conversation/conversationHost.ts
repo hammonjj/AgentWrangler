@@ -28,7 +28,7 @@ import type { Disposable } from '../../core/events';
 import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../../shared/orchestration/taskView';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
-import type { SessionActions } from '../actions';
+import type { PermissionDecisionOutcome, SessionActions } from '../actions';
 import { sessionRef, type AccessRequest, type BoundAccess } from '../../core/access';
 import { runInRequest } from '../../core/requestScope';
 import type { PaneChannel } from '../paneChannel';
@@ -57,6 +57,13 @@ export interface ConversationHostUi {
    * simply report it.
    */
   offerDictationSetup(err: DictationSetupError): Promise<void>;
+  /**
+   * Whether a path named by a *remote* browser (a paired device, never the
+   * Electron window) may be read as a host path: only a staged upload (#139).
+   * Absent: none may. A remote client's paths are its own filesystem's, not
+   * the host's, so they are refused before anything is `stat`ed or read.
+   */
+  allowRemotePath?(file: string): boolean;
 }
 
 /**
@@ -538,21 +545,26 @@ export class ConversationHost {
       case 'interrupt':
         await source?.interrupt?.();
         return;
+      // A live session's asks are answered through `SessionActions`, never
+      // straight at its handle: the table row, Discord and every other client's
+      // card answer the same ask, and the action is where "already answered" is
+      // decided and told to the client that pressed (#132). A transcript's card
+      // goes through it too, inside `TranscriptSource`.
       case 'decide': {
+        if (source?.kind === 'runner') {
+          if (key) this.cannotAnswer(await this.actions.decidePermission(key, m.decision, { expectedRequestId: m.requestId }));
+          return;
+        }
         const sent = await source?.decide?.(m.requestId, m.decision, m.message);
         if (sent === false) this.tooLate();
         return;
       }
-      case 'answer': {
-        const sent = await source?.answer?.(m.requestId, m.answers);
-        if (sent === false) this.tooLate();
+      case 'answer':
+        if (key) this.cannotAnswer(await this.actions.answerQuestion(key, m.requestId, m.answers));
         return;
-      }
-      case 'plan': {
-        const sent = await source?.decidePlan?.(m.requestId, m.decision === 'approve', m.feedback);
-        if (sent === false) this.tooLate();
+      case 'plan':
+        if (key) this.cannotAnswer(await this.actions.decidePlan(key, m.requestId, m.decision === 'approve', m.feedback));
         return;
-      }
       case 'setPermissionMode':
         await source?.setPermissionMode?.(m.mode);
         return;
@@ -701,8 +713,14 @@ export class ConversationHost {
       wanted.length = MAX_DROPPED_PATHS;
     }
 
+    // A paired device is remote: what it names is on its machine, not here.
+    const remote = this.access.context.deviceId !== undefined;
     for (const file of wanted) {
       const name = path.basename(file);
+      if (remote && !(path.isAbsolute(file) && this.ui.allowRemotePath?.(file))) {
+        notes.push(`Could not use ${name}: it is not on the host. Attach it with the paperclip to upload it.`);
+        continue;
+      }
       let stat: Awaited<ReturnType<typeof fs.stat>>;
       try {
         stat = await fs.stat(file);
@@ -735,6 +753,11 @@ export class ConversationHost {
 
   private tooLate(): void {
     this.ui.dialogs.flash('Agent Wrangler: that prompt has already been answered.', 4000);
+  }
+
+  /** `SessionActions` has already said "already answered"; only a refusal it does not report is left to say. */
+  private cannotAnswer(outcome: PermissionDecisionOutcome): void {
+    if (outcome === 'unsupported') this.ui.dialogs.flash('Agent Wrangler: that prompt cannot be answered from here.', 4000);
   }
 
   /**

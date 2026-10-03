@@ -21,6 +21,7 @@ import { ClientRegistry } from '../core/clients';
 import type { ControlWebLinkResult } from '../core/control/protocol';
 import type { Disposable } from '../core/events';
 import { createDefaultClientBroker } from '../node/clientBroker';
+import { createMacShell } from '../node/macShell';
 import type { NodeHost } from '../node/nodeHost';
 
 export interface DaemonClientsOptions {
@@ -43,10 +44,13 @@ export function startDaemonClients(opts: DaemonClientsOptions): DaemonClients {
   const { app, host, log } = opts;
   const registry = new ClientRegistry({ log });
   const local = createDefaultClientBroker({ log });
-  host.useBroker({ ...local, dialogs: registry.dialogs });
+  // Dialogs and the shell go to the client that asked (#126, #140). The Mac's
+  // own shell is only for a loopback browser's "Open on this Mac".
+  const macShell = createMacShell(log);
+  host.useBroker({ ...local, dialogs: registry.dialogs, shell: registry.shell });
   app.attachSurface(registry.surface);
   const web = opts.webviewDir
-    ? startWebWorkbench({ app, host, ui: workbenchUi(host), clients: registry, log, webviewDir: opts.webviewDir })
+    ? startWebWorkbench({ app, host, ui: workbenchUi(host), clients: registry, log, hostShell: macShell, webviewDir: opts.webviewDir })
     : undefined;
   if (!web) log('web: no workbench assets given; the browser workbench is off');
   return {

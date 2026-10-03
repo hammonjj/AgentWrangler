@@ -17,8 +17,8 @@
  *    `<host>.local` or a bound address on the LAN, with the listener's port. A
  *    page that rebinds its own DNS name to us still sends its own name.
  * 2. Anything but GET/HEAD, and every WebSocket upgrade, must carry an
- *    `Origin` equal to this server (`https://…` on the LAN), or **403**. No
- *    endpoint takes a POST yet, so one that passes is 405.
+ *    `Origin` equal to this server (`https://…` on the LAN), or **403**. The
+ *    only POST is `/upload` (#139, `files.ts`); any other that passes is 405.
  * 3. `/login?code=…` exchanges a single-use code for a device cookie of the
  *    listener's scope: from `aw web open` on loopback, from pairing (#137) on
  *    the LAN. Everything else needs that cookie, or **401**.
@@ -39,6 +39,8 @@ import type { Disposable } from '../events';
 import { ownerContext, type AccessGate, type RequestContext } from '../access';
 import { AssetManifest } from './assets';
 import { DEVICE_TTL_MS, WEB_DEVICES_FILE, WebDeviceStore, summarizeUserAgent, type DeviceScope, type WebDevice } from './devices';
+import type { WebFileRoutes } from './files';
+import { DIRS_PATH, FILES_PATH, UPLOAD_PATH } from '../../shared/files';
 import { LoginCodes } from './loginLinks';
 import { caMobileconfig, MOBILECONFIG_CONTENT_TYPE } from './mobileconfig';
 import { isLoopbackHost, readCookie } from './wsFrames';
@@ -123,7 +125,27 @@ const DEFLATE = {
   clientNoContextTakeover: false,
 } as const;
 
+/** What a route is handed: a request from a signed-in device, on a listener of `scope`. */
+export interface WebRouteContext {
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  url: URL;
+  scope: DeviceScope;
+  deviceId: string;
+}
+
+/**
+ * A route another module adds (#140's file view; downloads and uploads).
+ * Reached only after the host, origin and device checks, GET and HEAD only.
+ */
+export interface WebRoute {
+  match(pathname: string): boolean;
+  handle(ctx: WebRouteContext): Promise<void> | void;
+}
+
 export interface WebServerOptions {
+  /** Routes beyond the page, assets and login (#140). First match wins. */
+  routes?: WebRoute[];
   /** 0 picks a free port (tests). */
   port: number;
   /** `dist/webview`: the only directory served. */
@@ -146,6 +168,12 @@ export interface WebServerOptions {
    * certificate is in use). Absent: those routes are 404.
    */
   caCertificate?: () => Promise<string | undefined>;
+  /**
+   * Upload, download and the folder browser (#139; `WebFiles`). Absent: those
+   * routes do not exist. They sit behind the same Host, Origin and device
+   * cookie checks as everything else here.
+   */
+  files?: WebFileRoutes;
   now?: () => number;
 }
 
@@ -281,6 +309,16 @@ export class WebServer implements Disposable {
         res.writeHead(403, SECURITY_HEADERS).end();
         return;
       }
+      // The one POST: a file for the host (#139), from a signed-in device.
+      if (req.method === 'POST' && this.opts.files && req.url?.split('?')[0] === UPLOAD_PATH) {
+        const device = this.devices.verify(readCookie(req.headers.cookie, cookieName(listener.scope)), listener.scope);
+        if (!device) {
+          text(res, 401, 'Not signed in.');
+          return;
+        }
+        this.routed(res, this.opts.files.upload(ownerContext('browser', { deviceId: device.id }), req, res));
+        return;
+      }
       res.writeHead(405, { ...SECURITY_HEADERS, allow: 'GET, HEAD' }).end();
       return;
     }
@@ -316,12 +354,43 @@ export class WebServer implements Disposable {
       this.page(listener, req, res, cookie);
       return;
     }
+    // Files for a remote browser (#139): downloads from an allowlist, and the folder browser.
+    if (this.opts.files && (url.pathname === FILES_PATH || url.pathname === DIRS_PATH)) {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { ...SECURITY_HEADERS, allow: 'GET' }).end();
+        return;
+      }
+      const ctx = ownerContext('browser', { deviceId: device.id });
+      this.routed(res, url.pathname === FILES_PATH ? this.opts.files.download(ctx, req, res, url) : this.opts.files.dirs(ctx, req, res, url));
+      return;
+    }
+    // Routes other modules add (#140): reached only by a signed-in device.
+    const route = (this.opts.routes ?? []).find((r) => r.match(url.pathname));
+    if (route) {
+      void Promise.resolve()
+        .then(() => route.handle({ req, res, url, scope: listener.scope, deviceId: device.id }))
+        .catch((err) => {
+          this.opts.log(`web: route ${url.pathname} failed: ${String(err)}`);
+          if (!res.headersSent) text(res, 500, 'Something went wrong.');
+          else res.destroy();
+        });
+      return;
+    }
     // The CA, for a device to install, from the Mac only (#136).
     if (listener.scope === 'loopback' && (url.pathname === '/ca.pem' || url.pathname === '/ca.mobileconfig')) {
       void this.caDownload(url.pathname, res);
       return;
     }
     this.asset(url.pathname, res);
+  }
+
+  /** An async route that fails is a 500, never an unhandled rejection or a hung request. */
+  private routed(res: http.ServerResponse, done: Promise<void>): void {
+    done.catch((err: unknown) => {
+      this.opts.log(`web: ${String(err)}`);
+      if (!res.headersSent) text(res, 500, 'Something went wrong.');
+      else res.destroy();
+    });
   }
 
   private login(listener: Listener, req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
@@ -455,7 +524,7 @@ export class WebServer implements Disposable {
     this.wss.handleUpgrade(req, socket, head, (ws) => {
       listener.sockets.add(ws);
       ws.on('close', () => listener.sockets.delete(ws));
-      this.opts.onClient(ws, ownerContext('browser', { deviceId: device.id }));
+      this.opts.onClient(ws, ownerContext('browser', { deviceId: device.id, deviceScope: listener.scope }));
     });
   }
 

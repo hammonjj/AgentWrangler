@@ -21,6 +21,12 @@
  * the same provider code in both), so the reconciler sees the same ask and
  * does nothing. What only the app could see (a Codex question) is closed when
  * it goes, and posted again when it comes back.
+ *
+ * Only the remote daemon has two feeds, and it runs only while the Electron
+ * app runs the core. The core daemon follows one list, its own, with no
+ * switch (`../inProcess.ts`, #138). The switch stays for the Electron-core
+ * mode and is removed with Electron (#142), together with the daemon, its
+ * socket and `LocalFeed`.
  */
 import { Emitter, type Disposable } from '../../core/events';
 import type { SessionDTO } from '../../shared/model';
