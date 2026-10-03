@@ -126,7 +126,7 @@ otherwise a daemon restart ends conversations. See slice 1.
   (`sessionHostRuntime.ts`). The clone keeps working with `node` in place of
   `ELECTRON_RUN_AS_NODE`.
 - Node single-executable applications are the alternative. They complicate the esbuild output
-  and the signing, for no gain here. This is decision D1.
+  and the signing, for no gain here. Decided as D1 (§12).
 
 **Lifecycle**
 
@@ -196,8 +196,8 @@ for a remote client.
 | `shell.revealInFileManager` | Finder | C | Loopback: "Show in Finder" as today. Remote: copy the host path, or download the file. |
 | `shell.runInTerminal` (Resume, Release) | Terminal.app via AppleScript | C | Loopback: as today. Remote: show and copy `claude --resume <id>` (`resumeCommand` already splits it out). A browser terminal (node-pty + xterm.js) is out of scope. |
 | `clipboard.writeText` | Electron clipboard | B | `navigator.clipboard` in the browser. It needs a secure context, which is why the LAN requires TLS (§8). |
-| `notify` | Electron `Notification` | B | The Web Notifications API in open tabs (secure context). Discord when away. With no tab open, `osascript display notification` on the host as a fallback (decision D3). |
-| Tray / menu bar | Electron `Tray` | B | Dropped. The tab title and favicon carry the attention count. Decision D4 covers a native helper. |
+| `notify` | Electron `Notification` | B | The Web Notifications API in open tabs (secure context). Discord when away. With no tab open, `osascript display notification` on the host as a fallback (D3). |
+| Tray / menu bar | Electron `Tray` | B | Dropped. The tab title and favicon carry the attention count (D4). A native helper only if it is missed. |
 | Dictation | ffmpeg + whisper on the **host microphone** | C | Record in the browser (`MediaRecorder`, secure context), upload the audio, transcribe on the daemon with the same whisper. For a loopback client, recording on the host may stay as an option. |
 | File drop / attach | Dropped OS paths read by the host | C | **Upload** over HTTP POST to a per-conversation staging directory on the host; the message references the host path. Images stay inline as today. Paths from a client are never treated as host paths. |
 | Image paste | Inline base64 | B | Unchanged. |
@@ -263,7 +263,7 @@ action.
 |---|---|
 | Default listener | `127.0.0.1` only. LAN listening is a Preferences opt-in, **off by default**, and shows the addresses it binds. |
 | Loopback auth | Still required, because other local users and any web page can reach loopback. `aw web open` (and the app bundle when opened) mints a single-use, short-lived login link, which becomes the device credential cookie. This replaces the prototype's static token. |
-| LAN transport | **TLS required.** Plain http on a LAN IP is not a secure context, which breaks clipboard, notifications and microphone, and it exposes the credential. Recommended: the daemon creates a local CA and a server certificate (SANs: `<host>.local` and current LAN IPs); each device trusts the CA once (an iOS/macOS configuration profile). A user-supplied certificate and key is the alternative. Decision D2. |
+| LAN transport | **TLS required.** Plain http on a LAN IP is not a secure context, which breaks clipboard, notifications and microphone, and it exposes the credential. Decided (D2): the daemon creates a local CA and a server certificate (SANs: `<host>.local` and current LAN IPs); each device trusts the CA once (an iOS/macOS configuration profile). A user-supplied certificate and key is supported as an alternative. |
 | Pairing | From an already-authenticated client (the loopback browser) or `aw web pair`: a QR code and short code, valid 5 minutes and single use. The device exchanges it for a 256-bit device credential. The daemon stores only a hash (`devices.json`, 0600), with name, created and last-seen. |
 | Cookies | `HttpOnly; Secure; SameSite=Strict; Path=/`. 30-day sliding expiry. The loopback cookie is separate from LAN ones. |
 | Revocation | A device list in Preferences and `aw web devices [revoke <id>]`. Revoking closes that device's open connections immediately. |
@@ -361,10 +361,13 @@ authorize(ctx: RequestContext, action: ActionName, resource?: ResourceRef): 'all
 Effort uses the board's **Effort** field (XS < S < M < L < XL; roughly hours, a day, a few days,
 a week, more). Blockers are real dependencies. Order beyond that is preference.
 
-Each slice, and each decision D1–D4, is written up as a GitHub-ready story in
+Each slice is written up as a GitHub-ready story in
 `browser-workbench-stories.json`. Every entry has a purpose, scope, acceptance criteria, an
 effort with its rationale, and its blockers, keyed by slice. They are filed as sub-issues of
 the implementation epic, with native blocked-by links.
+
+**Filed 2026-10-03:** epic #121, with slices 1–17 as #122–#138, 18a–18c as #139–#141, 19 as #142
+and 20 as #143.
 
 | # | Slice | Effort | Blocked by |
 |---|---|---|---|
@@ -375,29 +378,29 @@ the implementation epic, with native blocked-by links.
 | 5 | Connection-scoped prompts, toasts and navigation (replace app-wide `HostDialogs`/`WorkbenchSurface` for clients) | L | 2 |
 | 6 | Web server: assets, CSP header, hashed assets, loopback listener, login link and device cookie | M | 2 |
 | 7 | WebSocket API: `shell` channel, hello/version, reconnect without reload, `commandId` dedupe, `ready{key}`, backpressure, coalescing, deflate | L | 6 |
-| 8 | Package the daemon runtime: signed `.app` with pinned Node; hosts and remote daemon run from it | L | D1 |
+| 8 | Package the daemon runtime: signed `.app` with pinned Node; hosts and remote daemon run from it | L | — |
 | 9 | Run the core in a LaunchAgent daemon: lifecycle, single instance, control socket, quit policy, power, sleep, `aw daemon` | L | 1, 4, 8 |
 | 10 | Coexistence: the Electron window loads the daemon's web UI | M | 7, 9 |
 | 11 | Multi-client convergence and approval resolution (tests plus fixes) | M | 5, 7 |
 | 12 | App shell: routes, in-page modal and toast hosts, focus management | L | 5, 7 |
 | 13 | Responsive mobile layouts for table, conversation and composer | L | 12 |
 | 14 | Preferences, Missions and Analytics as routes | M | 12 |
-| 15 | LAN opt-in listener with TLS | M | 6, D2 |
+| 15 | LAN opt-in listener with TLS | M | 6 |
 | 16 | Device pairing, device list, revocation and rate limits | L | 6, 15 |
 | 17 | Fold the Discord remote daemon into the core daemon | M | 3, 9 |
 | 18a | File upload/download and server-side folder browser | M | 7 |
 | 18b | Host-local actions vs remote alternatives: file/diff viewer, resume command, reveal | M | 7 |
-| 18c | Browser notifications and browser-recorded dictation | M | 7, D3 |
-| 19 | Retire Electron | M | 10, 11, 13, 14, 16, 17, 18a, 18b, 18c, D4 |
+| 18c | Browser notifications and browser-recorded dictation | M | 7 |
+| 19 | Retire Electron | M | 10, 11, 13, 14, 16, 17, 18a, 18b, 18c |
 | 20 | Docs: principles, README, CLAUDE.md, architecture, setup and troubleshooting | S | 19 |
 
-**Can start in parallel now:** 1, 2, 3, 6. Then 4, 5 and 7 as their single blockers land. The
+**Can start in parallel now:** 1, 2, 3, 6, 8. Then 4, 5 and 7 as their single blockers land. The
 UI track (12 → 13/14) and the remote-access track (15 → 16) run beside the daemon track
 (8 → 9 → 10).
 
-**Decisions that block slices** (James):
+**Decisions** (accepted by James 2026-10-03, as recommended; no slice waits on them now):
 
-| | Decision | Recommendation | Blocks |
+| | Decision | Decided | Shapes |
 |---|---|---|---|
 | D1 | Daemon runtime | Pinned Node inside a signed `.app` (not a SEA, not Homebrew Node) | 8 |
 | D2 | LAN TLS | Daemon-generated local CA plus a per-device trust profile; a user-supplied certificate as an option | 15 |
