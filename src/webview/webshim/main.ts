@@ -38,6 +38,7 @@ import {
   type ShellPrompt,
   type ShellToHost,
 } from '../../shared/shellProtocol';
+import { openUrlHere, showHostView } from '../common/hostView';
 
 interface Bridge {
   postMessage(message: unknown): void;
@@ -229,6 +230,14 @@ function onShell(body: HostToShell | undefined): void {
       return;
     case 'promptCancel':
       // A native dialog cannot be closed from script; its answer is ignored.
+      return;
+    // Former host-local actions, answered in this browser (#140).
+    case 'openUrl':
+      openUrlHere(body.url);
+      return;
+    case 'showFile':
+    case 'showCommand':
+      showHostView(body, { sendShell, toast });
       return;
   }
 }
