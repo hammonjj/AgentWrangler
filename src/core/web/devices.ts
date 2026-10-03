@@ -19,6 +19,14 @@ export const DEVICE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LAST_SEEN_WRITE_MS = 60 * 60 * 1000;
 export const WEB_DEVICES_FILE = 'web-devices.json';
 
+/**
+ * Where a credential works (#136). A loopback credential (from `aw web open`)
+ * is never accepted on the LAN listener and a LAN one (pairing, #137) never on
+ * loopback: each listener verifies against its own scope only, and they use
+ * different cookies as well.
+ */
+export type DeviceScope = 'loopback' | 'lan';
+
 export interface WebDevice {
   id: string;
   /** A summary of the user agent at login ("Chrome on macOS"). For a device list, not identity. */
@@ -26,8 +34,8 @@ export interface WebDevice {
   createdAt: number;
   lastSeen: number;
   principal: string;
-  /** Where the credential works. Loopback only today; LAN devices will be their own scope. */
-  scope: 'loopback';
+  /** Where the credential works. A file from before #136 has none, which reads as loopback. */
+  scope: DeviceScope;
 }
 
 interface StoredDevice extends WebDevice {
@@ -56,7 +64,7 @@ export class WebDeviceStore {
   }
 
   /** Issue a new device and its credential. The credential is returned once and not kept. */
-  issue(name: string, id: string = crypto.randomUUID()): { device: WebDevice; credential: string } {
+  issue(name: string, id: string = crypto.randomUUID(), scope: DeviceScope = 'loopback'): { device: WebDevice; credential: string } {
     const credential = crypto.randomBytes(32).toString('base64url');
     const at = this.now();
     const stored: StoredDevice = {
@@ -65,7 +73,7 @@ export class WebDeviceStore {
       createdAt: at,
       lastSeen: at,
       principal: LOCAL_OWNER.id,
-      scope: 'loopback',
+      scope,
       credentialHash: hashCredential(credential).toString('hex'),
     };
     this.devices = [...this.live(), stored];
@@ -74,11 +82,12 @@ export class WebDeviceStore {
   }
 
   /**
-   * The device a credential belongs to, if it is current, and mark it seen.
-   * Every stored hash is compared, in constant time each, whether or not an
-   * earlier one matched.
+   * The device a credential belongs to, if it is current and of `scope`, and
+   * mark it seen. Every stored hash is compared, in constant time each,
+   * whether or not an earlier one matched. A credential of the other scope is
+   * no credential here.
    */
-  verify(credential: string | undefined): WebDevice | undefined {
+  verify(credential: string | undefined, scope: DeviceScope): WebDevice | undefined {
     if (typeof credential !== 'string' || credential.length === 0 || credential.length > 128) return undefined;
     const given = hashCredential(credential);
     const at = this.now();
@@ -87,7 +96,7 @@ export class WebDeviceStore {
       const stored = Buffer.from(d.credentialHash, 'hex');
       if (stored.length === given.length && crypto.timingSafeEqual(stored, given) && !match) match = d;
     }
-    if (!match || at - match.lastSeen > DEVICE_TTL_MS) return undefined;
+    if (!match || match.scope !== scope || at - match.lastSeen > DEVICE_TTL_MS) return undefined;
     if (at - match.lastSeen > LAST_SEEN_WRITE_MS) {
       match.lastSeen = at;
       this.devices = this.live();
@@ -109,10 +118,13 @@ export class WebDeviceStore {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<DevicesFile>;
       if (!Array.isArray(raw.devices)) return [];
-      return raw.devices.filter(
-        (d): d is StoredDevice =>
-          !!d && typeof d.id === 'string' && typeof d.credentialHash === 'string' && /^[0-9a-f]{64}$/.test(d.credentialHash) && typeof d.lastSeen === 'number',
-      );
+      return raw.devices
+        .filter(
+          (d): d is StoredDevice =>
+            !!d && typeof d.id === 'string' && typeof d.credentialHash === 'string' && /^[0-9a-f]{64}$/.test(d.credentialHash) && typeof d.lastSeen === 'number',
+        )
+        // Anything but an explicit 'lan' is loopback, the narrower of the two.
+        .map((d): StoredDevice => ({ ...d, scope: d.scope === 'lan' ? 'lan' : 'loopback' }));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') this.log(`web: could not read ${path.basename(this.file)}; starting with no devices`);
       return [];

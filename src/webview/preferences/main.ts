@@ -13,7 +13,7 @@
 
 import './preferences.css';
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
-import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId } from '../../shared/preferences';
+import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId, SettingStatus } from '../../shared/preferences';
 import { settingGroups, SETTINGS, type SettingSpec } from '../../shared/settings';
 import { ORCHESTRATION_GROUP, onRoutingResult, renderOrchestration, setLocalEndpointResult } from './orchestration';
 
@@ -45,6 +45,8 @@ let values: Record<string, string | boolean | number> = {};
 /** The controls, so an external change can be reflected without a re-render. */
 const controls = new Map<string, HTMLInputElement | HTMLSelectElement>();
 const rows = new Map<string, HTMLElement>();
+/** The last status the host sent, by setting key (#136): read-only lines under a row. */
+let statuses: Record<string, SettingStatus> = {};
 /** The last catalog the host sent, and where it is drawn. */
 let orchestration: OrchestrationPrefsView | undefined;
 let orchestrationBody: HTMLElement | undefined;
@@ -248,8 +250,24 @@ function renderRow(spec: SettingSpec): HTMLElement {
     renderEnumHint(spec, control as HTMLSelectElement);
   }
 
+  const status = document.createElement('pre');
+  status.className = 'pf-status';
+  status.setAttribute('aria-live', 'polite');
+  row.appendChild(status);
+  applyStatus(spec.key);
+
   markRow(spec);
   return row;
+}
+
+/** What a setting is doing now, under its row; hidden when it has nothing to say. */
+function applyStatus(key: string): void {
+  const el = rows.get(key)?.querySelector<HTMLElement>('.pf-status');
+  if (!el) return;
+  const status = statuses[key];
+  el.textContent = status ? status.lines.join('\n') : '';
+  el.classList.toggle('bad', status ? !status.ok : false);
+  el.hidden = !status || status.lines.length === 0;
 }
 
 /**
@@ -544,6 +562,12 @@ window.addEventListener('message', (event: MessageEvent) => {
   if (message.type === 'actionResult') {
     setActionsBusy(false);
     showActionResult(message.ok, message.lines);
+    return;
+  }
+  if (message.type === 'status') {
+    const before = Object.keys(statuses);
+    statuses = message.status ?? {};
+    for (const key of new Set([...before, ...Object.keys(statuses)])) applyStatus(key);
     return;
   }
   if (message.type === 'localEndpointResult') {

@@ -146,12 +146,23 @@ export function isSettingActionId(value: unknown): value is SettingActionId {
   return typeof value === 'string' && (SETTING_ACTION_IDS as string[]).includes(value);
 }
 
+/**
+ * What a setting is doing right now, shown read-only under it: the addresses
+ * `web.lan.enabled` is bound to, for one (#136). Not a value and never written.
+ */
+export interface SettingStatus {
+  ok: boolean;
+  lines: string[];
+}
+
 export type HostToPreferences =
   | {
       type: 'values';
       /** Every setting the app offers, keyed without the `agentWrangler.` prefix. */
       values: Record<string, string | boolean | number>;
     }
+  /** Every setting's current status, by key. A key that is absent has none. */
+  | { type: 'status'; status: Record<string, SettingStatus> }
   /**
    * What an action did, shown in the window that asked rather than in a dialog
    * over it. A check with six separate results is a thing to read next to the

@@ -357,12 +357,12 @@ describe('login codes and devices', () => {
     const store = new WebDeviceStore(file, () => now);
     const { device, credential } = store.issue('Safari on iOS');
     now += DEVICE_TTL_MS - 1000;
-    expect(store.verify(credential)?.id).toBe(device.id);
+    expect(store.verify(credential, 'loopback')?.id).toBe(device.id);
     now += DEVICE_TTL_MS - 1000;
-    expect(store.verify(credential)?.id).toBe(device.id);
+    expect(store.verify(credential, 'loopback')?.id).toBe(device.id);
     // And it survives a restart.
-    expect(new WebDeviceStore(file, () => now).verify(credential)?.id).toBe(device.id);
-    expect(store.verify('x'.repeat(43))).toBeUndefined();
+    expect(new WebDeviceStore(file, () => now).verify(credential, 'loopback')?.id).toBe(device.id);
+    expect(store.verify('x'.repeat(43), 'loopback')).toBeUndefined();
   });
 
   it('summarises a user agent without keeping it', () => {

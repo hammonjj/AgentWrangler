@@ -394,6 +394,48 @@ export const SETTINGS: SettingSpec[] = [
     description:
       'The port the browser workbench listens on, on 127.0.0.1. Takes effect at once; open tabs reconnect to the new port only after you open the new address.',
   },
+  // Off by default (plan §8, #136): the only setting that makes Agent
+  // Wrangler listen beyond this Mac. Not nested under web.enabled because
+  // Preferences nests one level only; it does nothing while that is off.
+  {
+    key: 'web.lan.enabled',
+    label: 'Allow devices on my home network',
+    group: 'Browser',
+    type: 'boolean',
+    default: false,
+    description:
+      'Also serve the workbench over HTTPS on this Mac’s home-network addresses, so a phone or another computer on the same network can open it. Needs "Open in a browser" on. Each device must trust Agent Wrangler’s local certificate authority once (download it from a signed-in browser on this Mac at /ca.mobileconfig) and be paired before it can sign in. Only for a network you trust; never forward this port from your router. Off, nothing listens beyond this Mac.',
+  },
+  {
+    key: 'web.lan.port',
+    dependsOn: 'web.lan.enabled',
+    label: 'HTTPS port',
+    group: 'Browser',
+    type: 'number',
+    default: 7392,
+    minimum: 1024,
+    maximum: 65535,
+    description: 'The port for home-network access. The macOS firewall, if on, must allow Agent Wrangler to accept incoming connections.',
+  },
+  {
+    key: 'web.lan.certFile',
+    dependsOn: 'web.lan.enabled',
+    label: 'Your own certificate (optional)',
+    group: 'Browser',
+    type: 'string',
+    default: '',
+    description:
+      'Path to a PEM certificate (with its chain) to use instead of the one Agent Wrangler’s local CA issues. Used only when the key below is set too.',
+  },
+  {
+    key: 'web.lan.keyFile',
+    dependsOn: 'web.lan.enabled',
+    label: 'Your own private key (optional)',
+    group: 'Browser',
+    type: 'string',
+    default: '',
+    description: 'Path to the unencrypted PEM private key for the certificate above.',
+  },
 
   // ---- Experimental ----
   // Off by default and grouped apart on purpose: everything here can reach

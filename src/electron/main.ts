@@ -45,6 +45,9 @@ import { MenuBar, menuBarSessions } from './tray';
 import { WINDOW_CONNECTION_ID, WINDOW_CONTEXT, WorkbenchWindow, windowClientChannel } from './workbenchWindow';
 import { createBrowserClients, type BrowserClients } from './webPrototype';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
+import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
+import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
+import { Emitter } from '../core/events';
 import { renderBrowserWorkbenchHtml } from '../ui/html';
 import { ClientRegistry } from '../core/clients';
 import { runInRequest } from '../core/requestScope';
@@ -198,6 +201,10 @@ void app.whenReady().then(() => {
     parentWindow: () => window?.browserWindow,
   });
 
+  // LAN access's status for Preferences (#136); `syncWeb` below keeps it current.
+  let lanStatus: LanStatus = { state: 'off', lines: ['Off. Nothing listens beyond this Mac.'] };
+  const webStatusChanged = new Emitter<void>();
+
   // ⌘, — the app's answer to VSCode's settings UI. It renders
   // `src/shared/settings.ts`, which is also what `package.json`'s
   // `contributes.configuration` is tested against, so both front ends offer
@@ -209,6 +216,11 @@ void app.whenReady().then(() => {
     parentWindow: () => window?.browserWindow,
     runAction: (id) => asLocalUser(() => wrangler.runSettingAction(id)),
     onDidChangeOpen: () => syncDock(),
+    // The addresses LAN access is bound to (#136), under its switch.
+    status: {
+      read: () => ({ 'web.lan.enabled': { ok: lanStatus.state !== 'error', lines: lanStatus.lines } }),
+      onDidChange: webStatusChanged.event,
+    },
     // Orchestration → tier map (#29): the catalog, and each source's health
     // from the same usage reads the dashboard cards use.
     orchestration: {
@@ -371,7 +383,7 @@ void app.whenReady().then(() => {
   // failure to serve it is logged and the app carries on.
   const runDirs = { runDir: path.join(userDataDir, 'run'), fallbackRunDir: path.join(os.homedir(), '.agentwrangler', 'run') };
   // The browser workbench (#127), started below; `aw web open` asks it for a link.
-  let web: { server: WebServer; clients: BrowserClients; port: number; listening: boolean } | undefined;
+  let web: { server: WebServer; clients: BrowserClients; lan: LanAccess; port: number; listening: boolean } | undefined;
   let control: ControlServer | undefined;
   try {
     const socketPath = controlSocketPath(runDirs);
@@ -398,10 +410,31 @@ void app.whenReady().then(() => {
 
   // The workbench in a browser on this Mac (#127): 127.0.0.1 only, sign-in by
   // `aw web open`. On by default; follows `web.enabled` and `web.port` live.
+  // Home-network access (#136) rides on it: https on the Mac's private
+  // addresses, only while `web.lan.enabled`, with the local CA in web-tls/.
+  const certs = new LocalCertificates({ dir: path.join(host.dataDir, WEB_TLS_DIR), log });
+  let hostName: Promise<string> | undefined;
+  const macName = () => (hostName ??= localHostName());
+  const lanSettings = () => ({
+    enabled: host.settings.get<boolean>('web.lan.enabled', false) === true,
+    port: Number(host.settings.get<number>('web.lan.port', LAN_DEFAULT_PORT)),
+    certFile: String(host.settings.get<string>('web.lan.certFile', '') ?? '').trim(),
+    keyFile: String(host.settings.get<string>('web.lan.keyFile', '') ?? '').trim(),
+  });
+  const setLanStatus = (status: LanStatus) => {
+    lanStatus = status;
+    webStatusChanged.fire();
+  };
   const stopWeb = () => {
+    web?.lan.dispose();
     web?.server.dispose();
     web?.clients.dispose();
     web = undefined;
+    setLanStatus(
+      lanSettings().enabled
+        ? { state: 'error', lines: ['Not listening: turn on "Open in a browser" above first.'] }
+        : { state: 'off', lines: ['Off. Nothing listens beyond this Mac.'] },
+    );
   };
   const syncWeb = () => {
     const enabled = host.settings.get<boolean>('web.enabled', true);
@@ -412,7 +445,10 @@ void app.whenReady().then(() => {
       stopWeb();
       return;
     }
-    if (web && web.port === port) return;
+    if (web && web.port === port) {
+      void web.lan.refresh();
+      return;
+    }
     stopWeb();
     // Each browser registers with the app's client registry, so what it causes comes back to it (#126).
     const browsers = createBrowserClients({ app: wrangler, host, ui, clients, log });
@@ -424,13 +460,22 @@ void app.whenReady().then(() => {
       log,
       page: renderBrowserWorkbenchHtml,
       onClient: (socket, context) => browsers.attach(socket, context),
+      // `/ca.mobileconfig` on loopback. Made on first request, so a device can
+      // be set up before LAN access is switched on. None with the user's own cert.
+      caCertificate: async () => {
+        const s = lanSettings();
+        if (s.certFile && s.keyFile) return undefined;
+        return certs.caCertificate(await macName());
+      },
     });
-    const entry = { server, clients: browsers, port, listening: false };
+    const lan = new LanAccess({ server, certs, settings: lanSettings, log, hostName: macName, onStatus: setLanStatus });
+    const entry = { server, clients: browsers, lan, port, listening: false };
     web = entry;
     server.listen().then(
       (bound) => {
         entry.listening = true;
         log(`web: http://127.0.0.1:${bound}/ (sign in with aw web open)`);
+        if (web === entry) void lan.refresh();
       },
       (err) => {
         log(`web: not serving on port ${port}: ${String(err)}`);
@@ -440,8 +485,10 @@ void app.whenReady().then(() => {
   };
   syncWeb();
   host.subscribe(host.settings.onDidChange((affects) => {
-    if (affects('web.enabled') || affects('web.port')) syncWeb();
+    if (['web.enabled', 'web.port', 'web.lan.enabled', 'web.lan.port', 'web.lan.certFile', 'web.lan.keyFile'].some(affects)) syncWeb();
   }));
+  // Addresses change across sleep (a different network, a new DHCP lease).
+  powerMonitor.on('resume', () => void web?.lan.refresh());
 
   const teardown = () => {
     stopWeb();

@@ -20,7 +20,7 @@ import * as path from 'node:path';
 import { BrowserWindow, ipcMain, type IpcMainEvent } from 'electron';
 import type { Disposable } from '../core/events';
 import type { HostSettings } from '../host/hostServices';
-import { settingUpdate, type HostToPreferences, type PreferencesToHost } from '../shared/preferences';
+import { settingUpdate, type HostToPreferences, type PreferencesToHost, type SettingStatus } from '../shared/preferences';
 import { isSettingActionId, modelPolicyChange, routingPolicyUpdate, type OrchestrationPrefsView, type SettingActionId } from '../shared/preferences';
 import type { ModelPolicyChange } from '../shared/orchestration/catalog';
 import { localEndpointChange, type LocalEndpointChange } from '../shared/orchestration/localEndpoints';
@@ -42,6 +42,11 @@ export interface PreferencesWindowOptions {
   runAction?(id: SettingActionId): Promise<{ ok: boolean; lines: string[] }>;
   /** Told when the window is created and when it has closed, for the Dock icon. */
   onDidChangeOpen?(open: boolean): void;
+  /** Read-only status lines under settings (the LAN addresses, #136), and when they change. */
+  status?: {
+    read(): Record<string, SettingStatus>;
+    onDidChange(listener: () => void): Disposable;
+  };
   /** Orchestration → tier map. Absent: the section says there is nothing to show. */
   orchestration?: {
     view(): OrchestrationPrefsView;
@@ -76,6 +81,7 @@ export class PreferencesWindow implements Disposable {
     // The catalog changes when a CLI reports its models, when a usage read
     // lands, and when a tier is changed here: all of it belongs on screen.
     if (opts.orchestration) this.subs.push(opts.orchestration.onDidChange(() => this.pushOrchestration()));
+    if (opts.status) this.subs.push(opts.status.onDidChange(() => this.pushStatus()));
   }
 
   /** Open it, or bring the open one forward. */
@@ -146,6 +152,7 @@ export class PreferencesWindow implements Disposable {
     if (!message || typeof message !== 'object') return;
     if (message.type === 'ready') {
       this.push();
+      this.pushStatus();
       this.pushOrchestration();
       return;
     }
@@ -264,6 +271,11 @@ export class PreferencesWindow implements Disposable {
     for (const spec of SETTINGS) values[spec.key] = this.opts.settings.get(spec.key, spec.default);
     const message: HostToPreferences = { type: 'values', values };
     this.window.webContents.send(TO_WEBVIEW, message);
+  }
+
+  private pushStatus(): void {
+    if (!this.opts.status) return;
+    this.post({ type: 'status', status: this.opts.status.read() });
   }
 
   private pushOrchestration(): void {

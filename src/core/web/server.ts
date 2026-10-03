@@ -5,20 +5,31 @@
  * (`onClient`), so the window's main process today and the daemon later can
  * both run this unchanged. No Electron here.
  *
- * Every request, in order:
- * 1. `Host` must be this listener by a loopback name, or **421**. A page that
- *    rebinds its own DNS name to 127.0.0.1 still sends its own name.
- * 2. Anything but GET/HEAD, and every WebSocket upgrade, must carry an
- *    `Origin` equal to this server, or **403**. No endpoint takes a POST yet,
- *    so one that passes is 405.
- * 3. `/login?code=…` exchanges a single-use code from `aw web open` for a
- *    device cookie. Everything else needs that cookie, or **401**.
+ * It runs one or more listeners (#136), each with a scope:
+ * - **loopback**: plain http on 127.0.0.1, always (while `web.enabled`).
+ * - **lan**: https on each of the Mac's private IPv4 addresses, only while
+ *   `web.lan.enabled` (`setLan`, driven by `lan.ts`). Its credentials are
+ *   `scope: 'lan'` and live in their own cookie; a loopback credential is not
+ *   one here, and the other way round.
  *
- * Only `dist/webview` is served (`AssetManifest`); data files will come
- * through their own allowlist later (§6).
+ * Every request, in order:
+ * 1. `Host` must name this listener, or **421**: a loopback name on loopback,
+ *    `<host>.local` or a bound address on the LAN, with the listener's port. A
+ *    page that rebinds its own DNS name to us still sends its own name.
+ * 2. Anything but GET/HEAD, and every WebSocket upgrade, must carry an
+ *    `Origin` equal to this server (`https://…` on the LAN), or **403**. No
+ *    endpoint takes a POST yet, so one that passes is 405.
+ * 3. `/login?code=…` exchanges a single-use code for a device cookie of the
+ *    listener's scope: from `aw web open` on loopback, from pairing (#137) on
+ *    the LAN. Everything else needs that cookie, or **401**.
+ *
+ * Only `dist/webview` is served (`AssetManifest`), plus, on loopback, the
+ * local CA for a device to install (`/ca.pem`, `/ca.mobileconfig`); data files
+ * will come through their own allowlist later (§6).
  */
 import * as crypto from 'node:crypto';
 import * as http from 'node:http';
+import * as https from 'node:https';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
@@ -26,14 +37,51 @@ import type { TLSSocket } from 'node:tls';
 import type { Disposable } from '../events';
 import { ownerContext, type AccessGate, type RequestContext } from '../access';
 import { AssetManifest } from './assets';
-import { DEVICE_TTL_MS, WEB_DEVICES_FILE, WebDeviceStore, summarizeUserAgent, type WebDevice } from './devices';
+import { DEVICE_TTL_MS, WEB_DEVICES_FILE, WebDeviceStore, summarizeUserAgent, type DeviceScope, type WebDevice } from './devices';
 import { LoginCodes } from './loginLinks';
+import { caMobileconfig, MOBILECONFIG_CONTENT_TYPE } from './mobileconfig';
 import { acceptKey, isLoopbackHost, readCookie } from './wsFrames';
 
 export const WEB_DEFAULT_PORT = 7391;
-/** The loopback device cookie. A LAN one (later) gets its own name. */
+/** The loopback device cookie. */
 export const DEVICE_COOKIE = 'aw_device';
+/**
+ * The LAN device cookie (#136). `__Host-`: the browser only accepts it with
+ * `Secure`, `Path=/` and no `Domain`, so nothing on another name or over http
+ * can plant or widen it.
+ */
+export const LAN_DEVICE_COOKIE = '__Host-aw_lan_device';
 const COOKIE_MAX_AGE_S = Math.floor(DEVICE_TTL_MS / 1000);
+
+/** What the LAN listeners should be (#136). `lan.ts` works it out; the server only binds it. */
+export interface LanConfig {
+  /** Private IPv4 addresses to bind, one listener each. */
+  addresses: string[];
+  /** Every name a LAN request may use in `Host`: `<host>.local` and the addresses. */
+  names: string[];
+  /** 0 picks a free port per address (tests). */
+  port: number;
+  cert: string;
+  key: string;
+}
+
+/** One LAN listener, for Preferences. */
+export interface LanListenerStatus {
+  address: string;
+  port?: number;
+  error?: string;
+}
+
+interface Listener {
+  scope: DeviceScope;
+  server: http.Server | https.Server;
+  address: string;
+  /** The port actually bound, once listening. */
+  port?: number;
+  error?: string;
+  /** Upgraded WebSockets, which the http server no longer tracks: closing the listener ends them. */
+  sockets: Set<Duplex>;
+}
 
 const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   'cache-control': 'no-store',
@@ -68,64 +116,120 @@ export interface WebServerOptions {
    * id and owns the socket from here.
    */
   onClient: (socket: Duplex, context: RequestContext) => void;
+  /**
+   * The local CA certificate (PEM) for `/ca.pem` and `/ca.mobileconfig` on
+   * loopback (#136). `undefined`: there is none to offer (a user-supplied
+   * certificate is in use). Absent: those routes are 404.
+   */
+  caCertificate?: () => Promise<string | undefined>;
   now?: () => number;
 }
 
 export class WebServer implements Disposable {
-  private readonly server: http.Server;
+  private readonly loopback: Listener;
+  private lan: Listener[] = [];
+  private lanConfig: LanConfig | undefined;
   private readonly assets: AssetManifest;
   private readonly devices: WebDeviceStore;
-  private readonly codes: LoginCodes;
-  private readonly sockets = new Set<Duplex>();
-  private boundPort: number | undefined;
+  private readonly codes: Record<DeviceScope, LoginCodes>;
   private failedLogins = 0;
+  private disposed = false;
 
   constructor(private readonly opts: WebServerOptions) {
     const now = opts.now ?? (() => Date.now());
     this.assets = new AssetManifest(opts.webviewDir);
     this.devices = new WebDeviceStore(path.join(opts.dataDir, WEB_DEVICES_FILE), now, opts.log);
-    this.codes = new LoginCodes(now);
-    this.server = http.createServer((req, res) => this.request(req, res));
-    this.server.on('upgrade', (req: http.IncomingMessage, socket: Duplex) => this.upgrade(req, socket));
+    this.codes = { loopback: new LoginCodes(now), lan: new LoginCodes(now) };
+    this.loopback = { scope: 'loopback', address: '127.0.0.1', server: http.createServer(), sockets: new Set() };
+    this.wire(this.loopback);
   }
 
   /** Listen on 127.0.0.1. Resolves with the port; rejects if it cannot (in use). */
-  listen(): Promise<number> {
-    return new Promise((resolve, reject) => {
-      this.server.once('error', reject);
-      this.server.listen(this.opts.port, '127.0.0.1', () => {
-        this.server.off('error', reject);
-        this.server.on('error', (err) => this.opts.log(`web: ${String(err)}`));
-        const addr = this.server.address();
-        this.boundPort = typeof addr === 'object' && addr ? addr.port : this.opts.port;
-        resolve(this.boundPort);
-      });
-    });
+  async listen(): Promise<number> {
+    this.loopback.port = await bind(this.loopback.server, this.opts.port, '127.0.0.1', this.opts.log);
+    return this.loopback.port;
   }
 
   get port(): number | undefined {
-    return this.boundPort;
+    return this.loopback.port;
   }
 
-  /** A single-use login link, good for two minutes. For `aw web open`. */
-  loginLink(): { url: string; expiresAt: number } {
-    if (this.boundPort === undefined) throw new Error('the browser workbench is not listening');
-    const { code, expiresAt } = this.codes.mint();
-    return { url: `http://127.0.0.1:${this.boundPort}/login?code=${code}`, expiresAt };
+  /**
+   * Bring the LAN listeners in line with `config` (#136); `undefined` closes
+   * them all. Addresses that stay keep their listener and connections; a new
+   * certificate is swapped in without re-binding; a new port re-binds. An
+   * address that failed to bind is tried again on the next call.
+   */
+  async setLan(config: LanConfig | undefined): Promise<LanListenerStatus[]> {
+    if (this.disposed) return [];
+    const prev = this.lanConfig;
+    this.lanConfig = config;
+    const keep = (l: Listener): boolean =>
+      !!config && !l.error && l.port !== undefined && prev?.port === config.port && config.addresses.includes(l.address);
+    for (const l of this.lan) if (!keep(l)) closeListener(l);
+    this.lan = this.lan.filter(keep);
+    if (!config) return [];
+    if (prev && (prev.cert !== config.cert || prev.key !== config.key)) {
+      for (const l of this.lan) (l.server as https.Server).setSecureContext({ cert: config.cert, key: config.key });
+    }
+    const missing = config.addresses.filter((a) => !this.lan.some((l) => l.address === a));
+    await Promise.all(
+      missing.map(async (address) => {
+        const server = https.createServer({ cert: config.cert, key: config.key, minVersion: 'TLSv1.2' });
+        const l: Listener = { scope: 'lan', address, server, sockets: new Set() };
+        this.wire(l);
+        this.lan.push(l);
+        try {
+          l.port = await bind(server, config.port, address, this.opts.log);
+          // Disposed while binding: what was just opened goes too.
+          if (this.disposed) closeListener(l);
+        } catch (err) {
+          l.error = (err as NodeJS.ErrnoException).code ?? String(err);
+          closeListener(l);
+        }
+      }),
+    );
+    return this.lanStatus();
+  }
+
+  /** The LAN listeners, bound or not. Empty when LAN access is off. */
+  lanStatus(): LanListenerStatus[] {
+    return this.lan.map((l) => ({ address: l.address, ...(l.port !== undefined ? { port: l.port } : {}), ...(l.error ? { error: l.error } : {}) }));
+  }
+
+  /**
+   * A single-use login link, good for two minutes. Loopback: for `aw web
+   * open`. LAN: for pairing (#137), which is what will call it; it signs in a
+   * `scope: 'lan'` device on the LAN listener and nowhere else.
+   */
+  loginLink(scope: DeviceScope = 'loopback'): { url: string; expiresAt: number } {
+    if (scope === 'loopback') {
+      if (this.loopback.port === undefined) throw new Error('the browser workbench is not listening');
+      const { code, expiresAt } = this.codes.loopback.mint();
+      return { url: `http://127.0.0.1:${this.loopback.port}/login?code=${code}`, expiresAt };
+    }
+    const listener = this.lan.find((l) => l.port !== undefined && !l.error);
+    if (!listener || !this.lanConfig) throw new Error('LAN access is not listening');
+    const { code, expiresAt } = this.codes.lan.mint();
+    return { url: `https://${this.lanConfig.names[0]}:${listener.port}/login?code=${code}`, expiresAt };
   }
 
   dispose(): void {
-    for (const s of this.sockets) s.destroy();
-    this.sockets.clear();
-    this.server.close();
-    this.server.closeAllConnections();
+    this.disposed = true;
+    closeListener(this.loopback);
+    for (const l of this.lan) closeListener(l);
+    this.lan = [];
+  }
+
+  private wire(listener: Listener): void {
+    listener.server.on('request', (req: http.IncomingMessage, res: http.ServerResponse) => this.request(listener, req, res));
+    listener.server.on('upgrade', (req: http.IncomingMessage, socket: Duplex) => this.upgrade(listener, req, socket));
   }
 
   // ---- HTTP ----
 
-  private request(req: http.IncomingMessage, res: http.ServerResponse): void {
-    const port = this.boundPort ?? this.opts.port;
-    if (!isLoopbackHost(req.headers.host, port)) {
+  private request(listener: Listener, req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!this.hostAllowed(listener, req.headers.host)) {
       res.writeHead(421, SECURITY_HEADERS).end();
       return;
     }
@@ -150,55 +254,95 @@ export class WebServer implements Disposable {
         res.writeHead(405, { ...SECURITY_HEADERS, allow: 'GET' }).end();
         return;
       }
-      this.login(req, res, url);
+      this.login(listener, req, res, url);
       return;
     }
-    const cookie = readCookie(req.headers.cookie, DEVICE_COOKIE);
-    const device = this.devices.verify(cookie);
+    const cookie = readCookie(req.headers.cookie, cookieName(listener.scope));
+    const device = this.devices.verify(cookie, listener.scope);
     if (!device || !cookie) {
-      text(res, 401, 'Not signed in. Run `aw web open` in a terminal on this Mac to open Agent Wrangler here.');
+      text(
+        res,
+        401,
+        listener.scope === 'lan'
+          ? 'Not signed in. This device has not been paired with Agent Wrangler on the Mac yet.'
+          : 'Not signed in. Run `aw web open` in a terminal on this Mac to open Agent Wrangler here.',
+      );
       return;
     }
     if (url.pathname === '/') {
-      this.page(req, res, cookie);
+      this.page(listener, req, res, cookie);
+      return;
+    }
+    // The CA, for a device to install, from the Mac only (#136).
+    if (listener.scope === 'loopback' && (url.pathname === '/ca.pem' || url.pathname === '/ca.mobileconfig')) {
+      void this.caDownload(url.pathname, res);
       return;
     }
     this.asset(url.pathname, res);
   }
 
-  private login(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
-    const outcome = this.codes.redeem(url.searchParams.get('code'));
+  private login(listener: Listener, req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
+    const scope = listener.scope;
+    const outcome = this.codes[scope].redeem(url.searchParams.get('code'));
     if (outcome !== 'ok') {
       this.failedLogins++;
       this.opts.gate.loginFailed('browser', outcome);
-      this.opts.log(`web: refused a login link (${outcome}; ${this.failedLogins} since start)`);
-      text(res, 401, 'This sign-in link has expired or has already been used. Run `aw web open` again.');
+      this.opts.log(`web: refused a ${scope} login link (${outcome}; ${this.failedLogins} since start)`);
+      text(
+        res,
+        401,
+        scope === 'lan'
+          ? 'This pairing link has expired or has already been used. Pair this device again from the Mac.'
+          : 'This sign-in link has expired or has already been used. Run `aw web open` again.',
+      );
       return;
     }
     // A browser that is already a device keeps its device; anything else
-    // becomes a new one.
-    let cookie = readCookie(req.headers.cookie, DEVICE_COOKIE);
-    let device: WebDevice | undefined = this.devices.verify(cookie);
+    // becomes a new one, of this listener's scope.
+    let cookie = readCookie(req.headers.cookie, cookieName(scope));
+    let device: WebDevice | undefined = this.devices.verify(cookie, scope);
     if (!device) {
       const id = crypto.randomUUID();
       if (!this.opts.gate.admit(ownerContext('browser', { deviceId: id }), 'web.device.add', { kind: 'device', id })) {
         text(res, 403, 'Not permitted.');
         return;
       }
-      const issued = this.devices.issue(summarizeUserAgent(req.headers['user-agent']), id);
+      const issued = this.devices.issue(summarizeUserAgent(req.headers['user-agent']), id, scope);
       device = issued.device;
       cookie = issued.credential;
-      this.opts.log(`web: new device ${device.id}`);
+      this.opts.log(`web: new ${scope} device ${device.id}`);
     }
     if (!cookie || !this.opts.gate.admit(ownerContext('browser', { deviceId: device.id }), 'web.login', { kind: 'device', id: device.id })) {
       text(res, 403, 'Not permitted.');
       return;
     }
-    res.writeHead(303, { ...SECURITY_HEADERS, 'set-cookie': this.cookie(req, cookie), location: '/' });
+    res.writeHead(303, { ...SECURITY_HEADERS, 'set-cookie': this.cookie(listener, req, cookie), location: '/' });
     res.end();
   }
 
-  private page(req: http.IncomingMessage, res: http.ServerResponse, cookie: string): void {
+  private async caDownload(pathname: string, res: http.ServerResponse): Promise<void> {
+    let pem: string | undefined;
+    try {
+      pem = this.opts.caCertificate ? await this.opts.caCertificate() : undefined;
+    } catch (err) {
+      this.opts.log(`web: cannot make the local CA: ${String(err)}`);
+      text(res, 500, 'Could not make the local certificate authority. See the Agent Wrangler log.');
+      return;
+    }
+    if (!pem) {
+      text(res, 404, 'There is no local certificate authority to install: LAN access uses your own certificate (web.lan.certFile).');
+      return;
+    }
+    const mobileconfig = pathname === '/ca.mobileconfig';
+    res.writeHead(200, {
+      ...SECURITY_HEADERS,
+      'content-type': mobileconfig ? MOBILECONFIG_CONTENT_TYPE : 'application/x-pem-file',
+      'content-disposition': `attachment; filename="${mobileconfig ? 'agent-wrangler-ca.mobileconfig' : 'agent-wrangler-ca.pem'}"`,
+    });
+    res.end(mobileconfig ? caMobileconfig(pem) : pem);
+  }
+
+  private page(listener: Listener, req: http.IncomingMessage, res: http.ServerResponse, cookie: string): void {
     const nonce = crypto.randomBytes(16).toString('base64');
     // Explicit as well as 'self': older Safari does not count ws: as 'self'.
     const connectSrc = `'self' ${this.secure(req) ? 'wss' : 'ws'}://${req.headers.host}`;
@@ -218,7 +362,7 @@ export class WebServer implements Disposable {
       'content-type': 'text/html; charset=utf-8',
       'content-security-policy': csp,
       // Sliding expiry: every page load starts the 30 days again.
-      'set-cookie': this.cookie(req, cookie),
+      'set-cookie': this.cookie(listener, req, cookie),
     });
     res.end(html);
   }
@@ -245,14 +389,14 @@ export class WebServer implements Disposable {
 
   // ---- WebSocket ----
 
-  private upgrade(req: http.IncomingMessage, socket: Duplex): void {
+  private upgrade(listener: Listener, req: http.IncomingMessage, socket: Duplex): void {
     const refuse = (status: string): void => {
       socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     };
     socket.on('error', () => socket.destroy());
-    if (!isLoopbackHost(req.headers.host, this.boundPort ?? this.opts.port)) return refuse('421 Misdirected Request');
+    if (!this.hostAllowed(listener, req.headers.host)) return refuse('421 Misdirected Request');
     if (!this.sameOrigin(req)) return refuse('403 Forbidden');
-    const device = this.devices.verify(readCookie(req.headers.cookie, DEVICE_COOKIE));
+    const device = this.devices.verify(readCookie(req.headers.cookie, cookieName(listener.scope)), listener.scope);
     if (!device) return refuse('401 Unauthorized');
     const key = req.headers['sec-websocket-key'];
     let pathname: string;
@@ -266,12 +410,22 @@ export class WebServer implements Disposable {
       'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
         `Sec-WebSocket-Accept: ${acceptKey(key)}\r\n\r\n`,
     );
-    this.sockets.add(socket);
-    socket.on('close', () => this.sockets.delete(socket));
+    listener.sockets.add(socket);
+    socket.on('close', () => listener.sockets.delete(socket));
     this.opts.onClient(socket, ownerContext('browser', { deviceId: device.id }));
   }
 
   // ---- helpers ----
+
+  /**
+   * `Host` names this listener: a loopback name on loopback; on the LAN,
+   * `<host>.local` or a bound address. Always with the listener's own port.
+   */
+  private hostAllowed(listener: Listener, hostHeader: string | undefined): boolean {
+    const port = listener.port ?? this.opts.port;
+    if (listener.scope === 'loopback') return isLoopbackHost(hostHeader, port);
+    return isLanHost(hostHeader, port, this.lanConfig?.names ?? []);
+  }
 
   private secure(req: http.IncomingMessage): boolean {
     return (req.socket as TLSSocket).encrypted === true;
@@ -286,9 +440,40 @@ export class WebServer implements Disposable {
   }
 
   /** `Secure` only over https: a plain-http loopback browser would drop it. */
-  private cookie(req: http.IncomingMessage, value: string): string {
-    return `${DEVICE_COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_S}${this.secure(req) ? '; Secure' : ''}`;
+  private cookie(listener: Listener, req: http.IncomingMessage, value: string): string {
+    return `${cookieName(listener.scope)}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_S}${this.secure(req) ? '; Secure' : ''}`;
   }
+}
+
+function cookieName(scope: DeviceScope): string {
+  return scope === 'lan' ? LAN_DEVICE_COOKIE : DEVICE_COOKIE;
+}
+
+/** The LAN Host allowlist (#136): one of `names`, exactly, with this port. */
+export function isLanHost(hostHeader: string | undefined, port: number, names: readonly string[]): boolean {
+  if (!hostHeader) return false;
+  const host = hostHeader.toLowerCase();
+  return names.some((n) => `${n.toLowerCase()}:${port}` === host);
+}
+
+/** Listen on `address`; the bound port. Errors after that are logged, not thrown. */
+function bind(server: http.Server | https.Server, port: number, address: string, log: (line: string) => void): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, address, () => {
+      server.off('error', reject);
+      server.on('error', (err) => log(`web: ${address}: ${String(err)}`));
+      const addr = server.address();
+      resolve(typeof addr === 'object' && addr ? addr.port : port);
+    });
+  });
+}
+
+function closeListener(l: Listener): void {
+  for (const s of l.sockets) s.destroy();
+  l.sockets.clear();
+  l.server.close();
+  l.server.closeAllConnections();
 }
 
 function text(res: http.ServerResponse, status: number, body: string): void {

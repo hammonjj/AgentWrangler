@@ -136,6 +136,7 @@ describe('dependentParentKeys', () => {
       'orchestration.enabled',
       'autoPause.enabled',
       'web.enabled',
+      'web.lan.enabled',
       'remote.enabled',
     ]);
   });
