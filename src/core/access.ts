@@ -145,6 +145,12 @@ export const ACTIONS = {
   'web.login': 'mutate',
   /** A browser became a new device: a credential was issued and stored (#127). */
   'web.device.add': 'mutate',
+  /** Start pairing a device: a five-minute, single-use code and its QR (`aw web pair`, `/pair/new`, #137). */
+  'web.pair.start': 'mutate',
+  /** A device exchanged a pairing code for a LAN credential on `/pair` (#137). */
+  'web.pair.redeem': 'mutate',
+  /** Revoke a device: its credential stops working and its connections close (#137). */
+  'web.device.revoke': 'mutate',
   /** A remote browser put a file on the host (#139). Audited with the size, never the name. */
   'file.upload': 'mutate',
   /** A remote browser took a file off the host (#139). Audited by an id of the file, never its path. */
@@ -182,7 +188,10 @@ export const authorize: Authorizer = (ctx) =>
 
 /** One audit line for an access decision. Ids only. */
 export interface AccessAuditRecord {
-  /** `login-failed`: a login that named nobody (a bad, used or expired link). It has no principal. */
+  /**
+   * `login-failed`: a login that named nobody (a bad, used or expired link, or
+   * a wrong pairing code, #137). It has no principal.
+   */
   event: 'authorized' | 'refused-unauthorised' | 'login-failed';
   /** Absent only on `login-failed`: nobody was identified. */
   principal?: PrincipalId;
@@ -213,10 +222,11 @@ export interface AccessGate {
   /**
    * A credential that identified nobody (#127): a login link that is unknown,
    * used or expired. There is no principal to authorise, so it is only
-   * audited, always. `outcome` is a word ("invalid", "expired"), never the
-   * credential.
+   * audited, always. `outcome` is a word ("invalid", "expired", "locked-out"),
+   * never the credential. `action`: what was being attempted (`web.login`,
+   * or `web.pair.redeem` for a pairing code, #137).
    */
-  loginFailed(via: Via, outcome: string): void;
+  loginFailed(via: Via, outcome: string, action?: ActionName): void;
 }
 
 export function createAccessGate(opts: { authorize?: Authorizer; audit?: AccessAudit; log?: (message: string) => void } = {}): AccessGate {
@@ -239,8 +249,8 @@ export function createAccessGate(opts: { authorize?: Authorizer; audit?: AccessA
       if (decision === 'deny') opts.log?.(`access: refused ${action} via ${ctx.via} for ${ctx.principal.id}`);
       return decision === 'allow';
     },
-    loginFailed(via, outcome) {
-      opts.audit?.write({ event: 'login-failed', via, action: 'web.login', outcome });
+    loginFailed(via, outcome, action = 'web.login') {
+      opts.audit?.write({ event: 'login-failed', via, action, outcome });
     },
   };
 }

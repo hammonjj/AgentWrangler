@@ -45,6 +45,7 @@ import { watchForSleep } from '../core/sleepWatcher';
 import type { HostServices } from '../host/hostServices';
 import { createNodeHost, type NodeHost } from '../node/nodeHost';
 import { createPowerAssertion, type PowerAssertion } from '../node/powerAssertion';
+import { WEB_DEVICES_FILE, WebDeviceStore } from '../core/web/devices';
 import { startDaemonClients, type DaemonClients } from './clients';
 
 export interface StartCoreDaemonOptions {
@@ -127,6 +128,8 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
   ensurePrivateDir(paths.runDir);
   ensurePrivateDir(path.dirname(paths.socketPath));
   let clients: DaemonClients | undefined;
+  // One device store for the process: the web server and the control socket share it, so a revocation closes the device's connections.
+  const webDevices = new WebDeviceStore(path.join(opts.dataDir, WEB_DEVICES_FILE), now, log);
   const control = new ControlServer({
     token: writeControlToken(paths.tokenPath),
     log,
@@ -138,6 +141,9 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
       gate: app.access,
       // The web workbench's sign-in link (#131): `aw web open`, and the app's window.
       webLink: () => clients?.loginLink(),
+      // Pairing and the device list (#137): `aw web pair`, `aw web devices`, `aw web revoke`.
+      webPair: () => clients?.pairingOffer(),
+      webDevices,
     }),
   });
   try {
@@ -151,7 +157,7 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
   log(`control socket: listening on ${paths.socketPath}`);
 
   // ---- Clients (#131): the browsers and the app's window, before start so its prompts reach them ----
-  clients = startDaemonClients({ app, host, log, webviewDir: opts.webviewDir });
+  clients = startDaemonClients({ app, host, log, webviewDir: opts.webviewDir, devices: webDevices });
 
   app.start();
 

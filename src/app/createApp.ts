@@ -1636,6 +1636,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
           host.notify?.({
             title: n.title,
             body: n.body,
+            tag: `mission:${n.missionId}:${n.title}`,
+            ...(origin ? { sessionKey: origin.key } : {}),
             onClick: () => (origin ? surface?.show(origin.key, { preserveFocus: false }) : showMissionRequests.fire(n.missionId)),
           });
         }
@@ -2208,7 +2210,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
       else void reviewProposal(runner, mission.id, current.tasks[0].recommendation!, { showSession: false });
     };
     const body = route ? `Proposed: ${route}. Click to review and start it.` : 'No route recommended: click to pick one.';
-    if (host.notify) host.notify({ title: `Task proposal: ${mission.title}`, body, onClick: open });
+    if (host.notify) {
+      host.notify({
+        title: `Task proposal: ${mission.title}`,
+        body,
+        onClick: open,
+        tag: `proposal:${mission.id}`,
+        ...(from ? { sessionKey: from.key } : {}),
+      });
+    }
     dialogs.flash(`Task proposal waiting: ${mission.title} (${from ? 'in its conversation' : 'Tasks menu'})`, 6000);
     log(`task ${mission.id}: proposed through aw`);
     return {
@@ -2879,6 +2889,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
           if (!notice) continue;
           host.notify({
             ...notice,
+            // One tag per ask (#141): the session and what it is waiting for.
+            tag: `attention:${s.key}:${s.status}`,
+            sessionKey: s.key,
             // Clicked: the user asked for it, so the window comes forward.
             onClick: () => surface?.show(s.key, { preserveFocus: false }),
           });

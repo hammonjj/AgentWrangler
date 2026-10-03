@@ -157,6 +157,30 @@ describe('the core daemon serves the web workbench', () => {
       expect(page.body).toContain('aw-build');
       expect(page.body).toContain('webshim');
 
+      // Pairing (#137) over the control socket, as `aw web pair` and `aw web devices` ask it:
+      // LAN access is off here, so it says so rather than offering; the device list is the daemon's own store.
+      const aw = await ControlClient.connect({ runDir: daemon.paths.runDir, fallbackRunDir }, { build: 'b-test' });
+      if (!aw) throw new Error('control socket not answering');
+      await expect(aw.request('web.pair')).rejects.toThrow(/not listening/);
+      const listed = await aw.request<{ devices?: { id: string }[] } | { id: string }[]>('web.devices');
+      const devices = Array.isArray(listed) ? listed : (listed.devices ?? []);
+      expect(devices).toHaveLength(1);
+      aw.close();
+
+      // Dictation (#141) is registered: a POST without the device cookie is 401, not 404/405.
+      const post = await new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { host: '127.0.0.1', port, path: '/dictation', method: 'POST', headers: { host: `127.0.0.1:${port}`, origin: `http://127.0.0.1:${port}`, 'content-type': 'audio/webm' }, agent: false },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on('error', reject);
+        req.end('x');
+      });
+      expect(post).toBe(401);
+
       // The files side (#139, #140) is wired too: the folder browser and the file view answer a signed-in device, and 401 without one.
       expect((await get('/api/dirs', {})).status).toBe(401);
       expect((await get('/api/dirs', { cookie })).status).not.toBe(404);

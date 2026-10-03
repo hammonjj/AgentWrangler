@@ -423,7 +423,24 @@ describe('control backend (aw): every method is authorised before it acts', () =
       },
     } as unknown as AgentWranglerApp;
     const auth = recordingAuthorizer(decision);
-    const backend = createControlBackend(app, { build: 'test', appPid: 1, startedAt: 0, gate: createAccessGate({ authorize: auth.fn }) });
+    const device = { id: 'device-synthetic-1', name: 'Safari on iOS', createdAt: 1, lastSeen: 1, principal: 'local-owner', scope: 'lan' as const };
+    const backend = createControlBackend(app, {
+      build: 'test',
+      appPid: 1,
+      startedAt: 0,
+      gate: createAccessGate({ authorize: auth.fn }),
+      webPair: () => {
+        calls.push('webPair');
+        return { url: 'https://test-mac.local:1/pair?code=ABCD2345', code: 'ABCD2345', expiresAt: 1 };
+      },
+      webDevices: {
+        list: () => [device],
+        revoke: () => {
+          calls.push('revoke');
+          return device;
+        },
+      },
+    });
     return { backend, calls, auth };
   }
 
@@ -440,6 +457,9 @@ describe('control backend (aw): every method is authorised before it acts', () =
     delegate: (b) => b.delegate({ objective: 'synthetic', cwd: '/Users/test/proj' } as never),
     tasks: (b) => b.tasks(),
     webLink: (b) => b.webLink(),
+    webPair: (b) => b.webPair(),
+    webDevices: (b) => b.webDevices(),
+    webRevoke: (b) => b.webRevoke('device-s'),
   };
 
   it.each(Object.entries(METHODS))('%s: refused → RPC_UNAUTHORIZED via cli, and nothing ran', async (_name, call) => {
@@ -455,6 +475,17 @@ describe('control backend (aw): every method is authorised before it acts', () =
     expect(r.auth.asked).toHaveLength(1);
     expect(r.auth.asked[0].ctx).toMatchObject({ principal: LOCAL_OWNER, via: 'cli' });
     expect(r.calls).toEqual([]);
+  });
+
+  it('allowed, pairing and revoking are audited by their own actions, revoke naming the resolved device (#137)', () => {
+    const r = rig('allow');
+    r.backend.webPair();
+    expect(r.backend.webRevoke('device-s').device.id).toBe('device-synthetic-1');
+    expect(r.calls).toEqual(['webPair', 'revoke']);
+    expect(r.auth.asked.map((a) => [a.action, a.resource])).toEqual([
+      ['web.pair.start', undefined],
+      ['web.device.revoke', 'device-synthetic-1'],
+    ]);
   });
 
   it('allowed, send and stop act on the resolved session', async () => {

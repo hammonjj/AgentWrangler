@@ -22,6 +22,7 @@ import type { ControlWebLinkResult } from '../core/control/protocol';
 import type { Disposable } from '../core/events';
 import { createDefaultClientBroker } from '../node/clientBroker';
 import { createMacShell } from '../node/macShell';
+import type { WebDeviceStore } from '../core/web/devices';
 import type { NodeHost } from '../node/nodeHost';
 
 export interface DaemonClientsOptions {
@@ -30,12 +31,16 @@ export interface DaemonClientsOptions {
   log: (message: string) => void;
   /** `dist/webview`, readable by plain Node. Absent: no web workbench (tests of the core alone). */
   webviewDir?: string;
+  /** The process's device store, shared with `aw web devices` on the control socket (#137). */
+  devices?: WebDeviceStore;
 }
 
 export interface DaemonClients extends Disposable {
   readonly registry: ClientRegistry;
   readonly web: WebWorkbench | undefined;
   loginLink(): ControlWebLinkResult | undefined;
+  /** `aw web pair`: an offer, or undefined while LAN access is not listening. */
+  pairingOffer(): ReturnType<WebWorkbench['pairingOffer']>;
   /** After a wake: the LAN addresses may have changed. */
   refresh(): void;
 }
@@ -47,16 +52,27 @@ export function startDaemonClients(opts: DaemonClientsOptions): DaemonClients {
   // Dialogs and the shell go to the client that asked (#126, #140). The Mac's
   // own shell is only for a loopback browser's "Open on this Mac".
   const macShell = createMacShell(log);
-  host.useBroker({ ...local, dialogs: registry.dialogs, shell: registry.shell });
+  // Notices (#141, D3): browser tabs first, `osascript` on this Mac only when none can show it.
+  host.useBroker({ ...local, dialogs: registry.dialogs, shell: registry.shell, notify: registry.notifier(local.notify) });
   app.attachSurface(registry.surface);
   const web = opts.webviewDir
-    ? startWebWorkbench({ app, host, ui: workbenchUi(host), clients: registry, log, hostShell: macShell, webviewDir: opts.webviewDir })
+    ? startWebWorkbench({
+        app,
+        host,
+        ui: workbenchUi(host),
+        clients: registry,
+        log,
+        hostShell: macShell,
+        devices: opts.devices,
+        webviewDir: opts.webviewDir,
+      })
     : undefined;
   if (!web) log('web: no workbench assets given; the browser workbench is off');
   return {
     registry,
     web,
     loginLink: () => web?.loginLink(),
+    pairingOffer: () => web?.pairingOffer(),
     refresh: () => web?.refresh(),
     dispose: () => {
       web?.dispose();

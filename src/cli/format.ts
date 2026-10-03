@@ -10,6 +10,8 @@ import type {
   ControlStatusResult,
   ControlTaskProposeResult,
   ControlTaskView,
+  ControlWebDevice,
+  ControlWebPairResult,
   RunBy,
 } from '../core/control/protocol';
 import { STATUS_LABEL } from '../shared/model';
@@ -272,4 +274,30 @@ export function formatOffline(view: OfflineView, now: number, width = 100, full 
     );
   }
   return out.join('\n');
+}
+
+const DEVICE_SCOPE_LABEL: Record<string, string> = { loopback: 'this Mac', lan: 'home network' };
+
+/** `aw web devices` (#137). */
+export function formatWebDevices(devices: readonly ControlWebDevice[], now: number, width = 100): string {
+  if (devices.length === 0) return 'No browser devices. Sign one in with aw web open, or pair one with aw web pair.';
+  const rows = [...devices]
+    .sort((a, b) => b.lastSeen - a.lastSeen)
+    .map((d) => [d.id.slice(0, 8), DEVICE_SCOPE_LABEL[d.scope] ?? safe(d.scope), ago(d.createdAt, now), ago(d.lastSeen, now), d.name]);
+  return `${table(['ID', 'WHERE', 'ADDED', 'LAST SEEN', 'NAME'], rows, width)}\n\nRevoke one with aw web devices revoke <id>.`;
+}
+
+/** `aw web pair`'s words around the QR code (#137). */
+export function formatWebPair(r: ControlWebPairResult, now: number): string {
+  const minutes = Math.max(1, Math.round((r.expiresAt - now) / 60_000));
+  const code = r.code.length === 8 ? `${r.code.slice(0, 4)}-${r.code.slice(4)}` : r.code;
+  return [
+    'Scan the QR code with the camera of the phone or tablet to pair it,',
+    `or open ${r.url.replace(/\?.*$/, '')} on it and type the code:`,
+    '',
+    `    ${code}`,
+    '',
+    `Good once, for ${minutes} minute${minutes === 1 ? '' : 's'}. Whoever uses it first gets in as you.`,
+    'The device must trust Agent Wrangler’s certificate first (see the README, “Home-network access”).',
+  ].join('\n');
 }

@@ -20,6 +20,7 @@ import type { SessionHandle } from '../session/sessionHandle';
 import type { ClientChannel, ClientPrompt, NavigateTarget } from '../clients';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { SHELL_PANE, parseShellToHost, type HostToShell, type ShellPrompt, type ShellPromptValue } from '../../shared/shellProtocol';
+import type { NotificationState } from '../../shared/webCapabilities';
 
 /** The connection's conversation pane, as navigation needs it. */
 export interface ShellConversation {
@@ -120,6 +121,9 @@ export function createShellChannel(opts: ShellChannelOptions): ShellChannel {
     }
   };
 
+  /** The tab's `Notification.permission`, as it last said (#141). Nothing is sent until it says `granted`. */
+  let permission: NotificationState = 'unsupported';
+
   const canActOnHost = opts.kind === 'loopback' && opts.hostShell !== undefined;
   const offers = new Map<number, Offer>();
   let offerSeq = 0;
@@ -137,6 +141,12 @@ export function createShellChannel(opts: ShellChannelOptions): ShellChannel {
     kind: opts.kind,
     get isOpen() {
       return open;
+    },
+    get canNotify() {
+      return open && permission === 'granted';
+    },
+    notify: (notice) => {
+      if (open && permission === 'granted') send({ type: 'notify', ...notice });
     },
     // In the browser that asked, never on the host.
     openUrl: (url) => {
@@ -162,6 +172,15 @@ export function createShellChannel(opts: ShellChannelOptions): ShellChannel {
     channel,
     receive(body) {
       const m = parseShellToHost(body);
+      if (m?.type === 'notifications') {
+        permission = m.permission;
+        return;
+      }
+      if (m?.type === 'show') {
+        // A tapped notification: this tab's conversation goes where it said.
+        navigate({ kind: 'session', key: m.key });
+        return;
+      }
       if (m?.type === 'hostAction') {
         const o = canActOnHost ? offers.get(m.id) : undefined;
         const hostShell = opts.hostShell;

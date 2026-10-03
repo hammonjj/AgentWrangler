@@ -32,6 +32,8 @@ import { createBrowserConnections } from '../core/web/browserConnections';
 import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
 import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
+import { WEB_DEVICES_FILE, WebDeviceStore } from '../core/web/devices';
+import { createDictationRoute } from '../core/web/dictationRoute';
 import type { WebFiles } from '../core/web/files';
 import { createFileViewRoute } from '../core/web/fileView';
 import type { WebRoute } from '../core/web/server';
@@ -59,6 +61,8 @@ export interface BrowserClientsOptions {
 export interface BrowserClients extends Disposable {
   /** An upgraded socket from an authenticated device. Owned from here on. */
   attach(socket: WebSocket, device: RequestContext): void;
+  /** A revoked device's connections, closed now (#137). */
+  closeDevice(deviceId: string): number;
 }
 
 export function createBrowserClients(opts: BrowserClientsOptions): BrowserClients {
@@ -89,6 +93,8 @@ export interface WebWorkbenchOptions {
   log: (line: string) => void;
   /** The Mac's own shell, for a loopback browser's "Open on this Mac" (#140). */
   hostShell?: HostShell;
+  /** The process's device store, when something else (Preferences) shares it. Default: its own, in the data dir. */
+  devices?: WebDeviceStore;
   /**
    * More of what a server and its clients are made of, for features that add
    * routes or hooks (pairing, notifications). Called once per server built,
@@ -107,6 +113,10 @@ export interface WebWorkbench extends Disposable {
   readonly onDidChangeLanStatus: (listener: () => void) => Disposable;
   /** Re-read the network now: addresses change across sleep. */
   refresh(): void;
+  /** Paired devices (#137): `aw web devices` and Preferences read and revoke through it. */
+  readonly devices: WebDeviceStore;
+  /** A pairing offer for `aw web pair`; undefined while LAN access is not listening. */
+  pairingOffer(): ReturnType<WebServer['pairingOffer']>;
 }
 
 interface Running {
@@ -120,6 +130,7 @@ interface Running {
 
 export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
   const { app, host, ui, clients, log } = opts;
+  const devices = opts.devices ?? new WebDeviceStore(path.join(host.dataDir, WEB_DEVICES_FILE), () => Date.now(), log);
   const certs = new LocalCertificates({ dir: path.join(host.dataDir, WEB_TLS_DIR), log });
   let hostName: Promise<string> | undefined;
   const macName = () => (hostName ??= localHostName());
@@ -183,7 +194,15 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     const server = new WebServer({
       files,
       // The read-only file and diff view that stands in for "open in the editor" (#140), on the shared allowlist.
-      routes: [createFileViewRoute({ allowlist: files.allowlist, log }), ...(extra?.routes ?? [])],
+      routes: [
+        createFileViewRoute({ allowlist: files.allowlist, log }),
+        // Browser dictation (#141): audio recorded in the page, transcribed by the core.
+        createDictationRoute({ transcribe: (audio, ext) => app.dictation.transcribeAudio(audio, ext), log }),
+        ...(extra?.routes ?? []),
+      ],
+      // One store for the process, shared with `aw web devices` and Preferences (#137).
+      devices,
+      onDeviceRevoked: (id) => browsers.closeDevice(id),
       port,
       webviewDir: opts.webviewDir,
       dataDir: host.dataDir,
@@ -230,6 +249,8 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     },
     onDidChangeLanStatus: (listener) => statusChanged.event(listener),
     refresh: () => void web?.lan.refresh(),
+    devices,
+    pairingOffer: () => web?.server.pairingOffer(),
     dispose: () => {
       if (disposed) return;
       disposed = true;
