@@ -1,6 +1,11 @@
 # Electron app migration
 
-Status: **in progress** on `feat/electron-app`, worktree `../AgentWrangler-electron`.
+> **Superseded by [browser-workbench.md](browser-workbench.md) (#121).** The Electron app this
+> plan built was retired in #142. Agent Wrangler is now a core daemon (a LaunchAgent) that
+> serves a web workbench to browsers. This plan is kept as the record of how the Electron app
+> came about; nothing in it describes the current runtime.
+
+Status (historical): **in progress** on `feat/electron-app`, worktree `../AgentWrangler-electron`.
 
 The analysis this executes is `docs/codex-and-electron.md` § "Electron seam". The prerequisite
 — removing window jumping so the pane is the whole product — landed on `main` and is recorded

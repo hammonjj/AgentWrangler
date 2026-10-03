@@ -15,6 +15,10 @@ what this plan asks of it.
 
 ## 0. Read this first
 
+> **Runtime superseded by [browser-workbench.md](browser-workbench.md) (#121).** Where this plan
+> says "the Electron main process", the core is now the core daemon, a LaunchAgent on a pinned
+> Node (#130); Electron was retired in #142. Nothing else about orchestration changed.
+
 1. **Orchestration lives in the core, on top of #4's session layer.** It is a set of services in
    the Electron main process (the "core" of #4 §5) that launch ordinary AW-hosted sessions through
    #4's `SessionExecutor`, record them in #4's `SessionRegistry`, and observe them through

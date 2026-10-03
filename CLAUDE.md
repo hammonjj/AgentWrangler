@@ -14,7 +14,7 @@ checks), and `HostServices` has one implementation, `src/node/nodeHost.ts`.
 
 - `npm run build` · `npm run typecheck` · `npm test` (vitest; pure functions only, plus
   `test/live.integration.test.ts`, which reads the real `~/.claude` and self-skips without it)
-  · `npm run test:integration`.
+  · `npm run test:integration` · `npm run cli:install` (put `aw` on the PATH).
 - `node dist/launcher/main.js [--dry-run]` — from a checkout, what opening the app does: start
   this checkout's daemon (spawned, no LaunchAgent) and open a browser on a sign-in link.
   `--dry-run` starts, installs and opens nothing. It runs against the real data dir unless
@@ -34,6 +34,12 @@ checks), and `HostServices` has one implementation, `src/node/nodeHost.ts`.
   in tests point `HOME` (and `CLAUDE_CONFIG_DIR`, `CODEX_HOME`) at a temp dir. Never install the
   LaunchAgent from a test, and never run the packaged launcher without `--dry-run` against a
   temp `HOME`: a packaged `ensure` talks to the real launchd label.
+  Logs: `~/Library/Application Support/Agent Wrangler/logs/core-daemon.log` and
+  `agent-wrangler.log` beside it.
+- `aw web open` — open the workbench (`http://127.0.0.1:7391/`) in the default browser, signed
+  in. Routes are in the hash: `#/` (agents), `#/c/<key>`, `#/missions`, `#/analytics`,
+  `#/preferences`. `aw web url` prints the link instead and refuses in an agent's shell, as do
+  `aw web pair` and `aw web devices revoke`.
 
 ## Branches and worktrees
 
@@ -126,15 +132,25 @@ Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
 - **The repo is public** (`hammonjj/AgentWrangler`). No real project paths, session titles,
   prompts, transcript content or hook payloads in code, tests, fixtures, docs or commits.
   Fixtures use `/Users/test/proj`-style paths. Never paste `live.integration.test.ts` output anywhere.
+- **The Mac is the execution host; browsers are clients.** Agent work, paths, files and
+  host-local actions happen on the Mac. A path a browser sends is never a host path because it
+  sent it (`src/core/web/pathAllowlist.ts`); "Open on this Mac" is for a loopback browser only.
+  The workbench listens on `127.0.0.1` by default and on the LAN only when `web.lan.enabled` is
+  on, over TLS with paired devices: never add a listener, a relay or anything public.
+- **One approval path.** Permission, question and plan answers from every client (browser,
+  Discord, `aw`) go through `src/app/approvals.ts`, and every mutating action through
+  `authorize()` (`src/core/access.ts`). No client-specific shortcut.
 - `src/webview/**` imports only from `src/shared/**` and `src/webview/common/**`.
-  `src/shared/**` has no Node or DOM imports (it is bundled into both the main process and the
-  webviews); `src/webview/common/**` is browser-only and is where things a webview has exactly
-  one of live — see `paneApi.ts`.
-- Webview CSP forbids inline styles and inline scripts; use classes and the nonce'd bundle.
-- **The table and the conversation share one webview** (the workbench page the daemon serves
-  to a browser), split by a divider the user drags, one pane at a time on a phone (#134). Three things a webview has exactly one of — the API handle, the
-  message channel and `setState` — are shared through `src/webview/common/paneApi.ts`. Go
-  through it; the web shim (`src/webview/webshim`) supplies the one bridge.
+  `src/shared/**` has no Node or DOM imports (it is bundled into both the daemon and the
+  browser bundles); `src/webview/common/**` is browser-only and is where things a page has
+  exactly one of live — see `paneApi.ts`.
+- The page's CSP (a header from `src/core/web/server.ts`) forbids inline styles and inline
+  scripts; use classes and the nonce'd bundle.
+- **The table and the conversation share one page** (the workbench the daemon serves to a
+  browser), split by a divider the user drags, one pane at a time on a phone (#134). Three
+  things a page has exactly one of — the API handle, the message channel and `setState` — are
+  shared through `src/webview/common/paneApi.ts`. Go through it; the web shim
+  (`src/webview/webshim`) supplies the one bridge.
 - **Neither pane may assume it has the page.** The table is usually about half a
   full-screen tab, but the divider moves, so a pane can be 300px inside a 2000px tab.
   Size off the pane, never the viewport: the table folds its columns below 720px from a
@@ -152,7 +168,9 @@ store, config, services · `src/remote/*` remote control, with `discord/` below 
 boundary · `src/app/createApp.ts` the application (`src/app/webWorkbench.ts` is the browser
 workbench the daemon serves) · `src/daemon/*` the core daemon · `src/launcher/*` what opening
 the app runs (`launcher.c` is the bundle's executable, which execs Node on `main.ts`) ·
-`src/node/*` plain-Node host services and the LaunchAgent · `src/core/appBundle.ts` the `.app`
+`src/core/web/*` the web server: loopback and LAN listeners, sign-in, devices and pairing, TLS,
+uploads and downloads · `src/node/*` plain-Node host services and the LaunchAgent ·
+`src/core/appBundle.ts` the `.app`
 layout · `src/host/*` the seam the app is written against · `src/ui/*` webview hosts and click
 routing · `src/webview/*` browser bundles (one dir per bundle, entry `main.ts` + a `.css`;
 `workbench` is what ships and imports the `dashboard`, `conversation` and `preferences` panes,
@@ -163,6 +181,9 @@ routing · `src/webview/*` browser bundles (one dir per bundle, entry `main.ts` 
 ## Verification
 
 Typecheck and tests green, then `npm run app:install` (it restarts the core daemon on the new
-build when the rule above allows; otherwise tell James a restart is needed), and say what to
-open or click in the browser to see the change. Status-hook facts that are not documented by
+build when the rule above allows; otherwise tell James a restart is needed), then check
+`aw daemon status` shows the new build. Say what to open to see the change: `aw web open` and
+the route (for example `#/preferences`, or `#/missions`), then what to click. Open tabs reload
+onto the new build by themselves. If it matters on a phone, say so: James checks those on a
+paired device. Status-hook facts that are not documented by
 Anthropic are recorded in the README ("How status is detected") and in `docs/plans/`.
