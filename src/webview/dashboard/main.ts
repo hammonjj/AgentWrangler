@@ -1465,12 +1465,10 @@ function tabsHtml(): string {
   const missions = missionsSnap
     ? tab('missions', `Missions${waiting > 0 ? ` <span class="tabcount">${waiting}</span>` : ''}`, waiting > 0 ? ` title="${waiting} mission${waiting === 1 ? '' : 's'} waiting for you"` : '')
     : '';
-  // Analytics sits beside Missions: both are orchestration's, and there only while it is on.
-  const analytics = missionsSnap ? tab('analytics', 'Analytics') : '';
   // Agents that need you: the rows the Waiting section holds. Missions keep their own count.
   const needYou = attentionTotal(sessions);
   const status = tab('status', `Status${needYou > 0 ? ` <span class="tabcount">${needYou}</span>` : ''}`, needYou > 0 ? ` title="${needYou} agent${needYou === 1 ? '' : 's'} waiting for you"` : '');
-  return `<div class="tabletabs" role="tablist" aria-label="Table view">${status}${tab('project', 'Project')}${missions}${analytics}</div>`;
+  return `<div class="tabletabs" role="tablist" aria-label="Table view">${status}${tab('project', 'Project')}${missions}</div>`;
 }
 
 /** Switch to Missions, open one mission and scroll to it: the drill-down for delegated work (§10). */
@@ -1510,7 +1508,8 @@ function render(): void {
     if (document.activeElement instanceof HTMLSelectElement && document.activeElement.closest('.analytics')) return;
     menuPosition = undefined;
     rowMenu = undefined;
-    paint(`${bannerHtml()}${tabsHtml()}${analyticsHtml(analyticsData)}`);
+    // Its own page (the shell's Analytics link), so no table tabs above it.
+    paint(`${bannerHtml()}${analyticsHtml(analyticsData)}`);
     if (analyticsMoreOpen) app.querySelector<HTMLDetailsElement>('.analytics .an-more')?.setAttribute('open', '');
     return;
   }
