@@ -36,7 +36,10 @@ import {
   type ShellSurface,
 } from '../../shared/appRoutes';
 import { paneApi, shellApi } from '../common/paneApi';
+import { tabTitle } from '../../shared/tabAttention';
+import { setFaviconBadge } from './favicon';
 import {
+  onAttention,
   onConversationShown,
   onOpenRoute,
   onTableViewShown,
@@ -194,6 +197,7 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
   let depth = depthOf(history.state) ?? 0;
   let hasMissions = true;
   let settled = false;
+  let attention = 0;
   const wide = window.matchMedia(`(min-width: ${SPLIT_MIN_VIEWPORT_PX}px)`);
   const layout = () => layoutFor(wide.matches ? SPLIT_MIN_VIEWPORT_PX : 0);
 
@@ -235,7 +239,7 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
 
     const title = routeTitle(route);
     heading.textContent = title;
-    document.title = `${title} · Agent Wrangler`;
+    document.title = tabTitle(title, attention);
 
     // Back only where the table is out of sight: a lone conversation, or a page.
     const target = surface === 'conversation' || surface === 'page' ? backRoute(route, state.tableView) : undefined;
@@ -327,6 +331,11 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     settled = a.settled;
     hasMissions = a.hasMissions;
     feed({ type: 'tableViewShown', view: shellTableView(a.view), user: a.user, settled: a.settled });
+  });
+  onAttention((count) => {
+    attention = count;
+    setFaviconBadge(count);
+    paint();
   });
   onConversationShown((a) => feed({ type: 'conversationShown', key: a.key, ...(a.previous ? { previous: a.previous } : {}) }));
   onOpenRoute((route) => feed({ type: 'go', route }));
