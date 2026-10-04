@@ -2071,6 +2071,10 @@ body,
 #convApp.narrow .blk :not(pre) > code {
   overflow-wrap: anywhere;
 }
+/* Two columns of code need room (#146): a narrow pane keeps the unified block. */
+#convApp.narrow .diffopen {
+  display: none;
+}
 #convApp.narrow .blk pre,
 #convApp.narrow .blk table,
 #convApp.narrow .tinput,

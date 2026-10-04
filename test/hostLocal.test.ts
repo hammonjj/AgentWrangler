@@ -181,6 +181,30 @@ describe('a browser connection shows things in the browser', () => {
     expect(host).toEqual([]);
   });
 
+  it('"Open in its own tab" asks the browser for a new tab and leaves this conversation alone (#146)', () => {
+    const { shell, posted } = browser('lan');
+    shell.channel.navigate({ kind: 'tab', key: 'claude:k1' });
+    expect(posted).toEqual([{ type: 'openTab', key: 'claude:k1' }]);
+  });
+
+  it('hands a window-menu action to the host, and only the two it knows (#146)', () => {
+    const seen: string[] = [];
+    const shell = createShellChannel({
+      connectionId: 'web-1',
+      kind: 'lan',
+      post: () => undefined,
+      conversation: () => undefined,
+      appAction: (a) => seen.push(a),
+    });
+    shell.receive({ type: 'appAction', action: 'restartCodex' });
+    shell.receive({ type: 'appAction', action: 'removeHooks' });
+    shell.receive({ type: 'appAction', action: 'rm -rf' });
+    shell.receive({ type: 'appAction' });
+    expect(seen).toEqual(['restartCodex', 'removeHooks']);
+    expect(parseShellToHost({ type: 'appAction', action: 'removeHooks' })).toEqual({ type: 'appAction', action: 'removeHooks' });
+    expect(parseShellToHost({ type: 'appAction', action: 'refresh' })).toBeUndefined();
+  });
+
   it('a LAN client is shown the file and the command, with no host actions, and cannot trigger one', () => {
     const { shell, posted, host } = browser('lan');
     expect(shell.channel.kind).toBe('lan');

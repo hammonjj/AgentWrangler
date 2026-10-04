@@ -86,6 +86,8 @@ export type HostToShell =
   | { type: 'notify'; title: string; body: string; sessionKey?: string; tag: string }
   /** #140: open this link in the browser that asked, never on the host. http/https only. */
   | { type: 'openUrl'; url: string }
+  /** #146: open this conversation's route in a new tab of this browser, one that row clicks never swap away. */
+  | { type: 'openTab'; key: string }
   /**
    * #140: show a file the host named. `intent` is what the app wanted
    * (open it, or reveal it in the file manager); a browser answers both with
@@ -101,6 +103,13 @@ export type HostToShell =
 
 /** The longest text a `notify` or `show` carries. Longer is cut, not refused. */
 export const MAX_NOTICE_TEXT = 500;
+
+/**
+ * The window-menu actions with no pane message of their own (#146). Refresh and
+ * Install Status Hooks already have one (`refresh`, `installHooks`), so the
+ * Actions menu sends those through the table.
+ */
+export type AppActionName = 'restartCodex' | 'removeHooks';
 
 export type ShellToHost =
   /**
@@ -119,6 +128,11 @@ export type ShellToHost =
   | { type: 'notifications'; permission: 'granted' | 'denied' | 'default' | 'unsupported' }
   /** A tapped notification: point this tab's conversation at that session (#141). */
   | { type: 'show'; key: string }
+  /**
+   * #146: an action the native window's menu used to carry. The host
+   * authorises it like any other; the client names nothing but which one.
+   */
+  | { type: 'appAction'; action: AppActionName }
   /** The client's half of the handshake (#128): what it was loaded as. */
   | { type: 'hello'; protocol: number; build: string }
   /** The tab was hidden or shown: a hidden one gets the table less often (#128). */
@@ -140,6 +154,10 @@ export function parseShellToHost(body: unknown): ShellToHost | undefined {
   if (m.type === 'show') {
     const key = (body as { key?: unknown }).key;
     return typeof key === 'string' && key.length > 0 && key.length <= 1024 ? { type: 'show', key } : undefined;
+  }
+  if (m.type === 'appAction') {
+    const a = (body as { action?: unknown }).action;
+    return a === 'restartCodex' || a === 'removeHooks' ? { type: 'appAction', action: a } : undefined;
   }
   if (m.type === 'hostAction') {
     const a = (body as { action?: unknown }).action;

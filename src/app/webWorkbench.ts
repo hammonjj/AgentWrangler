@@ -77,6 +77,13 @@ export function createBrowserClients(opts: BrowserClientsOptions): BrowserClient
     folderAllowed: opts.folderAllowed,
     ...(opts.hostShell ? { hostShell: opts.hostShell } : {}),
     isMutating: isMutatingPaneMessage,
+    appAction: (action, context) => {
+      // The same gate every mutating action passes (#123); a refusal is audited and does nothing.
+      const name = action === 'restartCodex' ? 'codex.restart' : 'hooks.remove';
+      if (!app.access.admit(context, name)) return;
+      const run = action === 'restartCodex' ? app.restartCodexServer() : app.uninstallHooks();
+      run.catch((e) => log(`web: ${action} failed: ${e instanceof Error ? e.message : String(e)}`));
+    },
     createPanes: (transport, context) => createWorkbenchHosts(app, host, ui, transport, context, opts.preferences),
   });
 }
