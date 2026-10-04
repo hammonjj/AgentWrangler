@@ -263,7 +263,7 @@ describe('web server: page and assets', () => {
     expect(a.headers['content-type']).toBe('text/html; charset=utf-8');
     expect(a.headers['cache-control']).toBe('no-store');
     expect(a.headers['x-content-type-options']).toBe('nosniff');
-    expect(a.headers['referrer-policy']).toBe('no-referrer');
+    expect(a.headers['referrer-policy']).toBe('same-origin');
     expect(a.headers['x-frame-options']).toBe('DENY');
     const csp = String(a.headers['content-security-policy']);
     expect(csp).toContain("default-src 'none'");
