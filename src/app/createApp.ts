@@ -2685,8 +2685,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
       ffmpegPath: host.settings.get<string>('dictation.ffmpegPath', ''),
       whisperPath: host.settings.get<string>('dictation.whisperPath', ''),
       modelPath: host.settings.get<string>('dictation.modelPath', ''),
-      inputDevice: host.settings.get<string>('dictation.inputDevice', ':default'),
-      livePreview: host.settings.get<boolean>('dictation.livePreview', true),
     }),
   });
 
