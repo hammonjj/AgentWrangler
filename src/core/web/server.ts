@@ -128,7 +128,8 @@ interface Listener {
 const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   'cache-control': 'no-store',
   'x-content-type-options': 'nosniff',
-  'referrer-policy': 'no-referrer',
+  // Not `no-referrer`: Chrome then sends `Origin: null` on a same-origin form POST, which `sameOrigin` refuses (the pairing buttons got a 403).
+  'referrer-policy': 'same-origin',
   'x-frame-options': 'DENY',
 };
 

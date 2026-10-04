@@ -45,7 +45,7 @@ function page(title: string, body: string): string {
   return (
     '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<meta name="referrer" content="no-referrer">' +
+    '<meta name="referrer" content="same-origin">' +
     `<title>${escapeHtml(title)}</title><link rel="stylesheet" href="${PAIR_CSS_PATH}"></head>` +
     `<body><main>${body}</main></body></html>\n`
   );
