@@ -798,6 +798,34 @@ body.aw-surface-page #bar {
   }
 }
 
+/* On a phone the bar, launcher, usage cards and tab strip stacked above the
+   table fill the screen, and with only #app scrolling the rows never come into
+   view. Below the breakpoint the table screen scrolls as one page instead: the
+   body is the scroller and nothing is pinned. The desktop layout is unchanged. */
+@media (max-width: 799px) {
+  body.aw-web.aw-surface-table {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  body.aw-web.aw-surface-table > * {
+    flex-shrink: 0;
+  }
+  body.aw-web.aw-surface-table #wb,
+  body.aw-web.aw-surface-table #wbTable {
+    flex: 0 0 auto !important;
+    height: auto;
+    overflow: visible;
+  }
+  body.aw-web.aw-surface-table #wbTable > #app {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+  body.aw-web.aw-surface-table #app .tabletabs,
+  body.aw-web.aw-surface-table #app thead th {
+    position: static;
+  }
+}
+
 /* Finger-sized targets in the shell's own controls. */
 @media (pointer: coarse) {
   #awBar .aw-nav a,
