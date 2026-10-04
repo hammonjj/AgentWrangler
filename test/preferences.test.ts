@@ -146,6 +146,16 @@ describe('dependentParentKeys', () => {
   });
 });
 
+describe('Mac-microphone dictation settings are retired (#147)', () => {
+  it('are listed for removal and no longer shown in Preferences', () => {
+    const keys = SETTINGS.map((s) => s.key);
+    for (const retired of ['dictation.livePreview', 'dictation.inputDevice']) {
+      expect(RETIRED_SETTING_KEYS).toContain(retired);
+      expect(keys).not.toContain(retired);
+    }
+  });
+});
+
 describe('session hosts are not optional (#122)', () => {
   it('no setting turns them off: the retired switch is gone and listed for removal', () => {
     expect(RETIRED_SETTING_KEYS).toContain('experimental.sessionHosts');
