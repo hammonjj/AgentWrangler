@@ -252,7 +252,7 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
     }
     case 'webPair': {
       const r = await client.request<ControlWebPairResult>('web.pair');
-      process.stdout.write(qrToTerminal(encodeQr(r.url, 'M'), { ansi: process.stdout.isTTY === true }));
+      process.stdout.write(qrToTerminal(encodeQr(r.setupUrl ?? r.url, 'M'), { ansi: process.stdout.isTTY === true }));
       process.stdout.write(`\n${formatWebPair(r, Date.now())}\n`);
       return 0;
     }

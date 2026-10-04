@@ -292,12 +292,12 @@ export function formatWebPair(r: ControlWebPairResult, now: number): string {
   const minutes = Math.max(1, Math.round((r.expiresAt - now) / 60_000));
   const code = r.code.length === 8 ? `${r.code.slice(0, 4)}-${r.code.slice(4)}` : r.code;
   return [
-    'Scan the QR code with the camera of the phone or tablet to pair it,',
-    `or open ${r.url.replace(/\?.*$/, '')} on it and type the code:`,
+    'Scan the QR code with the camera of the phone or tablet. It sets up the',
+    'certificate, then pairs the device.',
+    ...(r.setupUrl ? ['', 'No camera? Open this in its browser:', `    ${r.setupUrl}`] : [`or open ${r.url.replace(/\?.*$/, '')} on it and type the code:`]),
     '',
     `    ${code}`,
     '',
     `Good once, for ${minutes} minute${minutes === 1 ? '' : 's'}. Whoever uses it first gets in as you.`,
-    'The device must trust Agent Wrangler’s certificate first (see the README, “Home-network access”).',
   ].join('\n');
 }
