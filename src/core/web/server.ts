@@ -62,7 +62,7 @@ import { DIRS_PATH, FILES_PATH, UPLOAD_PATH } from '../../shared/files';
 import { LoginCodes } from './loginLinks';
 import { caMobileconfig, MOBILECONFIG_CONTENT_TYPE } from './mobileconfig';
 import { PAIRING_LOCKOUT_MS, PairingOffers } from './pairing';
-import { PAIR_CSS, PAIR_CSS_PATH, PAIR_PAGE_CSP, pairFormPage, pairMessagePage, pairOfferPage, pairStartPage } from './pairPages';
+import { PAIR_CSS, PAIR_CSS_PATH, PAIR_PAGE_CSP, pairFormPage, pairMessagePage, pairOfferPage, pairStartPage, setupPage } from './pairPages';
 import { encodeQr, qrToSvg } from './qr';
 import { isLoopbackHost, readCookie } from './wsFrames';
 
@@ -87,8 +87,21 @@ export const MAX_FORM_BYTES = 4 * 1024;
 export interface PairingOfferView {
   /** `https://<host>.local:<port>/pair?code=…`: what the QR code says. */
   url: string;
+  /**
+   * `http://<address>:<setup port>/setup?code=…`: what the QR code carries, so
+   * a device that does not trust the certificate yet can still open it. Absent
+   * when the setup listener could not bind.
+   */
+  setupUrl?: string;
   code: string;
   expiresAt: number;
+}
+
+/** One plain-HTTP setup listener (`setupRequest`): the certificate before the device trusts it. */
+interface SetupListener {
+  address: string;
+  server: http.Server;
+  port?: number;
 }
 
 /** What the LAN listeners should be (#136). `lan.ts` works it out; the server only binds it. */
@@ -237,6 +250,7 @@ export interface WebServerOptions {
 export class WebServer implements Disposable {
   private readonly loopback: Listener;
   private lan: Listener[] = [];
+  private setup: SetupListener[] = [];
   private lanConfig: LanConfig | undefined;
   private readonly assets: AssetManifest;
   /** Where devices and their credential hashes are kept. */
@@ -300,6 +314,7 @@ export class WebServer implements Disposable {
       !!config && !l.error && l.port !== undefined && prev?.port === config.port && config.addresses.includes(l.address);
     for (const l of this.lan) if (!keep(l)) closeListener(l);
     this.lan = this.lan.filter(keep);
+    await this.setSetup(config);
     if (!config) {
       // Nothing to redeem it on any more; a new one is started when LAN access is back.
       this.pairing.cancel();
@@ -326,6 +341,38 @@ export class WebServer implements Disposable {
       }),
     );
     return this.lanStatus();
+  }
+
+  /**
+   * The plain-HTTP setup listeners, one per LAN address, on the port after the
+   * HTTPS one. A phone cannot open the HTTPS pairing page before it trusts the
+   * certificate, so the QR code leads here first. They answer 404 to everything
+   * unless a pairing offer is live and the request carries its code, and serve
+   * only the public CA certificate and a link on to `/pair`: never a session, a
+   * device credential or any Agent Wrangler data.
+   */
+  private async setSetup(config: LanConfig | undefined): Promise<void> {
+    const port = config ? (config.port === 0 ? 0 : config.port + 1) : undefined;
+    const keep = (l: SetupListener): boolean => !!config && l.port !== undefined && config.addresses.includes(l.address) && (port === 0 || l.port === port);
+    for (const l of this.setup) if (!keep(l)) closeSetup(l);
+    this.setup = this.setup.filter(keep);
+    if (!config || port === undefined) return;
+    const missing = config.addresses.filter((a) => !this.setup.some((l) => l.address === a));
+    await Promise.all(
+      missing.map(async (address) => {
+        const server = http.createServer();
+        const l: SetupListener = { address, server };
+        server.on('request', (req, res) => this.setupRequest(l, req, res));
+        try {
+          l.port = await bind(server, port, address, this.opts.log);
+          if (this.disposed) closeSetup(l);
+          else this.setup.push(l);
+        } catch (err) {
+          this.opts.log(`web: setup listener on ${address}:${port}: ${(err as NodeJS.ErrnoException).code ?? String(err)}; the QR code will lead to the pairing page directly`);
+          closeSetup(l);
+        }
+      }),
+    );
   }
 
   /** The LAN listeners, bound or not. Empty when LAN access is off. */
@@ -360,7 +407,81 @@ export class WebServer implements Disposable {
     const listener = this.lan.find((l) => l.port !== undefined && !l.error);
     if (!listener || !this.lanConfig || this.disposed) return undefined;
     const { code, expiresAt } = this.pairing.start();
-    return { url: `https://${this.lanConfig.names[0]}:${listener.port}/pair?code=${code}`, code, expiresAt };
+    // By address, not `<host>.local`: it needs no name lookup on the device.
+    const setup = this.setup.find((l) => l.address === listener.address);
+    return {
+      url: `https://${this.lanConfig.names[0]}:${listener.port}/pair?code=${code}`,
+      ...(setup?.port !== undefined ? { setupUrl: `http://${setup.address}:${setup.port}/setup?code=${code}` } : {}),
+      code,
+      expiresAt,
+    };
+  }
+
+  /**
+   * The setup listener's requests. Unauthenticated by design, so: a `Host`
+   * that is one of ours, GET/HEAD only, a live offer, and its code (counted
+   * against the same guessing limits as `/pair`); anything else is a 404 that
+   * does not say which of those was missing.
+   */
+  private setupRequest(listener: SetupListener, req: http.IncomingMessage, res: http.ServerResponse): void {
+    const config = this.lanConfig;
+    if (!config || listener.port === undefined || !isLanHost(req.headers.host, listener.port, config.names)) {
+      res.writeHead(421, SECURITY_HEADERS).end();
+      return;
+    }
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { ...SECURITY_HEADERS, allow: 'GET, HEAD' }).end();
+      return;
+    }
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://localhost');
+    } catch {
+      res.writeHead(400, SECURITY_HEADERS).end();
+      return;
+    }
+    if (url.pathname === PAIR_CSS_PATH) {
+      res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': 'text/css; charset=utf-8' });
+      res.end(PAIR_CSS);
+      return;
+    }
+    const files = ['/setup', '/setup/ca.mobileconfig', '/setup/ca.pem'];
+    if (!files.includes(url.pathname)) {
+      this.html(res, 404, pairMessagePage('Not found', 'There is nothing here.'));
+      return;
+    }
+    const code = url.searchParams.get('code');
+    const outcome = this.pairing.verify(code, remoteAddress(req));
+    if (!outcome.ok) {
+      if (outcome.reason === 'locked' || outcome.lockedOut) {
+        this.pairLocked(res);
+        return;
+      }
+      this.opts.gate.loginFailed('browser', outcome.reason, 'web.pair.redeem');
+      this.html(res, 404, pairMessagePage('Not found', 'This link is not valid, or has expired. Start pairing again on the Mac and scan the new QR code.'));
+      return;
+    }
+    if (url.pathname !== '/setup') {
+      void this.caDownload(url.pathname.replace('/setup', ''), res);
+      return;
+    }
+    const host = String(req.headers.host).replace(/:\d+$/, '');
+    const lanPort = this.lan.find((l) => l.port !== undefined && !l.error)?.port;
+    if (lanPort === undefined) {
+      this.html(res, 503, pairMessagePage('Not available', 'Home-network access is not listening. Check Agent Wrangler on the Mac.'));
+      return;
+    }
+    const q = `code=${encodeURIComponent(String(code))}`;
+    this.html(
+      res,
+      200,
+      setupPage({
+        mobileconfigHref: `/setup/ca.mobileconfig?${q}`,
+        pemHref: `/setup/ca.pem?${q}`,
+        pairUrl: `https://${host}:${lanPort}/pair?${q}`,
+        userAgent: String(req.headers['user-agent'] ?? ''),
+      }),
+    );
   }
 
   /** Open WebSockets per device id (diagnostics, tests). */
@@ -392,6 +513,8 @@ export class WebServer implements Disposable {
     closeListener(this.loopback);
     for (const l of this.lan) closeListener(l);
     this.lan = [];
+    for (const l of this.setup) closeSetup(l);
+    this.setup = [];
     this.wss.close();
   }
 
@@ -680,8 +803,8 @@ export class WebServer implements Disposable {
       return;
     }
     this.opts.log('web: pairing started from a browser on this Mac');
-    const svg = qrToSvg(encodeQr(offer.url, 'M'), { title: 'Pairing QR code' });
-    this.html(res, 200, pairOfferPage({ svg, code: offer.code, url: offer.url, expiresAt: offer.expiresAt, token }));
+    const svg = qrToSvg(encodeQr(offer.setupUrl ?? offer.url, 'M'), { title: 'Pairing QR code' });
+    this.html(res, 200, pairOfferPage({ svg, code: offer.code, url: offer.url, ...(offer.setupUrl ? { setupUrl: offer.setupUrl } : {}), expiresAt: offer.expiresAt, token }));
   }
 
   private pairLocked(res: http.ServerResponse): void {
@@ -918,6 +1041,11 @@ function readForm(req: http.IncomingMessage): Promise<URLSearchParams | number> 
       resolve(400);
     });
   });
+}
+
+function closeSetup(l: SetupListener): void {
+  l.server.close();
+  l.server.closeAllConnections();
 }
 
 function closeListener(l: Listener): void {

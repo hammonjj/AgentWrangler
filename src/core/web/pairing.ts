@@ -125,6 +125,19 @@ export class PairingOffers {
    * the offer.
    */
   redeem(input: string | null | undefined, ip: string): PairingOutcome {
+    return this.attempt(input, ip, true);
+  }
+
+  /**
+   * Like `redeem`, but a right code leaves the offer in place: the setup
+   * pages (certificate, then the pairing link) check the code several times
+   * before the device spends it. Wrong codes count exactly as they do there.
+   */
+  verify(input: string | null | undefined, ip: string): PairingOutcome {
+    return this.attempt(input, ip, false);
+  }
+
+  private attempt(input: string | null | undefined, ip: string, spend: boolean): PairingOutcome {
     if (this.locked(ip)) return { ok: false, reason: 'locked' };
     const at = this.now();
     const code = normalizePairingCode(input);
@@ -132,7 +145,7 @@ export class PairingOffers {
     const matches =
       code !== undefined && offer !== undefined && crypto.timingSafeEqual(Buffer.from(code), Buffer.from(offer.code));
     if (matches && offer.expiresAt > at) {
-      this.offer = undefined;
+      if (spend) this.offer = undefined;
       return { ok: true };
     }
     const reason: PairingFailure = matches ? 'expired' : 'invalid';

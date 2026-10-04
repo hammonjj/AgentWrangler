@@ -441,6 +441,7 @@ describe.skipIf(!HAS_OPENSSL)('pairing over the listeners', () => {
       onClient: (ws, context) => conns.attach(ws, context),
       devices: store,
       onDeviceRevoked: (id) => conns.closeDevice(id),
+      caCertificate: async () => caPem,
     });
     loopPort = await server.listen();
     const status = await server.setLan({ addresses: ['127.0.0.1'], names: [LAN_NAME, '192.168.1.20'], port: 0, cert: material.cert, key: material.key });
@@ -691,6 +692,71 @@ describe.skipIf(!HAS_OPENSSL)('pairing over the listeners', () => {
     lanPort = status[0].port!;
     const { token } = await lanForm();
     expect((await postPair({ code: offer.code }, { token, cookieToken: token })).status).toBe(401);
+  });
+
+  describe('the plain-HTTP setup page the QR code opens', () => {
+    function setup(setupUrl: string, pathname: string, headers: Record<string, string> = {}): Promise<Reply> {
+      const u = new URL(setupUrl);
+      return new Promise((resolve, reject) => {
+        const req = http.request(
+          { host: '127.0.0.1', port: Number(u.port), path: pathname, method: 'GET', headers: { host: `192.168.1.20:${u.port}`, ...headers }, agent: false },
+          (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (c) => (body += c));
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers as never, body }));
+          },
+        );
+        req.on('error', reject);
+        req.end();
+      });
+    }
+
+    it('carries the code in the QR link, serves the profile and the way on to /pair, and does not spend the offer', async () => {
+      const offer = server.pairingOffer()!;
+      expect(offer.setupUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/setup\?code=[0-9A-Z]{8}$/);
+      const q = `?code=${offer.code}`;
+      const page = await setup(offer.setupUrl!, `/setup${q}`, { 'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit Mobile Safari' });
+      expect(page.status).toBe(200);
+      expect(page.body).toContain(`/setup/ca.mobileconfig${q}`);
+      expect(page.body).toContain(`https://192.168.1.20:${lanPort}/pair?code=${offer.code}`);
+      expect(page.body).not.toContain('Windows</h2>');
+      const profile = await setup(offer.setupUrl!, `/setup/ca.mobileconfig${q}`);
+      expect(profile.status).toBe(200);
+      expect(profile.headers['content-type']).toBe('application/x-apple-aspen-config');
+      const pem = await setup(offer.setupUrl!, `/setup/ca.pem${q}`);
+      expect(pem.body).toContain('BEGIN CERTIFICATE');
+      // Still redeemable: the setup pages only looked.
+      await pairDevice('Setup phone');
+    });
+
+    it('shows a Windows PC the Windows steps, and tells another browser on iOS to use Safari', async () => {
+      const offer = server.pairingOffer()!;
+      const q = `/setup?code=${offer.code}`;
+      const win = await setup(offer.setupUrl!, q, { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130 Safari/537.36' });
+      expect(win.body).toContain('Windows</h2>');
+      expect(win.body).not.toContain('iPhone or iPad</h2>');
+      const chrome = await setup(offer.setupUrl!, q, { 'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) CriOS/130 Mobile Safari' });
+      expect(chrome.body).toContain('Open this page in Safari');
+    });
+
+    it('refuses without a live offer or the right code, counts wrong codes, and never answers another Host', async () => {
+      const offer = server.pairingOffer()!;
+      const base = offer.setupUrl!;
+      expect((await setup(base, '/setup?code=ZZZZZZZZ')).status).toBe(404);
+      expect((await setup(base, '/setup')).status).toBe(404);
+      expect((await setup(base, `/setup?code=${offer.code}`, { host: 'evil.example:80' })).status).toBe(421);
+      expect((await setup(base, '/anything-else')).status).toBe(404);
+      for (let i = 0; i < 5; i++) await setup(base, '/setup?code=ZZZZZZZZ');
+      // Five wrong codes withdrew the offer; the right one no longer opens anything.
+      expect((await setup(base, `/setup?code=${offer.code}`)).status).toBe(429);
+    });
+
+    it('closes with LAN access', async () => {
+      const offer = server.pairingOffer()!;
+      await server.setLan(undefined);
+      await expect(setup(offer.setupUrl!, `/setup?code=${offer.code}`)).rejects.toThrow();
+    });
   });
 });
 

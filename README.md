@@ -936,9 +936,21 @@ Mac's home-network addresses, on *HTTPS port* (`web.lan.port`, 7392), so a phone
 computer on the same network can open `https://<your-mac>.local:7392/`. Preferences shows the
 addresses it is listening on under the switch. With it off, nothing listens beyond `127.0.0.1`.
 
-The **Connect** tab (`#/connect`, next to Preferences) walks through it: allow LAN access, trust
-the certificate on the device, pair it, open it. Steps can be ticked off (kept in the browser),
-and the certificate and pairing links appear only in a browser on the Mac.
+The **Connect** tab (`#/connect`, next to Preferences) walks through it for iPhone/iPad and
+Windows: allow LAN access, scan one QR code, open it later. Steps can be ticked off (kept in the
+browser), and the QR link appears only in a browser on the Mac.
+
+**One QR code for the certificate and the pairing.** A device cannot open the HTTPS pairing page
+before it trusts the certificate, so the QR code (`aw web pair`, or `/pair/new` on the Mac) opens
+a **plain-HTTP setup page** on the *HTTPS port + 1* (7393) instead, at the Mac's address (no name
+lookup needed). The page is for that one device's OS: it serves the public CA profile
+(`/setup/ca.mobileconfig`) or PEM, tells iOS to use Safari, and ends in a link to `/pair` with
+the code filled in. It is not Agent Wrangler: it answers 404 to everything unless a pairing offer
+is live and the request carries its code (wrong codes count against the same limits as `/pair`),
+it serves no session, credential or workbench data, it is one listener per LAN address like the
+HTTPS one, and it goes away with LAN access. iOS still needs its own *Certificate Trust
+Settings* switch; Apple allows no way around that. If the 7393 port cannot bind, the QR code
+carries the HTTPS pairing link as before.
 
 It assumes:
 

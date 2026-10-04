@@ -325,6 +325,8 @@ export interface ControlWebLinkResult {
  */
 export interface ControlWebPairResult {
   url: string;
+  /** What the QR code carries when there is a setup page: see `PairingOfferView`. */
+  setupUrl?: string;
   code: string;
   expiresAt: number;
 }
