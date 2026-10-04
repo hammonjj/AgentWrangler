@@ -927,8 +927,10 @@ function usageCardHtml(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' |
       ? `<span class="ureset" data-resets-at="${w.resetsAtMs}"${w.id === 'session' || /(?:^|\s)5\s*hr(?:$|\s)/i.test(w.label) ? ' data-five-hour="true"' : ''}>${esc(usageResetText(w, Date.now()))}</span>`
       : '<span class="ureset"></span>';
   const label = prefix ? `${provider} · ${w.label}` : w.label;
+  // The collapsed strip on a phone: "Cl Session", not "CLAUDE · SESSION (5HR)".
+  const short = `${provider === 'Claude' ? 'Cl' : 'Cx'} ${w.label.replace(/\s*\(.*?\)/g, '').trim()}`;
   return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap, provider))}">
-  <div class="uhead"><span class="ulabel">${esc(label)}</span><span class="upct">${pct}%</span></div>
+  <div class="uhead"><span class="ulabel">${esc(label)}</span><span class="ushort">${esc(short)}</span><span class="upct">${pct}%</span></div>
   <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(w.label)}"><span class="ufill" data-w="${pct}%"></span></div>
   ${resets}
 </div>`;
@@ -942,7 +944,7 @@ function spendCardHtml(snap: UsageSnapshot): string {
   const sev = usageSeverity(s.percent);
   const title = `Extra usage: ${spendText(s)} of credits spent this month (${pct}%). These cover you past the plan limits.`;
   return `<div class="ucard ${sev}" title="${esc(title)}">
-  <div class="uhead"><span class="ulabel">Extra usage</span><span class="upct">${pct}%</span></div>
+  <div class="uhead"><span class="ulabel">Extra usage</span><span class="ushort">Extra</span><span class="upct">${pct}%</span></div>
   <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Extra usage"><span class="ufill" data-w="${pct}%"></span></div>
   <span class="ureset">${esc(spendText(s))}</span>
 </div>`;
@@ -993,6 +995,11 @@ function usageHtml(): string {
 const usageEl = document.createElement('div');
 usageEl.id = 'usage';
 app.insertAdjacentElement('beforebegin', usageEl);
+// On a phone the strip is one scrolling line of short chips until tapped
+// (`#usage.expanded`, see dashboard.css); in a wide pane the class does nothing.
+usageEl.addEventListener('click', () => {
+  if (app.classList.contains('narrow')) usageEl.classList.toggle('expanded');
+});
 
 /** The strip currently drawn, so a snapshot that changes nothing leaves the bars' transition alone. */
 let usagePainted = '';

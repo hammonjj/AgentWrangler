@@ -773,6 +773,26 @@ body.aw-web .aw-fb {
     flex: 0 0 auto;
     white-space: nowrap;
   }
+  /* Back, heading and Actions share the first row; the routes are the second.
+     Actions used to wrap onto a row of its own after the full-width nav. */
+  #awBar .aw-bar-back {
+    order: 0;
+  }
+  #awBar .aw-bar-title {
+    order: 1;
+  }
+  #awBar .aw-actions {
+    order: 2;
+    margin-left: auto;
+  }
+  #awBar .aw-nav {
+    order: 3;
+  }
+  /* The heading takes focus on every route change; a ring on a page title the
+     user did not tab to is noise on a phone. */
+  #awBar .aw-bar-title:focus-visible {
+    outline: none;
+  }
   #awPage {
     padding: 10px 10px;
   }
