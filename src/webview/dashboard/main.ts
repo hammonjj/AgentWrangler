@@ -1467,7 +1467,10 @@ function tabsHtml(): string {
     : '';
   // Analytics sits beside Missions: both are orchestration's, and there only while it is on.
   const analytics = missionsSnap ? tab('analytics', 'Analytics') : '';
-  return `<div class="tabletabs" role="tablist" aria-label="Table view">${tab('status', 'Status')}${tab('project', 'Project')}${missions}${analytics}</div>`;
+  // Agents that need you: the rows the Waiting section holds. Missions keep their own count.
+  const needYou = attentionTotal(sessions);
+  const status = tab('status', `Status${needYou > 0 ? ` <span class="tabcount">${needYou}</span>` : ''}`, needYou > 0 ? ` title="${needYou} agent${needYou === 1 ? '' : 's'} waiting for you"` : '');
+  return `<div class="tabletabs" role="tablist" aria-label="Table view">${status}${tab('project', 'Project')}${missions}${analytics}</div>`;
 }
 
 /** Switch to Missions, open one mission and scroll to it: the drill-down for delegated work (§10). */
