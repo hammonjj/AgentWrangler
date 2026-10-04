@@ -34,7 +34,8 @@ describe('routes in the URL', () => {
     ['#/analytics/', { kind: 'analytics' }],
     ['#/preferences', { kind: 'preferences' }],
     ['#/preferences/pair', { kind: 'pair' }],
-    ['#/c', { kind: 'conversation' }],
+    ['#/connect', { kind: 'connect' }],
+    ['#/c',{ kind: 'conversation' }],
     ['#/c/claude%3Aabc-123', { kind: 'conversation', key: 'claude:abc-123' }],
     ['#/nowhere', { kind: 'agents' }],
     ['#/c/%E0%A4%A', { kind: 'conversation' }],
@@ -49,6 +50,7 @@ describe('routes in the URL', () => {
       { kind: 'analytics' },
       { kind: 'preferences' },
       { kind: 'pair' },
+      { kind: 'connect' },
       { kind: 'conversation' },
       { kind: 'conversation', key: 'codex:thread/with spaces?&#' },
     ];
@@ -69,12 +71,14 @@ describe('layout', () => {
     expect(surfaceFor({ kind: 'analytics' }, 'single')).toBe('table');
     expect(surfaceFor({ kind: 'preferences' }, 'split')).toBe('page');
     expect(surfaceFor({ kind: 'pair' }, 'single')).toBe('page');
+    expect(surfaceFor({ kind: 'connect' }, 'split')).toBe('page');
   });
 
   it('goes back from a lone conversation to the table view last used', () => {
     expect(backRoute({ kind: 'conversation', key: 'k' }, 'missions')).toEqual({ kind: 'missions' });
     expect(backRoute({ kind: 'conversation' }, undefined)).toEqual({ kind: 'agents' });
     expect(backRoute({ kind: 'pair' }, 'sessions')).toEqual({ kind: 'preferences' });
+    expect(backRoute({ kind: 'connect' }, 'missions')).toEqual({ kind: 'missions' });
     expect(backRoute({ kind: 'agents' }, 'sessions')).toBeUndefined();
   });
 });

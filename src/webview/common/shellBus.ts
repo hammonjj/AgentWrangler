@@ -97,7 +97,7 @@ export const onOpenRoute = (l: Listener<AppRoute>): (() => void) => routeWanted.
  * until something mounts real content: `registerPage('pair', (root) => …)` is
  * called with the page's content element each time the page is shown.
  */
-export type PageKind = Extract<AppRoute['kind'], 'preferences' | 'pair'>;
+export type PageKind = Extract<AppRoute['kind'], 'preferences' | 'connect' | 'pair'>;
 const pages = new Map<PageKind, (root: HTMLElement) => void>();
 
 export function registerPage(kind: PageKind, mount: (root: HTMLElement) => void): void {
