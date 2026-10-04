@@ -204,8 +204,6 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
   };
   const links = {
     agents: link({ kind: 'agents' }, 'Agents'),
-    conversation: link({ kind: 'conversation' }, 'Conversation'),
-    missions: link({ kind: 'missions' }, 'Missions'),
     analytics: link({ kind: 'analytics' }, 'Analytics'),
     preferences: link({ kind: 'preferences' }, 'Preferences'),
   };
@@ -293,9 +291,9 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
       back.setAttribute('aria-label', `Back to ${routeTitle(target)}`);
     }
 
-    links.conversation.href = formatRoute(state.shownKey ? { kind: 'conversation', key: state.shownKey } : { kind: 'conversation' });
-    links.missions.hidden = links.analytics.hidden = settled && !hasMissions;
-    const current = route.kind === 'pair' ? 'preferences' : route.kind;
+    links.analytics.hidden = settled && !hasMissions;
+    // Conversation and Missions have no link of their own: the table's rows and Missions tab lead there.
+    const current = route.kind === 'pair' ? 'preferences' : route.kind === 'conversation' || route.kind === 'missions' ? 'agents' : route.kind;
     for (const [kind, a] of Object.entries(links)) {
       if (kind === current) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
