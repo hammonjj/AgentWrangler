@@ -58,6 +58,14 @@ export const onTableViewShown = (l: Listener<TableViewAnnouncement>): (() => voi
 export const requestTableView = (view: TableRouteView): void => tableViewWanted.emit(view);
 export const onTableViewRequest = (l: Listener<TableRouteView>): (() => void) => tableViewWanted.on(l, false);
 
+// ---- agents that need you ----
+
+const attentionShown = topic<number>();
+
+/** The dashboard: this many agents need you now (#144). Cheap to repeat. */
+export const announceAttention = (count: number): void => attentionShown.emit(count);
+export const onAttention = (l: Listener<number>): (() => void) => attentionShown.on(l);
+
 // ---- the conversation ----
 
 export interface ConversationAnnouncement {

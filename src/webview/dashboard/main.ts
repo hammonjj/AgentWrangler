@@ -35,7 +35,8 @@ import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestrati
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
 import { requestComposerFocus } from '../common/composerFocus';
-import { announceTableView, onTableViewRequest } from '../common/shellBus';
+import { announceAttention, announceTableView, onTableViewRequest } from '../common/shellBus';
+import { attentionTotal } from '../../shared/tabAttention';
 import { canPauseSession, clampMenuPosition, dismissAction, ITEM_H_TOUCH, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
 import { onLongPress, trackTouch } from '../common/phone';
 import {
@@ -1616,6 +1617,7 @@ vscodeApi.onMessage((body) => {
   if (m.type === 'snapshot') {
     sessions = m.sessions;
     missionsSnap = m.missions;
+    announceAttention(attentionTotal(sessions, missionsSnap?.attention ?? 0));
     // A route that asked for Missions before anything said whether there are any.
     if (!snapshotSeen && pendingView && missionsSnap) {
       tableView = pendingView;
