@@ -227,9 +227,9 @@ export const SETTINGS: SettingSpec[] = [
     label: 'Notify when an agent needs you',
     group: 'Agents and status',
     type: 'boolean',
-    default: false,
+    default: true,
     description:
-      'Show a notification when a session needs permission, is waiting on you, or is done, while Agent Wrangler is open in a browser tab.',
+      'Show a notification when a session needs permission, is waiting on you, or is done, while Agent Wrangler is open in a browser tab. On by default, so allowing notifications in a tab is all it takes.',
   },
   {
     key: 'notifyWhenWindowClosed',
@@ -304,24 +304,6 @@ export const SETTINGS: SettingSpec[] = [
   },
 
   // ---- Dictation ----
-  {
-    key: 'dictation.livePreview',
-    label: 'Live preview while dictating',
-    group: 'Dictation',
-    type: 'boolean',
-    default: true,
-    description:
-      'Show the words being recognised beside the composer while you speak. The preview re-runs whisper.cpp on the last few seconds of audio about once a second, on this machine, so it costs CPU and may change as you talk. The text put in the composer when you stop is always a fresh transcription of the whole recording. Turn this off on a slow machine or with a large model.',
-  },
-  {
-    key: 'dictation.inputDevice',
-    label: 'Microphone',
-    group: 'Dictation',
-    type: 'string',
-    default: ":default",
-    description:
-      'Microphone for dictation, as an ffmpeg avfoundation input. \':default\' is the system input device; \':1\' picks audio device 1 (run \'ffmpeg -f avfoundation -list_devices true -i ""\' to list them).',
-  },
   {
     key: 'dictation.modelPath',
     label: 'Whisper model',
@@ -509,8 +491,15 @@ export const SETTINGS: SettingSpec[] = [
  *   session host; there is nothing left to switch.
  * - `experimental.coreDaemon` (#142): the core always runs in the background
  *   service; the Electron window it switched away from is gone.
+ * - `dictation.livePreview`, `dictation.inputDevice` (#147): they configured the
+ *   Mac-microphone recorder; dictation records in the browser now.
  */
-export const RETIRED_SETTING_KEYS: readonly string[] = ['experimental.sessionHosts', 'experimental.coreDaemon'];
+export const RETIRED_SETTING_KEYS: readonly string[] = [
+  'experimental.sessionHosts',
+  'experimental.coreDaemon',
+  'dictation.livePreview',
+  'dictation.inputDevice',
+];
 
 /** Group headings in declaration order, with no duplicates. */
 export function settingGroups(): { group: string; settings: SettingSpec[] }[] {

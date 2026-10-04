@@ -52,6 +52,7 @@ import {
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { resetsInText } from '../../shared/usage';
 import { isRemoteHost, paneApi } from '../common/paneApi';
+import { takeComposerFocus } from '../common/composerFocus';
 import { uploadFile } from '../common/upload';
 import { trackTouch } from '../common/phone';
 import { CONV_NARROW_PX, isNarrowWidth } from '../../shared/phoneLayout';
@@ -3027,6 +3028,8 @@ vscodeApi.onMessage((body) => {
       vscodeApi.setState({ key: m.session.key });
       // And so the browser's URL names it (#133).
       announceConversation({ key: m.session.key });
+      // "+ New" asked for the cursor to be ready to type the first prompt.
+      if (takeComposerFocus()) msgEl.focus();
       break;
     case 'append':
       appendBlocks(m.blocks);
