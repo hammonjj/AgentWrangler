@@ -21,6 +21,8 @@ export type AppRoute =
   | { kind: 'conversation'; key?: string }
   /** Preferences, mounted by `webview/preferences/pane.ts` (#135). */
   | { kind: 'preferences' }
+  /** The guided steps for reaching the workbench from a phone or another computer. */
+  | { kind: 'connect' }
   /** Pairing a device (#137): a page the pairing UI mounts into. */
   | { kind: 'pair' };
 
@@ -53,6 +55,8 @@ export function parseRoute(hash: string): AppRoute {
       return rest[0] === 'pair' ? { kind: 'pair' } : { kind: 'preferences' };
     case 'pair':
       return { kind: 'pair' };
+    case 'connect':
+      return { kind: 'connect' };
     case 'c': {
       const raw = rest.join('/');
       if (!raw) return { kind: 'conversation' };
@@ -97,6 +101,8 @@ export function routeTitle(route: AppRoute): string {
       return 'Conversation';
     case 'preferences':
       return 'Preferences';
+    case 'connect':
+      return 'Connect a device';
     case 'pair':
       return 'Pair a device';
   }
@@ -139,7 +145,7 @@ export function layoutFor(viewportWidth: number): ShellLayout {
 export type ShellSurface = 'split' | 'table' | 'conversation' | 'page';
 
 export function surfaceFor(route: AppRoute, layout: ShellLayout): ShellSurface {
-  if (route.kind === 'preferences' || route.kind === 'pair') return 'page';
+  if (route.kind === 'preferences' || route.kind === 'connect' || route.kind === 'pair') return 'page';
   if (layout === 'split') return 'split';
   return route.kind === 'conversation' ? 'conversation' : 'table';
 }
@@ -152,6 +158,7 @@ export function backRoute(route: AppRoute, tableView: TableRouteView | undefined
   switch (route.kind) {
     case 'conversation':
     case 'preferences':
+    case 'connect':
       return routeOfTableView(tableView ?? 'sessions');
     case 'pair':
       return { kind: 'preferences' };
@@ -242,7 +249,7 @@ export function routerStep(state: RouterState, input: RouterInput): RouterStep {
     case 'navigate': {
       if (input.target === 'workbench') {
         // The app was asked to come forward; a page hides the panes it means.
-        if (state.route.kind === 'preferences' || state.route.kind === 'pair') {
+        if (state.route.kind === 'preferences' || state.route.kind === 'connect' || state.route.kind === 'pair') {
           return apply(state, routeOfTableView(state.tableView ?? 'sessions'), 'push', true);
         }
         return { state, effects: [] };

@@ -48,6 +48,7 @@ import {
   type PageKind,
 } from '../common/shellBus';
 import { trackViewport } from '../common/phone';
+import { mountConnectPage } from './connectPage';
 import { createModalHost } from './modalHost';
 import { showToast } from './toastHost';
 
@@ -206,6 +207,7 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     agents: link({ kind: 'agents' }, 'Agents'),
     analytics: link({ kind: 'analytics' }, 'Analytics'),
     preferences: link({ kind: 'preferences' }, 'Preferences'),
+    connect: link({ kind: 'connect' }, 'Connect'),
   };
   bar.append(back, heading, nav, actionsMenu(dashboard));
   // First in the document, above the table's launcher: the first tab stop and
@@ -299,7 +301,7 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
       else a.removeAttribute('aria-current');
     }
 
-    if (route.kind === 'preferences' || route.kind === 'pair') showPage(route.kind);
+    if (route.kind === 'preferences' || route.kind === 'connect' || route.kind === 'pair') showPage(route.kind);
     else pageShown = undefined; // drawn afresh next time it is opened
   }
 
@@ -309,6 +311,10 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     pageShown = kind;
     pageTitle.textContent = routeTitle({ kind });
     pageBody.replaceChildren();
+    if (kind === 'connect') {
+      mountConnectPage(pageBody);
+      return;
+    }
     const mount = pageMounter(kind);
     if (mount) {
       mount(pageBody);
@@ -337,7 +343,7 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
   function focusHeading(): void {
     const route = state.route;
     let target: HTMLElement | null = heading;
-    if (route.kind === 'preferences' || route.kind === 'pair') target = pageTitle;
+    if (route.kind === 'preferences' || route.kind === 'connect' || route.kind === 'pair') target = pageTitle;
     else if (route.kind === 'conversation' && convTitle?.textContent) target = convTitle;
     target.focus();
   }

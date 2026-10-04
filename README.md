@@ -936,6 +936,10 @@ Mac's home-network addresses, on *HTTPS port* (`web.lan.port`, 7392), so a phone
 computer on the same network can open `https://<your-mac>.local:7392/`. Preferences shows the
 addresses it is listening on under the switch. With it off, nothing listens beyond `127.0.0.1`.
 
+The **Connect** tab (`#/connect`, next to Preferences) walks through it: allow LAN access, trust
+the certificate on the device, pair it, open it. Steps can be ticked off (kept in the browser),
+and the certificate and pairing links appear only in a browser on the Mac.
+
 It assumes:
 
 - **A home network you trust.** Anyone on it can reach the sign-in page, though nothing
