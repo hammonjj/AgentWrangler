@@ -569,6 +569,11 @@ body.aw-surface-conversation #wbConv {
   margin: 0 0 6px;
   line-height: 1.4;
 }
+#awPage .aw-connect-platform {
+  margin: 10px 0 4px;
+  font-size: 0.95em;
+  font-weight: 600;
+}
 #awPage .aw-connect-sub {
   margin: 0 0 8px;
   padding-left: 22px;
