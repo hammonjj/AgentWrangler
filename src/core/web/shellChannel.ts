@@ -19,7 +19,7 @@ import type { HostShell } from '../../host/hostServices';
 import type { SessionHandle } from '../session/sessionHandle';
 import type { ClientChannel, ClientPrompt, NavigateTarget } from '../clients';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
-import { SHELL_PANE, parseShellToHost, type HostToShell, type ShellPrompt, type ShellPromptValue } from '../../shared/shellProtocol';
+import { SHELL_PANE, parseShellToHost, type AppActionName, type HostToShell, type ShellPrompt, type ShellPromptValue } from '../../shared/shellProtocol';
 import type { NotificationState } from '../../shared/webCapabilities';
 
 /** The connection's conversation pane, as navigation needs it. */
@@ -40,6 +40,8 @@ export interface ShellChannelOptions {
    * folder browser may offer. Absent: no folder is accepted.
    */
   folderAllowed?(dir: string): Promise<boolean>;
+  /** Do a window-menu action this client asked for (#146). The callee authorises it. Absent: ignored. */
+  appAction?(action: AppActionName): void;
   /** `loopback` may offer "Open on this Mac"; `lan` never acts on the host (#140). */
   kind: 'loopback' | 'lan';
   /**
@@ -107,9 +109,8 @@ export function createShellChannel(opts: ShellChannelOptions): ShellChannel {
         send({ type: 'navigate', target: 'conversation', key: target.key });
         return;
       case 'tab':
-        conversation?.show(target.key);
-        send({ type: 'navigate', target: 'conversation', key: target.key });
-        send({ type: 'toast', text: 'A conversation of its own is not available in the browser yet.' });
+        // A tab of its own is a new browser tab on the conversation's route; this one stays where it was (#146).
+        send({ type: 'openTab', key: target.key });
         return;
       case 'handle':
         conversation?.showSession(target.handle);
@@ -180,6 +181,10 @@ export function createShellChannel(opts: ShellChannelOptions): ShellChannel {
       if (m?.type === 'show') {
         // A tapped notification: this tab's conversation goes where it said.
         navigate({ kind: 'session', key: m.key });
+        return;
+      }
+      if (m?.type === 'appAction') {
+        opts.appAction?.(m.action);
         return;
       }
       if (m?.type === 'hostAction') {

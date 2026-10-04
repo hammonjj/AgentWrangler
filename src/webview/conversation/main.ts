@@ -52,6 +52,7 @@ import {
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { resetsInText } from '../../shared/usage';
 import { isRemoteHost, paneApi } from '../common/paneApi';
+import { renderSideBySide } from '../common/sideBySide';
 import { uploadFile } from '../common/upload';
 import { trackTouch } from '../common/phone';
 import { CONV_NARROW_PX, isNarrowWidth } from '../../shared/phoneLayout';
@@ -169,9 +170,6 @@ const composerWrite = document.getElementById('composerWrite')!;
 const composerNote = document.getElementById('composerNote')!;
 const adoptBtn = document.getElementById('adopt') as HTMLButtonElement;
 const pinBtn = document.getElementById('pin') as HTMLButtonElement;
-// "Own tab" needs a second window, and a browser page is one document: the host
-// can only answer it with "not available" (#134), so the page drops the button.
-if (document.body.classList.contains('aw-web')) pinBtn.remove();
 const releaseBtn = document.getElementById('release') as HTMLButtonElement;
 const modeSel = document.getElementById('mode') as HTMLSelectElement;
 const modelSel = document.getElementById('model') as HTMLSelectElement;
@@ -495,17 +493,30 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
           // wants syntax highlighting and side-by-side, which is a real editor.
           const open = document.createElement('button');
           open.className = 'diffopen';
-          open.textContent = 'Open in diff editor';
-          open.title = 'Show this change side by side, with syntax highlighting';
-          open.addEventListener('click', (e) => {
-            e.stopPropagation();
-            post({ type: 'openDiff', file: filePath, patch });
-          });
+          open.textContent = 'Side by side';
+          open.title = 'Show this change with the before and after next to each other';
           file.append(name, open);
           const pre = document.createElement('pre');
           pre.className = 'tdiff';
           renderDiff(pre, patch);
-          d.append(file, pre);
+          // The browser has no diff editor to hand the patch to (#146): the card
+          // swaps its own +/- block for the two-column view, and back.
+          const split = document.createElement('div');
+          split.className = 'tdiff tdiff-split';
+          split.hidden = true;
+          let drawn = false;
+          open.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const on = split.hidden;
+            if (on && !drawn) {
+              renderSideBySide(split, patch);
+              drawn = true;
+            }
+            split.hidden = !on;
+            pre.hidden = on;
+            open.textContent = on ? 'Unified' : 'Side by side';
+          });
+          d.append(file, pre, split);
         }
         if (b.result.text) {
           const pre = document.createElement('pre');

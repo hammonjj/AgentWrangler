@@ -2462,6 +2462,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   const uninstallHooks = async (): Promise<void> => {
+    const choice = await dialogs.warn(
+      'Remove Agent Wrangler status hooks?',
+      {
+        modal: true,
+        detail:
+          `This takes Agent Wrangler's block out of ${settingsPath()}; your other hooks and settings stay. ` +
+          `Status goes back to being guessed from transcripts, for sessions started afterwards.`,
+      },
+      'Remove',
+    );
+    if (choice !== 'Remove') return;
     const res = await removeHooks();
     log(`uninstallHooks: ${res.message}`);
     if (res.ok) void dialogs.info(`Agent Wrangler: ${res.message}`);

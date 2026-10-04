@@ -48,6 +48,7 @@ import {
   shouldShowNotifyBanner,
   type NotificationState,
 } from '../../shared/webCapabilities';
+import { formatRoute } from '../../shared/appRoutes';
 import { openUrlHere, showHostView } from '../common/hostView';
 import { overlayDock, reserveDockSpace } from '../common/overlayDock';
 
@@ -245,6 +246,12 @@ function onShell(body: HostToShell | undefined): boolean {
     case 'openUrl':
       openUrlHere(body.url);
       return true;
+    case 'openTab': {
+      // This page's own origin, so no `noopener`: it is how a blocked pop-up shows (#146).
+      const tab = window.open(`${location.origin}${location.pathname}${formatRoute({ kind: 'conversation', key: body.key })}`, '_blank');
+      if (!tab) toast('The browser blocked the new tab. Allow pop-ups for this page and try again.');
+      return true;
+    }
     case 'showFile':
     case 'showCommand':
       // Offered to the app shell's modal host first (`aw:host-view`), drawn

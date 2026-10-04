@@ -207,6 +207,65 @@ body.aw-app #wb {
   outline-offset: 1px;
 }
 
+/* The Actions menu (#146): what the native window's menu carried. */
+#awBar .aw-actions {
+  position: relative;
+}
+#awBar .aw-actions > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 2px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  list-style: none;
+}
+#awBar .aw-actions > summary::-webkit-details-marker {
+  display: none;
+}
+#awBar .aw-actions > summary:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+#awBar .aw-actions > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+#awBar .aw-actions-list {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+}
+#awBar .aw-actions-item {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+#awBar .aw-actions-item:hover,
+#awBar .aw-actions-item:focus-visible {
+  background: var(--vscode-list-hoverBackground);
+  outline: none;
+}
+@media (pointer: coarse) {
+  #awBar .aw-actions > summary,
+  #awBar .aw-actions-item {
+    min-height: 44px;
+  }
+}
+
 /* One pane at a time, below the breakpoint. `!important` because the divider
    writes the table's width into its own style, which would otherwise win. */
 body.aw-surface-table #wbSplit,

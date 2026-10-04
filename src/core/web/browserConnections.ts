@@ -31,7 +31,7 @@ import type { ClientRegistry } from '../clients';
 import type { HostShell } from '../../host/hostServices';
 import { CommandResults } from './commandResults';
 import { createShellChannel, type ShellConversation } from './shellChannel';
-import { SHELL_PANE, WIRE_PROTOCOL, isCommandId, parseShellToHost, type HostToShell } from '../../shared/shellProtocol';
+import { SHELL_PANE, WIRE_PROTOCOL, isCommandId, parseShellToHost, type AppActionName, type HostToShell } from '../../shared/shellProtocol';
 
 /** What carries a document's pane envelopes; the pane hosts are written against it. */
 export interface EnvelopeTransport {
@@ -83,6 +83,8 @@ export interface BrowserConnectionsOptions {
   folderAllowed?(dir: string): Promise<boolean>;
   /** The Mac's own shell, for a loopback client's explicit "Open on this Mac" (#140). Never for a LAN one. */
   hostShell?: HostShell;
+  /** A window-menu action a browser asked for (#146), with who asked. The callee authorises it. */
+  appAction?(action: AppActionName, context: RequestContext): void;
   /** Shared by every connection, so a resend on a new one is recognised. */
   results?: CommandResults;
   limits?: Partial<ConnectionLimits>;
@@ -163,12 +165,11 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
     // First on the wire, before the panes can post anything.
     sendNow({ pane: SHELL_PANE, body: { type: 'hello', protocol: WIRE_PROTOCOL, build: opts.build() } satisfies HostToShell });
 
-    let panes: BrowserPanes | undefined = opts.createPanes(
-      transport,
-      ownerContext('browser', { deviceId: device.deviceId, connectionId }),
-    );
+    const context = ownerContext('browser', { deviceId: device.deviceId, connectionId });
+    let panes: BrowserPanes | undefined = opts.createPanes(transport, context);
     const shell = createShellChannel({
       connectionId,
+      ...(opts.appAction ? { appAction: (action: AppActionName) => opts.appAction?.(action, context) } : {}),
       post: (envelope) => void transport.postMessage(envelope),
       conversation: () => panes?.conversation,
       ...(opts.folderAllowed ? { folderAllowed: opts.folderAllowed } : {}),

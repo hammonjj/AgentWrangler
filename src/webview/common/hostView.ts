@@ -18,7 +18,9 @@
  * first as a cancelable `aw:host-view` event on `window`, and only drawn here
  * (plain DOM, classes only, no inline styles) if nobody called `preventDefault`.
  */
+import { SIDE_BY_SIDE_MIN_PX } from '../../shared/diff';
 import { fileViewUrl, type FileView, type HostToShell, type ShellToHost } from '../../shared/shellProtocol';
+import { renderSideBySide } from './sideBySide';
 
 export type HostViewMessage = Extract<HostToShell, { type: 'showFile' | 'showCommand' }>;
 
@@ -204,14 +206,42 @@ async function load(into: HTMLElement, path: string): Promise<void> {
     into.textContent = `${view.name} is a binary file (${formatBytes(view.size)}). Use Download.`;
     return;
   }
-  const pre = el('pre', view.kind === 'diff' ? 'aw-hv-text aw-hv-diff' : 'aw-hv-text');
   if (view.kind === 'diff') {
-    for (const line of view.text.split('\n')) pre.appendChild(el('span', `aw-hv-line ${diffClass(line)}`, line || ' '));
+    drawDiff(into, view.text);
   } else {
+    const pre = el('pre', 'aw-hv-text');
     pre.textContent = view.text;
+    into.appendChild(pre);
   }
-  into.appendChild(pre);
   if (view.truncated) into.appendChild(el('p', 'aw-hv-note', `Showing the first part of ${formatBytes(view.size)}. Use Download for the rest.`));
+}
+
+/**
+ * A patch, unified or side by side (#146). Side by side is the first view when
+ * the viewer is wide enough for two columns; either is one click away.
+ */
+function drawDiff(into: HTMLElement, patch: string): void {
+  const views = el('div', 'aw-hv-views');
+  const view = el('div', 'aw-hv-diffview');
+  const unified = el('button', 'aw-hv-btn', 'Unified');
+  const split = el('button', 'aw-hv-btn', 'Side by side');
+  unified.type = split.type = 'button';
+  const show = (sideBySide: boolean) => {
+    unified.setAttribute('aria-pressed', String(!sideBySide));
+    split.setAttribute('aria-pressed', String(sideBySide));
+    if (sideBySide) {
+      renderSideBySide(view, patch);
+      return;
+    }
+    const pre = el('pre', 'aw-hv-text aw-hv-diff');
+    for (const line of patch.split('\n')) pre.appendChild(el('span', `aw-hv-line ${diffClass(line)}`, line || ' '));
+    view.replaceChildren(pre);
+  };
+  unified.addEventListener('click', () => show(false));
+  split.addEventListener('click', () => show(true));
+  views.append(unified, split);
+  into.append(views, view);
+  show(into.clientWidth >= SIDE_BY_SIDE_MIN_PX);
 }
 
 /** The class a unified-diff line is drawn with. */

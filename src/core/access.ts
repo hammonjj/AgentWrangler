@@ -128,6 +128,10 @@ export const ACTIONS = {
   'session.archive': 'mutate',
   'sessions.pauseAll': 'mutate',
   'hooks.install': 'mutate',
+  /** Take Agent Wrangler's block out of Claude Code's settings (#146). */
+  'hooks.remove': 'mutate',
+  /** Restart the background Codex server (#146). It confirms first when that would interrupt a turn. */
+  'codex.restart': 'mutate',
   /** Host-wide settings (runner defaults, Discord on/off). */
   'settings.write': 'mutate',
   /** Potentially user-owned preferences: columns, favourite and hidden projects. */

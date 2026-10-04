@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { splitUnifiedPatch } from '../src/shared/diff';
+import { sideBySideRows, splitUnifiedPatch } from '../src/shared/diff';
 
 /** The shape `diffFromToolUseResult` produces from an edit's `structuredPatch`. */
 const PATCH = ['@@ -1,3 +1,3 @@', ' const a = 1;', '-const b = 2;', '+const b = 3;', ' const c = 4;'].join('\n');
@@ -40,5 +40,35 @@ describe('splitUnifiedPatch', () => {
 
   it('survives an empty patch rather than throwing', () => {
     expect(splitUnifiedPatch('')).toEqual({ before: '', after: '' });
+  });
+});
+
+describe('sideBySideRows', () => {
+  it('numbers each side from the hunk header and pairs a change with its replacement', () => {
+    const rows = sideBySideRows(['@@ -10,3 +20,3 @@', ' keep', '-old', '+new', ' end'].join('\n'));
+    expect(rows).toEqual([
+      { kind: 'hunk', text: '@@ -10,3 +20,3 @@' },
+      { kind: 'line', left: { n: 10, text: 'keep', change: 'ctx' }, right: { n: 20, text: 'keep', change: 'ctx' } },
+      { kind: 'line', left: { n: 11, text: 'old', change: 'del' }, right: { n: 21, text: 'new', change: 'add' } },
+      { kind: 'line', left: { n: 12, text: 'end', change: 'ctx' }, right: { n: 22, text: 'end', change: 'ctx' } },
+    ]);
+  });
+
+  it('leaves the shorter side of a run empty', () => {
+    const rows = sideBySideRows(['@@ -1,1 +1,3 @@', '-a', '+x', '+y', '+z'].join('\n'));
+    expect(rows.slice(1).map((r) => (r.kind === 'line' ? [r.left?.text, r.right?.text] : []))).toEqual([
+      ['a', 'x'],
+      [undefined, 'y'],
+      [undefined, 'z'],
+    ]);
+  });
+
+  it('shows a file header as a full-width row and skips the no-newline marker and the trailing newline', () => {
+    const rows = sideBySideRows(['--- a/f', '+++ b/f', '@@ -1,1 +1,1 @@', '-x', '\\ No newline at end of file', '+y', ''].join('\n'));
+    expect(rows.map((r) => r.kind)).toEqual(['meta', 'meta', 'hunk', 'line']);
+  });
+
+  it('survives an empty patch', () => {
+    expect(sideBySideRows('')).toEqual([]);
   });
 });

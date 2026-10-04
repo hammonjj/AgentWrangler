@@ -88,6 +88,50 @@ function mountPairPage(root: HTMLElement): void {
   root.appendChild(p);
 }
 
+/**
+ * What the native window's menu carried (#146). Refresh and Install Status
+ * Hooks are messages the table already handles; Remove Status Hooks and Restart
+ * Codex Server go to the host as shell `appAction`s, where the host authorises
+ * and confirms them.
+ */
+function actionsMenu(dashboard: ReturnType<typeof paneApi>): HTMLElement {
+  const menu = document.createElement('details');
+  menu.className = 'aw-actions';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Actions';
+  const list = document.createElement('div');
+  list.className = 'aw-actions-list';
+  list.setAttribute('role', 'menu');
+  const item = (label: string, title: string, run: () => void) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'aw-actions-item';
+    b.textContent = label;
+    b.title = title;
+    b.setAttribute('role', 'menuitem');
+    b.addEventListener('click', () => {
+      menu.open = false;
+      run();
+    });
+    list.appendChild(b);
+  };
+  item('Refresh', 'Re-read every session now', () => dashboard.post({ type: 'refresh' }));
+  item('Install status hooks', 'Let Claude Code report exact status', () => dashboard.post({ type: 'installHooks' }));
+  item('Remove status hooks', "Take Agent Wrangler's hooks out of Claude Code's settings", () => shellApi.post({ type: 'appAction', action: 'removeHooks' }));
+  item('Restart Codex server', 'Restart the background Codex server, to pick up a Codex update', () => shellApi.post({ type: 'appAction', action: 'restartCodex' }));
+  menu.append(summary, list);
+  // A menu closes on a click elsewhere and on Escape, like the native one did.
+  document.addEventListener('click', (e) => {
+    if (menu.open && !menu.contains(e.target as Node)) menu.open = false;
+  });
+  menu.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !menu.open) return;
+    menu.open = false;
+    summary.focus();
+  });
+  return menu;
+}
+
 export function startAppShell(opts: { browser: boolean }): void {
   const wb = document.getElementById('wb') as HTMLElement;
   let router: ((input: RouterInput) => void) | undefined;
@@ -162,7 +206,7 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     analytics: link({ kind: 'analytics' }, 'Analytics'),
     preferences: link({ kind: 'preferences' }, 'Preferences'),
   };
-  bar.append(back, heading, nav);
+  bar.append(back, heading, nav, actionsMenu(dashboard));
   // First in the document, above the table's launcher: the first tab stop and
   // the first thing a screen reader meets.
   document.body.prepend(bar);
