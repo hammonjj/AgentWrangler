@@ -810,9 +810,16 @@ body.aw-surface-page #bar {
   body.aw-web.aw-surface-table > * {
     flex-shrink: 0;
   }
-  body.aw-web.aw-surface-table #wb,
+  /* #wb is a column item of the body: its height is its content. */
+  body.aw-web.aw-surface-table #wb {
+    flex: 0 0 auto;
+    height: auto;
+    overflow: visible;
+  }
+  /* #wbTable is a row item of #wb, so `flex` sizes its width: it must keep
+     filling the screen. With `flex-basis: auto` it took its content's width,
+     which the usage grid makes unbounded, and the pane never went `.narrow`. */
   body.aw-web.aw-surface-table #wbTable {
-    flex: 0 0 auto !important;
     height: auto;
     overflow: visible;
   }
