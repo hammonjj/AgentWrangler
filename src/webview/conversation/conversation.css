@@ -1965,8 +1965,14 @@ body,
   padding: 6px 8px;
   min-width: 0;
 }
+/* Two lines when it has to be: status and title, then the buttons. On one line
+   the title was squeezed to a few letters between the pill and three buttons.
+   The title's basis is nearly the whole row, so the buttons always wrap below. */
+#convApp.narrow #hdr {
+  flex-wrap: wrap;
+}
 #convApp.narrow #ttl {
-  flex: 1 1 0;
+  flex: 1 1 calc(100% - 7rem);
   min-width: 0;
 }
 #convApp.narrow #convUsage,

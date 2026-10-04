@@ -838,7 +838,7 @@
 
 #prefsApp.narrow .pf-navlink {
   flex: none;
-  min-height: 34px;
+  min-height: 44px;
   white-space: nowrap;
 }
 
@@ -855,10 +855,32 @@
   flex: 1 1 100%;
 }
 
+/* The heading line is name and Reset, with the key under both. Reset is hidden
+   (not removed) on a row that has not changed, so left in source order it wrapped
+   onto a line of its own and left an empty gap under every setting's name. */
+#prefsApp.narrow .pf-label {
+  flex: 1 1 0;
+  min-width: 0;
+}
+#prefsApp.narrow .pf-reset {
+  order: 1;
+  min-height: 36px;
+  padding: 4px 12px;
+  /* Out of layout, not just invisible, until the row has changed: a 36px
+     button nobody can see would still make every heading line that tall. */
+  display: none;
+}
+#prefsApp.narrow .pf-row.changed .pf-reset,
+#prefsApp.narrow .pf-model.changed .pf-reset {
+  display: inline-block;
+}
+#prefsApp.narrow .pf-key {
+  order: 2;
+}
 #prefsApp.narrow .pf-input,
 #prefsApp.narrow .pf-select,
 #prefsApp.narrow .pf-action {
-  min-height: 34px;
+  min-height: 44px;
   /* 16px stops a phone zooming the page when a field is focused. */
   font-size: 16px;
 }

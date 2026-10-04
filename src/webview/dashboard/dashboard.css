@@ -2601,6 +2601,19 @@ body:has(#app.narrow) #usage:not(.expanded) .unote {
   padding: 6px 14px;
   font-size: 0.95em;
 }
+/* Missions and analytics controls: finger-sized, and 16px in fields so iOS does
+   not zoom the page on focus. */
+#app.touch .missions .mnew,
+#app.touch .missions .pbtn2,
+#app.touch .missions .pactions select,
+#app.touch .analytics .an-filter select {
+  min-height: 44px;
+  font-size: 16px;
+}
+#app.touch .missions .mnew,
+#app.touch .missions .pbtn2 {
+  padding: 6px 14px;
+}
 #app.touch button.schevron,
 #app.touch button.colcfg {
   min-width: 44px;
