@@ -227,9 +227,9 @@ export const SETTINGS: SettingSpec[] = [
     label: 'Notify when an agent needs you',
     group: 'Agents and status',
     type: 'boolean',
-    default: false,
+    default: true,
     description:
-      'Show a notification when a session needs permission, is waiting on you, or is done, while Agent Wrangler is open in a browser tab.',
+      'Show a notification when a session needs permission, is waiting on you, or is done, while Agent Wrangler is open in a browser tab. On by default, so allowing notifications in a tab is all it takes.',
   },
   {
     key: 'notifyWhenWindowClosed',

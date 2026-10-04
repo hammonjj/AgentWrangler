@@ -1029,7 +1029,7 @@ a tag, so the same ask arriving twice is one notification, and every device is i
 phone and a laptop each get one, and a tab you are looking at is the only one that stays quiet.
 
 Which notices are sent at all is two settings: *Notify when an agent needs you*
-(`notifyOnWaiting`, off by default) while any tab is connected, and *Notify while no tab is
+(`notifyOnWaiting`, on by default since #145, so allowing notifications in a tab is the only opt-in) while any tab is connected, and *Notify while no tab is
 open* (`notifyWhenWindowClosed`, on) while none is. Where a sent notice goes:
 
 | Browser tab connected, notifications allowed | Notice goes to |
