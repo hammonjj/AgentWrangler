@@ -217,9 +217,20 @@ There is no usage-refresh button. A host handler for `refresh` exists, but nothi
   blocked until the host answers.
 - **Preferences Probe:** the host now pushes `busy` when the probe starts, so "Probing…" shows.
 
-## 6. Proposed follow-up issues
+## 6. Follow-up issues
 
-Each is larger than a pane-only fix, or needs a decision.
+Each is larger than a pane-only fix, or needs a decision. Filed 2026-10-04:
+
+| Item | Issue |
+|---|---|
+| F1 | #148 |
+| F2 | #149 |
+| F3 | #150 |
+| F4 | #151 |
+| F5 | #152 |
+| F6 | #153 |
+| F7 | #154 |
+| F8 | #155 |
 
 **F1. Core dedupe and host pending state for task actions.**
 
