@@ -59,6 +59,7 @@ import { AssetManifest } from './assets';
 import { DEVICE_TTL_MS, WEB_DEVICES_FILE, WebDeviceStore, cleanDeviceName, summarizeUserAgent, type DeviceScope, type WebDevice } from './devices';
 import type { WebFileRoutes } from './files';
 import { DIRS_PATH, FILES_PATH, UPLOAD_PATH } from '../../shared/files';
+import { REAUTH_PATH, REAUTH_STORAGE_KEY, REAUTH_TOKEN_PATH } from '../../shared/webReauth';
 import { LoginCodes } from './loginLinks';
 import { caMobileconfig, MOBILECONFIG_CONTENT_TYPE } from './mobileconfig';
 import { PAIRING_LOCKOUT_MS, PairingOffers } from './pairing';
@@ -75,7 +76,10 @@ export const DEVICE_COOKIE = 'aw_device';
  * can plant or widen it.
  */
 export const LAN_DEVICE_COOKIE = '__Host-aw_lan_device';
-const COOKIE_MAX_AGE_S = Math.floor(DEVICE_TTL_MS / 1000);
+/** LAN recovery (a browser that lost its device cookie): trade a kept token for a new cookie. */
+const LAN_NOT_SIGNED_IN =
+  'Not signed in. This device has not been paired with Agent Wrangler on the Mac, or was unpaired. To pair it, run `aw web pair` on the Mac and scan the QR code.';
+const COOKIE_MAX_AGE_S =Math.floor(DEVICE_TTL_MS / 1000);
 /** The pairing forms' token cookie (#137), per scope like the device cookies. */
 export const PAIR_FORM_COOKIE = 'aw_pair_form';
 export const LAN_PAIR_FORM_COOKIE = '__Host-aw_pair_form';
@@ -560,6 +564,14 @@ export class WebServer implements Disposable {
         this.routed(res, this.opts.files.upload(ownerContext('browser', { deviceId: device.id }), req, res));
         return;
       }
+      if (req.method === 'POST' && listener.scope === 'lan' && url.pathname === REAUTH_TOKEN_PATH) {
+        this.reauthToken(listener, req, res);
+        return;
+      }
+      if (req.method === 'POST' && listener.scope === 'lan' && url.pathname === REAUTH_PATH) {
+        void this.reauth(listener, req, res);
+        return;
+      }
       if (req.method === 'POST' && listener.scope === 'lan' && url.pathname === '/pair') {
         void this.pairRedeem(listener, req, res);
         return;
@@ -592,11 +604,21 @@ export class WebServer implements Disposable {
     const cookie = readCookie(req.headers.cookie, cookieName(listener.scope));
     const device = this.devices.verify(cookie, listener.scope);
     if (!device || !cookie) {
+      if (url.pathname === '/') {
+        // Why a page load was refused, for "it keeps asking me to pair again".
+        this.opts.log(
+          `web: refused a ${listener.scope} page load (${cookie ? 'a credential no device has' : 'no device cookie'}; ${summarizeUserAgent(req.headers['user-agent'])})`,
+        );
+      }
+      if (listener.scope === 'lan' && url.pathname === '/' && req.method === 'GET') {
+        this.reauthPage(res);
+        return;
+      }
       text(
         res,
         401,
         listener.scope === 'lan'
-          ? 'Not signed in. This device has not been paired with Agent Wrangler on the Mac, or was unpaired. To pair it, run `aw web pair` on the Mac and scan the QR code.'
+          ? LAN_NOT_SIGNED_IN
           : 'Not signed in. Run `aw web open` in a terminal on this Mac to open Agent Wrangler here.',
       );
       return;
@@ -769,6 +791,74 @@ export class WebServer implements Disposable {
       location: '/',
     });
     res.end();
+  }
+
+  // ---- recovery (a LAN device that lost its cookie) ----
+
+  /** LAN `POST /reauth/token`, signed in: a recovery token for this browser to keep. */
+  private reauthToken(listener: Listener, req: http.IncomingMessage, res: http.ServerResponse): void {
+    req.resume();
+    const device = this.devices.verify(readCookie(req.headers.cookie, cookieName(listener.scope)), listener.scope);
+    if (!device) {
+      text(res, 401, 'Not signed in.');
+      return;
+    }
+    const token = this.devices.issueRecovery(device.id);
+    if (!token) {
+      text(res, 404, 'No recovery token for this device.');
+      return;
+    }
+    res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ token }));
+  }
+
+  /** LAN `POST /reauth`: a recovery token for a new device cookie. Origin has been checked. */
+  private async reauth(listener: Listener, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const form = await readForm(req);
+    if (typeof form === 'number') {
+      text(res, form, 'Not accepted.');
+      return;
+    }
+    const ip = remoteAddress(req);
+    const recovered = this.devices.recover(form.get('token') ?? undefined, listener.scope);
+    if (!recovered) {
+      this.opts.gate.loginFailed('browser', 'recovery-token', 'web.login');
+      this.opts.log(`web: refused a recovery token from ${ip}`);
+      text(res, 401, 'Not signed in.');
+      return;
+    }
+    const { device, credential } = recovered;
+    if (!this.opts.gate.admit(ownerContext('browser', { deviceId: device.id }), 'web.login', { kind: 'device', id: device.id })) {
+      text(res, 403, 'Not permitted.');
+      return;
+    }
+    this.opts.log(`web: signed device ${device.id} back in with its recovery token`);
+    res.writeHead(204, { ...SECURITY_HEADERS, 'set-cookie': this.cookie(listener, req, credential) });
+    res.end();
+  }
+
+  /**
+   * The LAN 401 for the page: the same words, plus a script that offers the
+   * browser's recovery token (if it kept one) before giving up. Tried at most
+   * once every 30 seconds per tab, so a cookie that still does not stick cannot loop.
+   */
+  private reauthPage(res: http.ServerResponse): void {
+    const nonce = crypto.randomBytes(16).toString('base64');
+    const script =
+      `(function(){var k='${REAUTH_STORAGE_KEY}',a='${REAUTH_STORAGE_KEY}.at',t=null,n=Date.now();` +
+      `try{t=localStorage.getItem(k);if(!t||n-(+sessionStorage.getItem(a)||0)<30000)return;sessionStorage.setItem(a,String(n));}catch(e){return;}` +
+      `fetch('${REAUTH_PATH}',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/x-www-form-urlencoded'},body:'token='+encodeURIComponent(t)})` +
+      `.then(function(r){if(r.ok)location.reload();else if(r.status===401)try{localStorage.removeItem(k);}catch(e){}})` +
+      `.catch(function(){});})();`;
+    res.writeHead(401, {
+      ...SECURITY_HEADERS,
+      'content-type': 'text/html; charset=utf-8',
+      'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`,
+    });
+    res.end(
+      `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Not signed in</title>` +
+        `<p>${LAN_NOT_SIGNED_IN.replace(/`([^`]*)`/g, '<code>$1</code>')}</p><script nonce="${nonce}">${script}</script>`,
+    );
   }
 
   /** Loopback `POST /pair/new`, signed in: start an offer and show its QR code. */

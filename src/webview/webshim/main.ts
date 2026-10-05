@@ -49,6 +49,7 @@ import {
   type NotificationState,
 } from '../../shared/webCapabilities';
 import { formatRoute } from '../../shared/appRoutes';
+import { REAUTH_STORAGE_KEY, REAUTH_TOKEN_PATH } from '../../shared/webReauth';
 import { openUrlHere, showHostView } from '../common/hostView';
 import { overlayDock, reserveDockSpace } from '../common/overlayDock';
 
@@ -176,6 +177,25 @@ function sendRaw(envelope: unknown): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(envelope));
 }
 
+/**
+ * Keep a recovery token (LAN devices only: the loopback listener answers 404),
+ * so a browser that loses its device cookie can sign itself back in.
+ */
+function keepRecoveryToken(): void {
+  if (location.protocol !== 'https:') return;
+  try {
+    if (localStorage.getItem(REAUTH_STORAGE_KEY)) return;
+  } catch {
+    return;
+  }
+  void fetch(REAUTH_TOKEN_PATH, { method: 'POST', credentials: 'same-origin' })
+    .then((r) => (r.ok ? (r.json() as Promise<{ token?: unknown }>) : undefined))
+    .then((body) => {
+      if (typeof body?.token === 'string') localStorage.setItem(REAUTH_STORAGE_KEY, body.token);
+    })
+    .catch(() => undefined);
+}
+
 /** The server's `hello`: on this build, the connection is live; on another, reload. */
 function onHello(protocol: number, build: string): void {
   if (protocol !== WIRE_PROTOCOL || build !== BUILD) {
@@ -184,6 +204,7 @@ function onHello(protocol: number, build: string): void {
   }
   live = true;
   attempt = 0;
+  keepRecoveryToken();
   sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden } });
   reportNotifications();
   // What was not acknowledged before the drop. A pane's old `ready` is

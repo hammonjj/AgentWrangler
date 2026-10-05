@@ -17,7 +17,7 @@ import WebSocket from 'ws';
 import { createAccessGate, type AccessAuditRecord } from '../src/core/access';
 import { ClientRegistry } from '../src/core/clients';
 import { createBrowserConnections, type BrowserConnections } from '../src/core/web/browserConnections';
-import { WebDeviceStore, cleanDeviceName } from '../src/core/web/devices';
+import { DEVICE_TTL_MS, WebDeviceStore, cleanDeviceName, summarizeUserAgent } from '../src/core/web/devices';
 import {
   PAIRING_ALPHABET,
   PAIRING_FAILURE_WINDOW_MS,
@@ -370,6 +370,49 @@ describe('the device store (#137)', () => {
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
   });
 
+  it('recovers a LAN device by its token: a new credential, the old one gone, the token kept, revoke ends it', () => {
+    const file = path.join(dir, 'web-devices.json');
+    const store = new WebDeviceStore(file);
+    const { device, credential } = store.issue('Chrome on iOS', undefined, 'lan');
+    const token = store.issueRecovery(device.id)!;
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(fs.readFileSync(file, 'utf8')).not.toContain(token);
+    expect(store.recover('nope', 'lan')).toBeUndefined();
+    expect(store.recover(token, 'loopback')).toBeUndefined();
+    const again = store.recover(token, 'lan')!;
+    expect(again.device.id).toBe(device.id);
+    expect(store.verify(again.credential, 'lan')?.id).toBe(device.id);
+    expect(store.verify(credential, 'lan')).toBeUndefined();
+    expect(store.recover(token, 'lan')).toBeDefined();
+    // A newer token replaces the older one.
+    const newer = store.issueRecovery(device.id)!;
+    expect(store.recover(token, 'lan')).toBeUndefined();
+    expect(store.recover(newer, 'lan')).toBeDefined();
+    // It survives a restart, and not a revoke.
+    expect(new WebDeviceStore(file).recover(newer, 'lan')).toBeDefined();
+    store.revoke(device.id);
+    expect(store.recover(newer, 'lan')).toBeUndefined();
+  });
+
+  it('gives loopback devices and unknown ids no recovery token, and an expired device cannot recover', () => {
+    let now = 1_000_000;
+    const store = new WebDeviceStore(path.join(dir, 'web-devices.json'), () => now);
+    expect(store.issueRecovery(store.issue('Chrome on macOS').device.id)).toBeUndefined();
+    expect(store.issueRecovery('missing')).toBeUndefined();
+    const { device } = store.issue('Safari on iOS', undefined, 'lan');
+    const token = store.issueRecovery(device.id)!;
+    now += DEVICE_TTL_MS + 1;
+    expect(store.recover(token, 'lan')).toBeUndefined();
+  });
+
+  it('names iOS Chrome, Firefox and Edge by their own tokens', () => {
+    const ios = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) ';
+    expect(summarizeUserAgent(`${ios}CriOS/130.0.0.0 Mobile/15E148 Safari/604.1`)).toBe('Chrome on iOS');
+    expect(summarizeUserAgent(`${ios}FxiOS/130.0 Mobile/15E148 Safari/605.1.15`)).toBe('Firefox on iOS');
+    expect(summarizeUserAgent(`${ios}EdgiOS/130.0 Version/18.0 Mobile/15E148 Safari/605.1.15`)).toBe('Edge on iOS');
+    expect(summarizeUserAgent(`${ios}Version/18.0 Mobile/15E148 Safari/604.1`)).toBe('Safari on iOS');
+  });
+
   it('cleans a typed device name', () => {
     expect(cleanDeviceName('  My\u0000 phone\n\t ', 'fallback')).toBe('My phone');
     expect(cleanDeviceName('‮', 'Safari on iOS')).toBe('Safari on iOS');
@@ -649,6 +692,55 @@ describe.skipIf(!HAS_OPENSSL)('pairing over the listeners', () => {
     expect(await connect(lanPort, true, `${LAN_DEVICE_COOKIE}=${cred}`)).toEqual({ status: 401 });
     const { credential } = await pairDevice();
     expect((await loop('/', { headers: { cookie: `aw_device=${credential}` } })).status).toBe(401);
+  });
+
+  describe('recovery for a browser that lost its cookie', () => {
+    const post = (p: string, headers: Record<string, string> = {}, body = '') =>
+      lan(p, { method: 'POST', body, headers: { origin: lanOrigin(), 'content-type': 'application/x-www-form-urlencoded', ...headers } });
+
+    it('hands a signed-in LAN device a token, and trades it for a new cookie', async () => {
+      const { credential, deviceId } = await pairDevice();
+      expect((await post('/reauth/token')).status).toBe(401);
+      const issued = await post('/reauth/token', { cookie: `${LAN_DEVICE_COOKIE}=${credential}` });
+      expect(issued.status).toBe(200);
+      const { token } = JSON.parse(issued.body) as { token: string };
+      const back = await post('/reauth', {}, new URLSearchParams({ token }).toString());
+      expect(back.status).toBe(204);
+      const fresh = cookieValue(back, LAN_DEVICE_COOKIE)!;
+      expect((back.headers['set-cookie'] ?? [])[0]).toMatch(/HttpOnly; SameSite=Strict; Path=\/; Max-Age=\d+; Secure$/);
+      expect((await lan('/', { headers: { cookie: `${LAN_DEVICE_COOKIE}=${fresh}` } })).status).toBe(200);
+      expect(store.list().find((d) => d.id === deviceId)).toBeDefined();
+      expect(JSON.stringify(audit)).not.toContain(token);
+    });
+
+    it('refuses a wrong token, a foreign Origin, and a revoked device’s token', async () => {
+      const { credential, deviceId } = await pairDevice();
+      const { token } = JSON.parse((await post('/reauth/token', { cookie: `${LAN_DEVICE_COOKIE}=${credential}` })).body) as { token: string };
+      const form = new URLSearchParams({ token }).toString();
+      expect((await post('/reauth', {}, new URLSearchParams({ token: 'nope' }).toString())).status).toBe(401);
+      expect((await post('/reauth', { origin: 'https://evil.example' }, form)).status).toBe(403);
+      expect((await post('/reauth', { 'content-type': 'text/plain' }, form)).status).toBe(415);
+      store.revoke(deviceId);
+      expect((await post('/reauth', {}, form)).status).toBe(401);
+    });
+
+    it('is not offered on loopback', async () => {
+      const cred = await loopbackCredential();
+      const r = await loop('/reauth/token', { method: 'POST', headers: { origin: loopOrigin(), cookie: `aw_device=${cred}` } });
+      expect(r.status).toBe(405);
+    });
+
+    it('answers a cookie-less page load with the pairing words and a nonce’d recovery script', async () => {
+      const r = await lan('/');
+      expect(r.status).toBe(401);
+      expect(r.body).toContain('aw web pair');
+      const nonce = /script-src 'nonce-([^']+)'/.exec(String(r.headers['content-security-policy']))?.[1];
+      expect(nonce).toBeTruthy();
+      expect(r.body).toContain(`<script nonce="${nonce}">`);
+      expect(r.headers['content-security-policy']).not.toContain('unsafe-inline');
+      // Assets and other paths stay plain 401s.
+      expect((await lan('/workbench.js')).headers['content-type']).toContain('text/plain');
+    });
   });
 
   it('revoking a paired device disconnects it at once and refuses it from then on', async () => {

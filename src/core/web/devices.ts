@@ -46,6 +46,8 @@ export interface WebDevice {
 interface StoredDevice extends WebDevice {
   /** sha256 of the credential, hex. The credential itself is never stored. */
   credentialHash: string;
+  /** sha256 of the recovery token (LAN devices), hex. See `issueRecovery`. */
+  recoveryHash?: string;
 }
 
 interface DevicesFile {
@@ -138,6 +140,46 @@ export class WebDeviceStore {
     return publicView(match);
   }
 
+  /**
+   * A recovery token for a LAN device: a second secret the page keeps in
+   * `localStorage`, for the day the browser loses the device cookie (a locked
+   * phone, a cleared cookie jar). Replaces any earlier one. Undefined for a
+   * device that is not current or not on the LAN.
+   */
+  issueRecovery(deviceId: string): string | undefined {
+    const d = this.devices.find((x) => x.id === deviceId);
+    if (!d || d.scope !== 'lan' || this.now() - d.lastSeen > DEVICE_TTL_MS) return undefined;
+    const token = crypto.randomBytes(32).toString('base64url');
+    d.recoveryHash = hashCredential(token).toString('hex');
+    this.save();
+    return token;
+  }
+
+  /**
+   * Trade a recovery token for a fresh cookie credential. The device keeps its
+   * id; its old credential stops working, as the browser lost it anyway. The
+   * token stays valid, so a response lost on the way does not strand the device.
+   * Revoking or expiring the device ends the token with it.
+   */
+  recover(token: string | undefined, scope: DeviceScope): { device: WebDevice; credential: string } | undefined {
+    if (typeof token !== 'string' || token.length === 0 || token.length > 128) return undefined;
+    const given = hashCredential(token);
+    const at = this.now();
+    let match: StoredDevice | undefined;
+    for (const d of this.devices) {
+      const stored = d.recoveryHash ? Buffer.from(d.recoveryHash, 'hex') : undefined;
+      if (stored && stored.length === given.length && crypto.timingSafeEqual(stored, given) && !match) match = d;
+    }
+    if (!match || match.scope !== scope || at - match.lastSeen > DEVICE_TTL_MS) return undefined;
+    const credential = crypto.randomBytes(32).toString('base64url');
+    match.credentialHash = hashCredential(credential).toString('hex');
+    match.lastSeen = at;
+    this.devices = this.live();
+    this.save();
+    this.changed.fire();
+    return { device: publicView(match), credential };
+  }
+
   list(): WebDevice[] {
     return this.live().map(publicView);
   }
@@ -198,11 +240,12 @@ export function cleanDeviceName(input: string | null | undefined, fallback: stri
 /** "Chrome on macOS", from a user agent, for a device list. Never stored as more than this. */
 export function summarizeUserAgent(ua: string | undefined): string {
   if (!ua) return 'Unknown browser';
-  const browser = /Edg\//.test(ua)
+  // iOS browsers are WebKit under their own tokens (`CriOS`, `FxiOS`, `EdgiOS`).
+  const browser = /Edg\/|EdgiOS\//.test(ua)
     ? 'Edge'
-    : /Firefox\//.test(ua)
+    : /Firefox\/|FxiOS\//.test(ua)
       ? 'Firefox'
-      : /Chrome\//.test(ua)
+      : /Chrome\/|CriOS\//.test(ua)
         ? 'Chrome'
         : /Safari\//.test(ua)
           ? 'Safari'
