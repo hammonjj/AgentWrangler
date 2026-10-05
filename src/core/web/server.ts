@@ -59,6 +59,7 @@ import { AssetManifest } from './assets';
 import { DEVICE_TTL_MS, WEB_DEVICES_FILE, WebDeviceStore, cleanDeviceName, summarizeUserAgent, type DeviceScope, type WebDevice } from './devices';
 import type { WebFileRoutes } from './files';
 import { DIRS_PATH, FILES_PATH, UPLOAD_PATH } from '../../shared/files';
+import { PAIR_OFFER_PATH, type PairOfferReply } from '../../shared/pairOffer';
 import { REAUTH_PATH, REAUTH_STORAGE_KEY, REAUTH_TOKEN_PATH } from '../../shared/webReauth';
 import { LoginCodes } from './loginLinks';
 import { caMobileconfig, MOBILECONFIG_CONTENT_TYPE } from './mobileconfig';
@@ -576,6 +577,10 @@ export class WebServer implements Disposable {
         void this.pairRedeem(listener, req, res);
         return;
       }
+      if (req.method === 'POST' && listener.scope === 'loopback' && url.pathname === PAIR_OFFER_PATH) {
+        this.pairOfferJson(listener, req, res);
+        return;
+      }
       if (req.method === 'POST' && listener.scope === 'loopback' && url.pathname === '/pair/new') {
         void this.pairStart(listener, req, res);
         return;
@@ -895,6 +900,47 @@ export class WebServer implements Disposable {
     this.opts.log('web: pairing started from a browser on this Mac');
     const svg = qrToSvg(encodeQr(offer.setupUrl ?? offer.url, 'M'), { title: 'Pairing QR code' });
     this.html(res, 200, pairOfferPage({ svg, code: offer.code, url: offer.url, ...(offer.setupUrl ? { setupUrl: offer.setupUrl } : {}), expiresAt: offer.expiresAt, token }));
+  }
+
+  /**
+   * Loopback `POST /pair/offer`, signed in: the same offer as `/pair/new`, as
+   * JSON for the workbench to draw in place. The Origin check ran above and the
+   * device cookie is `SameSite=Strict`, which is what the form token adds to a
+   * plain form; a JSON body has no form to forge.
+   */
+  private pairOfferJson(listener: Listener, req: http.IncomingMessage, res: http.ServerResponse): void {
+    req.resume();
+    const device = this.devices.verify(readCookie(req.headers.cookie, cookieName(listener.scope)), listener.scope);
+    const json = (status: number, body: unknown): void => {
+      res.writeHead(status, { ...SECURITY_HEADERS, 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(body));
+    };
+    if (!device) {
+      json(401, { error: 'Not signed in. Run `aw web open` in a terminal on this Mac first.' });
+      return;
+    }
+    if (!this.lanListening()) {
+      json(409, { error: 'Home-network access is off. Turn on “Allow devices on my home network” in Preferences (Browser), then try again.' });
+      return;
+    }
+    if (!this.opts.gate.admit(ownerContext('browser', { deviceId: device.id }), 'web.pair.start')) {
+      json(403, { error: 'Not permitted.' });
+      return;
+    }
+    const offer = this.pairingOffer();
+    if (!offer) {
+      json(409, { error: 'Home-network access is off. Turn on “Allow devices on my home network” in Preferences (Browser), then try again.' });
+      return;
+    }
+    this.opts.log('web: pairing started from a browser on this Mac');
+    const svg = qrToSvg(encodeQr(offer.setupUrl ?? offer.url, 'M'), { title: 'Pairing QR code' });
+    const reply: PairOfferReply = {
+      qr: `data:image/svg+xml;base64,${Buffer.from(svg, 'utf8').toString('base64')}`,
+      code: offer.code,
+      address: offer.setupUrl ?? offer.url.replace(/\?.*$/, ''),
+      expiresAt: offer.expiresAt,
+    };
+    json(200, reply);
   }
 
   private pairLocked(res: http.ServerResponse): void {

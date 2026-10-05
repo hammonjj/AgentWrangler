@@ -588,6 +588,62 @@ body.aw-surface-conversation #wbConv {
   gap: 8px;
   margin: 8px 0;
 }
+#awPage button.aw-page-button {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+#awPage button.aw-page-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+#awPage .aw-pair-status {
+  margin: 0 0 8px;
+  color: var(--vscode-errorForeground);
+}
+#awPage .aw-pair-status:empty {
+  display: none;
+}
+#awPage .aw-pair-panel {
+  margin: 8px 0 12px;
+  padding: 12px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  animation: aw-pair-open 0.2s ease-out;
+}
+#awPage .aw-pair-panel[hidden] {
+  display: none;
+}
+#awPage .aw-pair-qr {
+  display: block;
+  width: min(240px, 100%);
+  height: auto;
+  margin: 0 0 8px;
+  border-radius: 4px;
+  image-rendering: pixelated;
+}
+#awPage .aw-pair-address {
+  display: block;
+  margin: 0 0 8px;
+  word-break: break-all;
+}
+#awPage .aw-pair-code {
+  margin: 0 0 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 1.6em;
+  letter-spacing: 0.15em;
+}
+@keyframes aw-pair-open {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #awPage .aw-pair-panel {
+    animation: none;
+  }
+}
 #awPage .aw-connect-check {
   display: inline-flex;
   align-items: center;
