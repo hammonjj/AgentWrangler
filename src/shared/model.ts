@@ -515,6 +515,28 @@ export function formatAge(nowMs: number, thenMs: number): string {
   return formatDuration(nowMs - thenMs);
 }
 
+/**
+ * A conversation block's hover text: the local date and time it arrived, then
+ * how long ago that was. Empty when `ts` is missing or not a date. The caller
+ * passes `now` so the "ago" is fresh at hover time and the function stays pure.
+ */
+export function messageTimeTitle(nowMs: number, ts: string | undefined): string {
+  if (!ts) return '';
+  const then = new Date(ts);
+  if (Number.isNaN(then.getTime())) return '';
+  const when = then.toLocaleString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const ago = nowMs - then.getTime();
+  return ago < 5_000 ? `${when} · just now` : `${when} · ${formatAge(nowMs, then.getTime())} ago`;
+}
+
 // ---- hook health (the dashboard banner) ----
 
 /** Mirrors `InstallState.kind` in the extension host, minus the host-only payload. */
