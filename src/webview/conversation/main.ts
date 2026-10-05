@@ -16,7 +16,7 @@ import { decodedBytes, IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES } from '../../shared/c
 import { describeDictation, spliceDictation } from '../../shared/dictationText';
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
-import { displayTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
+import { displayTitle, messageTimeTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
 import { modelLabel } from '../../shared/modelName';
 import {
   assessmentChipTitle,
@@ -376,12 +376,6 @@ function decorateCodeBlocks(root: HTMLElement): void {
   }
 }
 
-function timeLabel(ts: string | undefined): string {
-  if (!ts) return '';
-  const d = new Date(ts);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
 function answeredLabel(state: AskState): string {
   switch (state) {
     case 'allowed':
@@ -597,9 +591,16 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
     }
   }
 
-  const ts = 'ts' in b ? timeLabel(b.ts) : '';
-  if (ts) el.title = ts;
+  // The tooltip is written on hover (below), so "N ago" is current when read.
+  if ('ts' in b && b.ts) el.dataset.ts = b.ts;
 }
+
+blocksEl.addEventListener('mouseover', (e) => {
+  const blk = (e.target as Element).closest<HTMLElement>('[data-ts]');
+  if (!blk) return;
+  const title = messageTimeTitle(Date.now(), blk.dataset.ts);
+  if (title) blk.title = title;
+});
 
 /** An ask this pane cannot answer: say so instead of showing dead buttons. */
 function cannotAnswer(row: HTMLElement, what: string): void {
