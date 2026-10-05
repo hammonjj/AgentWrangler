@@ -270,12 +270,15 @@ body.aw-app #wb {
    writes the table's width into its own style, which would otherwise win. */
 body.aw-surface-table #wbSplit,
 body.aw-surface-table #wbConv,
+body.aw-surface-analytics #wbSplit,
+body.aw-surface-analytics #wbConv,
 body.aw-surface-conversation #wbTable,
 body.aw-surface-conversation #wbSplit,
 body.aw-surface-page #wb {
   display: none;
 }
-body.aw-surface-table #wbTable {
+body.aw-surface-table #wbTable,
+body.aw-surface-analytics #wbTable {
   flex: 1 1 auto !important;
 }
 body.aw-surface-conversation #wbConv {
@@ -805,7 +808,9 @@ body.aw-web .aw-fb {
    with the table out of sight it must go too, or it fills a phone's screen above
    the conversation. */
 body.aw-surface-conversation #bar,
-body.aw-surface-page #bar {
+body.aw-surface-page #bar,
+body.aw-surface-analytics #bar,
+body.aw-surface-analytics #usage {
   display: none;
 }
 
@@ -823,15 +828,18 @@ body.aw-surface-page #bar {
    view. Below the breakpoint the table screen scrolls as one page instead: the
    body is the scroller and nothing is pinned. The desktop layout is unchanged. */
 @media (max-width: 799px) {
-  body.aw-web.aw-surface-table {
+  body.aw-web.aw-surface-table,
+  body.aw-web.aw-surface-analytics {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
-  body.aw-web.aw-surface-table > * {
+  body.aw-web.aw-surface-table > *,
+  body.aw-web.aw-surface-analytics > * {
     flex-shrink: 0;
   }
   /* #wb is a column item of the body: its height is its content. */
-  body.aw-web.aw-surface-table #wb {
+  body.aw-web.aw-surface-table #wb,
+  body.aw-web.aw-surface-analytics #wb {
     flex: 0 0 auto;
     height: auto;
     overflow: visible;
@@ -839,16 +847,20 @@ body.aw-surface-page #bar {
   /* #wbTable is a row item of #wb, so `flex` sizes its width: it must keep
      filling the screen. With `flex-basis: auto` it took its content's width,
      which the usage grid makes unbounded, and the pane never went `.narrow`. */
-  body.aw-web.aw-surface-table #wbTable {
+  body.aw-web.aw-surface-table #wbTable,
+  body.aw-web.aw-surface-analytics #wbTable {
     height: auto;
     overflow: visible;
   }
-  body.aw-web.aw-surface-table #wbTable > #app {
+  body.aw-web.aw-surface-table #wbTable > #app,
+  body.aw-web.aw-surface-analytics #wbTable > #app {
     flex: 0 0 auto;
     overflow: visible;
   }
   body.aw-web.aw-surface-table #app .tabletabs,
-  body.aw-web.aw-surface-table #app thead th {
+  body.aw-web.aw-surface-table #app thead th,
+  body.aw-web.aw-surface-analytics #app .tabletabs,
+  body.aw-web.aw-surface-analytics #app thead th {
     position: static;
   }
 }

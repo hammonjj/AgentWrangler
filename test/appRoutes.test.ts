@@ -68,7 +68,11 @@ describe('layout', () => {
     expect(surfaceFor({ kind: 'conversation', key: 'k' }, 'split')).toBe('split');
     expect(surfaceFor({ kind: 'missions' }, 'split')).toBe('split');
     expect(surfaceFor({ kind: 'conversation', key: 'k' }, 'single')).toBe('conversation');
-    expect(surfaceFor({ kind: 'analytics' }, 'single')).toBe('table');
+    expect(surfaceFor({ kind: 'analytics' }, 'single')).toBe('analytics');
+    expect(surfaceFor({ kind: 'analytics' }, 'split')).toBe('analytics');
+    // An item's detail from Analytics takes the window; it does not reopen the split.
+    expect(surfaceFor({ kind: 'conversation' }, 'split', 'analytics')).toBe('conversation');
+    expect(surfaceFor({ kind: 'conversation' }, 'split', 'sessions')).toBe('split');
     expect(surfaceFor({ kind: 'preferences' }, 'split')).toBe('page');
     expect(surfaceFor({ kind: 'pair' }, 'single')).toBe('page');
     expect(surfaceFor({ kind: 'connect' }, 'split')).toBe('page');

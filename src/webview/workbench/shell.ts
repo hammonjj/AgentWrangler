@@ -52,7 +52,7 @@ import { mountConnectPage } from './connectPage';
 import { createModalHost } from './modalHost';
 import { showToast } from './toastHost';
 
-const SURFACES: ShellSurface[] = ['split', 'table', 'conversation', 'page'];
+const SURFACES: ShellSurface[] = ['split', 'table', 'conversation', 'page', 'analytics'];
 
 /** `history.state` as the shell writes it: how many of its own entries are behind this one. */
 interface HistoryMark {
@@ -277,7 +277,7 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
 
   function paint(): void {
     const route = state.route;
-    const surface = surfaceFor(route, layout());
+    const surface = surfaceFor(route, layout(), state.tableView);
     for (const s of SURFACES) document.body.classList.toggle(`aw-surface-${s}`, s === surface);
     page.hidden = surface !== 'page';
 
