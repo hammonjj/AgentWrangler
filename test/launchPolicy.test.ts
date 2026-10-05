@@ -120,12 +120,29 @@ describe('claudePolicyOptions', () => {
     expect(seen).toHaveLength(2);
     const local = seen.find((x) => x.model === 'qwen').env;
     const hosted = seen.find((x) => x.model === 'sonnet').env;
-    expect(local).toMatchObject({ PATH: '/bin', ANTHROPIC_BASE_URL: provider.baseUrl, ANTHROPIC_API_KEY: 'synthetic-secret', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '65536', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '4096' });
+    expect(local).toMatchObject({ PATH: '/bin', ANTHROPIC_BASE_URL: provider.baseUrl, ANTHROPIC_API_KEY: 'synthetic-secret', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '65536', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '4096', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ENABLE_CLAUDEAI_MCP_SERVERS: 'false' });
     for (const key of ['ANTHROPIC_MODEL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY']) expect(local).not.toHaveProperty(key);
     expect(hosted).toEqual(inherited);
     expect(inherited.ANTHROPIC_API_KEY).toBe('inherited-key');
     expect(process.env).toEqual(processBefore);
     expect(localClaudeEnv(inherited, provider).ANTHROPIC_API_KEY).toBe('agent-wrangler-local');
+  });
+
+  it("loads only the repository's settings and no MCP servers on a local endpoint, and leaves a hosted session alone (#158)", async () => {
+    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080', model: 'qwen', contextWindow: 65536 };
+    const seen: any[] = [];
+    const query: QueryFn = ({ options }) => { seen.push(options); return (async function* () {})() as any; };
+    // A merged-in option cannot widen it again: the policy's options go last.
+    const deps = { query, binary: '/fake/claude', log: () => undefined, sdkOptions: { settingSources: ['user', 'project', 'local'] as any, strictMcpConfig: false } };
+    new ClaudeSdkSession({ cwd: '/Users/test/proj', model: 'qwen', policy: { localProvider: provider } }, deps).start();
+    new ClaudeSdkSession({ cwd: '/Users/test/proj', model: 'sonnet' }, { query, binary: '/fake/claude', log: () => undefined }).start();
+    await Promise.resolve();
+    const local = seen.find((x) => x.model === 'qwen');
+    const hosted = seen.find((x) => x.model === 'sonnet');
+    expect(local).toMatchObject({ settingSources: ['project', 'local'], strictMcpConfig: true });
+    expect(hosted).not.toHaveProperty('settingSources');
+    expect(hosted).not.toHaveProperty('strictMcpConfig');
+    expect(claudePolicyOptions({ allowedTools: ['Read'] })).not.toHaveProperty('settingSources');
   });
 
   it('appends the shared instruction only when the conversation policy requests it', () => {

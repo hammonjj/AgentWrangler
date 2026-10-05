@@ -650,6 +650,12 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
   socket after boot. Only that session's SDK environment gets the endpoint URL, key (or dummy),
   and catalog context window. Resume and host migration repeat the hand-off. Neither the launch
   policy nor the registry or host manifest contains the key.
+- **A local Claude Code session loads the repository's settings, not yours.** It reads the
+  repo's `.claude/settings*.json` and `CLAUDE.md` only: nothing from `~/.claude` (your
+  `additionalDirectories`, plugins, hooks, skills, `CLAUDE.md`), no MCP servers, no auto memory
+  and no claude.ai connectors. On a 32k–64k window those cost tens of thousands of tokens, and
+  extra directories send a small model looking in the wrong repository (#158). Hosted sessions
+  are unchanged.
 - **Probe.** AW reads what the runtime says: the model list, context window, vision, slots
   (llama.cpp), constrained decoding, and whether the server serves `/v1/responses` (Codex) and
   `/v1/messages` natively. It probes those with an empty POST, which generates nothing. Each fact
@@ -663,12 +669,14 @@ llama.cpp's `llama-server`, vLLM, LM Studio, `mlx_lm.server`). The registry is
   with no dependencies, each with seeded bugs, a check (`node test/check.js`), protected tests and
   a list of the paths the agent may change. Each runs 3 times through the selected native harness,
   under the same permissions and prompt framing as a routed attempt, in a temp dir that is removed
-  afterwards. A run passes when the check exits 0, nothing under `test/` changed, and every
+  afterwards. For Claude Code that is `acceptEdits` (an endpoint has no `auto`), with the
+  fixture's check allowed by name as a repo's checks are (#159). A run passes when the check exits 0, nothing under `test/` changed, and every
   changed path is inside the allowed ones. A run that asks for approval fails, since nobody is
   there to answer it. The result shows the pass rate, turns, wall time and tokens, all
   `measured`. Results are kept separately for each native harness, survive a restart, and each run writes a
   `local-call` record. A harness whose native route is absent is marked *not runnable* for that
-  harness. It takes minutes. Neither stage ever
+  harness. It takes minutes. *Cancel*, in the model's row while it runs, ends the run in progress and
+  starts no more; nothing is stored, so the last result stands (#160). Neither stage ever
   sets a tier.
 - **Status beside the tier picker.** Each local model's row in the tier map says what it can
   be picked for now, and what it still needs for each kind of work:

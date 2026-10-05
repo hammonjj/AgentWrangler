@@ -47,5 +47,8 @@ export function localClaudeEnv(base: Record<string, string | undefined>, provide
   out.ANTHROPIC_API_KEY = key || 'agent-wrangler-local';
   out.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(provider.contextWindow);
   if (provider.maxOutputTokens) out.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(provider.maxOutputTokens);
+  // Nothing of the user's in a small window (#158): no auto memory, no claude.ai connectors' tools.
+  out.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
+  out.ENABLE_CLAUDEAI_MCP_SERVERS = 'false';
   return out;
 }
