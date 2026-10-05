@@ -122,6 +122,10 @@ export interface AttemptRecord extends RecordBase {
   /** The repository policy the attempt ran under (`LoadedRepoPolicy.version`, #32); `default` when it had none. */
   repoPolicyVersion?: string;
   routingConfidence?: string;
+  /** The budget strategy the route was decided under (#53). Absent on records written before it: balanced. */
+  budgetStrategy?: string;
+  /** The fullest usage window of the target's source when routed, in percent (#53): a mission's share is the change across its attempts. */
+  windowPercentAtStart?: number;
   assessment?: { dimensions: Record<string, { value: string; confidence: string }>; assessorVersion: string };
   requirement?: { tier: TierName; effort: EffortLevel };
   target: ExecutionTarget & { effortRequested?: EffortLevel; effortApplied?: string };

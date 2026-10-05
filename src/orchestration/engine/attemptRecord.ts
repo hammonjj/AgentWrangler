@@ -123,6 +123,8 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     assignedFrom: a.assignment.mode === 'reuse' || a.assignment.mode === 'fork' ? a.assignment.fromAttemptId : undefined,
     contextTokensAtStart: known(a.context?.atStart),
     repoPolicyVersion: a.repoPolicyVersion,
+    budgetStrategy: decision.strategy ?? 'balanced',
+    windowPercentAtStart: decision.windowPercent,
     ...(assessment ? { assessment: assessment.snapshot, routingConfidence: assessment.confidence } : {}),
     target: { ...target, ...(decision.requirement.effort ? { effortRequested: decision.requirement.effort } : {}) },
     ...(decision.shadow
