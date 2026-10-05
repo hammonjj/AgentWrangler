@@ -2655,6 +2655,38 @@ existing Budget cards). Codex has its own plan windows. Budget policy is therefo
 units: "keep this mission under 15% of the 5-hour window" and, for API-key users, "under $N". The
 MVP ships caps and admission thresholds (Phase 9); the strategies above are Future work (#53).
 
+**As built (#53, 2026-10-04).** The gate in the issue (analytics from #49, plus evidence that caps and
+admission are not enough) was not confirmed; the work was built on James's instruction to close the epic,
+and every strategy other than `balanced` is opt-in (`preferences.strategy`, global, repository, mission or
+task), so the default behaviour is unchanged.
+
+- **Profiles** (`shared/orchestration/budgetStrategy.ts`): data only, holding no tier, so nothing a
+  strategy does can route below `minTier`. The router never reads one.
+- **Resolver ranking** (`policy/resolver.ts`), all after the user's preferred harness and source and after
+  the unattended-fit key: *maximum quality* widens the pool to the highest routable tier within the cap
+  (never an escalation-only tier, never a pinned model's); *lowest cost* ranks the cheapest price first;
+  *fastest* ranks measured `outTokPerSec` first (an unmeasured model after a measured one; the catalog
+  has no throughput until telemetry fills it, so until then it ties and falls through to price);
+  *prefer local* ranks local first (it also covers `preferLocal`).
+- **Admission** (`engine/scheduler.ts`): lowest cost scales the admission threshold by 0.8 (85% → 68%),
+  and a mission's own `maxUsageWindowPercent` can only lower it further; fastest adds one agent to the
+  global and per-repository limits, never past the mission's own `maxConcurrentAgents`; prefer local
+  starts a local endpoint's task ahead of the queue.
+- **Budgets**: `caps.maxWindowSharePercent` holds a mission once the source's window has moved that many
+  points since the mission's first decision (a window that reset counts as 0); `caps.maxEstimatedCostUsd`
+  now also holds a mission, not only a task, once its attempts' reported cost reaches it (a `budget`
+  wait). Unknown share or spend never blocks. Both are cross-mission pacing against the fullest of the
+  5-hour and 7-day windows the source reports.
+- **Telemetry**: every `RoutingDecision` carries `strategy` and `windowPercent`; the `attempt` record has
+  `budgetStrategy` and `windowPercentAtStart`, so a mission's window share is the change across its
+  attempts.
+- **Editors**: Preferences → Orchestration and the policy picker offer the strategy and the share cap.
+- **Tests**: `test/orchestration/budgetStrategy.test.ts` (ranking tables per strategy, a property check
+  over strategy × required tier × cap × window state that the tier is never below `minTier` and fallbacks
+  keep the tier, scheduler tables and a 5-hour-window simulation).
+- **Not built**: a direct start by the user (`holdRefusal`) uses the standard threshold, not the
+  strategy's; throughput is not measured yet.
+
 ---
 
 ## 22. Session specialization and hierarchical orchestration (22.1 built by #54; 22.2 deferred by #55)

@@ -25,6 +25,7 @@ import {
   type PolicyFieldSpec,
   type PolicyValue,
 } from '../shared/orchestration/executionPolicy';
+import { BUDGET_STRATEGIES, STRATEGY_PROFILES } from '../shared/orchestration/budgetStrategy';
 import { EFFORT_LEVELS, type ExecutionPolicy } from '../shared/orchestration/types';
 
 export interface PolicyEditorDeps {
@@ -125,6 +126,8 @@ async function askValue(d: PolicyEditorDeps, spec: PolicyFieldSpec, current: Pol
             value: e.aliases[0] ?? e.descriptor.modelId,
           })),
       );
+    case 'strategy':
+      return choose(BUDGET_STRATEGIES.map((s) => ({ label: STRATEGY_PROFILES[s].label, description: STRATEGY_PROFILES[s].help, value: s })));
     case 'flag':
       return choose([{ label: 'Yes', value: true }]);
     case 'harnesses': {

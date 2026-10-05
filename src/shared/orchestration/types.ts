@@ -104,6 +104,12 @@ export interface RouteCaps {
   maxEstimatedCostUsd?: number;
   /** Stop starting work when a usage window reaches this percentage. */
   maxUsageWindowPercent?: number;
+  /**
+   * Stop starting work for a mission once it has used this many percentage
+   * points of its source's usage window (#53): "keep this mission under 15% of
+   * the 5-hour window". Measured from the window when the mission first ran.
+   */
+  maxWindowSharePercent?: number;
   location?: 'local-only' | 'hosted-only';
 }
 
@@ -684,6 +690,10 @@ export interface RoutingDecision {
    * later change does not reach it.
    */
   policyRevision?: number;
+  /** The budget strategy in force when this was decided (#53). Absent on older decisions: balanced. */
+  strategy?: NonNullable<RoutePreferences['strategy']>;
+  /** The fullest usage window of the target's source when decided, in percent (#53). Absent when not known. */
+  windowPercent?: number;
   decidedBy: 'router' | 'user';
   decidedAt: Millis;
 }

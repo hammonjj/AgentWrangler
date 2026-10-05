@@ -39,6 +39,8 @@
  *   wait ends.
  */
 import type { DependencyKind, HarnessId, Millis, MissionState, ModelSourceId, TaskState } from '../../shared/orchestration/types';
+import { STRATEGY_PROFILES, admissionPercentFor, type BudgetStrategy } from '../../shared/orchestration/budgetStrategy';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import { chooseAssignment, type AssignmentChoice, type AssignmentInput } from './assignment';
 
 // ---------------------------------------------------------------------------
@@ -134,6 +136,16 @@ export interface SchedMission {
   maxWindowPercent?: number;
   /** Mission cap (§10.2): orchestrated agents running at once, across every mission. */
   maxConcurrentAgents?: number;
+  /** Budget strategy (§21, #53): paces admission and the queue. Absent: balanced. */
+  strategy?: BudgetStrategy;
+  /** Mission cap (#53): percentage points of its source's usage window the mission may use. */
+  maxWindowShare?: number;
+  /** Points of the window the mission has used so far (`windowShareUsed`); absent when not known. */
+  windowShareUsed?: number;
+  /** Mission cap (#53): estimated hosted dollars the mission may spend. */
+  maxCostUsd?: number;
+  /** What the mission's attempts have cost so far, where anything reported a cost. */
+  spentUsd?: number;
   /** In plan order. */
   tasks: SchedTask[];
 }
@@ -153,6 +165,7 @@ export type WaitReason =
   | 'retry-delay'
   | 'backoff'
   | 'usage'
+  | 'budget'
   | 'concurrency'
   | 'endpoint-slots'
   | 'verification';
@@ -243,12 +256,18 @@ function treeHolder(m: SchedMission): SchedTask | undefined {
   return m.tasks.find((t) => t.live) ?? m.tasks.find((t) => t.attempts > 0 && !ENDED.includes(t.state));
 }
 
+/** Prefer-local missions (§21): a start on a local endpoint goes ahead of everything else, so local capacity is used first. */
+function localFirstRank(c: Candidate): number {
+  return STRATEGY_PROFILES[c.m.strategy ?? 'balanced'].localFirst && isEndpointSource(c.t.source) ? 0 : 1;
+}
+
 /**
- * Critical path, then mission priority, then mission age, then a warm
+ * Local capacity for a prefer-local mission, then critical path, then mission priority, then mission age, then a warm
  * session over a new one (#54), then plan order; ids break any tie.
  */
 function byPriority(a: Candidate, b: Candidate): number {
   return (
+    localFirstRank(a) - localFirstRank(b) ||
     b.path - a.path ||
     b.m.priority - a.m.priority ||
     a.m.createdAt - b.m.createdAt ||
@@ -412,15 +431,24 @@ function refusal(
   if (src?.backoffUntil !== undefined && src.backoffUntil > now) {
     return { reason: 'backoff', detail: `${t.source} is rate-limited`, until: src.backoffUntil };
   }
-  const threshold = Math.min(limits.admissionPercent, m.maxWindowPercent ?? Infinity);
+  const strategy = m.strategy ?? 'balanced';
+  const threshold = admissionPercentFor(strategy, limits.admissionPercent, m.maxWindowPercent);
   if (src?.windowPercent !== undefined && src.windowPercent >= threshold) {
-    return { reason: 'usage', detail: `the ${t.source} usage window is at ${Math.round(src.windowPercent)}%; new work starts below ${threshold}%` };
+    return { reason: 'usage', detail: `the ${t.source} usage window is at ${Math.round(src.windowPercent)}%; new work starts below ${threshold}%${strategy === 'balanced' ? '' : ` (${STRATEGY_PROFILES[strategy].label})`}` };
   }
-  if (agents.get('*') >= limits.global) return { reason: 'concurrency', detail: `${limits.global} agents are running (the most at once)` };
+  if (m.maxWindowShare !== undefined && m.windowShareUsed !== undefined && m.windowShareUsed >= m.maxWindowShare) {
+    return { reason: 'budget', detail: `the mission has used ${Math.round(m.windowShareUsed)} points of the usage window; it stops starting work at ${m.maxWindowShare}` };
+  }
+  if (m.maxCostUsd !== undefined && m.spentUsd !== undefined && m.spentUsd >= m.maxCostUsd) {
+    return { reason: 'budget', detail: `the mission has spent an estimated $${m.spentUsd.toFixed(2)}; it stops starting work at $${m.maxCostUsd.toFixed(2)}` };
+  }
+  // Fastest (§21): looser concurrency, within the mission's own cap, which still binds below.
+  const bonus = STRATEGY_PROFILES[strategy].concurrencyBonus;
+  if (agents.get('*') >= limits.global + bonus) return { reason: 'concurrency', detail: `${limits.global + bonus} agents are running (the most at once)` };
   if (m.maxConcurrentAgents !== undefined && agents.get('*') >= m.maxConcurrentAgents) {
     return { reason: 'concurrency', detail: `the mission caps concurrent agents at ${m.maxConcurrentAgents}` };
   }
-  if (agents.get(`repo:${m.repo}`) >= limits.perRepo) return { reason: 'concurrency', detail: `${limits.perRepo} agents are running in this repository` };
+  if (agents.get(`repo:${m.repo}`) >= limits.perRepo + bonus) return { reason: 'concurrency', detail: `${limits.perRepo + bonus} agents are running in this repository` };
   const perHarness = limits.perHarness[t.harness];
   if (perHarness !== undefined && agents.get(`harness:${t.harness}`) >= perHarness) {
     return { reason: 'concurrency', detail: `${perHarness} ${t.harness} agents are running` };

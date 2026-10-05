@@ -135,6 +135,7 @@ export const CAP_KEYS = [
   'maxConcurrentAgents',
   'maxEstimatedCostUsd',
   'maxUsageWindowPercent',
+  'maxWindowSharePercent',
   'location',
 ] as const satisfies readonly (keyof RouteCaps)[];
 
@@ -161,6 +162,7 @@ export const FIELD_LABEL: Record<string, string> = {
   'caps.maxConcurrentAgents': 'max concurrent agents',
   'caps.maxEstimatedCostUsd': 'max estimated spend',
   'caps.maxUsageWindowPercent': 'max usage window',
+  'caps.maxWindowSharePercent': 'max window share',
   'caps.location': 'location',
   'preferences.harness': 'preferred harness',
   'preferences.source': 'preferred source',
@@ -176,6 +178,7 @@ function capValueText(key: keyof RouteCaps, value: unknown): string {
     case 'maxEstimatedCostUsd':
       return `$${Number(value).toFixed(2)}`;
     case 'maxUsageWindowPercent':
+    case 'maxWindowSharePercent':
       return `${value}%`;
     default:
       return String(value);
@@ -502,7 +505,7 @@ export function admissionRefusal(eff: EffectivePolicy, facts: AdmissionFacts): s
 // The editable fields, for the editors (Preferences, the mission and task editors)
 // ---------------------------------------------------------------------------
 
-export type PolicyFieldKind = 'tier' | 'effort' | 'count' | 'usd' | 'percent' | 'location' | 'harness' | 'model' | 'flag' | 'harnesses';
+export type PolicyFieldKind = 'tier' | 'effort' | 'count' | 'usd' | 'percent' | 'location' | 'harness' | 'model' | 'flag' | 'harnesses' | 'strategy';
 
 export interface PolicyFieldSpec {
   field: string;
@@ -527,8 +530,10 @@ export const POLICY_FIELDS: readonly PolicyFieldSpec[] = [
   { field: 'caps.maxConcurrentAgents', kind: 'count', group: 'Caps', label: 'Max concurrent agents', help: 'Task agents running at once, across every mission.', min: 1, max: POLICY_LIMITS.maxConcurrentAgents },
   { field: 'caps.maxEstimatedCostUsd', kind: 'usd', group: 'Caps', label: 'Max estimated spend', help: 'Stop starting attempts once a task’s estimated hosted cost reaches this, in dollars.' },
   { field: 'caps.maxUsageWindowPercent', kind: 'percent', group: 'Caps', label: 'Max usage window', help: 'Stop starting work on a source whose usage window is at or above this share.', min: 1, max: 100 },
+  { field: 'caps.maxWindowSharePercent', kind: 'percent', group: 'Caps', label: 'Max window share', help: 'Stop starting a mission’s work once it has used this many percentage points of the usage window.', min: 1, max: 100 },
   { field: 'caps.location', kind: 'location', group: 'Caps', label: 'Location', help: 'Only local models, or only hosted ones.' },
   { field: 'preferences.harness', kind: 'harness', group: 'Preferences', label: 'Prefer harness', help: 'Rank this harness first within the tier the work needs.' },
+  { field: 'preferences.strategy', kind: 'strategy', group: 'Preferences', label: 'Budget strategy', help: 'How candidates are ranked and work is paced. Never routes below the tier the work needs.' },
   { field: 'preferences.preferLocal', kind: 'flag', group: 'Preferences', label: 'Prefer local models', help: 'Rank local models first within the tier the work needs.' },
   { field: 'exclusions.harnesses', kind: 'harnesses', group: 'Exclusions', label: 'Excluded harnesses', help: 'Never run on these.' },
   { field: 'exclusions.disableLocal', kind: 'flag', group: 'Exclusions', label: 'Local models off', help: 'Never run on a local model.' },
@@ -812,6 +817,11 @@ export function validateExecutionPolicy(
       const v = caps.maxUsageWindowPercent;
       if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 100) err('caps.maxUsageWindowPercent', 'must be a percentage from 1 to 100');
       else o.maxUsageWindowPercent = v;
+    }
+    if (caps.maxWindowSharePercent !== undefined) {
+      const v = caps.maxWindowSharePercent;
+      if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 100) err('caps.maxWindowSharePercent', 'must be a percentage from 1 to 100');
+      else o.maxWindowSharePercent = v;
     }
     if (caps.location !== undefined) {
       if (!(LOCATIONS as readonly unknown[]).includes(caps.location)) err('caps.location', `must be one of ${LOCATIONS.join(', ')}`);

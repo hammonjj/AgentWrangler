@@ -85,6 +85,7 @@ import {
   type PolicyChange,
   type PlanningRun,
   type PolicyLayers,
+  type RouteCaps,
   type RoutePins,
   type RouteRecommendation,
   type RoutingDecision,
@@ -97,6 +98,7 @@ import {
   type VerificationResult,
   type WorktreeAssignment,
 } from '../../shared/orchestration/types';
+import { strategyOf, windowShareUsed } from '../../shared/orchestration/budgetStrategy';
 import { ulid } from '../domain/ids';
 import { launchRefusal, taskMachine, transitionAttempt, transitionMission, transitionTask } from '../domain/lifecycles';
 import { applyPlanEdit, executionOrder, nextTaskKey, planIssues, planTask, taskCap, tasksFromDraft, type PlanContext } from '../domain/plan';
@@ -2007,10 +2009,33 @@ export class TaskRunner implements Disposable {
         sharedTree: !m.parallel,
         ...(caps.maxUsageWindowPercent !== undefined ? { maxWindowPercent: caps.maxUsageWindowPercent } : {}),
         ...(caps.maxConcurrentAgents !== undefined ? { maxConcurrentAgents: caps.maxConcurrentAgents } : {}),
+        ...this.budgetFacts(m, caps),
         tasks: executionOrder(m.tasks).map((t) => this.schedTask(m, t)),
       });
     }
     return { missions };
+  }
+
+  /**
+   * What the scheduler paces a mission by (#53): its strategy, and for the two
+   * budget caps what it has used. Window share is the source's window now less
+   * the window at the mission's first decision; dollars are what its attempts reported.
+   */
+  private budgetFacts(m: Mission, caps: RouteCaps): Pick<SchedMission, 'strategy' | 'maxWindowShare' | 'windowShareUsed' | 'maxCostUsd' | 'spentUsd'> {
+    const strategy = strategyOf(this.safeEffective(m)?.policy.preferences ?? m.policy.preferences);
+    const out: Pick<SchedMission, 'strategy' | 'maxWindowShare' | 'windowShareUsed' | 'maxCostUsd' | 'spentUsd'> = strategy === 'balanced' ? {} : { strategy };
+    if (caps.maxWindowSharePercent !== undefined) {
+      out.maxWindowShare = caps.maxWindowSharePercent;
+      const first = [...m.decisions].sort((a, b) => a.decidedAt - b.decidedAt).find((d) => d.windowPercent !== undefined);
+      const used = first ? windowShareUsed(first.windowPercent, this.windowPercentOf(first.resolution.target.source)) : undefined;
+      if (used !== undefined) out.windowShareUsed = used;
+    }
+    if (caps.maxEstimatedCostUsd !== undefined) {
+      out.maxCostUsd = caps.maxEstimatedCostUsd;
+      const costs = m.attempts.map((a) => a.usage?.costUsd).filter((c): c is number => c !== undefined);
+      if (costs.length > 0) out.spentUsd = costs.reduce((s, c) => s + c, 0);
+    }
+    return out;
   }
 
   private schedTask(m: Mission, t: Task): SchedTask {
@@ -3464,9 +3489,21 @@ export class TaskRunner implements Disposable {
         : { target, candidates: [{ target, verdict: 'chosen', reason: byEscalation ? `escalation: ${esc!.action}` : 'picked by the user' }], catalogVersion: byEscalation && esc!.target ? 'escalation' : 'manual' },
       ...(rec ? { shadow: rec, agreement: cmp!.agreement } : {}),
       policyRevision: m.policyChanges.length,
+      strategy: strategyOf(this.safeEffective(m)?.policy.preferences ?? m.policy.preferences),
+      ...(this.windowPercentOf(target.source) !== undefined ? { windowPercent: this.windowPercentOf(target.source) } : {}),
       decidedBy,
       decidedAt: this.now(),
     };
+  }
+
+  /** The fullest usage window of a source now, in percent; undefined when nothing reports one. */
+  private windowPercentOf(source: ModelSourceId): number | undefined {
+    try {
+      const pct = this.deps.routing?.snapshot().sources[source]?.capacity.windowPercent;
+      return pct && isKnown(pct) ? pct.value : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   // ---- Recommendation (#38) ----
