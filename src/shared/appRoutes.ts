@@ -142,10 +142,17 @@ export function layoutFor(viewportWidth: number): ShellLayout {
 }
 
 /** What is on screen: both panes, one of them, or a page of the shell's own. */
-export type ShellSurface = 'split' | 'table' | 'conversation' | 'page';
+export type ShellSurface = 'split' | 'table' | 'conversation' | 'page' | 'analytics';
 
-export function surfaceFor(route: AppRoute, layout: ShellLayout): ShellSurface {
+/**
+ * `tableView`: the table's view as it last said. Analytics is a page of its own
+ * with no conversation beside it; an item's detail (a keyless conversation
+ * route reached from it) takes the whole window rather than reopening the split.
+ */
+export function surfaceFor(route: AppRoute, layout: ShellLayout, tableView?: TableRouteView): ShellSurface {
   if (route.kind === 'preferences' || route.kind === 'connect' || route.kind === 'pair') return 'page';
+  if (route.kind === 'analytics') return 'analytics';
+  if (route.kind === 'conversation' && !route.key && tableView === 'analytics') return 'conversation';
   if (layout === 'split') return 'split';
   return route.kind === 'conversation' ? 'conversation' : 'table';
 }
