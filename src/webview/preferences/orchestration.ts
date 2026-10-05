@@ -255,6 +255,11 @@ function renderEndpoint(
       t.title = `Runs synthetic scratch repositories through ${label} on this endpoint.`;
       row.appendChild(t);
     }
+    if (m.tasksRunning) {
+      const c = button('Cancel', () => post({ type: 'localEndpoint', change: { op: 'cancelQualifyTasks', id: e.id, model: m.id } }), 'pf-action danger');
+      c.title = 'Ends the run in progress and starts no more. The last result stands.';
+      row.appendChild(c);
+    }
     card.appendChild(row);
     for (const harness of m.harnesses ?? []) {
       card.appendChild(el('p', 'pf-desc pf-model-fact', `${harness}: ${m.qualifications?.[harness] ?? 'not qualified'}`));

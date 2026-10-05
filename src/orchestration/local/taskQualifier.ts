@@ -26,9 +26,9 @@ import * as path from 'node:path';
 import type { SessionHandle, SessionViewEvent } from '../../core/session/sessionHandle';
 import { claudeTurnUsage, codexTurnUsage, type SegmentState } from '../../core/telemetry/turnUsage';
 import { changedPaths, judgeRun, parseFixture, type TaskFixture, type TaskRun } from '../../shared/orchestration/localQualification';
-import { DEFAULT_REPO_POLICY } from '../../shared/orchestration/repoPolicy';
+import { DEFAULT_REPO_POLICY, type RepoPolicy } from '../../shared/orchestration/repoPolicy';
 import type { ModelSourceId } from '../../shared/orchestration/types';
-import { attemptLaunchPolicy, attemptPrompt } from '../engine/attemptPolicy';
+import { attemptLaunchPolicy, attemptPrompt, NO_AUTO_PERMISSION_MODE } from '../engine/attemptPolicy';
 import type { AgentHarness } from '../harness/types';
 import type { TaskQualifier } from './localEndpointService';
 import { nodeExec, type Exec } from '../worktrees/exec';
@@ -131,13 +131,13 @@ export async function runTaskQualification(req: TaskQualificationRequest, deps: 
  * read on each run (so a bad one is reported, not fatal), k = 3 each.
  */
 export function taskQualifier(deps: TaskQualifierDeps & { k?: number }): TaskQualifier {
-  return async ({ source, model, onStart, onRun }) => {
+  return async ({ source, model, onStart, onRun, signal }) => {
     const k = deps.k ?? TASK_QUALIFICATION_K;
     const { fixtures, errors } = await loadFixtures(deps.fixturesDir);
     for (const e of errors) deps.log?.(`local: qualification fixture skipped: ${e}`);
     if (fixtures.length === 0) return { runs: [], k, error: errors[0] ?? 'no fixtures found' };
     onStart(fixtures.length * k);
-    const r = await runTaskQualification({ source, model, fixtures, k, onRun }, deps);
+    const r = await runTaskQualification({ source, model, fixtures, k, onRun, ...(signal ? { signal } : {}) }, deps);
     return { ...r, k };
   };
 }
@@ -165,6 +165,7 @@ async function runOnce(
     }
 
     const started = now();
+    const harness = deps.harness.id === 'claude-code' ? 'claude-code' : 'codex';
     let handle: SessionHandle;
     try {
       handle = await deps.harness.launch({
@@ -175,11 +176,14 @@ async function runOnce(
             objective: fixture.prompt,
             acceptanceCriteria: [`\`${fixture.check.join(' ')}\` exits 0`, `Nothing matching ${fixture.protected.join(', ')} is changed`],
           },
-            { harness: deps.harness.id === 'claude-code' ? 'claude-code' : 'codex', branch: BRANCH },
+          { harness, branch: BRANCH },
         ),
-        target: { harness: deps.harness.id === 'claude-code' ? 'claude-code' : 'codex', model: req.model, source: req.source, effortNative: 'none' },
+        target: { harness, model: req.model, source: req.source, effortNative: 'none' },
         origin: { kind: 'orchestration', missionId: 'qualification', taskId: fixture.id, attemptId: `qualification:${started}:${fixture.id}:${n}` },
-        policy: attemptLaunchPolicy({ harness: deps.harness.id === 'claude-code' ? 'claude-code' : 'codex', primaryRoot: dir, repoPolicy: DEFAULT_REPO_POLICY }),
+        // As an attempt on a model without `auto` (#159): an endpoint has no
+        // classifier, so `auto` would be `acceptEdits` anyway.
+        ...(harness === 'claude-code' ? { permissionMode: NO_AUTO_PERMISSION_MODE } : {}),
+        policy: attemptLaunchPolicy({ harness, primaryRoot: primaryRootOf(dir), repoPolicy: fixturePolicy(fixture) }),
       });
     } catch (e) {
       return { fatal: `could not start a run: ${String((e as Error).message ?? e)}` };
@@ -189,6 +193,10 @@ async function runOnce(
     const wallMs = Math.max(0, now() - started);
     const toolCalls = handle.blocks.filter((b) => b.kind === 'tool').length;
     await Promise.race([handle.end().catch(() => undefined), new Promise((r) => setTimeout(r, 10_000))]);
+    if (watched.outcome === 'aborted') {
+      log(`local: qualification ${fixture.id} #${n}: cancelled`);
+      return { fatal: 'cancelled' };
+    }
 
     const check = await exec(checkFile(fixture.check[0], deps), fixture.check.slice(1), {
       cwd: dir,
@@ -213,11 +221,33 @@ async function runOnce(
       ...tokens,
     };
     log(`local: qualification ${fixture.id} #${n}: ${run.pass ? 'pass' : `fail (${run.failure})`}`);
-    if (watched.outcome === 'aborted') return { fatal: 'cancelled' };
     return { run };
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/**
+ * The repo policy a run is launched with: the fixture's check is its one
+ * verification command, so it is allowed by name, as a repo's checks are
+ * for an attempt (#159).
+ */
+export function fixturePolicy(fixture: Pick<TaskFixture, 'check'>): RepoPolicy {
+  return {
+    ...DEFAULT_REPO_POLICY,
+    verification: { commands: { check: { run: [...fixture.check], timeoutSec: CHECK_TIMEOUT_MS / 1000 } }, missionDefault: ['command:check'] },
+  };
+}
+
+/**
+ * Where the run's "primary checkout" is. An attempt works in a worktree and
+ * may never write the primary checkout; a run works in its scratch repo,
+ * which has none, so this is a path beside it that is never created. Were
+ * it the scratch repo itself, the attempt's deny rules would cover the files
+ * the run is asked to fix (#159).
+ */
+export function primaryRootOf(dir: string): string {
+  return `${dir}.primary`;
 }
 
 /** Copy a fixture's files: plain files in `dist/qualification-fixtures`, regular files and directories only. */
@@ -269,6 +299,8 @@ function watch(handle: SessionHandle, deps: TaskQualifierDeps, signal?: AbortSig
     sub = handle.subscribe(0, (e: SessionViewEvent) => {
       if (e.type === 'turnEnd') turnEnds.push(e.raw);
     });
+    // Cancelled while the scratch repo was set up or the session launched: the listener above never fires.
+    if (signal?.aborted) onAbort();
   });
 }
 

@@ -81,6 +81,8 @@ export type TaskQualifier = (req: {
   /** Before the first run: how many there will be (fixtures × k), for the progress line. */
   onStart: (total: number) => void;
   onRun: (run: TaskRun) => void;
+  /** Cancel (#160): the run in progress is ended, and no more start. */
+  signal?: AbortSignal;
 }) => Promise<{
   runs: TaskRun[];
   /** Runs per fixture. */
@@ -138,7 +140,7 @@ export class LocalEndpointService implements Disposable {
   private readonly probing = new Map<string, Promise<void>>();
   private readonly qualifying = new Set<string>();
   /** Stage 2 running, per `<id>\0<model>`: runs done of the total. */
-  private readonly qualifyingTasks = new Map<string, { done: number; passed: number; total?: number }>();
+  private readonly qualifyingTasks = new Map<string, { done: number; passed: number; total?: number; cancel: AbortController }>();
   private taskQualifiers: Partial<Record<HarnessId, TaskQualifier>> = {};
   private stored: Stored;
   private timer?: ReturnType<typeof setInterval>;
@@ -574,6 +576,8 @@ export class LocalEndpointService implements Disposable {
         return this.qualify(change.id, change.model, change.harness ?? 'codex');
       case 'qualifyTasks':
         return this.qualifyTasks(change.id, change.model, change.harness ?? 'codex');
+      case 'cancelQualifyTasks':
+        return this.cancelQualifyTasks(change.id, change.model);
     }
   }
 
@@ -624,7 +628,7 @@ export class LocalEndpointService implements Disposable {
     const run = this.taskQualifiers[harness];
     if (!run) return { ok: false, lines: [`✗  Task qualification is not available: there is no ${harness} harness to run it through.`] };
 
-    const progress: { done: number; passed: number; total?: number } = { done: 0, passed: 0 };
+    const progress: { done: number; passed: number; total?: number; cancel: AbortController } = { done: 0, passed: 0, cancel: new AbortController() };
     this.qualifyingTasks.set(flag, progress);
     this.changed();
     const source = endpointSource(id);
@@ -633,9 +637,12 @@ export class LocalEndpointService implements Disposable {
       // One slot for the whole stage: one agent at a time on the server, and direct calls wait their turn.
       lease = await this.acquire(source);
       const queuedMs = lease.queuedMs;
+      const cancelled = () => ({ ok: false, lines: [`Cancelled after ${progress.done} run${progress.done === 1 ? '' : 's'}. The last result stands.`] });
+      if (progress.cancel.signal.aborted) return cancelled();
       const result = await run({
         source,
         model,
+        signal: progress.cancel.signal,
         onRun: (r) => {
           progress.done++;
           if (r.pass) progress.passed++;
@@ -668,6 +675,8 @@ export class LocalEndpointService implements Disposable {
           this.changed();
         },
       }).catch((e: unknown) => ({ runs: [] as TaskRun[], k: 0, error: String((e as Error)?.message ?? e) }));
+      // A part-run stage is not a result: it would be judged on whichever fixtures came first.
+      if (progress.cancel.signal.aborted) return cancelled();
       if (result.runs.length === 0) {
         // Nothing ran: the last result, if any, still stands.
         return { ok: false, lines: [`✗  Task qualification could not run: ${result.error ?? 'no fixtures'}`] };
@@ -680,6 +689,18 @@ export class LocalEndpointService implements Disposable {
       this.qualifyingTasks.delete(flag);
       this.changed();
     }
+  }
+
+  /**
+   * Stop a running stage 2 for one model (#160). The run in progress is
+   * interrupted and its session ended; no more start; nothing is stored, so
+   * the last result stands.
+   */
+  cancelQualifyTasks(id: string, model: string): { ok: boolean; lines: string[] } {
+    const running = (['codex', 'claude-code'] as const).map((h) => this.qualifyingTasks.get(`${id}\0${model}\0${h}`)).filter((p) => p !== undefined);
+    if (running.length === 0) return { ok: false, lines: ['Task qualification is not running.'] };
+    for (const p of running) p.cancel.abort();
+    return { ok: true, lines: ['Cancelling: the current run is being ended.'] };
   }
 
   private storeTasks(id: string, model: string, harness: HarnessId, q: TaskQualification): void {
