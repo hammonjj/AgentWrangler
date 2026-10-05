@@ -694,6 +694,24 @@ describe.skipIf(!HAS_OPENSSL)('pairing over the listeners', () => {
     expect((await loop('/', { headers: { cookie: `aw_device=${credential}` } })).status).toBe(401);
   });
 
+  it('starts pairing as JSON for the workbench to draw in place: loopback and signed in only', async () => {
+    const cred = await loopbackCredential();
+    const headers = { origin: loopOrigin(), cookie: `aw_device=${cred}` };
+    expect((await loop('/pair/offer', { method: 'POST', headers: { origin: loopOrigin() } })).status).toBe(401);
+    expect((await loop('/pair/offer', { method: 'POST', headers: { ...headers, origin: 'https://evil.example' } })).status).toBe(403);
+    const r = await loop('/pair/offer', { method: 'POST', headers });
+    expect(r.status).toBe(200);
+    const body = JSON.parse(r.body) as { qr: string; code: string; address: string; expiresAt: number };
+    expect(body.qr).toMatch(/^data:image\/svg\+xml;base64,/);
+    expect(Buffer.from(body.qr.split(',')[1], 'base64').toString('utf8')).toContain('<svg');
+    expect(body.code).toMatch(/^[0-9A-Z]{8}$/);
+    expect(body.address).toContain(`/setup?code=${body.code}`);
+    expect(body.expiresAt).toBeGreaterThan(Date.now() - 1000);
+    // The LAN listener has no such route.
+    const { credential } = await pairDevice();
+    expect((await lan('/pair/offer', { method: 'POST', headers: { origin: lanOrigin(), cookie: `${LAN_DEVICE_COOKIE}=${credential}` } })).status).toBe(405);
+  });
+
   describe('recovery for a browser that lost its cookie', () => {
     const post = (p: string, headers: Record<string, string> = {}, body = '') =>
       lan(p, { method: 'POST', body, headers: { origin: lanOrigin(), 'content-type': 'application/x-www-form-urlencoded', ...headers } });

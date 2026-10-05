@@ -6,20 +6,17 @@
  * gets, because the server answers it on loopback alone.
  */
 
-const STORE_KEY = 'aw.connect.done';
+import { PAIR_OFFER_PATH, type PairOfferReply } from '../../shared/pairOffer';
 
-interface Action {
-  label: string;
-  href: string;
-}
+const STORE_KEY = 'aw.connect.done';
 
 interface Step {
   id: string;
   title: string;
   /** Plain paragraphs. */
   body: string[];
-  /** Only offered in a browser on the Mac. */
-  actions?: Action[];
+  /** Shows the pairing QR code in place. Only offered in a browser on the Mac. */
+  pairing?: boolean;
   /** The same step for each kind of device, as numbered sub-steps. */
   platforms?: Platform[];
   /** Help, not a step: no checkbox, and not counted. */
@@ -58,13 +55,11 @@ const STEPS: Step[] = [
     body: [
       'One code does the rest: it opens a short setup page on the device that installs Agent Wrangler\'s certificate and then pairs the device. The code works once and expires after five minutes, so have the device in your hand first. The device must be on the same Wi-Fi as this Mac.',
     ],
-    actions: [{ label: 'Show the QR code', href: '/pair/new' }],
+    pairing: true,
     platforms: [
       {
         name: 'On the Mac',
-        list: [
-          'Click "Show the QR code" above, then click "Show a pairing code" on the page that opens. A QR code appears, with a web address under it.',
-        ],
+        list: ['Click "Show the QR code" above. A QR code slides open under the button, with a web address under it.'],
       },
       {
         name: 'iPhone or iPad',
@@ -171,6 +166,59 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, t
   return node;
 }
 
+function isOfferReply(v: unknown): v is PairOfferReply {
+  const o = v as Partial<PairOfferReply> | null;
+  return !!o && typeof o.qr === 'string' && o.qr.startsWith('data:image/svg+xml;') && typeof o.code === 'string' && typeof o.address === 'string' && typeof o.expiresAt === 'number';
+}
+
+/** The button and the QR code that opens under it. A new click is a new code. */
+function pairingPanel(): HTMLElement {
+  const wrap = el('div', 'aw-pair');
+  const row = el('p', 'aw-connect-actions');
+  const button = el('button', 'aw-page-button', 'Show the QR code');
+  button.type = 'button';
+  row.appendChild(button);
+  const status = el('p', 'aw-pair-status');
+  status.setAttribute('role', 'status');
+  const panel = el('div', 'aw-pair-panel');
+  panel.hidden = true;
+  const qr = el('img', 'aw-pair-qr');
+  qr.alt = 'Pairing QR code';
+  const address = el('code', 'aw-pair-address');
+  const code = el('p', 'aw-pair-code');
+  const until = el('p', 'aw-connect-text');
+  panel.append(qr, el('p', 'aw-connect-text', 'No camera? Open this address in the device’s browser:'), address, code, until);
+  wrap.append(row, status, panel);
+
+  button.addEventListener('click', () => {
+    button.disabled = true;
+    status.textContent = '';
+    void fetch(PAIR_OFFER_PATH, { method: 'POST', credentials: 'same-origin' })
+      .then(async (r) => {
+        const body = (await r.json().catch(() => undefined)) as unknown;
+        if (r.ok && isOfferReply(body)) {
+          qr.src = body.qr;
+          address.textContent = body.address;
+          code.textContent = body.code;
+          until.textContent = `Works once, until ${new Date(body.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Anyone who uses it first gets in as you, so only show it to the device you are pairing.`;
+          panel.hidden = false;
+          button.textContent = 'New code';
+        } else {
+          panel.hidden = true;
+          const error = (body as { error?: unknown } | undefined)?.error;
+          status.textContent = typeof error === 'string' ? error : `Could not start pairing (${r.status}).`;
+        }
+      })
+      .catch(() => {
+        status.textContent = 'Could not reach Agent Wrangler. Try again.';
+      })
+      .finally(() => {
+        button.disabled = false;
+      });
+  });
+  return wrap;
+}
+
 export function mountConnectPage(root: HTMLElement): void {
   const done = loadDone();
   const onMac = isMacBrowser();
@@ -201,15 +249,7 @@ export function mountConnectPage(root: HTMLElement): void {
     item.appendChild(head);
 
     for (const p of step.body) item.appendChild(el('p', 'aw-connect-text', p));
-    if (step.actions && onMac) {
-      const row = el('p', 'aw-connect-actions');
-      for (const a of step.actions) {
-        const link = el('a', 'aw-page-button', a.label);
-        link.href = a.href;
-        row.appendChild(link);
-      }
-      item.appendChild(row);
-    }
+    if (step.pairing && onMac) item.appendChild(pairingPanel());
 
     for (const platform of step.platforms ?? []) {
       item.appendChild(el('h4', 'aw-connect-platform', platform.name));
