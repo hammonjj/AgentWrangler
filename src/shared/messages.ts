@@ -81,6 +81,12 @@ export type HostToDashboard =
    */
   | { type: 'missionAck'; missionId: string; requestId: string }
   /**
+   * A row × (`dismiss`/`dismissHide`) has been carried out, or has not: the
+   * table moved the row on the click (`shared/pendingDismissals.ts`), and
+   * `ok: false` puts it back. The error itself is shown by the host's dialog.
+   */
+  | { type: 'dismissResult'; key: string; ok: boolean }
+  /**
    * The Analytics view (#49) for the selection the pane last sent. Sent only
    * to a pane that asked (`analyticsQuery`), and again whenever the telemetry
    * it is computed from grows.
