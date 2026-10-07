@@ -197,7 +197,7 @@ describe('createNodeHost', () => {
 
     // The default: nothing interactive, nothing run on the host.
     expect(host.shell.runInTerminal).toBeUndefined();
-    expect(typeof host.notify).toBe('function');
+    expect(host.notify).toBeUndefined(); // no native banner (#161)
 
     const terminal: string[] = [];
     const noticed: string[] = [];
@@ -251,23 +251,10 @@ describe('the default client broker', () => {
     expect(ran).toEqual([]); // nothing opened on the host
   });
 
-  it('notifies through osascript with the text as argv, never in the script', async () => {
-    const { createDefaultClientBroker, NOTIFY_SCRIPT } = await import('../src/node/clientBroker');
-    const calls: { file: string; args: string[] }[] = [];
-    const broker = createDefaultClientBroker({
-      log: () => undefined,
-      processes: { execFile: (file, args, done) => { calls.push({ file, args }); done(null); }, pipe: async () => undefined },
-    });
-    const hostile = 'x" & (do shell script "touch /tmp/pwned") & "';
-    broker.notify?.({ title: hostile, body: `line\n${hostile}` });
-    expect(calls).toHaveLength(1);
-    const { file, args } = calls[0];
-    expect(file).toBe('/usr/bin/osascript');
-    const sep = args.indexOf('--');
-    const script = args.slice(0, sep).filter((a) => a !== '-e');
-    expect(script).toEqual(NOTIFY_SCRIPT);
-    expect(script.join('\n')).not.toContain('pwned');
-    expect(args.slice(sep + 1)).toEqual([hostile, `line\n${hostile}`]);
+  it('has no native notification: osascript banners are Script Editor’s (#161)', async () => {
+    const { createDefaultClientBroker } = await import('../src/node/clientBroker');
+    const broker = createDefaultClientBroker({ log: () => undefined });
+    expect(broker.notify).toBeUndefined();
   });
 
   it('copies with pbcopy, the text on stdin', async () => {
