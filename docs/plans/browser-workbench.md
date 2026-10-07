@@ -519,7 +519,7 @@ UI track (12 → 13/14) and the remote-access track (15 → 16) run beside the d
 |---|---|---|---|
 | D1 | Daemon runtime | Pinned Node inside a signed `.app` (not a SEA, not Homebrew Node) | 8 |
 | D2 | LAN TLS | Daemon-generated local CA plus a per-device trust profile; a user-supplied certificate as an option | 15 |
-| D3 | Notifications with no tab open | Discord when enabled, otherwise an `osascript` notification on the host; no native helper | 18c |
+| D3 | Notifications with no tab open | Discord when enabled, otherwise nothing. Superseded 2026-10-07 (#161): the `osascript` banner is Script Editor's and a click opens Script Editor, and macOS refuses a notifier signed with the local certificate (`UNErrorDomain` 1, no prompt), so there is no native notification | 18c |
 | D4 | Menu-bar presence after Electron | Drop it (the tab title carries the count); revisit a tiny Swift helper only if missed | 19 |
 
 **Biggest uncertainties:** slice 5 (how many of the ~25 `surface` call sites and the

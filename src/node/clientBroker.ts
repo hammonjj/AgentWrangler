@@ -15,7 +15,7 @@
  * | `input`/`pick`/`pickFolder` | undefined: cancelled |
  * | `openExternal`/`openFile`/`revealInFileManager` | logged, nothing opened |
  * | `runInTerminal` | absent, so the callers do not offer it |
- * | `notify` | `osascript display notification` on the host (decision D3) |
+ * | `notify` | absent: a browser tab notifies, or nobody does (#161) |
  * | `clipboard.writeText` | `pbcopy`, the text on stdin |
  */
 import { execFile, spawn } from 'node:child_process';
@@ -52,21 +52,6 @@ export const systemProcesses: BrokerProcesses = {
   },
 };
 
-/**
- * `display notification` with the title and body as `argv`, never spliced into
- * the script: a body is agent text, and inside an AppleScript literal it could
- * close the string and run whatever followed.
- */
-export const NOTIFY_SCRIPT = [
-  'on run argv',
-  'display notification (item 2 of argv) with title (item 1 of argv)',
-  'end run',
-];
-
-export function notifyArgs(title: string, body: string): string[] {
-  return [...NOTIFY_SCRIPT.flatMap((line) => ['-e', line]), '--', title, body];
-}
-
 export function createDefaultClientBroker(opts: {
   log: (message: string) => void;
   processes?: BrokerProcesses;
@@ -95,12 +80,8 @@ export function createDefaultClientBroker(opts: {
     clipboard: {
       writeText: (text) => proc.pipe('/usr/bin/pbcopy', [], text),
     },
-    // `onClick` cannot be honoured: a `display notification` banner has no
-    // callback to this process (clicking one opens Script Editor).
-    notify: ({ title, body }) => {
-      proc.execFile('/usr/bin/osascript', notifyArgs(title, body), (err) => {
-        if (err) log(`notification failed: ${String(err)}`);
-      });
-    },
+    // No `notify`: a `display notification` banner belongs to Script Editor and
+    // clicking it opens Script Editor (#161), and macOS will not authorize a
+    // notifier signed with the local certificate. Browser tabs notify instead.
   };
 }

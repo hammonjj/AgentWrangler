@@ -206,9 +206,8 @@ export class ClientRegistry {
 
   /**
    * `host.notify`, routed (#141, decision D3). A notice goes to every browser
-   * tab that can show it; the host's own (`native`: `osascript` in the
-   * daemon) fires only when no such tab is
-   * connected. A visible tab suppresses its own copy, and the host's stays
+   * tab that can show it; the host's own (`native`, none in the daemon since
+   * #161) fires only when no such tab is connected. A visible tab suppresses its own copy, and the host's stays
    * quiet too: somebody is looking. Discord is separate and unchanged.
    *
    * The same `tag` inside `NOTICE_DEDUPE_MS` is one ask, delivered once.
