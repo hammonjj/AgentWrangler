@@ -241,6 +241,17 @@ export const SETTINGS: SettingSpec[] = [
       'With no Agent Wrangler tab open, it keeps running in the background. Show a macOS notification on this Mac when a session needs permission, is waiting on you, or is done. Discord integration, when it is on, posts to Discord as well.',
   },
   {
+    // #68: the lease hook is installed with the status hooks either way; off,
+    // it is told about no resource and every tool call goes straight through.
+    key: 'leases.enabled',
+    label: 'One agent at a time for exclusive resources (experimental)',
+    group: 'Agents and status',
+    type: 'boolean',
+    default: false,
+    description:
+      'Make agent sessions take turns with things only one of them may use at a time, such as installing Agent Wrangler itself (npm run app:install). A session whose command needs a resource another session holds waits for it (10 minutes for the installed app, 15 unless a resource says otherwise), then is told it is in use and why. Resources are listed under "leases.resources" in settings.json; the default list has only the installed app. Needs the status hooks installed, and applies to sessions started after they are.',
+  },
+  {
     key: 'openAtLogin',
     label: 'Open at login',
     group: 'Agents and status',

@@ -22,7 +22,7 @@ import { ClaudeStructuredCompletion, type CompletionQueryFn, type CompletionResu
 import { RoutedCompletion } from './completion/localCompletion';
 import type { LocalEndpointService } from './local/localEndpointService';
 import type { CapabilityCatalogView } from '../shared/orchestration/catalog';
-import { TaskRunner, type SchedulingDeps } from './engine/taskRunner';
+import { TaskRunner, type AttemptLeases, type SchedulingDeps } from './engine/taskRunner';
 import { ClaudeCodeHarness } from './harness/claudeCodeHarness';
 import { CodexHarness } from './harness/codexHarness';
 import type { AgentHarness } from './harness/types';
@@ -101,6 +101,8 @@ export interface OrchestrationDeps {
    * window moves. Absent: default limits, never paused.
    */
   scheduling?: SchedulingDeps;
+  /** Exclusive resource leases (#47 over #68): attempts take them before they start. Absent: none. */
+  leases?: AttemptLeases;
 }
 
 /**
@@ -264,6 +266,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     logsDir: path.join(deps.dataDir, 'orchestration', 'logs'),
     settleMs: deps.settleMs,
     ...(deps.scheduling ? { scheduling: deps.scheduling } : {}),
+    ...(deps.leases ? { leases: deps.leases } : {}),
     parallelTasks: () => deps.settings.get<unknown>(PARALLEL_TASKS_KEY, false) === true,
     log,
   });

@@ -55,6 +55,9 @@ import type { LaunchDefaults } from '../../core/launchDefaults';
 import type { SessionExecutors } from '../../core/session/sessionExecutors';
 import type { SessionHandle, SessionViewEvent } from '../../core/session/sessionHandle';
 import type { SessionRecord, SessionRegistry } from '../../core/session/sessionRegistry';
+import type { LeaseService } from '../../core/leases/leaseService';
+import { labelOf, type Lease } from '../../shared/leases';
+import { exclusiveLeaseNames, outOfScopeText, scopeCheck, wroteOutsideScope } from './contention';
 import type { PermissionModeName } from '../../shared/conversation';
 import type { LaunchPolicy } from '../../shared/launchPolicy';
 import { DEFAULT_CONFLICT_ATTEMPTS, DEFAULT_REPO_POLICY } from '../../shared/orchestration/repoPolicy';
@@ -68,6 +71,7 @@ import {
   LAUNCHING_ACTIONS,
   isOrchestrationOrigin,
   type AssignmentMode,
+  type AttemptScopeCheck,
   type AttemptState,
   type EffortLevel,
   type EscalationDecision,
@@ -265,6 +269,25 @@ export class FinishRefused extends TaskError {
   }
 }
 
+/**
+ * An exclusive resource the attempt needs is leased by someone else (§13.5):
+ * nothing was started and nothing failed. The task says why and waits; the
+ * scheduler steps again when a lease is released.
+ */
+export class LeaseWait extends TaskError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LeaseWait';
+  }
+}
+
+/** What `launch` took for an attempt before it reached its mission, so a failure there gives it back. */
+interface LeaseSlot {
+  attemptId?: string;
+  keys: string[];
+  written: boolean;
+}
+
 /** What can be done with a task now. The launcher's task menu offers these (#34 draws them properly). */
 export type TaskAction = 'show-session' | 'open-diff' | 'accept' | 'resume' | 'retry' | 'recreate-worktree' | 'skip' | 'edit-policy' | 'cancel';
 
@@ -346,7 +369,23 @@ export interface TaskRunnerDeps {
    * branch by the Integrator. Absent or false: one at a time in the mission tree.
    */
   parallelTasks?: () => boolean;
+  /** Exclusive resource leases (§13.5, #47 over #68). Absent: no task waits for one. */
+  leases?: AttemptLeases;
   log?: (msg: string) => void;
+}
+
+/**
+ * The core's `LeaseService`, as the task runner uses it (§13.5): an attempt
+ * takes the leases its task needs before it launches (never waiting: a lease
+ * held elsewhere is a scheduler wait), binds them to its session, and gives
+ * them back when it ends.
+ */
+export interface AttemptLeases {
+  service: Pick<LeaseService, 'acquire' | 'heldBy' | 'bind' | 'releaseAttempt' | 'onDidChange'>;
+  /** The agent process a session runs as, once the core knows it; a bound lease lives as long as it does. */
+  agentPid?(sessionId: string): number | undefined;
+  /** Tell the reaper which attempts are still running, so their leases outlive the core that took them. */
+  setAttemptActive?(fn: (attemptId: string) => boolean | undefined): void;
 }
 
 /** The scheduler's view of the machine (#45). */
@@ -381,6 +420,8 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const END_SESSION_WAIT_MS = 15_000;
 /** Attempt states in which a session is (or is about to be) the attempt's. */
 const LIVE: readonly AttemptState[] = ['launching', 'running', 'waiting-human', 'finishing', 'verifying'];
+/** Task states nothing starts from again. */
+const ENDED_TASK: readonly TaskState[] = ['done', 'failed', 'cancelled', 'skipped'];
 const PLANNING_REASON = 'the planner is reading the repository; nothing runs until you approve its plan';
 const DELEGATING_REASON = 'the planner is reading the repository to decide whether this is one task or several; nothing runs until you approve';
 
@@ -431,6 +472,12 @@ export class TaskRunner implements Disposable {
   // ---- The scheduler loop (#45) ----
   /** Tasks the loop is starting now, before their attempt is on record: they hold a slot. */
   private readonly starting = new Set<string>();
+  /** Attempts that hold leases but are not on their mission yet (launch, before the write-ahead). */
+  private readonly leasing = new Set<string>();
+  /** The session and agent pid each attempt's leases were last bound to. */
+  private readonly leasePids = new Map<string, { sid: string; pid?: number }>();
+  /** Recovery has loaded every active mission: `attemptActive` can answer. */
+  private recovered = false;
   /** Missions with a scheduler step waiting in their queue. */
   private readonly stepQueued = new Set<string>();
   /** Finished attempts whose checks wait for a verification slot, by attempt id. */
@@ -464,6 +511,12 @@ export class TaskRunner implements Disposable {
           this.kickSoon();
         }),
       );
+    }
+    if (deps.leases) {
+      // A released lease is what a task waiting for it waits on (§13.5).
+      this.subs.push(deps.leases.service.onDidChange(() => this.kickSoon()));
+      this.subs.push(deps.sessions.onDidChange(() => this.bindLeasePids()));
+      deps.leases.setAttemptActive?.((id) => this.attemptActive(id));
     }
   }
 
@@ -596,6 +649,15 @@ export class TaskRunner implements Disposable {
       this.starting.add(task.id);
       try {
         await this.launch(id, { mode: 'fresh', route: req.route });
+      } catch (e) {
+        if (!(e instanceof LeaseWait)) throw e;
+        // Its lease was taken in the moment since the scheduler looked: it waits in a running mission.
+        const now = this.now();
+        this.queuedSince.set(task.id, now);
+        let next = this.need(id);
+        if (next.state === 'draft') next = transitionMission(next, 'running', { now, reason: 'waiting to start' });
+        this.put(next);
+        this.log(`task ${id}: waits to start (resource): ${e.message}`);
       } finally {
         this.starting.delete(task.id);
       }
@@ -1996,7 +2058,8 @@ export class TaskRunner implements Disposable {
       if (!['running', 'paused', 'cancelled'].includes(state)) continue;
       // Nothing of a planned mission runs before approval.
       if (isPlanned(m) && m.planApprovedAt === undefined) continue;
-      const caps = this.safeEffective(m)?.policy.caps ?? {};
+      const eff = this.safeEffective(m)?.policy;
+      const caps = eff?.caps ?? {};
       missions.push({
         id: m.id,
         repo: m.repoRoot,
@@ -2009,6 +2072,7 @@ export class TaskRunner implements Disposable {
         sharedTree: !m.parallel,
         ...(caps.maxUsageWindowPercent !== undefined ? { maxWindowPercent: caps.maxUsageWindowPercent } : {}),
         ...(caps.maxConcurrentAgents !== undefined ? { maxConcurrentAgents: caps.maxConcurrentAgents } : {}),
+        ...(eff?.allowOverlap ? { allowOverlap: true } : {}),
         ...this.budgetFacts(m, caps),
         tasks: executionOrder(m.tasks).map((t) => this.schedTask(m, t)),
       });
@@ -2055,6 +2119,9 @@ export class TaskRunner implements Disposable {
     if (live) phase = this.verifyWaiters.has(live.id) ? 'verify-queued' : live.state === 'verifying' ? 'verifying' : 'agent';
     else if (this.starting.has(t.id)) phase = 'agent';
     const assignment = !live && !pending && t.attemptIds.length === 0 ? this.assignmentInput(m, t, route) : undefined;
+    const scope = t.scope.paths.length > 0 || t.scope.subsystems.length > 0 ? { paths: t.scope.paths, subsystems: t.scope.subsystems } : undefined;
+    const resources = ENDED_TASK.includes(t.state) ? [] : this.leaseNamesFor(m, t);
+    const resourceWait = live || resources.length === 0 ? undefined : this.resourceWait(m, resources);
     return {
       id: t.id,
       key: t.key,
@@ -2070,7 +2137,117 @@ export class TaskRunner implements Disposable {
       ...(phase ? { live: { id: live?.id ?? `starting:${t.id}`, phase } } : {}),
       ...(pending && !this.starting.has(t.id) ? { retry: { decisionId: pending.id, ...(pending.notBefore !== undefined ? { notBefore: pending.notBefore } : {}) } } : {}),
       ...(assignment ? { assignment } : {}),
+      ...(scope ? { scope } : {}),
+      ...(resources.length > 0 ? { resources } : {}),
+      ...(resourceWait ? { resourceWait } : {}),
     };
+  }
+
+  // ---- Exclusive resources (§13.5, #47) ----
+
+  /** The lease names a task needs: its repository's exclusive resources its scope reaches, and any its assessment named. */
+  private leaseNamesFor(m: Mission, t: Task): string[] {
+    if (!this.deps.leases) return [];
+    const policy = this.deps.repoPolicies.forFolder(m.repoRoot)?.policy;
+    return exclusiveLeaseNames(policy, t.scope.paths, latestAssessment(m, t.id)?.requires ?? []);
+  }
+
+  /** Why the task cannot have its leases now, or undefined when nobody else holds them. */
+  private resourceWait(m: Mission, names: readonly string[]): string | undefined {
+    const leases = this.deps.leases;
+    if (!leases) return undefined;
+    for (const name of names) {
+      let held: Lease | undefined;
+      try {
+        held = leases.service.heldBy(name, { cwd: m.repoRoot });
+      } catch (e) {
+        this.log(`mission ${m.id}: could not read the ${name} lease: ${errorText(e)}`);
+        continue;
+      }
+      if (held) return `${name} is in use by ${this.leaseHolderText(held)}`;
+    }
+    return undefined;
+  }
+
+  private leaseHolderText(l: Lease): string {
+    if (l.holder.kind === 'attempt') {
+      const id = l.holder.attemptId;
+      for (const m of this.missions.values()) {
+        const a = m.attempts.find((x) => x.id === id);
+        const t = a && m.tasks.find((x) => x.id === a.taskId);
+        if (t) return `${t.key}${m.title ? ` of “${m.title}”` : ''}`;
+      }
+      return 'another task';
+    }
+    return l.holder.sessionId ? `another agent session (${labelOf({ key: l.resource, label: l.label })})` : 'another agent session';
+  }
+
+  /**
+   * Take the leases an attempt needs, never waiting (§13.5): every one, or
+   * none and the reason. Held by the attempt, and by its session when its id
+   * is already known, so the agent's own tool calls are never made to wait
+   * on the lease taken for them.
+   */
+  private acquireLeases(m: Mission, t: Task, attemptId: string, sessionId: string | undefined): { keys: string[] } | { wait: string } {
+    const leases = this.deps.leases;
+    const names = this.leaseNamesFor(m, t);
+    if (!leases || names.length === 0) return { keys: [] };
+    const keys: string[] = [];
+    for (const name of names) {
+      const got = leases.service.acquire(name, { kind: 'attempt', attemptId, ...(sessionId ? { sessionId } : {}) }, { scope: 'session', cwd: m.repoRoot });
+      if (!got.ok) {
+        leases.service.releaseAttempt(attemptId);
+        return { wait: `${name} is in use by ${this.leaseHolderText(got.heldBy)}` };
+      }
+      keys.push(got.lease.key);
+    }
+    return { keys };
+  }
+
+  /** Give the attempt's leases its session and agent process (A5); again whenever either becomes known. */
+  private bindLeases(a: ExecutionAttempt): void {
+    const leases = this.deps.leases;
+    const sid = a.assignment.sessionIds.at(-1);
+    if (!leases || !sid || !a.leases?.length) return;
+    const pid = leases.agentPid?.(sid);
+    const seen = this.leasePids.get(a.id);
+    if (seen && seen.sid === sid && seen.pid === pid) return;
+    for (const key of a.leases) {
+      try {
+        leases.service.bind(key, a.id, sid, pid);
+      } catch (e) {
+        this.log(`attempt ${a.id}: could not bind lease ${key}: ${errorText(e)}`);
+      }
+    }
+    this.leasePids.set(a.id, { sid, ...(pid !== undefined ? { pid } : {}) });
+  }
+
+  /** On every session change: a live attempt whose agent pid is newly known moves its leases onto it. */
+  private bindLeasePids(): void {
+    for (const m of this.missions.values()) {
+      for (const a of m.attempts) if (a.leases?.length && LIVE.includes(a.state)) this.bindLeases(a);
+    }
+  }
+
+  private releaseLeases(a: Pick<ExecutionAttempt, 'id' | 'leases'>): void {
+    this.leasePids.delete(a.id);
+    if (!this.deps.leases || !a.leases?.length) return;
+    try {
+      this.deps.leases.service.releaseAttempt(a.id);
+    } catch (e) {
+      this.log(`attempt ${a.id}: could not release its leases: ${errorText(e)}`);
+    }
+  }
+
+  /** For the reaper: whether an attempt still runs. Undefined until recovery has loaded the missions. */
+  private attemptActive(attemptId: string): boolean | undefined {
+    if (this.leasing.has(attemptId)) return true;
+    if (!this.recovered) return undefined;
+    for (const m of this.missions.values()) {
+      const a = m.attempts.find((x) => x.id === attemptId);
+      if (a) return LIVE.includes(a.state) || a.state === 'created';
+    }
+    return false;
   }
 
   /**
@@ -2325,6 +2502,11 @@ export class TaskRunner implements Disposable {
           }
           await this.launch(m.id, { mode: 'fresh', route, taskId: task.id });
         } catch (e) {
+          if (e instanceof LeaseWait) {
+            // Taken in the moment since the scheduler looked; it waits like any other lease wait.
+            this.log(`mission ${m.id}: ${task.key} waits: ${e.message}`);
+            return;
+          }
           // `launch` has already left the task waiting on the user, saying why.
           this.log(`mission ${m.id}: ${task.key} could not start: ${errorText(e)}`);
           this.notify(this.need(m.id), 'needs you', `${task.key} could not start: ${errorText(e)}`);
@@ -2935,6 +3117,10 @@ export class TaskRunner implements Disposable {
       found.push(loaded.mission.id);
     }
     await Promise.all(found.map((id) => this.queue(id, () => this.recoverMission(id)).catch((e) => this.log(`task ${id}: recovery failed: ${String(e)}`))));
+    // Leases outlive the core (§23.3 step 6): a running attempt's go back on
+    // its session and agent; an ended one's were released as it was settled.
+    this.recovered = true;
+    this.bindLeasePids();
     this.emitter.fire();
   }
 
@@ -3146,6 +3332,19 @@ export class TaskRunner implements Disposable {
    * `continue`: the interrupted attempt's session, resumed in its own tree.
    */
   private async launch(missionId: string, opts: LaunchOptions): Promise<void> {
+    const slot: LeaseSlot = { keys: [], written: false };
+    try {
+      await this.launchAttempt(missionId, opts, slot);
+    } catch (e) {
+      // Leases taken for an attempt that never reached its mission go straight back.
+      if (slot.attemptId && !slot.written) this.releaseLeases({ id: slot.attemptId, leases: slot.keys });
+      throw e;
+    } finally {
+      if (slot.attemptId) this.leasing.delete(slot.attemptId);
+    }
+  }
+
+  private async launchAttempt(missionId: string, opts: LaunchOptions, slot: LeaseSlot): Promise<void> {
     let m = this.need(missionId);
     const resumeOf = opts.mode === 'continue' && 'resumeOf' in opts ? opts.resumeOf : undefined;
     const continues = opts.mode === 'continue' && 'continues' in opts ? opts.continues : undefined;
@@ -3196,6 +3395,23 @@ export class TaskRunner implements Disposable {
       if (task.attemptIds.length === 0) this.put(this.failBeforeLaunch(m, task.id, errorText(e)));
       else if (e instanceof TaskError) this.put(this.patchTask(m, task.id, (t) => ({ ...t, stateReason: e.message })));
       throw e;
+    }
+    const preassigned = harness.capabilities().preassignedSessionId;
+    const mode: AssignmentMode = carry ? carry.mode : opts.mode === 'continue' ? 'continue' : 'fresh';
+    const fromSid = carry?.from.assignment.sessionIds.at(-1);
+    const sessionIds = prevAttempt ? [...prevAttempt.assignment.sessionIds] : mode === 'reuse' && fromSid ? [fromSid] : preassigned ? [randomUUID()] : [];
+    // The exclusive resources its task needs (§13.5), before any worktree is
+    // made: one held elsewhere means waiting, never a parallel start.
+    const attemptId = this.id();
+    const leased = this.acquireLeases(m, task, attemptId, sessionIds.at(-1));
+    if ('wait' in leased) {
+      this.put(this.patchTask(m, task.id, (t) => ({ ...t, stateReason: `waiting: ${leased.wait}` })));
+      throw new LeaseWait(leased.wait);
+    }
+    if (leased.keys.length > 0) {
+      slot.attemptId = attemptId;
+      slot.keys = leased.keys;
+      this.leasing.add(attemptId);
     }
     const now = this.now();
     // Check the task can take an attempt now, before any worktree is made or taken:
@@ -3249,15 +3465,11 @@ export class TaskRunner implements Disposable {
     };
     const decision = this.decision(m, task, n, route, harness, routing);
     const provider = PROVIDER[route.harness] ?? 'claude';
-    const preassigned = harness.capabilities().preassignedSessionId;
-    const mode: AssignmentMode = carry ? carry.mode : opts.mode === 'continue' ? 'continue' : 'fresh';
-    const fromSid = carry?.from.assignment.sessionIds.at(-1);
-    const sessionIds = prevAttempt ? [...prevAttempt.assignment.sessionIds] : mode === 'reuse' && fromSid ? [fromSid] : preassigned ? [randomUUID()] : [];
     // A carried session starts from what it last held (#54); a cold one from its first request, when that is reported.
     const carriedContext = (carry?.from ?? prevAttempt)?.context?.last;
     const promptId = randomUUID();
     const attempt: ExecutionAttempt = {
-      id: this.id(),
+      id: attemptId,
       taskId: task.id,
       n,
       routingDecisionId: decision.id,
@@ -3278,6 +3490,7 @@ export class TaskRunner implements Disposable {
       ...(continues ? { continues: continues.id } : {}),
       ...(resolves ? { resolvesConflict: { missionHead: resolves.missionHead, files: [...resolves.files] } } : {}),
       ...(escalation?.step !== undefined ? { escalation: { decisionId: escalation.id, action: escalation.action, step: escalation.step } } : {}),
+      ...(leased.keys.length > 0 ? { leases: leased.keys } : {}),
     };
     m = { ...m, decisions: [...m.decisions, decision], attempts: [...m.attempts, attempt] };
     m = this.patchTask(m, task.id, (t) => ({ ...t, attemptIds: [...t.attemptIds, attempt.id] }));
@@ -3286,6 +3499,8 @@ export class TaskRunner implements Disposable {
     m = this.patchAttempt(m, attempt.id, (x) => transitionAttempt(m, x, 'launching', { now }));
     // Write-ahead: the attempt, its session id and origin are on disk before anything starts.
     this.put(m);
+    // From here its leases are the attempt's: `endAttempt` gives them back.
+    slot.written = true;
     this.queuedSince.delete(task.id);
     this.writeRouting(m, decision);
 
@@ -3329,6 +3544,7 @@ export class TaskRunner implements Disposable {
       m = this.need(missionId);
       const cur = m.attempts.find((x) => x.id === attempt.id);
       if (cur?.state === 'launching') this.put(this.patchAttempt(m, attempt.id, (x) => transitionAttempt(m, x, 'running', { now: this.now() })));
+      if (cur) this.bindLeases(cur);
       this.log(`task ${missionId}: attempt ${n} carries on session ${sessionIds.at(-1)} in ${wt.path}`);
       return;
     }
@@ -3366,6 +3582,9 @@ export class TaskRunner implements Disposable {
     }
     m = this.patchAttempt(m, attempt.id, (x) => transitionAttempt(m, x, 'running', { now: this.now() }));
     this.put(m);
+    // A5: its leases are its session's now (Codex has an id only from here).
+    const running = m.attempts.find((x) => x.id === attempt.id);
+    if (running) this.bindLeases(running);
     this.log(`task ${missionId}: attempt ${n} running in ${wt.path}${id ? ` as ${id}` : ''}${mode === 'reuse' ? ' (resumed)' : mode === 'fork' ? ` (forked from ${fromSid})` : ''}`);
     this.watch(missionId, attempt.id, handle, { recovered: false });
   }
@@ -4155,6 +4374,8 @@ export class TaskRunner implements Disposable {
         await this.launch(missionId, { mode: 'fresh', route, taskId: task.id, escalation: d, feedback: message });
       }
     } catch (e) {
+      // Its lease was taken in the moment since the scheduler looked: the step stays pending and waits.
+      if (e instanceof LeaseWait) return;
       m = this.need(missionId);
       const t = m.tasks.find((x) => x.id === task.id)!;
       const newest = m.attempts.find((a) => a.id === t.attemptIds.at(-1));
@@ -4480,8 +4701,14 @@ export class TaskRunner implements Disposable {
       this.notify(this.need(missionId), 'failed', 'Its changes could not be committed; they are still in its worktree.');
       return;
     }
+    // What it changed against what its task predicted (§13.4): `scopeAccuracy`, and a flag for review when most of it was outside.
+    const scope = stats.filesChanged > 0 ? await this.measureScope(m, task, wt) : undefined;
     m = this.need(missionId);
-    m = this.patchAttempt(m, a.id, (x) => ({ ...x, git: { baseCommit: wt.baseCommit, ...stats } }));
+    m = this.patchAttempt(m, a.id, (x) => ({
+      ...x,
+      git: { baseCommit: wt.baseCommit, ...stats },
+      ...(scope ? { scope, flags: { ...x.flags, ...(wroteOutsideScope(scope) ? { outOfScope: true } : {}) } } : {}),
+    }));
     this.put(m);
     // The two ways an attempt is over before anything is worth checking. Both
     // release the tree first: there is nothing to run in it.
@@ -4572,7 +4799,24 @@ export class TaskRunner implements Disposable {
     this.put(m);
     this.log(`task ${missionId}: attempt ${a.n} finished: ${stats.commits} commit(s), ${stats.filesChanged} file(s)`);
     const headline = verdict.verdict === 'passed' ? 'passed its checks' : `is ready for review (${verdict.verdict})`;
-    this.notify(m, headline, `${verdict.summary} — ${stats.filesChanged} file(s) on ${wt.branch}. Click to open the diff.`, 'open-diff');
+    const ended = m.attempts.find((x) => x.id === a.id);
+    const outside = ended?.flags.outOfScope && ended.scope ? ` Note: ${outOfScopeText(ended.scope)}.` : '';
+    this.notify(m, headline, `${verdict.summary} — ${stats.filesChanged} file(s) on ${wt.branch}.${outside} Click to open the diff.`, 'open-diff');
+  }
+
+  /** The attempt's changed files against its task's predicted scope; undefined when either is unknown. */
+  private async measureScope(m: Mission, task: Task, wt: WorktreeAssignment): Promise<AttemptScopeCheck | undefined> {
+    if (task.scope.paths.length === 0) return undefined;
+    try {
+      const files = await (await this.managerFor(m)).changedFiles(wt);
+      return scopeCheck(
+        files.map((f) => f.file),
+        task.scope.paths,
+      );
+    } catch (e) {
+      this.log(`mission ${m.id}: ${task.key}: could not compare its changes with its scope: ${errorText(e)}`);
+      return undefined;
+    }
   }
 
   /**
@@ -4661,6 +4905,8 @@ export class TaskRunner implements Disposable {
       m = this.patchTask(m, taskId, (t) => ({ ...t, stateReason: reason }));
     }
     const a = m.attempts.find((x) => x.id === attemptId)!;
+    // Its exclusive resources go back as it ends (§13.5), whatever ended it.
+    this.releaseLeases(a);
     const record = attemptRecord(m, a, now);
     const local = record && this.localMetrics(m, a, record.activeMs, record.queueMs);
     if (record && local) record.local = local;
