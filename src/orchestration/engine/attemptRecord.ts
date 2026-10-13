@@ -172,6 +172,8 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
   }
   if (waited > 0) record.waitedOnHumanMs = waited;
   if (a.git) record.git = { filesChanged: a.git.filesChanged, insertions: a.git.insertions, deletions: a.git.deletions, commits: a.git.commits };
+  // The fraction only (§13.4, §16): which files were outside stays on the mission, not in telemetry.
+  if (a.scope) record.scopeAccuracy = a.scope.accuracy;
   if (outcome === 'interrupted') record.partial = true;
   return prune(record);
 }

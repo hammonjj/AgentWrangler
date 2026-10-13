@@ -39,7 +39,10 @@ import { readRolloutBlocks } from '../codex/rollout';
 import { codexUsageReader } from '../codex/usage';
 import { CodexRunnerService } from '../codex/runner';
 import { isPidAlive, readProcessEntries, readRegistry } from '../claude/registry';
-import { bootTimeMs, parentPidOf, startTimeOf } from '../core/procStart';
+import { bootTimeMs, isSameProcessAlive, parentPidOf, startTimeOf } from '../core/procStart';
+import { FileLeaseService } from '../core/leases/leaseService';
+import { LEASES_ENABLED_KEY, LEASES_RESOURCES_KEY } from '../shared/leases';
+import { leasesDir, refreshLeaseScript } from '../claude/leaseHook';
 import { sweepOrphans, sweepRefusal, type SweepResult } from '../core/session/orphanSweep';
 import { endProcess } from '../claude/runner/adopt';
 import { SessionRegistry, type SessionRecord } from '../core/session/sessionRegistry';
@@ -53,7 +56,7 @@ import { RETIRED_SETTING_KEYS } from '../shared/settings';
 import { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import { LaunchDefaults } from '../core/launchDefaults';
-import { createOrchestration, parseRoutingSettings, ROUTING_KEY } from '../orchestration';
+import { createOrchestration, ORCHESTRATION_ENABLED_KEY, parseRoutingSettings, ROUTING_KEY } from '../orchestration';
 import { FinishRefused, TaskError, type TaskAction, type TaskRoute, type TaskRunner } from '../orchestration/engine/taskRunner';
 import { explainRecommendation, targetLabel } from '../orchestration/view/routeExplain';
 import { sourceStatus } from '../shared/orchestration/sourceHealth';
@@ -436,6 +439,33 @@ export function createApp(host: HostServices): AgentWranglerApp {
   if (startup.interrupted.length > 0) {
     log(`${startup.interrupted.length} session(s) were interrupted by the last restart`);
   }
+
+  // ---- Exclusive resource leases (#68) ----
+  //
+  // The lease files beside the hook script are the lock; this declares the
+  // resources the hook enforces (none while `leases.enabled` is off), reaps
+  // leases whose holder is gone, and lets the scheduler hold one for an
+  // attempt. Started after the registry's startup pass, so a session the last
+  // restart interrupted gives its leases back.
+  const leases = new FileLeaseService({
+    dir: leasesDir(hookLogDir()),
+    settings: () => ({ enabled: host.settings.get<boolean>(LEASES_ENABLED_KEY, false) === true, resources: host.settings.get<unknown>(LEASES_RESOURCES_KEY, undefined) }),
+    startTimeOf,
+    alive: isSameProcessAlive,
+    sessionState: (id) => {
+      const r = sessionRegistry.get(id);
+      return r ? { state: r.state, ...(r.stateChangedAt !== undefined ? { changedAt: r.stateChangedAt } : {}) } : undefined;
+    },
+    holdAttemptLeases: () => host.settings.get<boolean>(ORCHESTRATION_ENABLED_KEY, false) === true,
+    log,
+  });
+  leases.start();
+  host.subscribe(leases);
+  host.subscribe(
+    host.settings.onDidChange((affects) => {
+      if (affects(LEASES_ENABLED_KEY) || affects(LEASES_RESOURCES_KEY)) leases.syncResources();
+    }),
+  );
   for (const m of hostScan.foreign) {
     log(`host ${m.hostId} (session ${m.sessionId}) runs a manifest version this build does not know; leaving it alone`);
   }
@@ -820,6 +850,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
       onDidChange: (listener) => {
         const subs = [usage.onDidChange(listener), codexUsage.onDidChange(listener), pause.onDidChange(listener), localEndpoints.onDidChange(listener)];
         return { dispose: () => subs.forEach((s) => s.dispose()) };
+      },
+    },
+    // #47: a task needing an exclusive resource waits for its lease, and holds it while its attempt runs.
+    leases: {
+      service: leases,
+      agentPid: (id) => store.sessions.find((s) => s.sessionId === id)?.pid,
+      setAttemptActive: (fn) => {
+        leases.attemptActive = fn;
       },
     },
   });
@@ -3113,6 +3151,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (await refreshPermissionScript(hookLogDir())) log('permission hook script updated to this version');
     } catch (err) {
       log(`could not update the permission hook script: ${String(err)}`);
+    }
+    try {
+      if (await refreshLeaseScript(hookLogDir())) log('lease hook script updated to this version');
+    } catch (err) {
+      log(`could not update the lease hook script: ${String(err)}`);
     }
     const state = await currentState(hookLogDir());
     log(`hook install state: ${state.kind}${'why' in state ? ` (${state.why})` : ''}`);

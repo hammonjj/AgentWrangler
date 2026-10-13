@@ -824,6 +824,59 @@ plus a hash of its git common directory, so every worktree of a repository share
 The schema is `src/shared/orchestration/repoPolicy.ts`; this repository's policy is
 `docs/repo-policies/agentwrangler.json`. Until the Preferences page for it exists, edit the JSON file by hand.
 
+### Contention between tasks (#47)
+
+- **Overlapping scopes wait.** A task whose predicted scope (`scope.paths` globs, or a subsystem)
+  overlaps a task already running in the same repository, from any mission, waits with
+  *waiting: its scope overlaps t2, which is running (…)*. It starts when that task ends or
+  verifies. A mission's `allowOverlap` lets its tasks run beside overlapping ones, but only when
+  both missions allow it. A task with no predicted scope is never held back this way.
+- **Exclusive resources wait for a lease.** `"exclusive": [{ "id": "unity-editor:Game", "paths": ["Game/**"] }]`
+  in the repository policy says that a task whose scope reaches those paths needs that lease (with
+  no `paths`, every task in the repository needs it). Before its attempt starts, the scheduler
+  takes the lease (see *Exclusive resource leases* below) for the attempt and its session. A lease
+  held elsewhere means *waiting: unity-editor:Game is in use by …*, never a parallel start. The
+  attempt holds the lease, its verification included, and gives it back when it ends. The lease
+  survives a core restart. A name such as `unity-editor:Game` shares the lease the hook takes for a
+  declared `unity-editor` resource.
+- **Scope accuracy.** When an attempt finishes, its changed files are compared with its task's
+  predicted scope. The share inside it is recorded as `scopeAccuracy` in the attempt record (the
+  number only, never file names). An attempt with most of its changes outside the scope (under
+  75% inside) is flagged `outOfScope`. Its verification lines and its review notification then
+  name the files.
+
+## Exclusive resource leases (#68, experimental)
+
+Some things only one agent may use at a time: a Unity Editor on one project, a fixed port, and
+`npm run app:install`, which replaces the app every agent is watching. A **lease** makes sessions
+take turns, with no cooperation needed from the agent: the tool call is the request.
+
+- **Declared once.** `leases.resources` in `settings.json` is a list of
+  `{ "key", "label", "keyBy": "global" | "repo" | "cwd", "scope": "command" | "turn", "waitSec", "match": { "bash": [ERE…], "tools": [ERE…] } }`.
+  Absent, it is one resource, `aw-app` (`npm run app:install`, `install-app.sh`,
+  `quit app "Agent Wrangler"`, waiting up to 10 min). Nothing is enforced until **Preferences →
+  Agents and status → One agent at a time for exclusive resources** (`leases.enabled`) is on.
+- **Enforced by a hook.** The status hooks include `~/.claude/agentwrangler/lease-hook.sh` on
+  `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`, `Stop` and `StopFailure`. With nothing
+  declared it exits at once. A matching call takes the lease, which is a directory under
+  `~/.claude/agentwrangler/leases/`: `mkdir` is the atomic acquire and `holder.json` names the
+  session and its process. If another session holds the lease, the call waits (polling every
+  0.5 s) for up to `waitSec`. It is then denied with a reason the agent reads, for example
+  *the installed app is in use by another agent session (for 6 min)*. The hook never prints an
+  allow, so it can delay or refuse a call but never skips a permission prompt.
+- **Released by the hook.** A `command` lease is released when the call ends, or is refused at
+  the prompt. A `turn` lease (for a run of calls on one Editor) is released when the turn stops.
+  A stopped turn also releases any `command` lease left from an interrupted call. A matching
+  command run with `run_in_background` is refused, because its lease would end before the
+  command does.
+- **Works while the app is down.** The files are the lock, and the hook needs nothing else. The
+  core reaps leases whose holder is gone: a dead pid, or a live pid with a different start time
+  (the pid was reused). It also reaps the leases of a session the registry says has ended.
+- **Known gaps.** A script that runs a matched command internally is not seen. Re-run *Install
+  hooks* after updating so the lease command is in `settings.json`. Like any hook change, it
+  applies to sessions started afterwards. Codex threads are not gated yet (#70). The table does
+  not show holders and waiters yet (#69).
+
 ## From a terminal: `aw`
 
 `npm run cli:install` puts an `aw` command on your `PATH` (a copy of `bin/aw`, so it keeps working if the checkout goes). It runs the CLI bundled inside the installed app, using the app's own runtime, so it needs no Node and always matches the installed build.
@@ -1305,7 +1358,7 @@ Every row answers three questions: **what is happening** (the primary status: Wa
 
 ### 1. Hooks (exact, opt-in)
 
-Click *Install hooks* in the banner above the table (it shows while status is only estimated). It merges a block into `~/.claude/settings.json` in which every hook appends its stdin payload to `~/.claude/agentwrangler/$PPID.jsonl`; Agent Wrangler tails those logs. The one exception is `PermissionRequest`, which runs `~/.claude/agentwrangler/permission-hook.sh` (written by the installer) — see *Allow / Deny* below.
+Click *Install hooks* in the banner above the table (it shows while status is only estimated). It merges a block into `~/.claude/settings.json` in which every hook appends its stdin payload to `~/.claude/agentwrangler/$PPID.jsonl`; Agent Wrangler tails those logs. The one exception is `PermissionRequest`, which runs `~/.claude/agentwrangler/permission-hook.sh` (written by the installer) — see *Allow / Deny* below. `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`, `Stop` and `StopFailure` also run `lease-hook.sh` beside the log append, which does nothing unless exclusive resource leases are on (see *Exclusive resource leases*).
 
 | Signal | Meaning |
 |---|---|
@@ -1412,7 +1465,7 @@ There is no Done toast while delegated work is still going, and none for attempt
 
 All of them are in Preferences (`#/preferences`) and stored in `settings.json` in the app's support folder (`~/Library/Application Support/Agent Wrangler/`), keyed by the names below. Edit the file by hand only with the core daemon stopped.
 
-`runner.defaultPermissionMode` (`acceptEdits` — or `default` to be asked every time, `plan` to plan first) · `runner.model` (empty — Claude Code's own default) · `runner.autoResumeLastOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (notify an open tab when an agent needs you or is done) · `notifyWhenWindowClosed` (a Mac notification when no tab can show one) · `openAtLogin` (false — start the daemon at login) · `lifecycle.orphanIdleHours` (24) · `pollIntervalSeconds` (5) · `showUsage` (true) · `usagePollIntervalSeconds` (60, and 20 by itself near a limit) · `autoPause.enabled` (false) · `autoPause.percent` (98) · `web.enabled` (true — the browser workbench on 127.0.0.1) · `web.port` (7391) · `web.lan.enabled` (false) · `web.lan.port` (7392) · `web.lan.certFile` / `web.lan.keyFile` (your own certificate)
+`runner.defaultPermissionMode` (`acceptEdits` — or `default` to be asked every time, `plan` to plan first) · `runner.model` (empty — Claude Code's own default) · `runner.autoResumeLastOnStartup` (true) · `claudeBinaryPath` · `stuckThresholdSeconds` (600 — generation is silent for minutes; see above) · `endedWindowHours` (48) · `maxEndedSessions` (50) · `notifyOnWaiting` (notify an open tab when an agent needs you or is done) · `notifyWhenWindowClosed` (a Mac notification when no tab can show one) · `openAtLogin` (false — start the daemon at login) · `lifecycle.orphanIdleHours` (24) · `pollIntervalSeconds` (5) · `showUsage` (true) · `usagePollIntervalSeconds` (60, and 20 by itself near a limit) · `autoPause.enabled` (false) · `autoPause.percent` (98) · `leases.enabled` (false — see *Exclusive resource leases*) · `leases.resources` (list; absent means `aw-app` only) · `web.enabled` (true — the browser workbench on 127.0.0.1) · `web.port` (7391) · `web.lan.enabled` (false) · `web.lan.port` (7392) · `web.lan.certFile` / `web.lan.keyFile` (your own certificate)
 
 **Preferences → Orchestration** lists every model Claude Code and Codex have reported. For each one it shows the capability tier Agent Wrangler assigns it (`basic < standard < expert < frontier`; `frontier` is reached only by escalation), whether it is enabled, how AW's effort levels map onto the model's own, what is known about it and where each fact came from, and how its cost is worked out. Unassigned models are listed first, and routing never picks one automatically. Your choices go into `settings.json` under `orchestration.models`; anything left at its default is not written.
 

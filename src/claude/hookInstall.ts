@@ -21,6 +21,7 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { HOOK_EVENTS } from './hookEvents';
+import { LEASE_HOOK_TIMEOUT_SECONDS, LEASE_RELEASE_TIMEOUT_SECONDS, leaseHookCommandFor, leaseScriptCurrent, writeLeaseScript } from './leaseHook';
 import { claudeHome } from './paths';
 
 /** Present in every command we write; how we recognize our own entries later. */
@@ -144,9 +145,15 @@ function ourEntry(logDir: string, event: string): HookMatcherEntry {
   // notification_type etc. in our own parser rather than registering many
   // matchers, which keeps the block small and easy to verify by eye.
   const timeout = event === 'PermissionRequest' ? PERMISSION_HOOK_TIMEOUT_SECONDS : HOOK_TIMEOUT_SECONDS;
-  return {
-    hooks: [{ type: 'command', command: hookCommandFor(logDir, event), timeout }],
-  };
+  const hooks: HookCommand[] = [{ type: 'command', command: hookCommandFor(logDir, event), timeout }];
+  // The lease hook (#68) rides in the same entry: one entry per event is what
+  // marks a block as ours, and the commands of an entry run side by side. It
+  // exits at once while no resource is declared (`leases.enabled` off).
+  const lease = leaseHookCommandFor(logDir, event);
+  if (lease) {
+    hooks.push({ type: 'command', command: lease, timeout: event === 'PreToolUse' ? LEASE_HOOK_TIMEOUT_SECONDS : LEASE_RELEASE_TIMEOUT_SECONDS });
+  }
+  return { hooks };
 }
 
 /**
@@ -279,7 +286,7 @@ export async function currentState(logDir: string, file = settingsPath()): Promi
   if (found.length === 0) return { kind: 'absent' };
   if (stale || found.length !== HOOK_EVENTS.length) return { kind: 'stale', logDir };
   // The block can be current while the script it points at is old or gone.
-  if (!(await permissionScriptCurrent(logDir))) return { kind: 'stale', logDir };
+  if (!(await permissionScriptCurrent(logDir)) || !(await leaseScriptCurrent(logDir))) return { kind: 'stale', logDir };
   return { kind: 'installed', logDir };
 }
 
@@ -346,8 +353,11 @@ export async function installHooks(logDir: string, file = settingsPath()): Promi
   if ('error' in res) return { ok: false, changed: false, message: res.error };
 
   await fsp.mkdir(logDir, { recursive: true });
-  const scriptWasCurrent = await permissionScriptCurrent(logDir);
-  if (!scriptWasCurrent) await writePermissionScript(logDir);
+  const permissionWasCurrent = await permissionScriptCurrent(logDir);
+  if (!permissionWasCurrent) await writePermissionScript(logDir);
+  const leaseWasCurrent = await leaseScriptCurrent(logDir);
+  if (!leaseWasCurrent) await writeLeaseScript(logDir);
+  const scriptWasCurrent = permissionWasCurrent && leaseWasCurrent;
 
   const { hooks, changed } = mergeHooks(res.obj.hooks, logDir);
   if (!changed) {
@@ -357,7 +367,7 @@ export async function installHooks(logDir: string, file = settingsPath()): Promi
           ok: true,
           changed: true,
           message:
-            'Agent Wrangler permission hook script updated; settings.json was already current. ' +
+            'Agent Wrangler hook scripts updated; settings.json was already current. ' +
             'Sessions started from now on use the new script.',
         };
   }

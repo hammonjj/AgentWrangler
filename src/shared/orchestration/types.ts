@@ -801,6 +801,23 @@ export interface AttemptFlags {
   staleBase?: boolean;
   /** Its session's host stopped answering; the host still holds it, so it is not interrupted (§23.3). */
   hostUnreachable?: boolean;
+  /** It changed files well outside its task's predicted scope (§13.4); review says so. */
+  outOfScope?: boolean;
+}
+
+/**
+ * How the files an attempt changed compare with its task's predicted scope
+ * (§13.4, #47). Measured when it finishes; absent when nothing was predicted
+ * or nothing changed.
+ */
+export interface AttemptScopeCheck {
+  /** Fraction of changed files inside the predicted scope (the `attempt` record's `scopeAccuracy`). */
+  accuracy: number;
+  changed: number;
+  /** Changed files outside it, the first few. */
+  outside: string[];
+  /** How many were outside, all of them. */
+  outsideCount: number;
 }
 
 /** One try at a task. Persisted as `launching` before the session is launched; never reopened (§7.2). */
@@ -825,6 +842,14 @@ export interface ExecutionAttempt {
   endedAt?: Millis;
   outcome?: AttemptOutcome;
   git?: AttemptGitStats;
+  /** Changed files against the predicted scope (§13.4). */
+  scope?: AttemptScopeCheck;
+  /**
+   * Exclusive resource leases held for it (§13.5, #47), by their qualified
+   * keys: taken before launch, bound to its session, released when it ends.
+   * On disk so a restarted core rebinds or releases them.
+   */
+  leases?: string[];
   verification: VerificationResult[];
   usage?: UsageSummary;
   /** Context size at the start and at the last request (#54). */
