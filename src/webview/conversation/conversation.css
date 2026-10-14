@@ -1704,6 +1704,17 @@ body,
   background: var(--vscode-input-background);
   color: var(--vscode-input-foreground);
 }
+.qother {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  field-sizing: content;
+  min-height: 1lh;
+  max-height: 8lh;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .qfeedback {
   display: block;
   width: 100%;

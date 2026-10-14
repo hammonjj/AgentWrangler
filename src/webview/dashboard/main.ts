@@ -257,7 +257,7 @@ function paint(html: string): void {
   // loses the caret (and the focus ring) mid-word.
   const typing = document.activeElement;
   const focused =
-    typing instanceof HTMLInputElement && typing.classList.contains('qother')
+    typing instanceof HTMLTextAreaElement && typing.classList.contains('qother')
       ? { draft: typing.closest<HTMLElement>('.qstep')?.dataset.draft, at: typing.selectionStart }
       : undefined;
   // A button pressed from the keyboard turns busy in the next paint; it keeps the focus (`data-fk`), so
@@ -267,7 +267,7 @@ function paint(html: string): void {
   applyStyles(app);
   if (fk) app.querySelector<HTMLElement>(`[data-fk="${CSS.escape(fk)}"]`)?.focus();
   if (focused?.draft) {
-    const restored = app.querySelector<HTMLInputElement>(`.qstep[data-draft="${CSS.escape(focused.draft)}"] .qother`);
+    const restored = app.querySelector<HTMLTextAreaElement>(`.qstep[data-draft="${CSS.escape(focused.draft)}"] .qother`);
     if (restored) {
       restored.focus();
       const at = focused.at ?? restored.value.length;
@@ -565,7 +565,7 @@ function saveQuestionDraft(stepper: HTMLElement): QuestionDraft | undefined {
   draft.selected[step] = Array.from(stepper.querySelectorAll<HTMLInputElement>('input[data-qchoice]:checked')).map(
     (input) => input.value,
   );
-  draft.other[step] = stepper.querySelector<HTMLInputElement>('.qother')?.value.trim() ?? '';
+  draft.other[step] = stepper.querySelector<HTMLTextAreaElement>('.qother')?.value.trim() ?? '';
   return draft;
 }
 
@@ -586,7 +586,7 @@ function questionStepper(key: string, requestId: string, questions: import('../.
   return `<div class="qstep" data-draft="${esc(draftKey)}" data-step="${draft.step}" data-multi="${q.multiSelect === true}">
     <div class="qprogress">Question ${draft.step + 1} of ${questions.length}${q.header ? ` · ${esc(q.header)}` : ''}</div>
     <div class="qprompt">${esc(q.question)}</div>
-    <div class="qchoices">${options}<input class="qother" value="${esc(draft.other[draft.step] ?? '')}" placeholder="Other…" aria-label="Other answer"></div>
+    <div class="qchoices">${options}<textarea class="qother" rows="1" placeholder="Other…" aria-label="Other answer">${esc(draft.other[draft.step] ?? '')}</textarea></div>
     <div class="qnav">${draft.step > 0 ? '<button class="pbtn" data-qnav="back">Back</button>' : ''}<span></span><button class="pbtn allow" data-qnav="${draft.step + 1 === questions.length ? 'answer' : 'next'}">${draft.step + 1 === questions.length ? 'Answer' : 'Next'}</button></div>
   </div>`;
 }
