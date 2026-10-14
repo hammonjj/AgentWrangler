@@ -928,6 +928,14 @@ button.pbtn:disabled {
   background: var(--vscode-input-background);
   color: var(--vscode-input-foreground);
   font: inherit;
+  /* A long answer wraps and the box grows with it (max 8 lines), never scrolls sideways. */
+  display: block;
+  resize: none;
+  field-sizing: content;
+  min-height: 1lh;
+  max-height: 8lh;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .qnav { display: grid; grid-template-columns: auto 1fr auto; gap: 5px; margin-top: 8px; }
 

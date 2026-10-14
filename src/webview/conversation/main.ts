@@ -693,8 +693,8 @@ function questionForm(
       opts.appendChild(label);
     }
     // Claude's own question tool always offers "Other"; so does this.
-    const other = document.createElement('input');
-    other.type = 'text';
+    const other = document.createElement('textarea');
+    other.rows = 1;
     other.className = 'qother';
     other.placeholder = 'Other…';
     other.dataset.question = q.question;
@@ -726,7 +726,7 @@ function questionForm(
       )
         .filter((i) => i.checked)
         .map((i) => i.value);
-      const free = wrap.querySelector<HTMLInputElement>(`input.qother[data-question="${CSS.escape(q.question)}"]`);
+      const free = wrap.querySelector<HTMLTextAreaElement>(`textarea.qother[data-question="${CSS.escape(q.question)}"]`);
       const freeText = free?.value.trim();
       if (freeText) picked.push(freeText);
       if (picked.length > 0) collected[q.question] = picked.join(', ');
