@@ -168,6 +168,10 @@ import { missionViewOf } from '../orchestration/view/missionViews';
 import type { TaskPaneSource } from '../ui/conversation/conversationHost';
 import { adoptActionFor } from '../ui/openTarget';
 import { resumeInTerminal } from '../ui/terminal';
+import { createDurableAgents } from './durableAgents';
+import { DurableAgentStore } from '../core/durableAgentStore';
+import type { AgentConversations, AgentDirectory } from '../ui/agentDirectory';
+import { agentIdOfDraftKey } from '../shared/durableAgents';
 
 /** How long to let a session emit its first hook event before calling hooks broken. */
 const HOOK_HEALTH_GRACE_MS = 90_000;
@@ -242,6 +246,9 @@ export interface AgentWranglerApp {
   taskPanes?: TaskBadgeSource & TaskPaneSource;
   /** The table's Missions view (#43). Absent while orchestration is off. */
   missions?: MissionSource;
+  /** Durable agents (#179): the Agents view, and an agent's empty conversation in the pane. */
+  agents: AgentDirectory;
+  agentConversations: AgentConversations;
   dictation: DictationService;
   files: FileSuggestService;
   /**
@@ -1899,6 +1906,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
     taskMenu: tasks ? (cwd, provider) => taskMenu(tasks, cwd, provider) : undefined,
   };
 
+  // Durable agents (#179): Agent Wrangler's own record, in its own state.
+  const durableAgents = createDurableAgents({
+    agents: new DurableAgentStore(host.globalState),
+    store,
+    sessions,
+    launchDefaults,
+    projects,
+    dialogs,
+    surface: () => surface,
+    globalDir: globalConversationDir,
+    log,
+  });
+  host.subscribe({ dispose: () => durableAgents.dispose() });
+
   /**
    * "Run as task" (#33): the launcher's Tasks button. A quick pick, not a
    * view: the task table and task strip are #34's. Runs a new task in the
@@ -2590,6 +2611,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
       } finally { adopting.delete(key); }
     },
     smartOpen(key) {
+      // A link to an agent's conversation (#179): whatever the agent continues now.
+      const agentId = agentIdOfDraftKey(key);
+      if (agentId !== undefined) {
+        durableAgents.directory.open(agentId);
+        return;
+      }
       const s = store.get(key);
       if (!s) return;
       surface?.show(s.key);
@@ -3261,6 +3288,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     launcher,
     taskPanes,
     missions: missionSource,
+    agents: durableAgents.directory,
+    agentConversations: durableAgents.conversations,
     dictation,
     files,
     actions,

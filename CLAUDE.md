@@ -37,8 +37,8 @@ checks), and `HostServices` has one implementation, `src/node/nodeHost.ts`.
   Logs: `~/Library/Application Support/Agent Wrangler/logs/core-daemon.log` and
   `agent-wrangler.log` beside it.
 - `aw web open` — open the workbench (`http://127.0.0.1:7391/`) in the default browser, signed
-  in. Routes are in the hash: `#/` (agents), `#/c/<key>`, `#/missions`, `#/analytics`,
-  `#/preferences`. `aw web url` prints the link instead and refuses in an agent's shell, as do
+  in. Routes are in the hash: `#/agents` (durable agents), `#/sessions` (the session table;
+  bare `#/` too), `#/c/<key>`, `#/missions`, `#/analytics`, `#/preferences`. `aw web url` prints the link instead and refuses in an agent's shell, as do
   `aw web pair` and `aw web devices revoke`.
 
 ## Branches and worktrees

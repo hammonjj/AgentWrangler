@@ -137,6 +137,8 @@ export const ACTIONS = {
   'settings.write': 'mutate',
   /** Potentially user-owned preferences: columns, favourite and hidden projects. */
   'prefs.write': 'mutate',
+  /** Create, edit or delete a durable agent, or start it afresh (#179). Never a session or a permission. */
+  'agent.write': 'mutate',
   'task.propose': 'mutate',
   'task.delegate': 'mutate',
   'task.act': 'mutate',
@@ -171,7 +173,7 @@ export function actionKind(action: ActionName): ActionKind {
 
 /** What an action is about, by id. Never a path or any content: it is written to the audit log. */
 export interface ResourceRef {
-  readonly kind: 'session' | 'mission' | 'setting' | 'proposal' | 'device' | 'file';
+  readonly kind: 'session' | 'mission' | 'setting' | 'proposal' | 'device' | 'file' | 'agent';
   readonly id: string;
   /** A file's size in bytes (#139). A number says nothing about what is in it. */
   readonly size?: number;

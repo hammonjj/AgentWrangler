@@ -36,6 +36,9 @@ import { adoptActionFor } from '../openTarget';
 import { LiveSessionSource } from './runnerSource';
 import { CodexTranscriptSource } from './codexTranscriptSource';
 import type { ConversationSource } from './source';
+import { AgentDraftSource } from './agentDraftSource';
+import type { AgentConversations } from '../agentDirectory';
+import { agentIdOfDraftKey } from '../../shared/durableAgents';
 import { TranscriptSource } from './transcriptSource';
 
 /**
@@ -102,7 +105,11 @@ export interface ConversationProvider extends AgentProvider {
  * session we just started (Claude or Codex), whose id or store entry may not
  * exist yet.
  */
-type Binding = { kind: 'store'; key: string } | { kind: 'live'; handle: SessionHandle };
+type Binding =
+  | { kind: 'store'; key: string }
+  | { kind: 'live'; handle: SessionHandle }
+  /** A durable agent with nothing to continue (#179): an empty conversation until its first message. */
+  | { kind: 'agent'; agentId: string; notice?: string };
 
 export class ConversationHost {
   private subs: { dispose(): void }[] = [];
@@ -147,6 +154,8 @@ export class ConversationHost {
     /** Who this pane's messages act as, and the gate they pass (#123). */
     private access: BoundAccess,
     private tasks?: TaskPaneSource,
+    /** Durable agents' empty conversations (#179). */
+    private agents?: AgentConversations,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: ConversationToHost) => void this.onMessage(m)),
@@ -248,6 +257,14 @@ export class ConversationHost {
       if (this.leaveDetail() && this.ready) void this.sendInit();
       return;
     }
+    const agentId = agentIdOfDraftKey(key);
+    if (agentId !== undefined) {
+      const draft = this.agents?.draft(agentId);
+      if (!draft) return; // an agent deleted since the link was made
+      this.pendingKey = undefined;
+      this.bind({ kind: 'agent', agentId, ...(draft.notice ? { notice: draft.notice } : {}) }, draft.session);
+      return;
+    }
     const session = this.store.get(key);
     if (!session) {
       this.pendingKey = key;
@@ -325,7 +342,15 @@ export class ConversationHost {
 
   private swapSource(session: AgentSession): void {
     this.disposeSource();
-    const live = this.binding?.kind === 'live' ? this.binding.handle : this.sessions.get(session.sessionId);
+    const binding = this.binding;
+    if (binding?.kind === 'agent') {
+      const agents = this.agents;
+      this.source = new AgentDraftSource(session, binding.notice, (text, images) =>
+        agents ? agents.start(binding.agentId, text, images) : Promise.reject(new Error('Agents are not available.')),
+      );
+      return;
+    }
+    const live = binding?.kind === 'live' ? binding.handle : this.sessions.get(session.sessionId);
     const source: ConversationSource = live
       ? new LiveSessionSource(live)
       : session.provider === 'codex'
@@ -390,7 +415,8 @@ export class ConversationHost {
       return;
     }
     const binding = this.binding;
-    if (!binding) return;
+    // An agent's empty conversation has no session to follow; its first message rebinds the pane.
+    if (!binding || binding.kind === 'agent') return;
 
     let next: AgentSession | undefined;
     if (binding.kind === 'store') {
@@ -437,6 +463,10 @@ export class ConversationHost {
 
   private async caps(session: AgentSession): Promise<ConversationCapabilities> {
     const source = this.source;
+    if (source?.kind === 'draft') {
+      // `adoptOnSend`: the pickers stay off, since the agent's own settings decide the launch.
+      return { canSend: true, adoptOnSend: true, sendHint: 'Sending starts a new conversation with this agent.', canInterrupt: false, canAdopt: false, canResumeHere: false, canRelease: false, estimated: false };
+    }
     const live = source instanceof LiveSessionSource ? source.handle : undefined;
     const runner = live?.provider === 'claude' ? live : undefined;
     const codexRunner = live?.provider === 'codex' ? live : undefined;
@@ -529,7 +559,8 @@ export class ConversationHost {
         this.pendingSend = controller;
         try {
           const session = this.session;
-          const delegated = session && !m.images?.length && await this.suggestion.intercept(m.text, session, this.tasks?.conversationDelegation, controller.signal);
+          // Not for an agent's first message: there is no session yet to tie an offer to.
+          const delegated = session && source?.kind !== 'draft' && !m.images?.length && await this.suggestion.intercept(m.text, session, this.tasks?.conversationDelegation, controller.signal);
           if (!delegated && controller.signal.aborted) throw new Error('Send cancelled; your draft was kept.');
           if (!delegated) {
             if (source?.send) await source.send(m.text, m.images);
@@ -933,8 +964,12 @@ export function conversationRequest(m: ConversationToHost, key: string | undefin
       return { action: 'host.open' };
     case 'dictate':
       return { action: 'dictation.use' };
-    case 'send':
+    case 'send': {
+      // The first message to a durable agent starts its session (#179).
+      const agentId = agentIdOfDraftKey(m.sessionKey ?? key ?? '');
+      if (agentId !== undefined) return { action: 'session.start', resource: { kind: 'agent', id: agentId } };
       return { action: 'session.send', resource: sessionRef(m.sessionKey ?? key) };
+    }
     case 'cancelSend':
       return { action: 'session.send', resource: sessionRef(key) };
     case 'interrupt':

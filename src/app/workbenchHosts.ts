@@ -57,6 +57,7 @@ export function createWorkbenchHosts(
     app.taskPanes,
     app.missions,
     app.analytics,
+    app.agents,
   );
   const conversation = new ConversationHost(
     paneChannel(transport, 'conversation'),
@@ -74,6 +75,7 @@ export function createWorkbenchHosts(
     ui,
     access,
     app.taskPanes,
+    app.agentConversations,
   );
   const prefs = preferences ? new PreferencesHost(paneChannel(transport, 'preferences'), preferences, access) : undefined;
   return { dashboard, conversation, ...(prefs ? { preferences: prefs } : {}) };

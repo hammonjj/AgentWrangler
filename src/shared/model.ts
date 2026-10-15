@@ -172,6 +172,11 @@ export interface AgentSession {
    */
   nickname?: string;
   /**
+   * The durable agent this is the current conversation of (#179; host
+   * decorates). Absent for an unassigned session, which is most of them.
+   */
+  durableAgent?: { id: string; name: string };
+  /**
    * Its process is stopped (SIGSTOP) and spending nothing until resumed (host
    * decorates from PauseService). A paused session keeps whatever `status` it
    * had when it was frozen — that status is simply no longer moving, which is
