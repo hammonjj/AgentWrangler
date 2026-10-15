@@ -18,6 +18,7 @@ import type { LinkedWork, WaitInfo } from './orchestration/delegatedState';
 import type { MissionOp, MissionsSnapshot } from './orchestration/missionView';
 import type { AnalyticsDetail, AnalyticsRef, AnalyticsSelection, AnalyticsView } from './orchestration/analyticsView';
 import type { UsageState } from './usage';
+import type { DurableAgentInput, DurableAgentView } from './durableAgents';
 
 // ---- Dashboard ----
 
@@ -68,7 +69,11 @@ export type HostToDashboard =
        * orchestration is off, and then the table has no Missions tab at all.
        */
       missions?: MissionsSnapshot;
+      /** The Agents view (#179): every durable agent, most recently used first. */
+      agents?: DurableAgentView[];
     }
+  /** A `saveAgent` was carried out (`id`), or refused (`error`, shown in the form). */
+  | { type: 'agentSaved'; requestId: string; id?: string; error?: string }
   /** Bring the Missions view up, scrolled to this mission: one was just created, or its notice was clicked. */
   | { type: 'showMissions'; missionId?: string }
   /** A Missions view action was refused or failed; shown beside the mission, not as a modal. */
@@ -199,7 +204,15 @@ export type DashboardToHost =
   /** A metric, the split or a calibration row was clicked: show its detail in the conversation pane. */
   | { type: 'analyticsDetail'; selection: AnalyticsSelection; ref: AnalyticsRef }
   /** Accept or reject a routing proposal, or revoke an accepted rule (#52). The ids come from the view the pane was sent. */
-  | { type: 'analyticsProposal'; id: string; decision: 'accept' | 'reject' | 'revoke' };
+  | { type: 'analyticsProposal'; id: string; decision: 'accept' | 'reject' | 'revoke' }
+  /** An agent row (#179): show its continuing conversation. Starts nothing; the first message does. */
+  | { type: 'openAgent'; id: string }
+  /** The agent form: create (`id` absent) or edit. Answered with `agentSaved`. */
+  | { type: 'saveAgent'; id?: string; agent: DurableAgentInput; requestId: string }
+  /** Forget an agent. Its sessions stay, unassigned. The host confirms first. */
+  | { type: 'deleteAgent'; id: string }
+  /** Keep the agent's current conversation in history; its next message starts a new one. */
+  | { type: 'agentNewConversation'; id: string };
 
 // ---- Conversation pane ----
 

@@ -22,7 +22,8 @@ export interface ConversationInit {
 }
 
 export interface ConversationSource extends Disposable {
-  readonly kind: 'transcript' | 'runner';
+  /** `draft`: a durable agent with nothing to continue; its first message starts a session (#179). */
+  readonly kind: 'transcript' | 'runner' | 'draft';
 
   /** Everything to show right now. Called once, when the webview says it is ready. */
   init(): Promise<ConversationInit>;

@@ -31,6 +31,8 @@ import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, pendingKey
  */
 const PENDING_MAX_AGE_MS = 10 * 60_000;
 import { analyticsClickRef, analyticsDecision, analyticsFilterChange, analyticsHtml } from './analytics';
+import { agentsHtml, blankForm, formFor, formInput, newAgentsUiState, readForm } from './agents';
+import type { DurableAgentView } from '../../shared/durableAgents';
 import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestration/analyticsView';
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
@@ -72,8 +74,8 @@ import {
   type UsageWindow,
 } from '../../shared/usage';
 
-/** The table pane's views: status sections, project sections, missions (#43) and analytics (#49). */
-type TableView = 'status' | 'project' | 'missions' | 'analytics';
+/** The table pane's views: durable agents (#179), status sections, project sections, missions (#43) and analytics (#49). */
+type TableView = 'agents' | 'status' | 'project' | 'missions' | 'analytics';
 
 interface WebviewState {
   collapsed?: string[];
@@ -183,6 +185,11 @@ let analyticsSel: AnalyticsSelection = saved?.analytics ?? {};
 let analyticsData: AnalyticsView | undefined;
 /** "More metrics" was opened; a repaint must not fold it shut again. */
 let analyticsMoreOpen = false;
+/** The Agents view (#179): the host's list, and the form being filled in. */
+let agentViews: DurableAgentView[] | undefined;
+const agentsUi = newAgentsUiState();
+/** A snapshot arrived while the agent form had focus; draw once it lets go. */
+let agentRenderDeferred = false;
 
 function queryAnalytics(): void {
   post({ type: 'analyticsQuery', selection: analyticsSel });
@@ -202,11 +209,11 @@ function announce(user: boolean): void {
   announceTableView({ view: tableView, user, settled: snapshotSeen, hasMissions: missionsSnap !== undefined });
 }
 
-// The app shell's routes (#133): Agents, Missions and Analytics are this
-// pane's views. Agents means the session table, grouped however it last was.
+// The app shell's routes (#133): Agents, Sessions, Missions and Analytics are
+// this pane's views. Sessions means the session table, grouped however it last was.
 onTableViewRequest((want) => {
   const next: TableView = want === 'sessions' ? sessionGrouping : want;
-  if (want !== 'sessions' && !snapshotSeen) pendingView = want;
+  if ((want === 'missions' || want === 'analytics') && !snapshotSeen) pendingView = want;
   if (next === tableView) {
     announce(false);
     return;
@@ -377,6 +384,13 @@ function projectGroups(list: SessionDTO[]): string[] {
  * status underneath it (Busy, Blocked) is still on the row and would otherwise
  * read as something that is still happening.
  */
+/** The durable agent this is the conversation of (#179). Absent on an unassigned session. */
+function durableAgentChip(s: SessionDTO): string {
+  return s.durableAgent
+    ? `<span class="chip dagent" title="The current conversation of the agent ${esc(s.durableAgent.name)}. Open it from Agents or here: it is the same conversation.">${esc(s.durableAgent.name)}</span>`
+    : '';
+}
+
 function pausedChip(s: SessionDTO): string {
   if (s.interrupted) {
     return '<span class="chip interrupted" title="Agent Wrangler was running this when it stopped. The conversation is intact: right-click → Resume here to carry on.">interrupted</span>';
@@ -857,7 +871,7 @@ function rowHtml(s: SessionDTO, span: number): string {
   return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}${unc}" data-key="${esc(s.key)}" data-fk="row:${esc(s.key)}" tabindex="0" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title">${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${unknownChip(s)}${rateLimitChip(s)}${statusChip(s)}${delegatedChips(s)}</span></div>
+    <div class="title">${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${durableAgentChip(s)}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${unknownChip(s)}${rateLimitChip(s)}${statusChip(s)}${delegatedChips(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -1522,6 +1536,20 @@ function render(): void {
   // Orchestration was turned off (or never on): there is no Missions view to be on.
   if ((tableView === 'missions' || tableView === 'analytics') && !missionsSnap) tableView = sessionGrouping;
   announce(false);
+  if (tableView === 'agents') {
+    // Typing in the agent form: a snapshot must not replace the field under the caret.
+    const active = document.activeElement;
+    if ((active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement) && active.closest('.agents form')) {
+      agentRenderDeferred = true;
+      return;
+    }
+    agentRenderDeferred = false;
+    menuPosition = undefined;
+    rowMenu = undefined;
+    // Its own route (the shell's Agents link), so no session tabs above it.
+    paint(`${bannerHtml()}${agentsHtml(agentViews, agentsUi, projects, Date.now())}`);
+    return;
+  }
   if (tableView === 'analytics') {
     // A filter's dropdown is open: repainting would close it under the pointer.
     if (document.activeElement instanceof HTMLSelectElement && document.activeElement.closest('.analytics')) return;
@@ -1639,7 +1667,19 @@ vscodeApi.onMessage((body) => {
     if (!m.ok && dismissals.fail(m.key)) applyDismissals();
     return;
   }
+  if (m.type === 'agentSaved') {
+    if (agentsUi.pendingSave !== m.requestId) return;
+    agentsUi.pendingSave = undefined;
+    if (m.error) agentsUi.error = m.error;
+    else {
+      agentsUi.form = undefined;
+      agentsUi.error = undefined;
+    }
+    render();
+    return;
+  }
   if (m.type === 'snapshot') {
+    agentViews = m.agents;
     hostSessions = m.sessions;
     dismissals.settle(hostSessions);
     sessions = dismissals.apply(hostSessions);
@@ -1894,6 +1934,49 @@ app.addEventListener('click', (e) => {
     saveState();
     if (tableView === 'analytics') queryAnalytics();
     render();
+    return;
+  }
+
+  if (tableView === 'agents' && target.closest('.agents')) {
+    const button = target.closest<HTMLElement>('[data-ag]');
+    if (!button || (button instanceof HTMLButtonElement && button.disabled)) return;
+    const id = button.dataset.id;
+    const agent = id ? agentViews?.find((a) => a.id === id) : undefined;
+    switch (button.dataset.ag) {
+      case 'open':
+        if (!id) return;
+        agentsUi.selected = id;
+        requestComposerFocus();
+        post({ type: 'openAgent', id });
+        render();
+        return;
+      case 'new':
+        agentsUi.form = blankForm(currentProject());
+        agentsUi.error = undefined;
+        render();
+        app.querySelector<HTMLInputElement>('.agents [data-f="name"]')?.focus();
+        return;
+      case 'edit':
+        if (!agent) return;
+        agentsUi.form = formFor(agent);
+        agentsUi.error = undefined;
+        render();
+        app.querySelector<HTMLInputElement>('.agents [data-f="name"]')?.focus();
+        return;
+      case 'cancel':
+        agentsUi.form = undefined;
+        agentsUi.error = undefined;
+        agentsUi.pendingSave = undefined;
+        (document.activeElement as HTMLElement | null)?.blur();
+        render();
+        return;
+      case 'fresh':
+        if (id) post({ type: 'agentNewConversation', id });
+        return;
+      case 'delete':
+        if (id) post({ type: 'deleteAgent', id });
+        return;
+    }
     return;
   }
 
@@ -2188,6 +2271,41 @@ app.addEventListener('change', (event) => {
   const target = event.target as HTMLElement | null;
   const intent = target ? changeIntent(target) : undefined;
   if (intent) runMissionIntent(intent);
+});
+
+// The agent form (#179): Save is a submit, so Return in a field saves too.
+app.addEventListener('submit', (event) => {
+  const form = (event.target as HTMLElement | null)?.closest<HTMLFormElement>('.agents form');
+  if (!form || !agentsUi.form) return;
+  event.preventDefault();
+  if (agentsUi.pendingSave) return;
+  agentsUi.form = readForm(form, agentsUi.form);
+  const requestId = `ag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  agentsUi.pendingSave = requestId;
+  agentsUi.error = undefined;
+  post({ type: 'saveAgent', ...(agentsUi.form.id ? { id: agentsUi.form.id } : {}), agent: formInput(agentsUi.form), requestId });
+  (document.activeElement as HTMLElement | null)?.blur();
+  render();
+});
+
+// Keep what was typed in the agent form, so a repaint after focus leaves draws it back.
+app.addEventListener('input', (event) => {
+  const form = (event.target as HTMLElement | null)?.closest?.<HTMLFormElement>('.agents form');
+  if (form && agentsUi.form) agentsUi.form = readForm(form, agentsUi.form);
+});
+app.addEventListener('change', (event) => {
+  const form = (event.target as HTMLElement | null)?.closest?.<HTMLFormElement>('.agents form');
+  if (form && agentsUi.form) agentsUi.form = readForm(form, agentsUi.form);
+});
+
+// The snapshot held back while a field had focus is drawn once focus leaves the form.
+app.addEventListener('focusout', () => {
+  if (!agentRenderDeferred) return;
+  setTimeout(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && active.closest('.agents form')) return;
+    render();
+  }, 0);
 });
 
 // The snapshot held back while a field had focus is drawn once focus leaves the editor.

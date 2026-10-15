@@ -14,7 +14,10 @@
  */
 
 export type AppRoute =
+  /** Durable agents (#179): the configured identities you come back to. */
   | { kind: 'agents' }
+  /** Runtime sessions: the fleet console. Was called Agents before #179; `#/` still lands here. */
+  | { kind: 'sessions' }
   | { kind: 'missions' }
   | { kind: 'analytics' }
   /** No key: whatever the conversation pane is showing (an analytics detail has none). */
@@ -28,23 +31,27 @@ export type AppRoute =
 
 export type RouteKind = AppRoute['kind'];
 
-/** The routes the table pane draws: its session views, Missions and Analytics. */
-export type TableRoute = Extract<AppRoute, { kind: 'agents' | 'missions' | 'analytics' }>;
+/** The routes the table pane draws: Agents, its session views, Missions and Analytics. */
+export type TableRoute = Extract<AppRoute, { kind: 'agents' | 'sessions' | 'missions' | 'analytics' }>;
 
 /**
  * The table's views as the shell names them. `sessions` is Status or Project,
  * whichever the table last used: the URL does not care how rows are grouped.
  */
-export type TableRouteView = 'sessions' | 'missions' | 'analytics';
+export type TableRouteView = 'agents' | 'sessions' | 'missions' | 'analytics';
 
 /** The dashboard's own view names (`TableView` in `dashboard/main.ts`). */
-export type DashboardTableView = 'status' | 'project' | 'missions' | 'analytics';
+export type DashboardTableView = 'agents' | 'status' | 'project' | 'missions' | 'analytics';
 
 export function parseRoute(hash: string): AppRoute {
   const path = hash.replace(/^#/, '').replace(/^\/+/, '').replace(/\/+$/, '');
   const [head = '', ...rest] = path.split('/');
   switch (head) {
+    // The bare URL kept its meaning through the rename (#179): links and
+    // bookmarks made before it open the session table they always did.
     case '':
+    case 'sessions':
+      return { kind: 'sessions' };
     case 'agents':
       return { kind: 'agents' };
     case 'missions':
@@ -67,14 +74,12 @@ export function parseRoute(hash: string): AppRoute {
       }
     }
     default:
-      return { kind: 'agents' };
+      return { kind: 'sessions' };
   }
 }
 
 export function formatRoute(route: AppRoute): string {
   switch (route.kind) {
-    case 'agents':
-      return '#/';
     case 'conversation':
       return route.key ? `#/c/${encodeURIComponent(route.key)}` : '#/c';
     case 'pair':
@@ -93,6 +98,8 @@ export function routeTitle(route: AppRoute): string {
   switch (route.kind) {
     case 'agents':
       return 'Agents';
+    case 'sessions':
+      return 'Sessions';
     case 'missions':
       return 'Missions';
     case 'analytics':
@@ -109,20 +116,20 @@ export function routeTitle(route: AppRoute): string {
 }
 
 export function isTableRoute(route: AppRoute): route is TableRoute {
-  return route.kind === 'agents' || route.kind === 'missions' || route.kind === 'analytics';
+  return route.kind === 'agents' || route.kind === 'sessions' || route.kind === 'missions' || route.kind === 'analytics';
 }
 
 export function tableViewOf(route: TableRoute): TableRouteView {
-  return route.kind === 'agents' ? 'sessions' : route.kind;
+  return route.kind;
 }
 
 export function routeOfTableView(view: TableRouteView | DashboardTableView): TableRoute {
-  if (view === 'missions' || view === 'analytics') return { kind: view };
-  return { kind: 'agents' };
+  if (view === 'agents' || view === 'missions' || view === 'analytics') return { kind: view };
+  return { kind: 'sessions' };
 }
 
 export function shellTableView(view: DashboardTableView): TableRouteView {
-  return view === 'missions' || view === 'analytics' ? view : 'sessions';
+  return view === 'agents' || view === 'missions' || view === 'analytics' ? view : 'sessions';
 }
 
 // ---- layout ----
@@ -219,7 +226,7 @@ export interface RouterStep {
 }
 
 export function initialRouterState(): RouterState {
-  return { route: { kind: 'agents' } };
+  return { route: { kind: 'sessions' } };
 }
 
 /**

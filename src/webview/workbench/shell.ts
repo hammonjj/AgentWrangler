@@ -203,8 +203,11 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     nav.appendChild(a);
     return a;
   };
+  // Agents are the configured identities, Sessions the running conversations (#179).
   const links = {
     agents: link({ kind: 'agents' }, 'Agents'),
+    sessions: link({ kind: 'sessions' }, 'Sessions'),
+    missions: link({ kind: 'missions' }, 'Missions'),
     analytics: link({ kind: 'analytics' }, 'Analytics'),
     preferences: link({ kind: 'preferences' }, 'Preferences'),
     connect: link({ kind: 'connect' }, 'Connect'),
@@ -294,8 +297,10 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     }
 
     links.analytics.hidden = settled && !hasMissions;
-    // Conversation and Missions have no link of their own: the table's rows and Missions tab lead there.
-    const current = route.kind === 'pair' ? 'preferences' : route.kind === 'conversation' || route.kind === 'missions' ? 'agents' : route.kind;
+    links.missions.hidden = settled && !hasMissions;
+    // A conversation has no link of its own: it belongs to the view that opened it.
+    const current =
+      route.kind === 'pair' ? 'preferences' : route.kind === 'conversation' ? (state.tableView === 'agents' ? 'agents' : state.tableView === 'missions' ? 'missions' : 'sessions') : route.kind;
     for (const [kind, a] of Object.entries(links)) {
       if (kind === current) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');

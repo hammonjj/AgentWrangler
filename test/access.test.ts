@@ -137,6 +137,10 @@ const DASHBOARD: Samples<DashboardToHost> = {
   analyticsQuery: [{ type: 'analyticsQuery', selection: {} as never }],
   analyticsDetail: [{ type: 'analyticsDetail', selection: {} as never, ref: { kind: 'metric', id: 'x' } as never }],
   analyticsProposal: [{ type: 'analyticsProposal', id: 'p1', decision: 'accept' }],
+  openAgent: [{ type: 'openAgent', id: 'a1' }],
+  saveAgent: [{ type: 'saveAgent', agent: { name: 'PO', role: 'Owns the backlog', scope: { kind: 'global' }, provider: 'claude' }, requestId: 'r1' }],
+  deleteAgent: [{ type: 'deleteAgent', id: 'a1' }],
+  agentNewConversation: [{ type: 'agentNewConversation', id: 'a1' }],
 };
 
 const CONVERSATION: Samples<ConversationToHost> = {

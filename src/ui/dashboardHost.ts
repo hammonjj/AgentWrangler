@@ -19,6 +19,7 @@ import { occupantsOf, occupiesCheckout, sharedCheckouts, type CheckoutEntry } fr
 import type { QuestionView } from '../shared/conversation';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
+import type { AgentDirectory } from './agentDirectory';
 import type { PaneChannel } from './paneChannel';
 import { openTargetFor } from './openTarget';
 
@@ -166,6 +167,8 @@ export class DashboardHost {
     private tasks?: TaskBadgeSource,
     private missions?: MissionSource,
     private analytics?: AnalyticsSource,
+    /** Durable agents (#179). */
+    private agents?: AgentDirectory,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
@@ -210,6 +213,8 @@ export class DashboardHost {
       const show = this.missions.onDidRequestShow?.((missionId) => void this.webview.postMessage({ type: 'showMissions', missionId } satisfies HostToDashboard));
       if (show) this.subs.push(show);
     }
+    // An agent created, edited or linked to a new conversation changes its card and its session's row.
+    if (this.agents) this.subs.push(this.agents.onDidChange(() => this.pushSnapshot()));
     // Only a pane showing Analytics has asked; the others are not sent a view they would discard.
     if (this.analytics) this.subs.push(this.analytics.onDidChange(() => this.pushAnalyticsSoon()));
   }
@@ -310,8 +315,9 @@ export class DashboardHost {
     const sessions = decorated.map((s) => {
       const hit = shared.get(s.key);
       const task = badges?.get(s.key);
-      if (!hit && !task) return s;
-      return { ...s, sharedCheckout: hit ?? s.sharedCheckout, task };
+      const durableAgent = this.agents?.ownerOf(s.provider, s.sessionId);
+      if (!hit && !task && !durableAgent) return s;
+      return { ...s, sharedCheckout: hit ?? s.sharedCheckout, task, ...(durableAgent ? { durableAgent } : {}) };
     });
     const projects = this.projects.value.map((p) => {
       if (p.dir === GLOBAL_PROJECT_DIR) return p;
@@ -345,6 +351,7 @@ export class DashboardHost {
       },
       projects: projects.length > 0 ? projects : undefined,
       missions: this.missions?.snapshot(),
+      agents: this.agents?.views(),
     };
     void this.webview.postMessage(msg);
   }
@@ -523,6 +530,23 @@ export class DashboardHost {
         if (decision && typeof m.id === 'string') this.analytics?.decideProposal(m.id, decision);
         break;
       }
+      case 'openAgent':
+        if (typeof m.id === 'string') this.agents?.open(m.id);
+        break;
+      case 'saveAgent': {
+        if (typeof m.requestId !== 'string') break;
+        const result = this.agents
+          ? this.agents.save(typeof m.id === 'string' ? m.id : undefined, m.agent)
+          : { error: 'Agents are not available.' };
+        void this.webview.postMessage({ type: 'agentSaved', requestId: m.requestId, ...result } satisfies HostToDashboard);
+        break;
+      }
+      case 'deleteAgent':
+        if (typeof m.id === 'string') void this.agents?.remove(m.id);
+        break;
+      case 'agentNewConversation':
+        if (typeof m.id === 'string') this.agents?.startFresh(m.id);
+        break;
     }
   }
 
@@ -577,6 +601,8 @@ const ROW_ACTIONS: Record<DashboardAction, ActionName> = {
 };
 
 const setting = (id: string): ResourceRef => ({ kind: 'setting', id });
+/** An agent by its id: a UUID, never its name or instructions, since this is audited. */
+const agentRef = (id: unknown): ResourceRef | undefined => (typeof id === 'string' && id ? { kind: 'agent', id } : undefined);
 
 /**
  * What a table message asks to do, for `authorize`. Exhaustive: a message type
@@ -627,6 +653,14 @@ export function dashboardRequest(m: DashboardToHost): AccessRequest {
       return { action: 'sessions.pauseAll' };
     case 'analyticsProposal':
       return { action: 'routing.decide', resource: typeof m.id === 'string' ? { kind: 'proposal', id: m.id } : undefined };
+    // Opening an agent shows a conversation and starts nothing: the first
+    // message does, and that is a `session.start` of its own.
+    case 'openAgent':
+      return { action: 'session.open', resource: agentRef(m.id) };
+    case 'saveAgent':
+    case 'deleteAgent':
+    case 'agentNewConversation':
+      return { action: 'agent.write', resource: agentRef(m.id) };
     default: {
       // Compile-time: every message type is handled above. Run time: a type
       // the webview made up is authorised as a mutation (so a refusal is

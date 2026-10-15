@@ -2744,3 +2744,208 @@ body:has(#app.touch) .projmenu .pmfav.on {
 body:has(#app.touch) .projmenu .pmbrowse {
   min-height: 44px;
 }
+
+/* ---- Agents (#179): the durable agents' directory. Sized off the pane:
+   everything wraps, and the form stacks under #app.narrow. ---- */
+.chip.dagent {
+  border-color: var(--vscode-textLink-foreground, #569cd6);
+  color: var(--vscode-textLink-foreground, #569cd6);
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#app .agents {
+  padding: 0 0 16px;
+}
+#app .agents button {
+  font: inherit;
+  cursor: pointer;
+}
+#app .agents button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+#app .agents .ag-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+}
+#app .agents .ag-hint {
+  flex: 1 1 12rem;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#app .agents .ag-btn {
+  padding: 2px 9px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+#app .agents .ag-btn:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+#app .agents .ag-btn.primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+#app .agents .ag-btn.primary:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+#app .agents .ag-btn.danger {
+  color: var(--aw-stuck);
+}
+#app .agents .ag-empty {
+  padding: 20px 14px;
+  color: var(--vscode-descriptionForeground);
+}
+#app .agents .ag-empty .hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.9em;
+}
+#app .agents .ag-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+#app .agents .ag-item {
+  margin: 0 6px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-left: 3px solid var(--vscode-textLink-foreground, #569cd6);
+  border-radius: 3px;
+}
+#app .agents .ag-item.selected {
+  background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.15));
+}
+#app .agents .ag-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+}
+#app .agents .ag-open:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+#app .agents .ag-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+#app .agents .ag-role,
+#app .agents .ag-where {
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+#app .agents .ag-role {
+  color: var(--vscode-descriptionForeground);
+}
+#app .agents .ag-where.ag-none {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+#app .agents .ag-where.ag-missing {
+  color: var(--aw-waiting);
+}
+#app .agents .ag-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin-top: 2px;
+}
+#app .agents .ag-chip {
+  padding: 0 6px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, #555));
+  border-radius: 9px;
+  font-size: 0.78em;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+#app .agents .ag-st.st-busy { border-color: var(--aw-busy); color: var(--aw-busy); }
+#app .agents .ag-st.st-waiting,
+#app .agents .ag-st.st-blocked { border-color: var(--aw-waiting); color: var(--aw-waiting); }
+#app .agents .ag-st.st-stuck { border-color: var(--aw-stuck); color: var(--aw-stuck); }
+#app .agents .ag-st.st-done { border-color: var(--aw-done); color: var(--aw-done); }
+#app .agents .ag-age {
+  font-size: 0.78em;
+  color: var(--vscode-descriptionForeground);
+}
+#app .agents .ag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 8px 6px;
+}
+#app .agents .ag-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 6px 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 3px;
+}
+#app .agents .ag-formtitle {
+  margin: 0;
+  font-size: 1em;
+}
+#app .agents .ag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+#app .agents .ag-row .ag-field {
+  flex: 1 1 8rem;
+}
+#app .agents .ag-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 0.9em;
+}
+#app .agents .ag-field > span {
+  color: var(--vscode-descriptionForeground);
+}
+#app .agents .ag-field input,
+#app .agents .ag-field select,
+#app .agents .ag-field textarea {
+  min-width: 0;
+  max-width: 100%;
+  font: inherit;
+  padding: 3px 5px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, #555));
+  border-radius: 2px;
+}
+#app .agents .ag-field textarea {
+  resize: vertical;
+}
+#app .agents .ag-note {
+  margin: 0;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#app .agents .ag-error {
+  margin: 0;
+  color: var(--aw-stuck);
+}
+#app .agents .ag-formactions {
+  display: flex;
+  gap: 8px;
+}
+#app.narrow .agents .ag-row {
+  flex-direction: column;
+}
+#app.touch .agents .ag-btn {
+  min-height: 36px;
+}

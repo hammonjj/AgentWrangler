@@ -26,9 +26,11 @@ function run(inputs: RouterInput[], from: RouterState = initialRouterState()) {
 
 describe('routes in the URL', () => {
   it.each<[string, AppRoute]>([
-    ['', { kind: 'agents' }],
-    ['#', { kind: 'agents' }],
-    ['#/', { kind: 'agents' }],
+    ['', { kind: 'sessions' }],
+    ['#', { kind: 'sessions' }],
+    ['#/', { kind: 'sessions' }],
+    ['#/sessions', { kind: 'sessions' }],
+    // Reclaimed for durable agents (#179); the bare URL above still means Sessions.
     ['#/agents', { kind: 'agents' }],
     ['#/missions', { kind: 'missions' }],
     ['#/analytics/', { kind: 'analytics' }],
@@ -37,7 +39,7 @@ describe('routes in the URL', () => {
     ['#/connect', { kind: 'connect' }],
     ['#/c',{ kind: 'conversation' }],
     ['#/c/claude%3Aabc-123', { kind: 'conversation', key: 'claude:abc-123' }],
-    ['#/nowhere', { kind: 'agents' }],
+    ['#/nowhere', { kind: 'sessions' }],
     ['#/c/%E0%A4%A', { kind: 'conversation' }],
   ])('%s parses', (hash, route) => {
     expect(parseRoute(hash)).toEqual(route);
@@ -46,6 +48,7 @@ describe('routes in the URL', () => {
   it('round-trips every route, including keys with characters a path would split on', () => {
     const routes: AppRoute[] = [
       { kind: 'agents' },
+      { kind: 'sessions' },
       { kind: 'missions' },
       { kind: 'analytics' },
       { kind: 'preferences' },
@@ -80,10 +83,10 @@ describe('layout', () => {
 
   it('goes back from a lone conversation to the table view last used', () => {
     expect(backRoute({ kind: 'conversation', key: 'k' }, 'missions')).toEqual({ kind: 'missions' });
-    expect(backRoute({ kind: 'conversation' }, undefined)).toEqual({ kind: 'agents' });
+    expect(backRoute({ kind: 'conversation' }, undefined)).toEqual({ kind: 'sessions' });
     expect(backRoute({ kind: 'pair' }, 'sessions')).toEqual({ kind: 'preferences' });
     expect(backRoute({ kind: 'connect' }, 'missions')).toEqual({ kind: 'missions' });
-    expect(backRoute({ kind: 'agents' }, 'sessions')).toBeUndefined();
+    expect(backRoute({ kind: 'sessions' }, 'sessions')).toBeUndefined();
   });
 });
 
@@ -99,6 +102,20 @@ describe('the router', () => {
     expect(effects).toEqual([]);
   });
 
+  it('a deep link to Agents switches the table to the agent directory', () => {
+    const { effects } = run([{ type: 'start', route: { kind: 'agents' } }]);
+    expect(effects).toEqual([{ type: 'tableView', view: 'agents' }]);
+  });
+
+  it('the table landing on Agents by itself names it in the URL', () => {
+    const s = run([
+      { type: 'start', route: { kind: 'sessions' } },
+      { type: 'tableViewShown', view: 'agents', user: true, settled: true },
+    ]);
+    expect(s.effects.filter((e) => e.type === 'history')).toEqual([{ type: 'history', mode: 'push', route: { kind: 'agents' } }]);
+    expect(backRoute({ kind: 'conversation', key: 'agent:a1' }, 'agents')).toEqual({ kind: 'agents' });
+  });
+
   it('a deep link to Missions switches the table', () => {
     const { effects } = run([{ type: 'start', route: { kind: 'missions' } }]);
     expect(effects).toEqual([{ type: 'tableView', view: 'missions' }]);
@@ -106,7 +123,7 @@ describe('the router', () => {
 
   it('opening a row (the host navigates) pushes the conversation route and focuses its heading', () => {
     const { state, effects } = run([
-      { type: 'start', route: { kind: 'agents' } },
+      { type: 'start', route: { kind: 'sessions' } },
       { type: 'tableViewShown', view: 'sessions', user: false, settled: true },
       { type: 'navigate', target: 'conversation', key: 'K' },
     ]);
@@ -121,7 +138,7 @@ describe('the router', () => {
 
   it('back to an earlier conversation asks the pane for it, and its arrival settles the request', () => {
     const start = run([
-      { type: 'start', route: { kind: 'agents' } },
+      { type: 'start', route: { kind: 'sessions' } },
       { type: 'navigate', target: 'conversation', key: 'A' },
       { type: 'conversationShown', key: 'A' },
       { type: 'navigate', target: 'conversation', key: 'B' },
@@ -146,7 +163,7 @@ describe('the router', () => {
 
   it('a conversation that changes key in place takes the URL with it, without a history entry', () => {
     const s = run([
-      { type: 'start', route: { kind: 'agents' } },
+      { type: 'start', route: { kind: 'sessions' } },
       { type: 'navigate', target: 'conversation', key: 'pending-1' },
       { type: 'conversationShown', key: 'pending-1' },
     ]).state;
@@ -155,7 +172,7 @@ describe('the router', () => {
   });
 
   it('a conversation with no key in the URL (an analytics detail) is named once one shows', () => {
-    const s = run([{ type: 'start', route: { kind: 'agents' } }, { type: 'navigate', target: 'conversation' }]).state;
+    const s = run([{ type: 'start', route: { kind: 'sessions' } }, { type: 'navigate', target: 'conversation' }]).state;
     expect(s.route).toEqual({ kind: 'conversation' });
     const shown = run([{ type: 'conversationShown', key: 'K' }], s);
     expect(shown.effects).toEqual([{ type: 'history', mode: 'replace', route: { kind: 'conversation', key: 'K' } }]);
@@ -169,7 +186,7 @@ describe('the router', () => {
 
   it('clicking a table tab is a navigation: pushed, and focus stays on the tab', () => {
     const s = run([
-      { type: 'start', route: { kind: 'agents' } },
+      { type: 'start', route: { kind: 'sessions' } },
       { type: 'tableViewShown', view: 'sessions', user: false, settled: true },
       { type: 'tableViewShown', view: 'analytics', user: true, settled: true },
     ]);
@@ -183,12 +200,12 @@ describe('the router', () => {
     ]);
     expect(early.state.route).toEqual({ kind: 'missions' }); // not yet: Missions may still come
     const late = run([{ type: 'tableViewShown', view: 'sessions', user: false, settled: true }], early.state);
-    expect(late.effects).toEqual([{ type: 'history', mode: 'replace', route: { kind: 'agents' } }]);
+    expect(late.effects).toEqual([{ type: 'history', mode: 'replace', route: { kind: 'sessions' } }]);
   });
 
   it('a link to a route the table is already on asks the table for nothing', () => {
     const s = run([
-      { type: 'start', route: { kind: 'agents' } },
+      { type: 'start', route: { kind: 'sessions' } },
       { type: 'tableViewShown', view: 'missions', user: true, settled: true },
     ]).state;
     const again = run([{ type: 'hash', route: { kind: 'conversation', key: 'K' } }, { type: 'hash', route: { kind: 'missions' } }], s);
@@ -203,12 +220,12 @@ describe('the router', () => {
   });
 
   it('going nowhere new does nothing', () => {
-    expect(run([{ type: 'go', route: { kind: 'agents' } }]).effects.filter((e) => e.type !== 'tableView')).toEqual([]);
+    expect(run([{ type: 'go', route: { kind: 'sessions' } }]).effects.filter((e) => e.type !== 'tableView')).toEqual([]);
   });
 
   it('the host bringing the app forward leaves a page for the table, and otherwise stays put', () => {
     const fromPage = run([{ type: 'start', route: { kind: 'preferences' } }, { type: 'navigate', target: 'workbench' }]);
-    expect(fromPage.state.route).toEqual({ kind: 'agents' });
+    expect(fromPage.state.route).toEqual({ kind: 'sessions' });
     const fromTable = run([{ type: 'start', route: { kind: 'missions' } }, { type: 'navigate', target: 'workbench' }]);
     expect(fromTable.state.route).toEqual({ kind: 'missions' });
   });

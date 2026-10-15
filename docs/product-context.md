@@ -45,7 +45,8 @@ Its competitor is a wall of terminal tabs.
 
 - **One page, two panes, a draggable divider.** Left: the session table. Right: the
   conversation. They are one web page, deliberately, so neither can be closed or rearranged
-  away from the other. Routes in the page's bar: Agents, Missions, Analytics, Preferences. A
+  away from the other. Routes in the page's bar: Agents (durable, configured identities, #179), Sessions (the
+  running conversations), Missions, Analytics, Preferences. A
   second browser tab is the way to watch one agent while browsing others.
 - **Phones are first-class.** Below a breakpoint the page shows one pane at a time with a Back
   button, 44px touch targets and long-press for row menus. Any feature proposal must work on a

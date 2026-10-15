@@ -24,6 +24,6 @@ registerPage('preferences', (target) => {
     onMessage: (listener) => pane.onMessage((body) => listener(body as HostToPreferences)),
     onReconnect: (listener) => pane.onReconnect(listener),
     // No window to close: Escape goes back to the table.
-    close: () => openRoute({ kind: 'agents' }),
+    close: () => openRoute({ kind: 'sessions' }),
   });
 });
