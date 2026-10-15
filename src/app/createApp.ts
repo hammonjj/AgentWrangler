@@ -170,6 +170,9 @@ import { adoptActionFor } from '../ui/openTarget';
 import { resumeInTerminal } from '../ui/terminal';
 import { createDurableAgents } from './durableAgents';
 import { DurableAgentStore } from '../core/durableAgentStore';
+import { createJobDirectory, createScheduledJobs } from './scheduledJobs';
+import { ScheduledJobStore } from '../core/scheduledJobStore';
+import type { JobDirectory } from '../ui/jobDirectory';
 import type { AgentConversations, AgentDirectory } from '../ui/agentDirectory';
 import { agentIdOfDraftKey } from '../shared/durableAgents';
 
@@ -249,6 +252,8 @@ export interface AgentWranglerApp {
   /** Durable agents (#179): the Agents view, and an agent's empty conversation in the pane. */
   agents: AgentDirectory;
   agentConversations: AgentConversations;
+  /** Scheduled jobs (#164): the daemon's scheduler and the Jobs view. */
+  jobs: JobDirectory;
   dictation: DictationService;
   files: FileSuggestService;
   /**
@@ -821,6 +826,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }
     return busy;
   };
+  /** Every live agent frozen, as Pause all and auto-pause leave it. Nothing scheduled starts then. */
+  const fleetPaused = (): boolean => {
+    if (pause.count === 0) return false;
+    const live = store.sessions.filter((s) => s.status !== 'ended' && s.pid !== undefined);
+    return live.length > 0 && live.every((s) => pause.isPaused(s.pid));
+  };
   // Behind `orchestration.enabled` (off by default): tasks (#33) and nothing else yet.
   const orchestration = createOrchestration({
     settings: host.settings,
@@ -864,11 +875,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // "Pause now" uses the same PauseService. Usage, pause and endpoint changes step it.
     scheduling: {
       fleet: {
-        paused: () => {
-          if (pause.count === 0) return false;
-          const live = store.sessions.filter((s) => s.status !== 'ended' && s.pid !== undefined);
-          return live.length > 0 && live.every((s) => pause.isPaused(s.pid));
-        },
+        paused: () => fleetPaused(),
         pauseSession: (id) => {
           const s = store.sessions.find((x) => x.sessionId === id);
           const outcome = s ? pause.pause(s.pid) : 'gone';
@@ -1945,6 +1952,29 @@ export function createApp(host: HostServices): AgentWranglerApp {
     log,
   });
   host.subscribe({ dispose: () => durableAgents.dispose() });
+
+  // Scheduled jobs (#164, #165): the daemon starts them at their time, as itself
+  // on the owner's behalf, through the same launch path as a new conversation.
+  const jobStore = new ScheduledJobStore(host.globalState);
+  const scheduledJobs = createScheduledJobs({
+    jobs: jobStore,
+    sessions,
+    launchDefaults,
+    admission: (provider) => {
+      // The fullest window covers a provider at its limit too (100%), so no separate backoff.
+      const percent = maxUsagePercent((provider === 'codex' ? codexUsage : usage).usage.last);
+      return {
+        fleetPaused: fleetPaused(),
+        ...(percent !== undefined ? { windowPercent: percent } : {}),
+        autoPausePercent: getConfig().autoPausePercent,
+      };
+    },
+    mayStart: (jobId) => access.admit(daemonContext, 'session.start', { kind: 'job', id: jobId }),
+    notify: (notice) => host.notify?.(notice),
+    log: (line) => log(line),
+  });
+  host.subscribe({ dispose: () => scheduledJobs.dispose() });
+  const jobDirectory = createJobDirectory(jobStore, scheduledJobs);
 
   /**
    * "Run as task" (#33): the launcher's Tasks button. A quick pick, not a
@@ -3303,6 +3333,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       log('woke from sleep: rechecking session hosts');
       runners.wakeAll();
       remoteHere?.wake();
+      scheduledJobs.onWake();
     },
     restartCodexServer,
     runnerOwnership,
@@ -3334,6 +3365,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     taskPanes,
     missions: missionSource,
     agents: durableAgents.directory,
+    jobs: jobDirectory,
     agentConversations: durableAgents.conversations,
     dictation,
     files,

@@ -141,6 +141,10 @@ export const ACTIONS = {
   'agent.write': 'mutate',
   /** A durable agent proposes a memory update (`aw remember`, #180). Stores nothing until the user approves it with `agent.write`. */
   'agent.propose': 'mutate',
+  /** Create, edit, enable, disable or delete a scheduled job (#165). Never a session or a permission. */
+  'job.write': 'mutate',
+  /** Run a scheduled job now (#165). Starts a session the way `session.start` does. */
+  'job.run': 'mutate',
   'task.propose': 'mutate',
   'task.delegate': 'mutate',
   'task.act': 'mutate',
@@ -175,7 +179,7 @@ export function actionKind(action: ActionName): ActionKind {
 
 /** What an action is about, by id. Never a path or any content: it is written to the audit log. */
 export interface ResourceRef {
-  readonly kind: 'session' | 'mission' | 'setting' | 'proposal' | 'device' | 'file' | 'agent';
+  readonly kind: 'session' | 'mission' | 'setting' | 'proposal' | 'device' | 'file' | 'agent' | 'job';
   readonly id: string;
   /** A file's size in bytes (#139). A number says nothing about what is in it. */
   readonly size?: number;
