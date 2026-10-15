@@ -16,8 +16,11 @@ import {
   type UploadResult,
 } from '../../shared/files';
 
+import { isRelayHost, notOverRelay } from './relayHost';
+
 /** Send `file` to the host for the conversation `sessionKey`. Throws an `Error` whose message can be shown. */
 export async function uploadFile(file: File, sessionKey: string): Promise<UploadResult> {
+  if (isRelayHost()) throw new Error(notOverRelay(`Sending ${file.name}`));
   if (file.size > MAX_UPLOAD_BYTES) throw new Error(`${file.name} is over the ${Math.floor(MAX_UPLOAD_BYTES / 1024 / 1024)} MB upload limit.`);
   let res: Response;
   try {
