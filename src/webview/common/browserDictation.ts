@@ -12,6 +12,7 @@
  * recorder type to ask for, and whether the page may record at all, are the
  * pure functions in `shared/webCapabilities.ts`.
  */
+import { isRelayHost, notOverRelay } from './relayHost';
 import {
   DICTATION_DURATION_HEADER,
   DICTATION_HEADER,
@@ -56,6 +57,7 @@ export function createBrowserDictation(opts: { onLimit(): void }): BrowserDictat
 
   return {
     async start() {
+      if (isRelayHost()) throw new Error(notOverRelay('Dictation'));
       const insecure = secureContextProblem({
         isSecureContext: window.isSecureContext,
         protocol: location.protocol,

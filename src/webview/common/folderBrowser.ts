@@ -19,6 +19,7 @@
  * Classes only (`aw-fb*`, in `theme/vscodeTokens.css`): the CSP has no inline styles.
  */
 import { DIRS_PATH, type DirListing } from '../../shared/files';
+import { isRelayHost, notOverRelay } from './relayHost';
 
 export interface FolderBrowserOptions {
   /** The confirm button's label. Default "Choose this folder". */
@@ -30,6 +31,7 @@ export interface FolderBrowserOptions {
 }
 
 export async function fetchDirs(path: string | undefined, hidden: boolean): Promise<DirListing> {
+  if (isRelayHost()) throw new Error(notOverRelay('Browsing the Mac’s folders'));
   const q = new URLSearchParams();
   if (path) q.set('path', path);
   if (hidden) q.set('hidden', '1');

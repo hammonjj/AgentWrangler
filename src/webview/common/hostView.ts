@@ -20,6 +20,7 @@
  */
 import { SIDE_BY_SIDE_MIN_PX } from '../../shared/diff';
 import { fileViewUrl, type FileView, type HostToShell, type ShellToHost } from '../../shared/shellProtocol';
+import { isRelayHost, notOverRelay } from './relayHost';
 import { renderSideBySide } from './sideBySide';
 
 export type HostViewMessage = Extract<HostToShell, { type: 'showFile' | 'showCommand' }>;
@@ -188,6 +189,10 @@ function drawFile(modal: Modal, msg: Extract<HostViewMessage, { type: 'showFile'
 }
 
 async function load(into: HTMLElement, path: string): Promise<void> {
+  if (isRelayHost()) {
+    into.textContent = notOverRelay('Viewing files');
+    return;
+  }
   into.textContent = 'Loading…';
   let view: FileView;
   try {
