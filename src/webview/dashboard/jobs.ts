@@ -14,6 +14,8 @@ import { AGENT_EFFORTS } from '../../shared/durableAgents';
 import { JOB_TEMPLATES, jobTemplate, type JobTemplateId } from '../../shared/jobTemplates';
 import { capitalize, formatAge, GLOBAL_PROJECT_DIR, type ProjectDTO } from '../../shared/model';
 import type { DashboardToHost, HostToDashboard } from '../../shared/messages';
+import type { ModelChoice } from '../../shared/conversation';
+import { modelOptionsHtml } from './modelSelect';
 import { isDue, MAX_REVIEWS_PER_SWEEP, type ReviewNeed, type SweepItem } from '../../shared/prSweep';
 
 function esc(s: string): string {
@@ -207,7 +209,7 @@ function historyHtml(j: JobView, nowMs: number): string {
   }</div>`;
 }
 
-function formHtml(f: JobFormDraft, ui: JobsUiState, projects: readonly ProjectDTO[]): string {
+function formHtml(f: JobFormDraft, ui: JobsUiState, projects: readonly ProjectDTO[], models: readonly ModelChoice[]): string {
   const opt = (value: string, label: string, selected: boolean) => `<option value="${esc(value)}"${selected ? ' selected' : ''}>${esc(label)}</option>`;
   const folders = projects.filter((p) => p.dir !== GLOBAL_PROJECT_DIR);
   if (f.folder && f.folder !== GLOBAL_PROJECT_DIR && !folders.some((p) => p.dir === f.folder)) folders.unshift({ dir: f.folder, name: f.folder.split('/').filter(Boolean).pop() ?? f.folder });
@@ -235,7 +237,7 @@ ${f.repeat ? `<label class="ag-field"><span>Until</span><input type="time" data-
 <label class="ag-field"><span>Folder</span><select data-f="folder">${folderOpts}</select></label>
 <span class="ag-row">
 <label class="ag-field"><span>Harness</span><select data-f="provider">${opt('claude', 'Claude', claude)}${opt('codex', 'Codex', !claude)}</select></label>
-<label class="ag-field"><span>Model</span><input data-f="model" maxlength="100" value="${esc(f.model)}" placeholder="Default"></label>
+<label class="ag-field"><span>Model</span><select data-f="model">${modelOptionsHtml(models, f.provider, f.model)}</select></label>
 <label class="ag-field"><span>Effort</span><select data-f="effort">${efforts}</select></label>
 </span>
 ${claude ? `<label class="ag-field"><span>Permission mode</span><select data-f="permissionMode">${modes}</select></label>` : ''}
@@ -271,14 +273,14 @@ function repeatOptions(selected: string): string {
 
 const MODE_TEXT: Record<string, string> = { default: 'Ask for everything', acceptEdits: 'Accept edits', plan: 'Plan only', dontAsk: 'Deny what is not allowed' };
 
-export function jobsHtml(jobs: readonly JobView[] | undefined, ui: JobsUiState, projects: readonly ProjectDTO[], nowMs: number): string {
+export function jobsHtml(jobs: readonly JobView[] | undefined, ui: JobsUiState, projects: readonly ProjectDTO[], nowMs: number, models: readonly ModelChoice[] = []): string {
   const all = jobs ?? [];
   const adding = ui.form !== undefined && !ui.form.id;
   const templates = JOB_TEMPLATES.map(
     (t) => `<button type="button" class="ag-btn${t.id === 'custom' ? ' primary' : ''}" data-jb="new" data-template="${t.id}" title="${esc(t.hint)}"${adding ? ' disabled' : ''}>+ ${esc(t.id === 'custom' ? 'New job' : t.label)}</button>`,
   ).join('');
   const bar = `<div class="ag-bar"><span class="ag-hint">Work that starts at a set time. New jobs are off until you turn them on.</span>${templates}</div>`;
-  const form = ui.form ? formHtml(ui.form, ui, projects) : '';
+  const form = ui.form ? formHtml(ui.form, ui, projects, models) : '';
   const body =
     all.length === 0
       ? ui.form
@@ -314,7 +316,7 @@ export function readJobForm(form: HTMLElement, draft: JobFormDraft): JobFormDraf
 }
 
 export interface JobsController {
-  html(jobs: readonly JobView[] | undefined, projects: readonly ProjectDTO[]): string;
+  html(jobs: readonly JobView[] | undefined, projects: readonly ProjectDTO[], models: readonly ModelChoice[]): string;
   /** A click inside the view. True when it was the view's. */
   click(target: HTMLElement, jobs: readonly JobView[] | undefined, currentFolder: string): boolean;
   submit(event: Event): boolean;
@@ -333,7 +335,7 @@ export function createJobsController(app: HTMLElement, post: (m: DashboardToHost
   const requestId = () => `jb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const focusName = () => app.querySelector<HTMLInputElement>('.jobs [data-f="name"]')?.focus();
   return {
-    html: (jobs, projects) => jobsHtml(jobs, ui, projects, Date.now()),
+    html: (jobs, projects, models) => jobsHtml(jobs, ui, projects, Date.now(), models),
     click(target, jobs, currentFolder) {
       if (!target.closest('.jobs')) return false;
       const button = target.closest<HTMLElement>('[data-jb]');
@@ -421,6 +423,8 @@ export function createJobsController(app: HTMLElement, post: (m: DashboardToHost
       if (!form || !ui.form) return;
       const before = ui.form;
       ui.form = readJobForm(form, ui.form);
+      // Another harness has other models (#183).
+      if (ui.form.provider !== before.provider) ui.form = { ...ui.form, model: '' };
       // Switching harness changes which fields the form has; the mode changes what its note says.
       if (ui.form.provider !== before.provider || ui.form.permissionMode !== before.permissionMode || ui.form.repeat !== before.repeat) render();
     },
