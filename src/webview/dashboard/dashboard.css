@@ -2758,73 +2758,73 @@ body:has(#app.touch) .projmenu .pmbrowse {
   opacity: 0.7;
   border-style: dashed;
 }
-#app .agents {
+#app :is(.agents, .jobs) {
   padding: 0 0 16px;
 }
-#app .agents button {
+#app :is(.agents, .jobs) button {
   font: inherit;
   cursor: pointer;
 }
-#app .agents button:disabled {
+#app :is(.agents, .jobs) button:disabled {
   cursor: default;
   opacity: 0.5;
 }
-#app .agents .ag-bar {
+#app :is(.agents, .jobs) .ag-bar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   padding: 8px 10px;
 }
-#app .agents .ag-hint {
+#app :is(.agents, .jobs) .ag-hint {
   flex: 1 1 12rem;
   font-size: 0.85em;
   color: var(--vscode-descriptionForeground);
 }
-#app .agents .ag-btn {
+#app :is(.agents, .jobs) .ag-btn {
   padding: 2px 9px;
   border: 1px solid var(--vscode-button-border, transparent);
   border-radius: 2px;
   color: var(--vscode-button-secondaryForeground);
   background: var(--vscode-button-secondaryBackground);
 }
-#app .agents .ag-btn:hover:not(:disabled) {
+#app :is(.agents, .jobs) .ag-btn:hover:not(:disabled) {
   background: var(--vscode-button-secondaryHoverBackground);
 }
-#app .agents .ag-btn.primary {
+#app :is(.agents, .jobs) .ag-btn.primary {
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
 }
-#app .agents .ag-btn.primary:hover:not(:disabled) {
+#app :is(.agents, .jobs) .ag-btn.primary:hover:not(:disabled) {
   background: var(--vscode-button-hoverBackground);
 }
-#app .agents .ag-btn.danger {
+#app :is(.agents, .jobs) .ag-btn.danger {
   color: var(--aw-stuck);
 }
-#app .agents .ag-empty {
+#app :is(.agents, .jobs) .ag-empty {
   padding: 20px 14px;
   color: var(--vscode-descriptionForeground);
 }
-#app .agents .ag-empty .hint {
+#app :is(.agents, .jobs) .ag-empty .hint {
   display: block;
   margin-top: 6px;
   font-size: 0.9em;
 }
-#app .agents .ag-list {
+#app :is(.agents, .jobs) .ag-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
-#app .agents .ag-item {
+#app :is(.agents, .jobs) .ag-item {
   margin: 0 6px 8px;
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
   border-left: 3px solid var(--vscode-textLink-foreground, #569cd6);
   border-radius: 3px;
 }
-#app .agents .ag-item.selected {
+#app :is(.agents, .jobs) .ag-item.selected {
   background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.15));
 }
-#app .agents .ag-open {
+#app :is(.agents, .jobs) .ag-open {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -2836,36 +2836,36 @@ body:has(#app.touch) .projmenu .pmbrowse {
   color: inherit;
   background: transparent;
 }
-#app .agents .ag-open:hover {
+#app :is(.agents, .jobs) .ag-open:hover {
   background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
 }
-#app .agents .ag-name {
+#app :is(.agents, .jobs) .ag-name {
   font-weight: 600;
   overflow-wrap: anywhere;
 }
-#app .agents .ag-role,
-#app .agents .ag-where {
+#app :is(.agents, .jobs) .ag-role,
+#app :is(.agents, .jobs) .ag-where {
   font-size: 0.9em;
   overflow-wrap: anywhere;
 }
-#app .agents .ag-role {
+#app :is(.agents, .jobs) .ag-role {
   color: var(--vscode-descriptionForeground);
 }
-#app .agents .ag-where.ag-none {
+#app :is(.agents, .jobs) .ag-where.ag-none {
   color: var(--vscode-descriptionForeground);
   font-style: italic;
 }
-#app .agents .ag-where.ag-missing {
+#app :is(.agents, .jobs) .ag-where.ag-missing {
   color: var(--aw-waiting);
 }
-#app .agents .ag-meta {
+#app :is(.agents, .jobs) .ag-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 6px;
   margin-top: 2px;
 }
-#app .agents .ag-chip {
+#app :is(.agents, .jobs) .ag-chip {
   padding: 0 6px;
   border: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, #555));
   border-radius: 9px;
@@ -2873,22 +2873,22 @@ body:has(#app.touch) .projmenu .pmbrowse {
   white-space: nowrap;
   color: var(--vscode-descriptionForeground);
 }
-#app .agents .ag-st.st-busy { border-color: var(--aw-busy); color: var(--aw-busy); }
-#app .agents .ag-st.st-waiting,
-#app .agents .ag-st.st-blocked { border-color: var(--aw-waiting); color: var(--aw-waiting); }
-#app .agents .ag-st.st-stuck { border-color: var(--aw-stuck); color: var(--aw-stuck); }
-#app .agents .ag-st.st-done { border-color: var(--aw-done); color: var(--aw-done); }
-#app .agents .ag-age {
+#app :is(.agents, .jobs) .ag-st.st-busy { border-color: var(--aw-busy); color: var(--aw-busy); }
+#app :is(.agents, .jobs) .ag-st.st-waiting,
+#app :is(.agents, .jobs) .ag-st.st-blocked { border-color: var(--aw-waiting); color: var(--aw-waiting); }
+#app :is(.agents, .jobs) .ag-st.st-stuck { border-color: var(--aw-stuck); color: var(--aw-stuck); }
+#app :is(.agents, .jobs) .ag-st.st-done { border-color: var(--aw-done); color: var(--aw-done); }
+#app :is(.agents, .jobs) .ag-age {
   font-size: 0.78em;
   color: var(--vscode-descriptionForeground);
 }
-#app .agents .ag-actions {
+#app :is(.agents, .jobs) .ag-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   padding: 0 8px 6px;
 }
-#app .agents .ag-form {
+#app :is(.agents, .jobs) .ag-form {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2897,31 +2897,31 @@ body:has(#app.touch) .projmenu .pmbrowse {
   border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
   border-radius: 3px;
 }
-#app .agents .ag-formtitle {
+#app :is(.agents, .jobs) .ag-formtitle {
   margin: 0;
   font-size: 1em;
 }
-#app .agents .ag-row {
+#app :is(.agents, .jobs) .ag-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
-#app .agents .ag-row .ag-field {
+#app :is(.agents, .jobs) .ag-row .ag-field {
   flex: 1 1 8rem;
 }
-#app .agents .ag-field {
+#app :is(.agents, .jobs) .ag-field {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
   font-size: 0.9em;
 }
-#app .agents .ag-field > span {
+#app :is(.agents, .jobs) .ag-field > span {
   color: var(--vscode-descriptionForeground);
 }
-#app .agents .ag-field input,
-#app .agents .ag-field select,
-#app .agents .ag-field textarea {
+#app :is(.agents, .jobs) .ag-field input,
+#app :is(.agents, .jobs) .ag-field select,
+#app :is(.agents, .jobs) .ag-field textarea {
   min-width: 0;
   max-width: 100%;
   font: inherit;
@@ -2931,54 +2931,54 @@ body:has(#app.touch) .projmenu .pmbrowse {
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, #555));
   border-radius: 2px;
 }
-#app .agents .ag-field textarea {
+#app :is(.agents, .jobs) .ag-field textarea {
   resize: vertical;
 }
-#app .agents .ag-note {
+#app :is(.agents, .jobs) .ag-note {
   margin: 0;
   font-size: 0.85em;
   color: var(--vscode-descriptionForeground);
 }
-#app .agents .ag-error {
+#app :is(.agents, .jobs) .ag-error {
   margin: 0;
   color: var(--aw-stuck);
 }
-#app .agents .ag-formactions {
+#app :is(.agents, .jobs) .ag-formactions {
   display: flex;
   gap: 8px;
 }
-#app.narrow .agents .ag-row {
+#app.narrow :is(.agents, .jobs) .ag-row {
   flex-direction: column;
 }
-#app.touch .agents .ag-btn {
+#app.touch :is(.agents, .jobs) .ag-btn {
   min-height: 36px;
 }
-#app .agents .ag-item.archived {
+#app :is(.agents, .jobs) .ag-item.archived {
   border-left-color: var(--vscode-descriptionForeground);
   opacity: 0.8;
 }
-#app .agents .ag-item.asks {
+#app :is(.agents, .jobs) .ag-item.asks {
   border-left-color: var(--aw-waiting);
 }
-#app .agents .ag-pinned {
+#app :is(.agents, .jobs) .ag-pinned {
   border-color: var(--vscode-textLink-foreground, #569cd6);
   color: var(--vscode-textLink-foreground, #569cd6);
 }
-#app .agents .ag-tab.on {
+#app :is(.agents, .jobs) .ag-tab.on {
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
 }
 /* An agent's memory or history, under its card (#180, #181). */
-#app .agents .ag-panel {
+#app :is(.agents, .jobs) .ag-panel {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 6px 8px 8px;
   border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
 }
-#app .agents .ag-props,
-#app .agents .ag-mem,
-#app .agents .ag-histlist {
+#app :is(.agents, .jobs) .ag-props,
+#app :is(.agents, .jobs) .ag-mem,
+#app :is(.agents, .jobs) .ag-histlist {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -2986,47 +2986,92 @@ body:has(#app.touch) .projmenu .pmbrowse {
   flex-direction: column;
   gap: 4px;
 }
-#app .agents .ag-prop,
-#app .agents .ag-memitem,
-#app .agents .ag-hist {
+#app :is(.agents, .jobs) .ag-prop,
+#app :is(.agents, .jobs) .ag-memitem,
+#app :is(.agents, .jobs) .ag-hist {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
   font-size: 0.9em;
 }
-#app .agents .ag-prop {
+#app :is(.agents, .jobs) .ag-prop {
   padding: 4px 6px;
   border: 1px solid var(--aw-waiting);
   border-radius: 3px;
 }
-#app .agents .ag-proptext,
-#app .agents .ag-memtext,
-#app .agents .ag-histtext {
+#app :is(.agents, .jobs) .ag-proptext,
+#app :is(.agents, .jobs) .ag-memtext,
+#app :is(.agents, .jobs) .ag-histtext {
   flex: 1 1 12rem;
   min-width: 0;
   overflow-wrap: anywhere;
 }
-#app .agents .ag-memacts {
+#app :is(.agents, .jobs) .ag-memacts {
   display: flex;
   gap: 4px;
 }
-#app .agents .ag-memform {
+#app :is(.agents, .jobs) .ag-memform {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   flex: 1 1 100%;
 }
-#app .agents .ag-memform input {
+#app :is(.agents, .jobs) .ag-memform input {
   flex: 1 1 10rem;
   min-width: 0;
 }
-#app .agents .ag-memform input,
-#app .agents .ag-memform select {
+#app :is(.agents, .jobs) .ag-memform input,
+#app :is(.agents, .jobs) .ag-memform select {
   font: inherit;
   padding: 2px 5px;
   color: var(--vscode-input-foreground);
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, #555));
   border-radius: 2px;
+}
+/* The Jobs view (#166) shares the Agents view's look above; these are its own bits. */
+#app .jobs .jb-head:hover {
+  background: transparent;
+}
+#app .jobs .jb-on {
+  border-color: var(--aw-done);
+  color: var(--aw-done);
+}
+#app .jobs .jb-reason {
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+#app .jobs .jb-note {
+  padding: 0 8px 6px;
+  font-size: 0.9em;
+}
+#app .jobs .jb-days {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0;
+  padding: 4px 6px 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 2px;
+}
+#app .jobs .jb-days legend {
+  padding: 0 4px;
+  color: var(--vscode-descriptionForeground);
+}
+#app .jobs .jb-day {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+#app.touch .jobs .jb-day input {
+  width: 20px;
+  height: 20px;
+}
+#app .jobs .jb-days {
+  min-width: 0;
+}
+/* Stacked, a row's fields take their own height, not their wide-layout basis. */
+#app.narrow :is(.agents, .jobs) .ag-row .ag-field {
+  flex: 0 0 auto;
 }

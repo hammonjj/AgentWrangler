@@ -1,6 +1,6 @@
 # Scheduled agents: build plan
 
-**Status:** recommendation, 2026-10-14 (#3, epic #164). Replaces the research brief. The open
+**Status:** building, 2026-10-15 (epic #164). Slices 1 and 2 are in (`src/shared/scheduledJobs.ts`, `src/app/scheduledJobs.ts`, the Jobs view). Recommendation written 2026-10-14 (#3). Replaces the research brief. The open
 product questions in §6 have a proposed default each; slices 1 and 2 do not depend on the answers.
 
 Fills the gap `product-context.md` §7 names: "no scheduling". Two use cases drive it, and the plan
@@ -88,7 +88,7 @@ is skipped and the job's history says "missed". Never run twice for one slot.
 | A: team requests, drafts? | Personal and team requests, labelled; drafts excluded |
 | A: what posts under the user's name? | (a) local only, then (b) pending review; never approve or request changes |
 | A: time, weekdays? | 07:30, Monday to Friday, `catchUpHours` 4 |
-| B: which calendar and inbox? | Needs the user: Google or Microsoft 365. Slice 2 reads whichever connectors the job's allowed-tools list names |
+| B: which calendar and inbox? | Microsoft 365 (Outlook calendar and mail), answered 2026-10-15 |
 | B: where to read? | In the app first; phone comes with #112 |
 
 ## 7. Slices

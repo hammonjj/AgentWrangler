@@ -20,6 +20,7 @@ import type { QuestionView } from '../shared/conversation';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
 import type { AgentDirectory } from './agentDirectory';
+import type { JobDirectory } from './jobDirectory';
 import type { PaneChannel } from './paneChannel';
 import { openTargetFor } from './openTarget';
 
@@ -169,6 +170,8 @@ export class DashboardHost {
     private analytics?: AnalyticsSource,
     /** Durable agents (#179). */
     private agents?: AgentDirectory,
+    /** Scheduled jobs (#166). */
+    private jobs?: JobDirectory,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
@@ -215,6 +218,8 @@ export class DashboardHost {
     }
     // An agent created, edited or linked to a new conversation changes its card and its session's row.
     if (this.agents) this.subs.push(this.agents.onDidChange(() => this.pushSnapshot()));
+    // A job saved, turned on or off, or a run recorded.
+    if (this.jobs) this.subs.push(this.jobs.onDidChange(() => this.pushSnapshot()));
     // Only a pane showing Analytics has asked; the others are not sent a view they would discard.
     if (this.analytics) this.subs.push(this.analytics.onDidChange(() => this.pushAnalyticsSoon()));
   }
@@ -352,6 +357,7 @@ export class DashboardHost {
       projects: projects.length > 0 ? projects : undefined,
       missions: this.missions?.snapshot(),
       agents: this.agents?.views(),
+      jobs: this.jobs?.views(),
     };
     void this.webview.postMessage(msg);
   }
@@ -392,6 +398,7 @@ export class DashboardHost {
       // A refused agent change is still answered, so the view does not wait on it for good.
       if (m.type === 'saveAgent' && typeof m.requestId === 'string') void this.webview.postMessage({ type: 'agentSaved', requestId: m.requestId, error: 'Not permitted.' } satisfies HostToDashboard);
       if (m.type === 'agentMemory' || m.type === 'agentMakeCurrent' || m.type === 'assignSession') this.agentResult(m.requestId, { error: 'Not permitted.' });
+      if (m.type === 'saveJob' || m.type === 'jobEnable' || m.type === 'runJob') this.jobResult(m.requestId, { error: 'Not permitted.' });
       return;
     }
     // As this pane's client: the prompts, toasts and navigation it causes go
@@ -573,7 +580,33 @@ export class DashboardHost {
         this.agentResult(m.requestId, result);
         break;
       }
+      case 'saveJob':
+        this.jobResult(m.requestId, this.jobs?.save(typeof m.id === 'string' ? m.id : undefined, m.job));
+        break;
+      case 'jobEnable':
+        if (typeof m.id === 'string') this.jobResult(m.requestId, this.jobs?.setEnabled(m.id, m.on === true));
+        break;
+      case 'deleteJob':
+        if (typeof m.id === 'string') void this.jobs?.remove(m.id);
+        break;
+      case 'runJob': {
+        if (typeof m.id !== 'string' || !this.jobs) {
+          this.jobResult(m.requestId, undefined);
+          break;
+        }
+        void this.jobs.runNow(m.id).then(
+          (result) => this.jobResult(m.requestId, 'error' in result ? result : {}),
+          (error: unknown) => this.jobResult(m.requestId, { error: error instanceof Error ? error.message : String(error) }),
+        );
+        break;
+      }
     }
+  }
+
+  private jobResult(requestId: unknown, result: { id?: string; error?: string } | undefined): void {
+    if (typeof requestId !== 'string') return;
+    const out = result ?? { error: 'Jobs are not available.' };
+    void this.webview.postMessage({ type: 'jobResult', requestId, ...out } satisfies HostToDashboard);
   }
 
   private agentResult(requestId: unknown, result: { error?: string } | undefined): void {
@@ -635,6 +668,7 @@ const ROW_ACTIONS: Record<DashboardAction, ActionName> = {
 const setting = (id: string): ResourceRef => ({ kind: 'setting', id });
 /** An agent by its id: a UUID, never its name or instructions, since this is audited. */
 const agentRef = (id: unknown): ResourceRef | undefined => (typeof id === 'string' && id ? { kind: 'agent', id } : undefined);
+const jobRef = (id: unknown): ResourceRef | undefined => (typeof id === 'string' && id ? { kind: 'job', id } : undefined);
 
 /**
  * What a table message asks to do, for `authorize`. Exhaustive: a message type
@@ -699,6 +733,12 @@ export function dashboardRequest(m: DashboardToHost): AccessRequest {
     // Assigning names the agent it goes to; unassigning names the session it comes off.
     case 'assignSession':
       return { action: 'agent.write', resource: agentRef(m.agentId) ?? (typeof m.key === 'string' ? { kind: 'session', id: m.key } : undefined) };
+    case 'saveJob':
+    case 'jobEnable':
+    case 'deleteJob':
+      return { action: 'job.write', resource: jobRef(m.id) };
+    case 'runJob':
+      return { action: 'job.run', resource: jobRef(m.id) };
     default: {
       // Compile-time: every message type is handled above. Run time: a type
       // the webview made up is authorised as a mutation (so a refusal is

@@ -58,6 +58,7 @@ export function createWorkbenchHosts(
     app.missions,
     app.analytics,
     app.agents,
+    app.jobs,
   );
   const conversation = new ConversationHost(
     paneChannel(transport, 'conversation'),
