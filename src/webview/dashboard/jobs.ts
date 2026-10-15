@@ -242,7 +242,11 @@ ${claude ? `<label class="jb-check"><input type="checkbox" data-f="postPendingRe
 ${
   claude
     ? `<label class="ag-field"><span>Allowed tools, one rule per line</span><textarea data-f="allowedTools" rows="4" placeholder="Read&#10;Bash(gh pr view:*)">${esc(f.allowedTools)}</textarea></label>
-<p class="ag-note">These run without asking. Anything else the job tries waits in Waiting for you; nothing is approved on your behalf.</p>`
+<p class="ag-note">${
+        f.permissionMode === 'dontAsk'
+          ? 'These run without asking. Anything else the job tries is refused, so it never waits on a prompt nobody sees.'
+          : 'These run without asking. Anything else the job tries waits in Waiting for you; nothing is approved on your behalf.'
+      }</p>`
     : '<p class="ag-note">Codex jobs ask for anything outside their sandbox; the request waits in Waiting for you.</p>'
 }
 <p class="ag-note">A slot missed while the Mac was asleep runs once when it wakes, inside the catch-up window, and is marked late. Nothing starts while the fleet is paused or usage is at the limit; the run is recorded as skipped.</p>
@@ -399,10 +403,10 @@ export function createJobsController(app: HTMLElement, post: (m: DashboardToHost
     input(event) {
       const form = (event.target as HTMLElement | null)?.closest?.<HTMLFormElement>('.jobs form[data-job-form]');
       if (!form || !ui.form) return;
-      const before = ui.form.provider;
+      const before = ui.form;
       ui.form = readJobForm(form, ui.form);
-      // Switching harness changes which fields the form has.
-      if (ui.form.provider !== before) render();
+      // Switching harness changes which fields the form has; the mode changes what its note says.
+      if (ui.form.provider !== before.provider || ui.form.permissionMode !== before.permissionMode) render();
     },
     preview(m) {
       if (ui.previews.get(m.id)?.requestId !== m.requestId) return;
