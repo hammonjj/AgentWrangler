@@ -142,7 +142,7 @@ import { FileAuditLog } from '../remote/audit';
 import { createAccessGate, ownerContext, type AccessGate } from '../core/access';
 import { outsideRequest } from '../core/requestScope';
 import { createApprovalActions } from './approvals';
-import { doneNoticeFor, remoteAskFor, type RemoteNotice } from '../shared/remote';
+import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { PermissionModeName } from '../shared/conversation';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
 import { displayLabel, displayTitle, GLOBAL_PROJECT_DIR, STATUS_LABEL, type AgentSession, type SessionStatus } from '../shared/model';
@@ -2444,8 +2444,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
         ok(`The background service is running (pid ${status.pid}), so Discord keeps working when Agent Wrangler is closed`);
         if (!status.hasToken) bad('The background service has no bot token yet');
         lines.push(status.connected ? '✓  Connected to the Discord gateway' : '✗  Not connected to the gateway yet');
-        // Slash commands (#59): registered on connect, refused for a bot without the scope.
-        if (status.connected) lines.push(status.commandProblem ? `✗  ${status.commandProblem}` : '✓  Slash commands registered (/status, /usage, /help, …)');
       }
 
       // Only post when everything else passed: a card in a channel nobody can
@@ -2844,34 +2842,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
         log: (m) => log(`remote: ${m}`),
         makeTransport: here.makeTransport,
         mirrorFile: here.mirrorFile,
-        // Slash commands (#59): counts, usage and the one switch. Nothing else of the app.
-        commands: {
-          usage: () => ({ claude: usage.usage, ...(codexUsage.usage.last ? { codex: codexUsage.usage } : {}) }),
-          statusCounts: () => {
-            const byStatus: Partial<Record<SessionStatus, number>> = {};
-            for (const s of store.sessions) {
-              if (archive.isArchived(s.key)) continue;
-              byStatus[s.status] = (byStatus[s.status] ?? 0) + 1;
-            }
-            return byStatus;
-          },
-          waitingAsks: () => {
-            const asks = { permissions: 0, questions: 0, plans: 0 };
-            for (const s of remoteSessions.sessions) {
-              const ask = remoteAskFor(s);
-              if (ask?.kind === 'permission') asks.permissions++;
-              else if (ask?.kind === 'question') asks.questions++;
-              else if (ask?.kind === 'plan') asks.plans++;
-            }
-            return asks;
-          },
-          notificationsEnabled: () => getConfig().remoteNotificationsEnabled,
-          // The toolbar button's setting: the button, Preferences and the cards follow it.
-          setNotificationsEnabled: async (on) => {
-            await host.settings.update('remote.notificationsEnabled', on);
-          },
-          now: () => Date.now(),
-        },
       });
       log('remote: Discord runs in this process');
     }

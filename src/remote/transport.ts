@@ -57,23 +57,6 @@ export interface RemoteClose {
   atMs: number;
 }
 
-/** A command as the remote service lists it (#59): a name and one line. */
-export interface RemoteCommandSpec {
-  name: string;
-  description: string;
-}
-
-/**
- * A command someone ran (#59). Foreign input like a press: `name` is whatever came back, and
- * `scope` is checked before anything runs. The transport performs no authorisation.
- */
-export interface RemoteCommandInvocation {
-  invocationId: string;
-  name: string;
-  actor: RemoteActor;
-  scope: { guildId?: string; channelId?: string };
-}
-
 export interface RemoteTransport extends Disposable {
   readonly id: string;
   readonly connected: boolean;
@@ -102,15 +85,4 @@ export interface RemoteTransport extends Disposable {
    * back, because nothing will ever edit or close it.
    */
   notify(notice: RemoteNotice): Promise<void>;
-
-  // ---- commands (#59). Optional: a transport without them simply offers none. ----
-
-  /** Commands run on the service, once acknowledged. */
-  onDidCommand?(listener: (invocation: RemoteCommandInvocation) => void): Disposable;
-  /** Make these the service's commands, replacing any others. Called on every connect. */
-  setCommands?(commands: RemoteCommandSpec[]): void;
-  /** The private answer to one command. */
-  replyToCommand?(invocation: RemoteCommandInvocation, text: string): Promise<void>;
-  /** Why commands could not be registered (a bot without the commands scope), or undefined. */
-  readonly commandProblem?: string;
 }

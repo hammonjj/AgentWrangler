@@ -16,8 +16,6 @@ import * as os from 'node:os';
 import { DEFAULT_CONFIG, type WranglerConfig } from '../core/config';
 import type { Authorizer } from '../core/access';
 import { FileAuditLog, type AuditLog } from './audit';
-import { RemoteCommandService } from './commandService';
-import type { CommandRegistry } from './commands';
 import { DiscordTransport } from './discord/transport';
 import { MirrorStore } from './mirrorStore';
 import { auditFile, mirrorFile } from './paths';
@@ -34,8 +32,6 @@ export interface RemoteConnectorOptions {
   mirrorFile?: string;
   audit?: AuditLog;
   authorize?: Authorizer;
-  /** Remote commands (#59). Absent: the transport is offered none. */
-  commands?: CommandRegistry;
 }
 
 /** What the connection follows: the settings, the home to fold, and the token (absent: none). */
@@ -47,7 +43,6 @@ export interface RemoteSettings {
 
 export class RemoteConnector {
   readonly service: RemoteControlService;
-  private readonly commandService?: RemoteCommandService;
   private config: WranglerConfig = DEFAULT_CONFIG;
   private homeDir = os.homedir();
   private botToken?: string;
@@ -58,22 +53,15 @@ export class RemoteConnector {
   private disposed = false;
 
   constructor(private opts: RemoteConnectorOptions) {
-    const audit = opts.audit ?? new FileAuditLog(auditFile());
     this.service = new RemoteControlService(
       opts.sessions,
       opts.actions,
       new MirrorStore(opts.mirrorFile ?? mirrorFile()),
       () => this.remoteConfig(),
-      audit,
+      opts.audit ?? new FileAuditLog(auditFile()),
       opts.log,
       opts.authorize,
     );
-    if (opts.commands) this.commandService = new RemoteCommandService(opts.commands, () => this.remoteConfig(), audit, opts.log, opts.authorize);
-  }
-
-  /** Why slash commands are not available (a bot without the commands scope), or undefined. */
-  get commandProblem(): string | undefined {
-    return this.transport?.commandProblem;
   }
 
   /** The settings in effect: the app's own, or what the daemon read at start. */
@@ -139,7 +127,6 @@ export class RemoteConnector {
     this.disposed = true;
     await this.disconnect();
     this.service.dispose();
-    this.commandService?.dispose();
   }
 
   private remoteConfig(): RemoteConfig {
@@ -157,7 +144,6 @@ export class RemoteConnector {
   private async disconnect(): Promise<void> {
     if (!this.transport) return;
     this.service.setTransport(undefined);
-    this.commandService?.setTransport(undefined);
     const going = this.transport;
     this.transport = undefined;
     this.transportFor = undefined;
@@ -190,7 +176,6 @@ export class RemoteConnector {
       this.transport = next;
       this.transportFor = key;
       this.service.setTransport(next);
-      this.commandService?.setTransport(next);
       try {
         await next.connect();
         this.opts.log('connecting to Discord');

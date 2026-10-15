@@ -839,16 +839,9 @@ connection state nobody can act on is not worth the pixels.
 
 ### Deferred, explicitly
 
-Freeform chat · remotely starting or stopping agents · transcript browsing · Slack ·
+Slash commands · freeform chat · remotely starting or stopping agents · transcript browsing · Slack ·
 cloud relay · mobile dashboard · questions and plan approvals (they need §6's cross-window story) ·
 completion and failure notifications · any new permission classification or policy system.
-
-**Since lifted.** Slash commands (#59): a small, transport-agnostic registry
-(`src/remote/commands.ts`) run by `RemoteCommandService` through the same scope, allowlist,
-`authorize()` and audit checks as a press. `/status`, `/usage`, `/enable-notifications`,
-`/disable-notifications` and `/help`, registered guild-scoped on connect and answered privately.
-The cloud relay and a mobile dashboard became the remote control epic (#112,
-[remote-control-supabase.md](remote-control-supabase.md)).
 
 ---
 
