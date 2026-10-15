@@ -5,6 +5,7 @@
  */
 import type { Disposable } from '../core/events';
 import type { JobView } from '../shared/scheduledJobs';
+import type { SweepItem } from '../shared/prSweep';
 
 export interface JobDirectory {
   views(): JobView[];
@@ -15,5 +16,7 @@ export interface JobDirectory {
   remove(id: string): Promise<void>;
   /** Start a run now, enabled or not. Admission (pause, usage) still applies. */
   runNow(id: string): Promise<{ runId: string } | { error: string }>;
+  /** A PR sweep's preview (#168): what it would review now. Reviews nothing. */
+  preview(id: string): Promise<{ repo: string; items: SweepItem[] } | { error: string }>;
   onDidChange(listener: () => void): Disposable;
 }

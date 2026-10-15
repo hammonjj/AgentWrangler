@@ -1,6 +1,6 @@
 # Scheduled agents: build plan
 
-**Status:** building, 2026-10-15 (epic #164). Slices 1 and 2 are in (`src/shared/scheduledJobs.ts`, `src/app/scheduledJobs.ts`, the Jobs view). Recommendation written 2026-10-14 (#3). Replaces the research brief. The open
+**Status:** built, 2026-10-15 (epic #164). All six slices are in: `src/shared/scheduledJobs.ts`, `src/app/scheduledJobs.ts`, `src/shared/jobTemplates.ts`, `src/shared/prSweep.ts`, `src/app/prSweep.ts` and the Jobs view. Recommendation written 2026-10-14 (#3). Replaces the research brief. The open
 product questions in §6 have a proposed default each; slices 1 and 2 do not depend on the answers.
 
 Fills the gap `product-context.md` §7 names: "no scheduling". Two use cases drive it, and the plan
@@ -107,3 +107,28 @@ Each slice lands on its own. Tickets are filed under #164.
 Rules that apply to every slice: off by default; anything leaving the machine is a per-job opt-in;
 no window focus and no restart; job prompts, repo names and brief contents are user configuration
 and never land in code, fixtures or docs.
+
+## 8. As built (2026-10-15)
+
+Where the build differs from the plan above, or settles something the plan left open:
+
+- **One repository per sweep job.** A sweep works on the GitHub repository of its folder, so the
+  local tree to check out from is never in doubt. To sweep several repositories, make one job for
+  each. Discovery uses `review-requested:@me`, which covers team requests too. Review-request
+  notifications are a cross-check: they catch a team-only request the search missed, and they
+  date a re-request.
+- **The daemon posts, not the agent.** With the opt-in on, the review session writes JSON to a
+  file under AW's state. That file path is the only rule it gets on top of the job's list. The
+  daemon posts the file with no `event`, so the agent never holds a GitHub write permission and
+  cannot approve. Posting is its own audited action, `job.post`.
+- **No job runs in `auto`.** §3 proposed it as the default, but its classifier approves tool calls,
+  which is approving silently. A job's default is `default`: anything not on its list waits in
+  *Waiting*. `auto` is not offered at all.
+- **The brief and the sweep run in `dontAsk`.** In `auto` mode the classifier could approve a
+  tool that is not on the list. In `dontAsk` anything not on the list is refused, so nothing is
+  left waiting on a prompt nobody will see.
+- **"Pinned conversation" became *Open latest*.** Sessions have no pin. The brief's card opens
+  the latest run's conversation, and its "ready" notice points at it, once per run, across
+  restarts.
+- **At most 5 reviews per sweep run.** The rest wait for the next run, and the run's history says
+  how many are left.

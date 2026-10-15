@@ -17,6 +17,7 @@
 
 import type { PermissionModeName } from './conversation';
 import type { SessionProvider } from './harness';
+import { GLOBAL_PROJECT_DIR } from './model';
 
 export type JobKind = 'custom' | 'brief' | 'prSweep';
 
@@ -43,10 +44,15 @@ export interface JobRun {
   manual?: boolean;
   provider?: SessionProvider;
   sessionId?: string;
+  /** The "ready" notice for this run was shown (`notifyOnDone`). */
+  toldDone?: boolean;
 }
 
-/** Permission modes a job may run in. Never `bypassPermissions`. */
-export const JOB_PERMISSION_MODES = ['auto', 'default', 'acceptEdits', 'plan', 'dontAsk'] as const satisfies readonly PermissionModeName[];
+/**
+ * Permission modes a job may run in. Never `bypassPermissions`, and never
+ * `auto`: its classifier approves tool calls nobody is watching.
+ */
+export const JOB_PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'dontAsk'] as const satisfies readonly PermissionModeName[];
 export type JobPermissionMode = (typeof JOB_PERMISSION_MODES)[number];
 
 export interface ScheduledJob {
@@ -64,14 +70,22 @@ export interface ScheduledJob {
   /** Empty means the launcher's current default. */
   model?: string;
   effort?: string;
-  /** Claude only. Empty means `auto`. */
+  /** Claude only. Empty means `default`: anything not allowed waits in Waiting. */
   permissionMode?: JobPermissionMode;
-  /** Absolute folder the session works in. */
+  /** Absolute folder the session works in, or `GLOBAL_PROJECT_DIR` for the Global scratch folder. */
   folder: string;
   /** The first message the session is sent. */
   prompt: string;
   /** Claude permission rules approved without asking (`Bash(gh pr view:*)`). Claude only. */
   allowedTools: string[];
+  /** Say so with a notification when a run's session finishes its turn (#167): the daily brief. */
+  notifyOnDone?: boolean;
+  /**
+   * PR sweeps only (#170): post each review as a pending GitHub review the
+   * user submits. Leaves the machine under the user's name, so it is a
+   * per-job opt-in. Never an approval or a change request.
+   */
+  postPendingReview?: boolean;
   /**
    * Skip a run while any usage window is at or above this percent. Empty
    * means the auto-pause percent.
@@ -96,6 +110,8 @@ export interface JobInput {
   folder: string;
   prompt: string;
   allowedTools?: string[];
+  notifyOnDone?: boolean;
+  postPendingReview?: boolean;
   maxWindowPercent?: number;
 }
 
@@ -148,11 +164,12 @@ export function sanitizeJobInput(v: unknown): { value: JobInput } | { error: str
   if ('error' in schedule) return schedule;
   if (!isProvider(o.provider)) return { error: 'Choose Claude or Codex.' };
   const folder = str(o.folder)?.replace(/(.)\/+$/, '$1');
-  if (!folder || !folder.startsWith('/')) return { error: 'Choose the folder the job works in.' };
+  if (!folder || !(folder.startsWith('/') || folder === GLOBAL_PROJECT_DIR)) return { error: 'Choose the folder the job works in.' };
   const prompt = str(o.prompt);
   if (!prompt) return { error: 'Write what the job should do.' };
   if (prompt.length > MAX_JOB_PROMPT) return { error: `Keep the prompt under ${MAX_JOB_PROMPT} characters.` };
-  if (o.permissionMode !== undefined && o.permissionMode !== '' && !isMode(o.permissionMode)) {
+  // `auto` was briefly the default; stored jobs that carry it fall back to `default`.
+  if (o.permissionMode !== undefined && o.permissionMode !== '' && o.permissionMode !== 'auto' && !isMode(o.permissionMode)) {
     return { error: 'That permission mode is not allowed for a job.' };
   }
   let catchUpHours = DEFAULT_CATCH_UP_HOURS;
@@ -186,6 +203,8 @@ export function sanitizeJobInput(v: unknown): { value: JobInput } | { error: str
       folder,
       prompt,
       allowedTools: o.provider === 'claude' ? allowedTools : [],
+      ...(o.notifyOnDone === true ? { notifyOnDone: true } : {}),
+      ...(o.postPendingReview === true && o.kind === 'prSweep' && o.provider === 'claude' ? { postPendingReview: true } : {}),
       ...(maxWindowPercent !== undefined ? { maxWindowPercent } : {}),
     },
   };
@@ -214,6 +233,8 @@ function fromInput(i: JobInput): Omit<ScheduledJob, 'id' | 'enabled' | 'createdA
     folder: i.folder,
     prompt: i.prompt,
     allowedTools: [...(i.allowedTools ?? [])],
+    ...(i.notifyOnDone ? { notifyOnDone: true } : {}),
+    ...(i.postPendingReview ? { postPendingReview: true } : {}),
     ...(i.maxWindowPercent !== undefined ? { maxWindowPercent: i.maxWindowPercent } : {}),
   };
 }
@@ -266,6 +287,7 @@ function parseRun(v: unknown): JobRun | undefined {
     ...(o.manual === true ? { manual: true } : {}),
     ...(isProvider(o.provider) ? { provider: o.provider } : {}),
     ...(typeof o.sessionId === 'string' ? { sessionId: o.sessionId } : {}),
+    ...(o.toldDone === true ? { toldDone: true } : {}),
   };
 }
 
@@ -374,9 +396,23 @@ export interface JobView extends ScheduledJob {
   nextRunAt?: number;
   /** A run of this job is starting now. */
   starting: boolean;
+  /** The session of the newest run that started one: the latest brief, say. */
+  latestSessionKey?: string;
+}
+
+/** A run's session as the table keys it. */
+export function runSessionKey(r: Pick<JobRun, 'provider' | 'sessionId'>): string | undefined {
+  return r.provider && r.sessionId ? `${r.provider}:${r.sessionId.toLowerCase()}` : undefined;
 }
 
 export function jobView(job: ScheduledJob, now: number, starting: boolean): JobView {
   const next = job.enabled ? nextSlot(job.schedule, now) : undefined;
-  return { ...job, scheduleText: describeSchedule(job.schedule), ...(next !== undefined ? { nextRunAt: next } : {}), starting };
+  const latest = job.history.map(runSessionKey).find((k) => k !== undefined);
+  return {
+    ...job,
+    scheduleText: describeSchedule(job.schedule),
+    ...(next !== undefined ? { nextRunAt: next } : {}),
+    starting,
+    ...(latest ? { latestSessionKey: latest } : {}),
+  };
 }

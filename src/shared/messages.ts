@@ -21,6 +21,7 @@ import type { UsageState } from './usage';
 import type { AgentMemoryPaneView, DurableAgentInput, DurableAgentView } from './durableAgents';
 import type { MemoryOp } from './agentMemory';
 import type { JobInput, JobView } from './scheduledJobs';
+import type { SweepItem } from './prSweep';
 
 // ---- Dashboard ----
 
@@ -78,6 +79,8 @@ export type HostToDashboard =
     }
   /** A Jobs view request was carried out, or refused (`error`, shown in the view). `id` is the saved job. */
   | { type: 'jobResult'; requestId: string; id?: string; error?: string }
+  /** A PR sweep's preview (#168): what it would review now, or why it could not look. */
+  | { type: 'jobPreview'; requestId: string; id: string; repo?: string; items?: SweepItem[]; error?: string }
   /** A `saveAgent` was carried out (`id`), or refused (`error`, shown in the form). */
   | { type: 'agentSaved'; requestId: string; id?: string; error?: string; cancelled?: boolean }
   /** An agent memory change, assignment or "make current" was carried out, or refused (`error`, shown in the Agents view). */
@@ -236,7 +239,9 @@ export type DashboardToHost =
   /** Delete a job. The host confirms first. */
   | { type: 'deleteJob'; id: string }
   /** Run a job now. Answered with `jobResult`. */
-  | { type: 'runJob'; id: string; requestId: string };
+  | { type: 'runJob'; id: string; requestId: string }
+  /** What a PR sweep would review now (#168). Reviews nothing. Answered with `jobPreview`. */
+  | { type: 'previewJob'; id: string; requestId: string };
 
 // ---- Conversation pane ----
 

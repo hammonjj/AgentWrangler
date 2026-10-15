@@ -9,10 +9,12 @@
  * stacks off `#app.narrow`, never a media query. No inline styles. Every
  * check that matters is made again by the host (`shared/scheduledJobs.ts`).
  */
-import { DEFAULT_CATCH_UP_HOURS, JOB_PERMISSION_MODES, type JobInput, type JobOutcome, type JobRun, type JobView } from '../../shared/scheduledJobs';
+import { DEFAULT_CATCH_UP_HOURS, JOB_PERMISSION_MODES, runSessionKey, type JobInput, type JobOutcome, type JobRun, type JobView } from '../../shared/scheduledJobs';
 import { AGENT_EFFORTS } from '../../shared/durableAgents';
+import { JOB_TEMPLATES, jobTemplate, type JobTemplateId } from '../../shared/jobTemplates';
 import { capitalize, formatAge, GLOBAL_PROJECT_DIR, type ProjectDTO } from '../../shared/model';
 import type { DashboardToHost, HostToDashboard } from '../../shared/messages';
+import { isDue, MAX_REVIEWS_PER_SWEEP, type ReviewNeed, type SweepItem } from '../../shared/prSweep';
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -37,6 +39,8 @@ export interface JobFormDraft {
   folder: string;
   prompt: string;
   allowedTools: string;
+  notifyOnDone: boolean;
+  postPendingReview: boolean;
   maxWindowPercent: string;
 }
 
@@ -50,45 +54,49 @@ export interface JobsUiState {
   pending: Map<string, string>;
   /** The last refusal for a job's Run now or switch, shown on its card. */
   notes: Map<string, string>;
+  /** The PR sweep whose preview is open, and each sweep's last preview. */
+  previewOpen?: string;
+  previews: Map<string, JobPreviewState>;
+}
+
+export interface JobPreviewState {
+  /** The preview being waited on. */
+  requestId?: string;
+  repo?: string;
+  items?: SweepItem[];
+  error?: string;
 }
 
 export function newJobsUiState(): JobsUiState {
-  return { pending: new Map(), notes: new Map() };
+  return { pending: new Map(), notes: new Map(), previews: new Map() };
 }
 
-export function blankJobForm(folder?: string): JobFormDraft {
-  return {
-    name: '',
-    kind: 'custom',
-    weekdays: [1, 2, 3, 4, 5],
-    time: '07:30',
-    catchUpHours: String(DEFAULT_CATCH_UP_HOURS),
-    provider: 'claude',
-    model: '',
-    effort: '',
-    permissionMode: '',
-    folder: folder && folder !== GLOBAL_PROJECT_DIR ? folder : '',
-    prompt: '',
-    allowedTools: '',
-    maxWindowPercent: '',
-  };
+/** A new job's form, filled in from a template (`shared/jobTemplates.ts`). */
+export function blankJobForm(folder?: string, template: JobTemplateId = 'custom'): JobFormDraft {
+  const t = jobTemplate(template) ?? JOB_TEMPLATES[0]!;
+  return formOf(t.input(folder && folder !== GLOBAL_PROJECT_DIR ? folder : undefined));
 }
 
 export function jobFormFor(j: JobView): JobFormDraft {
+  return { ...formOf(j), id: j.id };
+}
+
+function formOf(j: JobInput): JobFormDraft {
   return {
-    id: j.id,
     name: j.name,
-    kind: j.kind,
+    kind: j.kind ?? 'custom',
     weekdays: [...j.schedule.weekdays],
     time: j.schedule.time,
-    catchUpHours: String(j.catchUpHours),
+    catchUpHours: String(j.catchUpHours ?? DEFAULT_CATCH_UP_HOURS),
     provider: j.provider,
     model: j.model ?? '',
     effort: j.effort ?? '',
     permissionMode: j.permissionMode ?? '',
     folder: j.folder,
     prompt: j.prompt,
-    allowedTools: j.allowedTools.join('\n'),
+    allowedTools: (j.allowedTools ?? []).join('\n'),
+    notifyOnDone: j.notifyOnDone === true,
+    postPendingReview: j.postPendingReview === true,
     maxWindowPercent: j.maxWindowPercent !== undefined ? String(j.maxWindowPercent) : '',
   };
 }
@@ -107,6 +115,8 @@ export function jobFormInput(f: JobFormDraft): JobInput {
     folder: f.folder,
     prompt: f.prompt,
     allowedTools: f.allowedTools.split('\n').map((t) => t.trim()).filter(Boolean),
+    ...(f.notifyOnDone ? { notifyOnDone: true } : {}),
+    ...(f.postPendingReview && f.kind === 'prSweep' ? { postPendingReview: true } : {}),
     ...(f.maxWindowPercent.trim() ? { maxWindowPercent: Number(f.maxWindowPercent) } : {}),
   };
 }
@@ -120,7 +130,7 @@ function when(ms: number): string {
 }
 
 function runHtml(r: JobRun, nowMs: number): string {
-  const key = r.provider && r.sessionId ? `${r.provider}:${r.sessionId.toLowerCase()}` : undefined;
+  const key = runSessionKey(r);
   const what = r.manual ? 'Run now' : r.slot !== undefined ? `Slot ${when(r.slot)}` : '';
   return `<li class="ag-hist"><span class="ag-histtext"><span class="ag-chip ag-st ${OUTCOME_CLASS[r.outcome]}">${esc(OUTCOME_TEXT[r.outcome])}</span> ${esc(what)} <span class="ag-age" title="${esc(when(r.at))}">${esc(formatAge(nowMs, r.at))} ago</span>${r.reason ? ` <span class="jb-reason">${esc(r.reason)}</span>` : ''}</span>
 ${key ? `<span class="ag-memacts"><button type="button" class="ag-btn" data-jb="session" data-key="${esc(key)}">Open session</button></span>` : ''}</li>`;
@@ -133,7 +143,10 @@ function itemHtml(j: JobView, ui: JobsUiState, nowMs: number): string {
   const meta = [
     `<span class="ag-chip${j.enabled ? ' jb-on' : ''}">${j.enabled ? 'On' : 'Off'}</span>`,
     `<span class="ag-chip">${esc(j.scheduleText)}</span>`,
-    `<span class="ag-chip" title="${esc(j.folder)}">${esc(j.folder.split('/').filter(Boolean).pop() ?? j.folder)}</span>`,
+    j.folder === GLOBAL_PROJECT_DIR
+      ? '<span class="ag-chip" title="Not tied to a project">Global</span>'
+      : `<span class="ag-chip" title="${esc(j.folder)}">${esc(j.folder.split('/').filter(Boolean).pop() ?? j.folder)}</span>`,
+    j.postPendingReview ? '<span class="ag-chip jb-posts" title="Posts each review to GitHub as a pending review under your name">Posts pending reviews</span>' : '',
     `<span class="ag-chip">${esc(j.provider === 'codex' ? 'Codex' : 'Claude')}${j.model ? ` · ${esc(j.model)}` : ''}${j.effort ? ` · ${esc(j.effort)}` : ''}</span>`,
     j.enabled && j.nextRunAt ? `<span class="ag-age">Next ${esc(when(j.nextRunAt))}</span>` : '',
     j.starting ? '<span class="ag-chip ag-st st-busy">Starting</span>' : '',
@@ -147,9 +160,35 @@ function itemHtml(j: JobView, ui: JobsUiState, nowMs: number): string {
 <button type="button" class="ag-btn${j.enabled ? '' : ' primary'}" data-jb="toggle" data-id="${id}"${busy ? ' disabled' : ''} title="${j.enabled ? 'Stop running it on its schedule' : 'Run it on its schedule from now on'}">${j.enabled ? 'Turn off' : 'Turn on'}</button>
 <button type="button" class="ag-btn" data-jb="run" data-id="${id}"${busy ? ' disabled' : ''} title="Start a run now, on or off. Still waits while the fleet is paused or usage is at its limit.">Run now</button>
 <button type="button" class="ag-btn ag-tab${open ? ' on' : ''}" data-jb="history" data-id="${id}" aria-expanded="${open}">History ${j.history.length}</button>
+${j.kind === 'prSweep' ? `<button type="button" class="ag-btn ag-tab${ui.previewOpen === j.id ? ' on' : ''}" data-jb="preview" data-id="${id}" aria-expanded="${ui.previewOpen === j.id}" title="Ask GitHub what a sweep would review now. Reviews nothing.">Preview</button>` : ''}
+${j.latestSessionKey ? `<button type="button" class="ag-btn" data-jb="session" data-key="${esc(j.latestSessionKey)}" title="Open the latest run's conversation">Open latest</button>` : ''}
 <button type="button" class="ag-btn" data-jb="edit" data-id="${id}">Edit</button>
 <button type="button" class="ag-btn danger" data-jb="delete" data-id="${id}" title="Forget this job and its history. Sessions it started stay.">Delete</button>
-</span>${note ? `<p class="ag-error jb-note" role="alert">${esc(note)}</p>` : ''}${open ? historyHtml(j, nowMs) : ''}</li>`;
+</span>${note ? `<p class="ag-error jb-note" role="alert">${esc(note)}</p>` : ''}${open ? historyHtml(j, nowMs) : ''}${ui.previewOpen === j.id ? previewHtml(ui.previews.get(j.id)) : ''}</li>`;
+}
+
+const NEED_TEXT: Record<ReviewNeed, string> = {
+  new: 'Will review',
+  updated: 'Will re-review: new commits',
+  rerequested: 'Will re-review: asked again',
+  inProgress: 'Review running',
+  reviewed: 'Reviewed at this head',
+  draft: 'Draft: skipped',
+};
+
+function previewHtml(p: JobPreviewState | undefined): string {
+  if (!p || p.requestId) return '<div class="ag-panel"><p class="ag-note">Asking GitHub…</p></div>';
+  if (p.error) return `<div class="ag-panel"><p class="ag-error" role="alert">${esc(p.error)}</p></div>`;
+  const items = p.items ?? [];
+  const rows = items
+    .map((i) => {
+      const cls = isDue(i.need) ? 'st-busy' : i.need === 'inProgress' ? 'st-waiting' : 'st-done';
+      return `<li class="ag-hist"><span class="ag-histtext"><span class="ag-chip ag-st ${cls}">${esc(NEED_TEXT[i.need])}</span> <b>#${i.number}</b> ${esc(i.title)} <span class="ag-age">${esc(i.author)}${i.via === 'team' ? ' · team request' : ''}</span>${i.postError ? ` <span class="jb-reason">Not posted: ${esc(i.postError)}</span>` : ''}${i.reviewId !== undefined ? ' <span class="ag-age">pending review posted</span>' : ''}</span>
+<span class="ag-memacts">${i.sessionKey ? `<button type="button" class="ag-btn" data-jb="session" data-key="${esc(i.sessionKey)}">Open review</button>` : ''}${i.url ? `<button type="button" class="ag-btn" data-jb="link" data-url="${esc(i.url)}">GitHub</button>` : ''}</span></li>`;
+    })
+    .join('');
+  const due = items.filter((i) => isDue(i.need)).length;
+  return `<div class="ag-panel"><p class="ag-note">${esc(p.repo ?? '')}: ${items.length} waiting on you, ${due} due. A run reviews at most ${MAX_REVIEWS_PER_SWEEP}.</p>${rows ? `<ul class="ag-histlist">${rows}</ul>` : ''}</div>`;
 }
 
 function firstLine(s: string): string {
@@ -166,10 +205,10 @@ function historyHtml(j: JobView, nowMs: number): string {
 function formHtml(f: JobFormDraft, ui: JobsUiState, projects: readonly ProjectDTO[]): string {
   const opt = (value: string, label: string, selected: boolean) => `<option value="${esc(value)}"${selected ? ' selected' : ''}>${esc(label)}</option>`;
   const folders = projects.filter((p) => p.dir !== GLOBAL_PROJECT_DIR);
-  if (f.folder && !folders.some((p) => p.dir === f.folder)) folders.unshift({ dir: f.folder, name: f.folder.split('/').filter(Boolean).pop() ?? f.folder });
-  const folderOpts = [opt('', 'Choose a folder…', !f.folder), ...folders.map((p) => opt(p.dir, `${p.name} — ${p.dir}`, p.dir === f.folder))].join('');
+  if (f.folder && f.folder !== GLOBAL_PROJECT_DIR && !folders.some((p) => p.dir === f.folder)) folders.unshift({ dir: f.folder, name: f.folder.split('/').filter(Boolean).pop() ?? f.folder });
+  const folderOpts = [opt('', 'Choose a folder…', !f.folder), opt(GLOBAL_PROJECT_DIR, 'Global (no project)', f.folder === GLOBAL_PROJECT_DIR), ...folders.map((p) => opt(p.dir, `${p.name} — ${p.dir}`, p.dir === f.folder))].join('');
   const efforts = AGENT_EFFORTS.map((e) => opt(e, e ? capitalize(e) : 'Default', f.effort === e)).join('');
-  const modes = [opt('', 'Auto (default)', !f.permissionMode), ...JOB_PERMISSION_MODES.filter((m) => m !== 'auto').map((m) => opt(m, MODE_TEXT[m] ?? m, f.permissionMode === m))].join('');
+  const modes = [opt('', 'Ask for anything not allowed (default)', !f.permissionMode), ...JOB_PERMISSION_MODES.filter((m) => m !== 'default').map((m) => opt(m, MODE_TEXT[m] ?? m, f.permissionMode === m))].join('');
   const days = DAY_ORDER.map(
     (d) => `<label class="jb-day"><input type="checkbox" data-day="${d}"${f.weekdays.includes(d) ? ' checked' : ''}><span>${DAYS[d]}</span></label>`,
   ).join('');
@@ -191,11 +230,23 @@ function formHtml(f: JobFormDraft, ui: JobsUiState, projects: readonly ProjectDT
 <label class="ag-field"><span>Effort</span><select data-f="effort">${efforts}</select></label>
 </span>
 ${claude ? `<label class="ag-field"><span>Permission mode</span><select data-f="permissionMode">${modes}</select></label>` : ''}
+${
+  f.kind === 'prSweep'
+    ? `<p class="ag-note">Reviews open pull requests in this folder's GitHub repository that wait on your review (by name or through a team; drafts skipped), each in its own worktree beside the folder. A PR is reviewed again when it gets new commits or your review is asked for again.</p>
+${claude ? `<label class="jb-check"><input type="checkbox" data-f="postPendingReview"${f.postPendingReview ? ' checked' : ''}><span>Post each review to GitHub as a pending review that I submit</span></label>
+<p class="ag-note jb-warn">This leaves this Mac: the review is posted under your GitHub name, as a pending review only you can see until you submit it. It never approves or requests changes. Off: reviews stay in Agent Wrangler.</p>` : ''}`
+    : ''
+}
+<label class="jb-check"><input type="checkbox" data-f="notifyOnDone"${f.notifyOnDone ? ' checked' : ''}><span>Notify me when a run has finished, with a link to it</span></label>
 <label class="ag-field"><span>Prompt</span><textarea data-f="prompt" rows="6" maxlength="20000" placeholder="What the job should do each time it runs.">${esc(f.prompt)}</textarea></label>
 ${
   claude
     ? `<label class="ag-field"><span>Allowed tools, one rule per line</span><textarea data-f="allowedTools" rows="4" placeholder="Read&#10;Bash(gh pr view:*)">${esc(f.allowedTools)}</textarea></label>
-<p class="ag-note">These run without asking. Anything else the job tries waits in Waiting for you; nothing is approved on your behalf.</p>`
+<p class="ag-note">${
+        f.permissionMode === 'dontAsk'
+          ? 'These run without asking. Anything else the job tries is refused, so it never waits on a prompt nobody sees.'
+          : 'These run without asking. Anything else the job tries waits in Waiting for you; nothing is approved on your behalf.'
+      }</p>`
     : '<p class="ag-note">Codex jobs ask for anything outside their sandbox; the request waits in Waiting for you.</p>'
 }
 <p class="ag-note">A slot missed while the Mac was asleep runs once when it wakes, inside the catch-up window, and is marked late. Nothing starts while the fleet is paused or usage is at the limit; the run is recorded as skipped.</p>
@@ -208,7 +259,11 @@ const MODE_TEXT: Record<string, string> = { default: 'Ask for everything', accep
 
 export function jobsHtml(jobs: readonly JobView[] | undefined, ui: JobsUiState, projects: readonly ProjectDTO[], nowMs: number): string {
   const all = jobs ?? [];
-  const bar = `<div class="ag-bar"><span class="ag-hint">Work that starts at a set time. New jobs are off until you turn them on.</span><button type="button" class="ag-btn primary" data-jb="new"${ui.form && !ui.form.id ? ' disabled' : ''}>+ New job</button></div>`;
+  const adding = ui.form !== undefined && !ui.form.id;
+  const templates = JOB_TEMPLATES.map(
+    (t) => `<button type="button" class="ag-btn${t.id === 'custom' ? ' primary' : ''}" data-jb="new" data-template="${t.id}" title="${esc(t.hint)}"${adding ? ' disabled' : ''}>+ ${esc(t.id === 'custom' ? 'New job' : t.label)}</button>`,
+  ).join('');
+  const bar = `<div class="ag-bar"><span class="ag-hint">Work that starts at a set time. New jobs are off until you turn them on.</span>${templates}</div>`;
   const form = ui.form ? formHtml(ui.form, ui, projects) : '';
   const body =
     all.length === 0
@@ -237,6 +292,8 @@ export function readJobForm(form: HTMLElement, draft: JobFormDraft): JobFormDraf
     permissionMode: value('permissionMode') ?? draft.permissionMode,
     prompt: value('prompt') ?? draft.prompt,
     allowedTools: value('allowedTools') ?? draft.allowedTools,
+    notifyOnDone: form.querySelector<HTMLInputElement>('[data-f="notifyOnDone"]')?.checked ?? draft.notifyOnDone,
+    postPendingReview: form.querySelector<HTMLInputElement>('[data-f="postPendingReview"]')?.checked ?? draft.postPendingReview,
   };
 }
 
@@ -249,6 +306,8 @@ export interface JobsController {
   input(event: Event): void;
   /** A `jobResult`. */
   result(m: Extract<HostToDashboard, { type: 'jobResult' }>): void;
+  /** A `jobPreview`. */
+  preview(m: Extract<HostToDashboard, { type: 'jobPreview' }>): void;
   /** A field of the form has focus: a snapshot must not repaint under the caret. */
   typing(): boolean;
 }
@@ -267,7 +326,7 @@ export function createJobsController(app: HTMLElement, post: (m: DashboardToHost
       const job = id ? jobs?.find((j) => j.id === id) : undefined;
       switch (button.dataset.jb) {
         case 'new':
-          ui.form = blankJobForm(currentFolder);
+          ui.form = blankJobForm(currentFolder, jobTemplate(button.dataset.template ?? '')?.id ?? 'custom');
           ui.error = undefined;
           render();
           focusName();
@@ -307,6 +366,23 @@ export function createJobsController(app: HTMLElement, post: (m: DashboardToHost
         case 'session':
           if (button.dataset.key) post({ type: 'rowClick', key: button.dataset.key });
           break;
+        case 'link':
+          if (button.dataset.url?.startsWith('https://')) post({ type: 'openExternal', url: button.dataset.url });
+          break;
+        case 'preview': {
+          if (!id) break;
+          if (ui.previewOpen === id) {
+            ui.previewOpen = undefined;
+            render();
+            break;
+          }
+          ui.previewOpen = id;
+          const rid = requestId();
+          ui.previews.set(id, { requestId: rid });
+          post({ type: 'previewJob', id, requestId: rid });
+          render();
+          break;
+        }
       }
       return true;
     },
@@ -327,10 +403,15 @@ export function createJobsController(app: HTMLElement, post: (m: DashboardToHost
     input(event) {
       const form = (event.target as HTMLElement | null)?.closest?.<HTMLFormElement>('.jobs form[data-job-form]');
       if (!form || !ui.form) return;
-      const before = ui.form.provider;
+      const before = ui.form;
       ui.form = readJobForm(form, ui.form);
-      // Switching harness changes which fields the form has.
-      if (ui.form.provider !== before) render();
+      // Switching harness changes which fields the form has; the mode changes what its note says.
+      if (ui.form.provider !== before.provider || ui.form.permissionMode !== before.permissionMode) render();
+    },
+    preview(m) {
+      if (ui.previews.get(m.id)?.requestId !== m.requestId) return;
+      ui.previews.set(m.id, { ...(m.repo ? { repo: m.repo } : {}), ...(m.items ? { items: m.items } : {}), ...(m.error ? { error: m.error } : {}) });
+      render();
     },
     result(m) {
       if (ui.pendingSave === m.requestId) {

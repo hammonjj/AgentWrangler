@@ -171,6 +171,7 @@ import { resumeInTerminal } from '../ui/terminal';
 import { createDurableAgents } from './durableAgents';
 import { DurableAgentStore } from '../core/durableAgentStore';
 import { createJobDirectory, createScheduledJobs } from './scheduledJobs';
+import { createPrSweep } from './prSweep';
 import { ScheduledJobStore } from '../core/scheduledJobStore';
 import type { JobDirectory } from '../ui/jobDirectory';
 import type { AgentConversations, AgentDirectory } from '../ui/agentDirectory';
@@ -1956,7 +1957,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // Scheduled jobs (#164, #165): the daemon starts them at their time, as itself
   // on the owner's behalf, through the same launch path as a new conversation.
   const jobStore = new ScheduledJobStore(host.globalState);
+  // The PR review sweep (#168–#170): its reviewed-head ledger and any opted-in review files live in AW's own state.
+  const prSweep = createPrSweep({
+    storage: host.globalState,
+    reviewsDir: path.join(host.dataDir, 'pr-reviews'),
+    job: (id) => jobStore.get(id),
+    mayPost: (jobId) => access.admit(daemonContext, 'job.post', { kind: 'job', id: jobId }),
+    notify: (notice) => host.notify?.(notice),
+    log: (line) => log(line),
+  });
   const scheduledJobs = createScheduledJobs({
+    prSweep,
     jobs: jobStore,
     sessions,
     launchDefaults,
@@ -1972,9 +1983,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
     mayStart: (jobId) => access.admit(daemonContext, 'session.start', { kind: 'job', id: jobId }),
     notify: (notice) => host.notify?.(notice),
     log: (line) => log(line),
+    globalDir: globalConversationDir,
   });
   host.subscribe({ dispose: () => scheduledJobs.dispose() });
-  const jobDirectory = createJobDirectory(jobStore, scheduledJobs, dialogs);
+  // A job's session finishing its turn: the brief says it is ready (#167), a sweep records its review.
+  host.subscribe(
+    store.onDidUpdate((u) => {
+      // Every done row, not only the edge: one that asked for permission first never "became" done. Told once per run.
+      for (const s of u.upserted) if (s.status === 'done') scheduledJobs.sessionDone(s.provider, s.sessionId);
+    }),
+  );
+  const jobDirectory = createJobDirectory(jobStore, scheduledJobs, dialogs, prSweep);
 
   /**
    * "Run as task" (#33): the launcher's Tasks button. A quick pick, not a
