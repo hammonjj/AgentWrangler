@@ -171,6 +171,7 @@ import { resumeInTerminal } from '../ui/terminal';
 import { createDurableAgents } from './durableAgents';
 import { DurableAgentStore } from '../core/durableAgentStore';
 import { createJobDirectory, createScheduledJobs } from './scheduledJobs';
+import { runSessionKey } from '../shared/scheduledJobs';
 import { createPrSweep } from './prSweep';
 import { ScheduledJobStore } from '../core/scheduledJobStore';
 import type { JobDirectory } from '../ui/jobDirectory';
@@ -1981,6 +1982,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
       };
     },
     mayStart: (jobId) => access.admit(daemonContext, 'session.start', { kind: 'job', id: jobId }),
+    runActive: (run) => {
+      const key = runSessionKey(run);
+      const s = key ? store.sessions.find((x) => x.key.toLowerCase() === key) : undefined;
+      return s !== undefined && (s.status === 'busy' || s.status === 'blocked');
+    },
     notify: (notice) => host.notify?.(notice),
     log: (line) => log(line),
     globalDir: globalConversationDir,

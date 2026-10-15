@@ -9,7 +9,7 @@
  * stacks off `#app.narrow`, never a media query. No inline styles. Every
  * check that matters is made again by the host (`shared/scheduledJobs.ts`).
  */
-import { DEFAULT_CATCH_UP_HOURS, JOB_PERMISSION_MODES, runSessionKey, type JobInput, type JobOutcome, type JobRun, type JobView } from '../../shared/scheduledJobs';
+import { DEFAULT_CATCH_UP_HOURS, JOB_PERMISSION_MODES, REPEAT_MINUTES, runSessionKey, type JobInput, type JobOutcome, type JobRun, type JobView } from '../../shared/scheduledJobs';
 import { AGENT_EFFORTS } from '../../shared/durableAgents';
 import { JOB_TEMPLATES, jobTemplate, type JobTemplateId } from '../../shared/jobTemplates';
 import { capitalize, formatAge, GLOBAL_PROJECT_DIR, type ProjectDTO } from '../../shared/model';
@@ -31,6 +31,9 @@ export interface JobFormDraft {
   kind: JobInput['kind'];
   weekdays: number[];
   time: string;
+  /** Minutes between runs, or empty for once a day (#184). */
+  repeat: string;
+  until: string;
   catchUpHours: string;
   provider: 'claude' | 'codex';
   model: string;
@@ -87,6 +90,8 @@ function formOf(j: JobInput): JobFormDraft {
     kind: j.kind ?? 'custom',
     weekdays: [...j.schedule.weekdays],
     time: j.schedule.time,
+    repeat: j.schedule.every ? String(j.schedule.every.minutes) : '',
+    until: j.schedule.every?.until ?? '20:00',
     catchUpHours: String(j.catchUpHours ?? DEFAULT_CATCH_UP_HOURS),
     provider: j.provider,
     model: j.model ?? '',
@@ -106,7 +111,7 @@ export function jobFormInput(f: JobFormDraft): JobInput {
   return {
     name: f.name,
     ...(f.kind ? { kind: f.kind } : {}),
-    schedule: { weekdays: [...f.weekdays], time: f.time },
+    schedule: { weekdays: [...f.weekdays], time: f.time, ...(f.repeat ? { every: { minutes: Number(f.repeat), until: f.until } } : {}) },
     catchUpHours: Number(f.catchUpHours === '' ? DEFAULT_CATCH_UP_HOURS : f.catchUpHours),
     provider: f.provider,
     ...(f.model.trim() ? { model: f.model.trim() } : {}),
@@ -219,7 +224,11 @@ function formHtml(f: JobFormDraft, ui: JobsUiState, projects: readonly ProjectDT
 <label class="ag-field"><span>Name</span><input data-f="name" maxlength="80" required value="${esc(f.name)}" placeholder="Morning PR sweep"></label>
 <fieldset class="ag-field jb-days"><legend>Days</legend>${days}</fieldset>
 <span class="ag-row">
-<label class="ag-field"><span>Time</span><input type="time" data-f="time" required value="${esc(f.time)}"></label>
+<label class="ag-field"><span>${f.repeat ? 'From' : 'Time'}</span><input type="time" data-f="time" required value="${esc(f.time)}"></label>
+<label class="ag-field"><span>Repeat</span><select data-f="repeat">${repeatOptions(f.repeat)}</select></label>
+${f.repeat ? `<label class="ag-field"><span>Until</span><input type="time" data-f="until" required value="${esc(f.until)}"></label>` : ''}
+</span>
+<span class="ag-row">
 <label class="ag-field"><span>Catch-up hours</span><input type="number" min="0" max="23" step="1" data-f="catchUpHours" value="${esc(f.catchUpHours)}"></label>
 <label class="ag-field"><span>Usage limit %</span><input type="number" min="1" max="100" step="1" data-f="maxWindowPercent" value="${esc(f.maxWindowPercent)}" placeholder="Auto-pause %"></label>
 </span>
@@ -255,6 +264,11 @@ ${ui.error ? `<p class="ag-error" role="alert">${esc(ui.error)}</p>` : ''}
 </form>`;
 }
 
+function repeatOptions(selected: string): string {
+  const label = (m: number) => (m % 60 === 0 ? (m === 60 ? 'Every hour' : `Every ${m / 60} hours`) : `Every ${m} minutes`);
+  return [`<option value=""${selected ? '' : ' selected'}>Once a day</option>`, ...REPEAT_MINUTES.map((m) => `<option value="${m}"${selected === String(m) ? ' selected' : ''}>${label(m)}</option>`)].join('');
+}
+
 const MODE_TEXT: Record<string, string> = { default: 'Ask for everything', acceptEdits: 'Accept edits', plan: 'Plan only', dontAsk: 'Deny what is not allowed' };
 
 export function jobsHtml(jobs: readonly JobView[] | undefined, ui: JobsUiState, projects: readonly ProjectDTO[], nowMs: number): string {
@@ -283,6 +297,8 @@ export function readJobForm(form: HTMLElement, draft: JobFormDraft): JobFormDraf
     name: value('name') ?? draft.name,
     weekdays,
     time: value('time') ?? draft.time,
+    repeat: value('repeat') ?? draft.repeat,
+    until: value('until') ?? draft.until,
     catchUpHours: value('catchUpHours') ?? draft.catchUpHours,
     maxWindowPercent: value('maxWindowPercent') ?? draft.maxWindowPercent,
     folder: value('folder') ?? draft.folder,
@@ -406,7 +422,7 @@ export function createJobsController(app: HTMLElement, post: (m: DashboardToHost
       const before = ui.form;
       ui.form = readJobForm(form, ui.form);
       // Switching harness changes which fields the form has; the mode changes what its note says.
-      if (ui.form.provider !== before.provider || ui.form.permissionMode !== before.permissionMode) render();
+      if (ui.form.provider !== before.provider || ui.form.permissionMode !== before.permissionMode || ui.form.repeat !== before.repeat) render();
     },
     preview(m) {
       if (ui.previews.get(m.id)?.requestId !== m.requestId) return;

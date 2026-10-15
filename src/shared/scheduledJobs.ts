@@ -24,9 +24,17 @@ export type JobKind = 'custom' | 'brief' | 'prSweep';
 export interface JobSchedule {
   /** Days it runs, 0 = Sunday … 6 = Saturday, ascending, no repeats. */
   weekdays: number[];
-  /** Local time of day, `HH:MM`, 24-hour. */
+  /** Local time of day, `HH:MM`, 24-hour: the only slot, or the first of a repeating day. */
   time: string;
+  /**
+   * Repeat through the day (#184): a slot every `minutes` from `time` up to
+   * and including `until`. Absent: once a day at `time`.
+   */
+  every?: { minutes: number; until: string };
 }
+
+/** The repeat intervals the form offers, in minutes. */
+export const REPEAT_MINUTES = [15, 30, 60, 120, 180, 240, 360] as const;
 
 export type JobOutcome = 'ran' | 'late' | 'skipped' | 'missed' | 'failed';
 
@@ -115,7 +123,7 @@ export interface JobInput {
   maxWindowPercent?: number;
 }
 
-export const MAX_JOB_HISTORY = 50;
+export const MAX_JOB_HISTORY = 100;
 export const DEFAULT_CATCH_UP_HOURS = 4;
 export const MAX_CATCH_UP_HOURS = 23;
 export const MAX_JOB_PROMPT = 20_000;
@@ -148,7 +156,32 @@ function cleanSchedule(v: unknown): JobSchedule | { error: string } {
   const days = Array.isArray(o.weekdays) ? o.weekdays : [];
   const weekdays = [...new Set(days.filter((d): d is number => Number.isInteger(d) && d >= 0 && d <= 6))].sort((a, b) => a - b);
   if (weekdays.length === 0) return { error: 'Pick at least one day.' };
-  return { weekdays, time: `${String(t.h).padStart(2, '0')}:${String(t.m).padStart(2, '0')}` };
+  const out: JobSchedule = { weekdays, time: hhmm(t) };
+  const every = o.every as Record<string, unknown> | undefined;
+  if (every && every.minutes !== undefined && every.minutes !== '' && every.minutes !== 0) {
+    const minutes = Number(every.minutes);
+    if (!(REPEAT_MINUTES as readonly number[]).includes(minutes)) return { error: 'Pick a repeat interval from the list.' };
+    const until = parseTime(every.until);
+    if (!until) return { error: 'Give the repeat end as HH:MM, 24-hour.' };
+    if (until.h * 60 + until.m <= t.h * 60 + t.m) return { error: 'The repeat must end after it starts, on the same day.' };
+    out.every = { minutes, until: hhmm(until) };
+  }
+  return out;
+}
+
+const hhmm = (t: { h: number; m: number }) => `${String(t.h).padStart(2, '0')}:${String(t.m).padStart(2, '0')}`;
+
+/** Minutes after midnight of each slot in a day, in order. */
+export function dailySlotMinutes(s: JobSchedule): number[] {
+  const t = parseTime(s.time);
+  if (!t) return [];
+  const start = t.h * 60 + t.m;
+  const until = s.every ? parseTime(s.every.until) : undefined;
+  if (!s.every || !until || s.every.minutes <= 0) return [start];
+  const end = until.h * 60 + until.m;
+  const out: number[] = [];
+  for (let m = start; m <= end; m += s.every.minutes) out.push(m);
+  return out;
 }
 
 /**
@@ -224,7 +257,7 @@ function fromInput(i: JobInput): Omit<ScheduledJob, 'id' | 'enabled' | 'createdA
   return {
     name: i.name,
     kind: i.kind ?? 'custom',
-    schedule: { weekdays: [...i.schedule.weekdays], time: i.schedule.time },
+    schedule: { weekdays: [...i.schedule.weekdays], time: i.schedule.time, ...(i.schedule.every ? { every: { ...i.schedule.every } } : {}) },
     catchUpHours: i.catchUpHours ?? DEFAULT_CATCH_UP_HOURS,
     provider: i.provider,
     ...(i.model ? { model: i.model } : {}),
@@ -295,26 +328,33 @@ function parseRun(v: unknown): JobRun | undefined {
 
 /** The latest slot at or before `now`, in local time, looking back at most a week. */
 export function latestSlot(schedule: JobSchedule, now: number): number | undefined {
-  const t = parseTime(schedule.time);
-  if (!t || schedule.weekdays.length === 0) return undefined;
+  const minutes = dailySlotMinutes(schedule);
+  if (minutes.length === 0 || schedule.weekdays.length === 0) return undefined;
   const d = new Date(now);
   for (let back = 0; back <= 7; back++) {
-    const day = new Date(d.getFullYear(), d.getMonth(), d.getDate() - back, t.h, t.m, 0, 0);
-    if (day.getTime() > now) continue;
-    if (schedule.weekdays.includes(day.getDay())) return day.getTime();
+    const date = new Date(d.getFullYear(), d.getMonth(), d.getDate() - back);
+    if (!schedule.weekdays.includes(date.getDay())) continue;
+    // Built from the wall clock each time, so a DST change moves no slot.
+    for (let i = minutes.length - 1; i >= 0; i--) {
+      const at = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, minutes[i]!).getTime();
+      if (at <= now) return at;
+    }
   }
   return undefined;
 }
 
 /** The first slot after `now`, for "next run" in the view. */
 export function nextSlot(schedule: JobSchedule, now: number): number | undefined {
-  const t = parseTime(schedule.time);
-  if (!t || schedule.weekdays.length === 0) return undefined;
+  const minutes = dailySlotMinutes(schedule);
+  if (minutes.length === 0 || schedule.weekdays.length === 0) return undefined;
   const d = new Date(now);
   for (let ahead = 0; ahead <= 7; ahead++) {
-    const day = new Date(d.getFullYear(), d.getMonth(), d.getDate() + ahead, t.h, t.m, 0, 0);
-    if (day.getTime() <= now) continue;
-    if (schedule.weekdays.includes(day.getDay())) return day.getTime();
+    const date = new Date(d.getFullYear(), d.getMonth(), d.getDate() + ahead);
+    if (!schedule.weekdays.includes(date.getDay())) continue;
+    for (const m of minutes) {
+      const at = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, m).getTime();
+      if (at > now) return at;
+    }
   }
   return undefined;
 }
@@ -386,7 +426,10 @@ export function describeSchedule(s: JobSchedule): string {
   const days = s.weekdays;
   const key = days.join(',');
   const which = key === '1,2,3,4,5' ? 'Weekdays' : key === '0,1,2,3,4,5,6' ? 'Every day' : key === '0,6' ? 'Weekends' : days.map((d) => DAY_NAMES[d]).join(' ');
-  return `${which} at ${s.time}`;
+  if (!s.every) return `${which} at ${s.time}`;
+  const m = s.every.minutes;
+  const step = m % 60 === 0 ? (m === 60 ? 'every hour' : `every ${m / 60} hours`) : `every ${m} min`;
+  return `${which}, ${step}, ${s.time}–${s.every.until}`;
 }
 
 /** What the table pane shows for a job. Everything the edit form needs, plus derived times. */
