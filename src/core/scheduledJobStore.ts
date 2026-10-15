@@ -58,7 +58,7 @@ export class ScheduledJobStore {
   }
 
   /** Fill in a run once its session is known. */
-  amendRun(id: string, runId: string, patch: Partial<Pick<JobRun, 'sessionId' | 'outcome' | 'reason'>>): ScheduledJob | undefined {
+  amendRun(id: string, runId: string, patch: Partial<Pick<JobRun, 'sessionId' | 'outcome' | 'reason' | 'toldDone'>>): ScheduledJob | undefined {
     return this.change(id, (j) => ({ ...j, history: j.history.map((r) => (r.id === runId ? { ...r, ...patch } : r)) }));
   }
 

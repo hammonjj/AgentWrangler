@@ -9,8 +9,9 @@
  * stacks off `#app.narrow`, never a media query. No inline styles. Every
  * check that matters is made again by the host (`shared/scheduledJobs.ts`).
  */
-import { DEFAULT_CATCH_UP_HOURS, JOB_PERMISSION_MODES, type JobInput, type JobOutcome, type JobRun, type JobView } from '../../shared/scheduledJobs';
+import { DEFAULT_CATCH_UP_HOURS, JOB_PERMISSION_MODES, runSessionKey, type JobInput, type JobOutcome, type JobRun, type JobView } from '../../shared/scheduledJobs';
 import { AGENT_EFFORTS } from '../../shared/durableAgents';
+import { JOB_TEMPLATES, jobTemplate, type JobTemplateId } from '../../shared/jobTemplates';
 import { capitalize, formatAge, GLOBAL_PROJECT_DIR, type ProjectDTO } from '../../shared/model';
 import type { DashboardToHost, HostToDashboard } from '../../shared/messages';
 
@@ -37,6 +38,7 @@ export interface JobFormDraft {
   folder: string;
   prompt: string;
   allowedTools: string;
+  notifyOnDone: boolean;
   maxWindowPercent: string;
 }
 
@@ -56,39 +58,31 @@ export function newJobsUiState(): JobsUiState {
   return { pending: new Map(), notes: new Map() };
 }
 
-export function blankJobForm(folder?: string): JobFormDraft {
-  return {
-    name: '',
-    kind: 'custom',
-    weekdays: [1, 2, 3, 4, 5],
-    time: '07:30',
-    catchUpHours: String(DEFAULT_CATCH_UP_HOURS),
-    provider: 'claude',
-    model: '',
-    effort: '',
-    permissionMode: '',
-    folder: folder && folder !== GLOBAL_PROJECT_DIR ? folder : '',
-    prompt: '',
-    allowedTools: '',
-    maxWindowPercent: '',
-  };
+/** A new job's form, filled in from a template (`shared/jobTemplates.ts`). */
+export function blankJobForm(folder?: string, template: JobTemplateId = 'custom'): JobFormDraft {
+  const t = jobTemplate(template) ?? JOB_TEMPLATES[0]!;
+  return formOf(t.input(folder && folder !== GLOBAL_PROJECT_DIR ? folder : undefined));
 }
 
 export function jobFormFor(j: JobView): JobFormDraft {
+  return { ...formOf(j), id: j.id };
+}
+
+function formOf(j: JobInput): JobFormDraft {
   return {
-    id: j.id,
     name: j.name,
-    kind: j.kind,
+    kind: j.kind ?? 'custom',
     weekdays: [...j.schedule.weekdays],
     time: j.schedule.time,
-    catchUpHours: String(j.catchUpHours),
+    catchUpHours: String(j.catchUpHours ?? DEFAULT_CATCH_UP_HOURS),
     provider: j.provider,
     model: j.model ?? '',
     effort: j.effort ?? '',
     permissionMode: j.permissionMode ?? '',
     folder: j.folder,
     prompt: j.prompt,
-    allowedTools: j.allowedTools.join('\n'),
+    allowedTools: (j.allowedTools ?? []).join('\n'),
+    notifyOnDone: j.notifyOnDone === true,
     maxWindowPercent: j.maxWindowPercent !== undefined ? String(j.maxWindowPercent) : '',
   };
 }
@@ -107,6 +101,7 @@ export function jobFormInput(f: JobFormDraft): JobInput {
     folder: f.folder,
     prompt: f.prompt,
     allowedTools: f.allowedTools.split('\n').map((t) => t.trim()).filter(Boolean),
+    ...(f.notifyOnDone ? { notifyOnDone: true } : {}),
     ...(f.maxWindowPercent.trim() ? { maxWindowPercent: Number(f.maxWindowPercent) } : {}),
   };
 }
@@ -120,7 +115,7 @@ function when(ms: number): string {
 }
 
 function runHtml(r: JobRun, nowMs: number): string {
-  const key = r.provider && r.sessionId ? `${r.provider}:${r.sessionId.toLowerCase()}` : undefined;
+  const key = runSessionKey(r);
   const what = r.manual ? 'Run now' : r.slot !== undefined ? `Slot ${when(r.slot)}` : '';
   return `<li class="ag-hist"><span class="ag-histtext"><span class="ag-chip ag-st ${OUTCOME_CLASS[r.outcome]}">${esc(OUTCOME_TEXT[r.outcome])}</span> ${esc(what)} <span class="ag-age" title="${esc(when(r.at))}">${esc(formatAge(nowMs, r.at))} ago</span>${r.reason ? ` <span class="jb-reason">${esc(r.reason)}</span>` : ''}</span>
 ${key ? `<span class="ag-memacts"><button type="button" class="ag-btn" data-jb="session" data-key="${esc(key)}">Open session</button></span>` : ''}</li>`;
@@ -147,6 +142,7 @@ function itemHtml(j: JobView, ui: JobsUiState, nowMs: number): string {
 <button type="button" class="ag-btn${j.enabled ? '' : ' primary'}" data-jb="toggle" data-id="${id}"${busy ? ' disabled' : ''} title="${j.enabled ? 'Stop running it on its schedule' : 'Run it on its schedule from now on'}">${j.enabled ? 'Turn off' : 'Turn on'}</button>
 <button type="button" class="ag-btn" data-jb="run" data-id="${id}"${busy ? ' disabled' : ''} title="Start a run now, on or off. Still waits while the fleet is paused or usage is at its limit.">Run now</button>
 <button type="button" class="ag-btn ag-tab${open ? ' on' : ''}" data-jb="history" data-id="${id}" aria-expanded="${open}">History ${j.history.length}</button>
+${j.latestSessionKey ? `<button type="button" class="ag-btn" data-jb="session" data-key="${esc(j.latestSessionKey)}" title="Open the latest run's conversation">Open latest</button>` : ''}
 <button type="button" class="ag-btn" data-jb="edit" data-id="${id}">Edit</button>
 <button type="button" class="ag-btn danger" data-jb="delete" data-id="${id}" title="Forget this job and its history. Sessions it started stay.">Delete</button>
 </span>${note ? `<p class="ag-error jb-note" role="alert">${esc(note)}</p>` : ''}${open ? historyHtml(j, nowMs) : ''}</li>`;
@@ -166,8 +162,8 @@ function historyHtml(j: JobView, nowMs: number): string {
 function formHtml(f: JobFormDraft, ui: JobsUiState, projects: readonly ProjectDTO[]): string {
   const opt = (value: string, label: string, selected: boolean) => `<option value="${esc(value)}"${selected ? ' selected' : ''}>${esc(label)}</option>`;
   const folders = projects.filter((p) => p.dir !== GLOBAL_PROJECT_DIR);
-  if (f.folder && !folders.some((p) => p.dir === f.folder)) folders.unshift({ dir: f.folder, name: f.folder.split('/').filter(Boolean).pop() ?? f.folder });
-  const folderOpts = [opt('', 'Choose a folder…', !f.folder), ...folders.map((p) => opt(p.dir, `${p.name} — ${p.dir}`, p.dir === f.folder))].join('');
+  if (f.folder && f.folder !== GLOBAL_PROJECT_DIR && !folders.some((p) => p.dir === f.folder)) folders.unshift({ dir: f.folder, name: f.folder.split('/').filter(Boolean).pop() ?? f.folder });
+  const folderOpts = [opt('', 'Choose a folder…', !f.folder), opt(GLOBAL_PROJECT_DIR, 'Global (no project)', f.folder === GLOBAL_PROJECT_DIR), ...folders.map((p) => opt(p.dir, `${p.name} — ${p.dir}`, p.dir === f.folder))].join('');
   const efforts = AGENT_EFFORTS.map((e) => opt(e, e ? capitalize(e) : 'Default', f.effort === e)).join('');
   const modes = [opt('', 'Auto (default)', !f.permissionMode), ...JOB_PERMISSION_MODES.filter((m) => m !== 'auto').map((m) => opt(m, MODE_TEXT[m] ?? m, f.permissionMode === m))].join('');
   const days = DAY_ORDER.map(
@@ -191,6 +187,7 @@ function formHtml(f: JobFormDraft, ui: JobsUiState, projects: readonly ProjectDT
 <label class="ag-field"><span>Effort</span><select data-f="effort">${efforts}</select></label>
 </span>
 ${claude ? `<label class="ag-field"><span>Permission mode</span><select data-f="permissionMode">${modes}</select></label>` : ''}
+<label class="jb-check"><input type="checkbox" data-f="notifyOnDone"${f.notifyOnDone ? ' checked' : ''}><span>Notify me when a run has finished, with a link to it</span></label>
 <label class="ag-field"><span>Prompt</span><textarea data-f="prompt" rows="6" maxlength="20000" placeholder="What the job should do each time it runs.">${esc(f.prompt)}</textarea></label>
 ${
   claude
@@ -208,7 +205,11 @@ const MODE_TEXT: Record<string, string> = { default: 'Ask for everything', accep
 
 export function jobsHtml(jobs: readonly JobView[] | undefined, ui: JobsUiState, projects: readonly ProjectDTO[], nowMs: number): string {
   const all = jobs ?? [];
-  const bar = `<div class="ag-bar"><span class="ag-hint">Work that starts at a set time. New jobs are off until you turn them on.</span><button type="button" class="ag-btn primary" data-jb="new"${ui.form && !ui.form.id ? ' disabled' : ''}>+ New job</button></div>`;
+  const adding = ui.form !== undefined && !ui.form.id;
+  const templates = JOB_TEMPLATES.map(
+    (t) => `<button type="button" class="ag-btn${t.id === 'custom' ? ' primary' : ''}" data-jb="new" data-template="${t.id}" title="${esc(t.hint)}"${adding ? ' disabled' : ''}>+ ${esc(t.id === 'custom' ? 'New job' : t.label)}</button>`,
+  ).join('');
+  const bar = `<div class="ag-bar"><span class="ag-hint">Work that starts at a set time. New jobs are off until you turn them on.</span>${templates}</div>`;
   const form = ui.form ? formHtml(ui.form, ui, projects) : '';
   const body =
     all.length === 0
@@ -237,6 +238,7 @@ export function readJobForm(form: HTMLElement, draft: JobFormDraft): JobFormDraf
     permissionMode: value('permissionMode') ?? draft.permissionMode,
     prompt: value('prompt') ?? draft.prompt,
     allowedTools: value('allowedTools') ?? draft.allowedTools,
+    notifyOnDone: form.querySelector<HTMLInputElement>('[data-f="notifyOnDone"]')?.checked ?? draft.notifyOnDone,
   };
 }
 
@@ -267,7 +269,7 @@ export function createJobsController(app: HTMLElement, post: (m: DashboardToHost
       const job = id ? jobs?.find((j) => j.id === id) : undefined;
       switch (button.dataset.jb) {
         case 'new':
-          ui.form = blankJobForm(currentFolder);
+          ui.form = blankJobForm(currentFolder, jobTemplate(button.dataset.template ?? '')?.id ?? 'custom');
           ui.error = undefined;
           render();
           focusName();

@@ -219,7 +219,7 @@ describe('the store', () => {
 });
 
 describe('the scheduler', () => {
-  function harness(opts: { now?: number; admission?: Partial<ReturnType<ScheduledJobDeps['admission']>>; folderExists?: boolean; mayStart?: boolean; sendOutcome?: string; launchThrows?: string } = {}) {
+  function harness(opts: { globalDir?: string; now?: number; admission?: Partial<ReturnType<ScheduledJobDeps['admission']>>; folderExists?: boolean; mayStart?: boolean; sendOutcome?: string; launchThrows?: string } = {}) {
     const storage = memoryStorage();
     const store = new ScheduledJobStore(storage, () => at(2026, 10, 1), () => 'j1');
     const launches: LaunchRequest[] = [];
@@ -250,6 +250,7 @@ describe('the scheduler', () => {
       log: () => {},
       now: () => clock,
       isDirectory: () => opts.folderExists ?? true,
+      ...(opts.globalDir ? { globalDir: () => opts.globalDir! } : {}),
       setInterval: (fn) => timers.push(fn),
       clearInterval: () => {},
       setTimeout: (fn) => timers.push(fn),
@@ -382,6 +383,29 @@ describe('the scheduler', () => {
     expect(h.directory.save('nope', INPUT)).toEqual({ error: 'That job no longer exists.' });
     expect(h.directory.views()[0]).toMatchObject({ id: 'j1', enabled: false, scheduleText: 'Weekdays at 07:30', starting: false });
   });
+
+  it('says a brief is ready once per run, pointing at its session', async () => {
+    const h = harness();
+    h.store.create({ ...INPUT, notifyOnDone: true });
+    await h.directory.runNow('j1');
+    const sid = h.launches[0]!.sessionId!;
+    h.jobs.sessionDone('claude', sid.toUpperCase());
+    h.jobs.sessionDone('claude', sid);
+    h.jobs.sessionDone('claude', 'someone-else');
+    expect(h.notices).toEqual(['Morning sweep is ready: Open it to read.']);
+    expect(h.directory.views()[0]!.latestSessionKey).toBe(`claude:${sid}`);
+  });
+
+  it('runs a Global job in the scratch folder', async () => {
+    const { GLOBAL_PROJECT_DIR } = await import('../src/shared/model');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const dir = `${mkdtempSync(`${tmpdir()}/aw-jobs-`)}/global`;
+    const h = harness({ folderExists: false, globalDir: dir });
+    h.store.create({ ...INPUT, folder: GLOBAL_PROJECT_DIR });
+    await h.directory.runNow('j1');
+    expect(h.launches[0]!.cwd).toBe(dir);
+  });
 });
 
 describe('the Jobs view', () => {
@@ -402,5 +426,25 @@ describe('the Jobs view', () => {
     expect(html).not.toContain('<b>x</b>');
     expect(html).toContain('Turn on');
     expect(html).not.toMatch(/style=/);
+  });
+});
+
+describe('the daily brief (#167)', () => {
+  it('is a valid job: read-only tools, dontAsk, the Global folder, a notice when done', async () => {
+    const { jobTemplate, BRIEF_ALLOWED_TOOLS, BRIEF_WORD_BUDGET } = await import('../src/shared/jobTemplates');
+    const { GLOBAL_PROJECT_DIR } = await import('../src/shared/model');
+    const r = sanitizeJobInput(jobTemplate('brief')!.input(undefined));
+    expect('value' in r && r.value).toMatchObject({ kind: 'brief', permissionMode: 'dontAsk', folder: GLOBAL_PROJECT_DIR, notifyOnDone: true });
+    expect(BRIEF_ALLOWED_TOOLS.some((t) => /send|reply|forward|create|update|delete|move|post|reaction|accept|respond|draft|schedule|trash|label/i.test(t))).toBe(false);
+    expect('value' in r && r.value.prompt).toContain(`${BRIEF_WORD_BUDGET} words`);
+  });
+
+  it('every template passes the form checks once a folder is chosen', async () => {
+    const { JOB_TEMPLATES } = await import('../src/shared/jobTemplates');
+    for (const t of JOB_TEMPLATES) {
+      const input = t.input('/Users/test/proj');
+      const r = sanitizeJobInput({ ...input, name: input.name || 'x', prompt: input.prompt || 'x' });
+      expect('value' in r).toBe(true);
+    }
   });
 });

@@ -22,7 +22,8 @@ import type { LaunchDefaults } from '../core/launchDefaults';
 import type { ScheduledJobStore } from '../core/scheduledJobStore';
 import type { SessionExecutors } from '../core/session/sessionExecutors';
 import type { HostDialogs, HostNotice } from '../host/hostServices';
-import { admissionRefusal, decideSlot, jobOrigin, jobView, sanitizeJobInput, type AdmissionState, type JobRun, type JobView, type ScheduledJob } from '../shared/scheduledJobs';
+import { admissionRefusal, decideSlot, jobOrigin, jobView, runSessionKey, sanitizeJobInput, type AdmissionState, type JobRun, type JobView, type ScheduledJob } from '../shared/scheduledJobs';
+import { GLOBAL_PROJECT_DIR } from '../shared/model';
 import type { JobDirectory } from '../ui/jobDirectory';
 
 export interface ScheduledJobDeps {
@@ -35,6 +36,10 @@ export interface ScheduledJobDeps {
   mayStart: (jobId: string) => boolean;
   notify: (notice: HostNotice) => void;
   log: (line: string) => void;
+  /** The scratch folder Global conversations work in (`GLOBAL_PROJECT_DIR`). */
+  globalDir?: () => string;
+  /** Runs a PR sweep job (#168, #169). Absent: a sweep job runs its prompt like any other. */
+  prSweep?: PrSweepRunner;
   now?: () => number;
   isDirectory?: (dir: string) => boolean;
   setInterval?: (fn: () => void, ms: number) => unknown;
@@ -45,6 +50,24 @@ export interface ScheduledJobDeps {
 
 export type RunNowResult = { runId: string } | { error: string };
 
+export interface StartSessionOptions {
+  cwd: string;
+  prompt: string;
+  origin: unknown;
+  /** Told the session's id as soon as it is known. */
+  onSessionId?: (sessionId: string) => void;
+}
+
+/** Start one session with a job's settings. Throws when it could not start or did not take the prompt. */
+export type StartJobSession = (job: ScheduledJob, opts: StartSessionOptions) => Promise<{ provider: ScheduledJob['provider']; sessionId?: string }>;
+
+export interface PrSweepRunner {
+  /** Review what is waiting. Returns one line for the run's history ("reviewing 2 of 5 PRs"). Throws a reason. */
+  run(job: ScheduledJob, cwd: string, runId: string, start: StartJobSession): Promise<string>;
+  /** A session finished its turn: if it was a sweep's review, record it. */
+  sessionDone?(provider: string, sessionId: string): void;
+}
+
 export interface ScheduledJobs {
   views(): JobView[];
   /** Decide every job's slot now. Returns once the runs it started have launched. */
@@ -53,6 +76,8 @@ export interface ScheduledJobs {
   runNow(id: string): Promise<RunNowResult>;
   /** The Mac woke: slots passed during the sleep are decided now. */
   onWake(): void;
+  /** A session finished its turn. A job that asked to be told (the brief) says so. */
+  sessionDone(provider: string, sessionId: string): void;
   dispose(): void;
 }
 
@@ -75,10 +100,50 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
     deps.notify({ title, body: `${job.name}: ${run.reason ?? run.outcome}`, tag: `job:${job.id}:${run.slot ?? run.id}:${run.outcome}` });
   };
 
+  /** Where a job works: its folder, or the Global scratch folder, created on demand. Throws a reason. */
+  function resolveFolder(job: ScheduledJob): string {
+    if (job.folder === GLOBAL_PROJECT_DIR) {
+      const dir = deps.globalDir?.();
+      if (!dir) throw new Error('there is no Global folder');
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+      } catch (error) {
+        throw new Error(`could not create ${dir}: ${(error as Error).message}`);
+      }
+      return dir;
+    }
+    if (!isDirectory(job.folder)) throw new Error(`${job.folder} does not exist`);
+    return job.folder;
+  }
+
+  /** One session of a job, launched as "new conversation" is, with the job's settings, and sent its prompt. */
+  const startSession: StartJobSession = async (job, opts) => {
+    const claude = job.provider === 'claude';
+    const handle = await deps.sessions.launch(
+      deps.launchDefaults.request(job.provider, opts.cwd, {
+        ...(job.model ? { model: job.model } : {}),
+        ...(job.effort ? { effort: job.effort } : {}),
+        ...(claude ? { sessionId: randomUUID(), permissionMode: job.permissionMode ?? 'auto' } : {}),
+        ...(claude && job.allowedTools.length ? { policy: { claude: { allowedTools: [...job.allowedTools] } } } : {}),
+        origin: opts.origin,
+      }),
+    );
+    const early = handle.sessionId;
+    if (early) opts.onSessionId?.(early);
+    const outcome = await handle.send(opts.prompt);
+    if (outcome !== 'applied') throw new Error('the session started but did not take the prompt');
+    // A Codex thread learns its id with its first turn.
+    if (!early && handle.sessionId) opts.onSessionId?.(handle.sessionId);
+    return { provider: handle.provider, sessionId: handle.sessionId };
+  };
+
   /** Launch one run. The run is recorded first, so a crash mid-launch still leaves a line. */
   async function launch(job: ScheduledJob, run: JobRun): Promise<RunNowResult> {
-    if (!isDirectory(job.folder)) {
-      const failed: JobRun = { ...run, outcome: 'failed', reason: `${job.folder} does not exist` };
+    let cwd: string;
+    try {
+      cwd = resolveFolder(job);
+    } catch (error) {
+      const failed: JobRun = { ...run, outcome: 'failed', reason: (error as Error).message };
       jobs.record(job.id, failed);
       notifyOnce(job, failed, 'Scheduled job failed');
       return { error: failed.reason! };
@@ -91,23 +156,15 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
     starting.add(job.id);
     jobs.record(job.id, { ...run, provider: job.provider });
     try {
-      const claude = job.provider === 'claude';
-      const handle = await deps.sessions.launch(
-        deps.launchDefaults.request(job.provider, job.folder, {
-          ...(job.model ? { model: job.model } : {}),
-          ...(job.effort ? { effort: job.effort } : {}),
-          ...(claude ? { sessionId: randomUUID(), permissionMode: job.permissionMode ?? 'auto' } : {}),
-          ...(claude && job.allowedTools.length ? { policy: { claude: { allowedTools: [...job.allowedTools] } } } : {}),
-          origin: jobOrigin(job.id, run.id),
-        }),
-      );
-      const early = handle.sessionId;
-      if (early) jobs.amendRun(job.id, run.id, { sessionId: early });
+      if (job.kind === 'prSweep' && deps.prSweep) {
+        // A sweep is one session per pull request, each in its own tree; the run says what it did.
+        const summary = await deps.prSweep.run(job, cwd, run.id, startSession);
+        jobs.amendRun(job.id, run.id, { reason: summary });
+        log(`scheduled job ${job.id}: sweep ${summary}`);
+        return { runId: run.id };
+      }
+      await startSession(job, { cwd, prompt: job.prompt, origin: jobOrigin(job.id, run.id), onSessionId: (sessionId) => jobs.amendRun(job.id, run.id, { sessionId }) });
       log(`scheduled job ${job.id}: started a ${job.provider} session (${run.manual ? 'run now' : run.outcome})`);
-      const outcome = await handle.send(job.prompt);
-      if (outcome !== 'applied') throw new Error('the session started but did not take the prompt');
-      // A Codex thread learns its id with its first turn.
-      if (!early && handle.sessionId) jobs.amendRun(job.id, run.id, { sessionId: handle.sessionId });
       return { runId: run.id };
     } catch (error) {
       const reason = (error as Error).message || String(error);
@@ -190,6 +247,20 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
     onWake() {
       log('woke from sleep: checking scheduled jobs');
       void tick();
+    },
+    sessionDone(provider, sessionId) {
+      deps.prSweep?.sessionDone?.(provider, sessionId);
+      const key = `${provider}:${sessionId.toLowerCase()}`;
+      for (const job of jobs.list) {
+        if (!job.notifyOnDone) continue;
+        const run = job.history.find((r) => runSessionKey(r) === key);
+        if (!run) continue;
+        // Once per run, across restarts: a row stays done through later, unrelated updates.
+        if (run.toldDone) return;
+        jobs.amendRun(job.id, run.id, { toldDone: true });
+        deps.notify({ title: `${job.name} is ready`, body: 'Open it to read.', sessionKey: key, tag: `job:${job.id}:${run.id}:done` });
+        return;
+      }
     },
     dispose() {
       disposed = true;

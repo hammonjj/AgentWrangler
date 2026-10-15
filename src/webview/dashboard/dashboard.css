@@ -3075,3 +3075,9 @@ body:has(#app.touch) .projmenu .pmbrowse {
 #app.narrow :is(.agents, .jobs) .ag-row .ag-field {
   flex: 0 0 auto;
 }
+#app .jobs .jb-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9em;
+}

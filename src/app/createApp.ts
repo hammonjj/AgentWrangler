@@ -1972,8 +1972,16 @@ export function createApp(host: HostServices): AgentWranglerApp {
     mayStart: (jobId) => access.admit(daemonContext, 'session.start', { kind: 'job', id: jobId }),
     notify: (notice) => host.notify?.(notice),
     log: (line) => log(line),
+    globalDir: globalConversationDir,
   });
   host.subscribe({ dispose: () => scheduledJobs.dispose() });
+  // A job's session finishing its turn: the brief says it is ready (#167), a sweep records its review.
+  host.subscribe(
+    store.onDidUpdate((u) => {
+      // Every done row, not only the edge: one that asked for permission first never "became" done. Told once per run.
+      for (const s of u.upserted) if (s.status === 'done') scheduledJobs.sessionDone(s.provider, s.sessionId);
+    }),
+  );
   const jobDirectory = createJobDirectory(jobStore, scheduledJobs, dialogs);
 
   /**
