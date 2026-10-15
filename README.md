@@ -438,6 +438,28 @@ is `docs/plans/scheduled-agents.md`.
 
 Jobs are stored in Agent Wrangler's own state (`state.json`), never in a project.
 
+*+ New job* starts from a template:
+
+- **Daily brief** (#167) reads Microsoft 365 calendar and mail, Slack, and GitHub. It writes one
+  short page with fixed sections and a 350-word limit. It works in the Global folder. It runs in
+  `dontAsk` with an allowed list of read-only tools only. Nothing on that list can send, accept,
+  post or react, and any other tool is refused, not asked about. When a run finishes, a
+  notification points at its conversation. *Open latest* on the card opens it too.
+- **PR review sweep** (#168–#170) works on the GitHub repository of its folder. It finds open
+  PRs that wait on your review, whether asked of you by name or through a team. Drafts are
+  skipped. *Preview* on the card shows what a sweep would review now and starts nothing. Each
+  PR that is due (new to you, new commits, or your review asked for again; at most 5 a run)
+  gets one session in its own detached worktree, `<folder>.aw-review/pr-<n>`. That session
+  uses the repository's own review process. A re-review is pointed at the diff since the last
+  reviewed head. The last reviewed head per PR is kept in Agent Wrangler's state, never on the
+  PR.
+  - By default nothing is posted: the review is the session's conversation.
+  - *Post each review to GitHub as a pending review* is a per-job opt-in, and it leaves the
+    Mac under your name. The session writes its review to a file under
+    `~/Library/Application Support/Agent Wrangler/pr-reviews/`. When the session finishes, the
+    daemon posts the review with no `event`, so GitHub keeps it pending until you submit it.
+    It never approves or requests changes.
+
 ## Tasks (experimental)
 
 With *Run tasks in worktrees of their own* on (`orchestration.enabled`, off by default, read at
