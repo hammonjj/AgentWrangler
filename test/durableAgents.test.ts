@@ -1,5 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readAgentFile } from '../src/app/durableAgents';
 import {
+  assignableAgents,
+  canAssign,
+  checkInstructionsPath,
+  editStartsFresh,
+  isDetached,
+  MAX_AGENT_INSTRUCTIONS_FILE,
+  refOfKey,
+  unassignSession,
   agentDraftKey,
   agentIdOfDraftKey,
   agentIdOfOrigin,
@@ -171,6 +183,94 @@ describe('what the Agents view draws', () => {
   });
 });
 
+describe('history and assignment (#181)', () => {
+  const a = linkSession(linkSession(createAgent('a1', INPUT, 1), { provider: 'claude', sessionId: 's1', linkedAt: 2 }, 2), { provider: 'claude', sessionId: 's2', linkedAt: 3 }, 3);
+
+  it('lists earlier conversations with what the store knows of them', () => {
+    const v = agentView(a, (k) => (k === 'claude:s1' ? { status: 'ended', title: 'Roadmap', lastActivityAt: 9 } : undefined));
+    expect(v.history).toEqual([{ key: 'claude:s1', provider: 'claude', linkedAt: 2, title: 'Roadmap', status: 'ended', lastActivityAt: 9 }]);
+  });
+
+  it('unassigning the current conversation leaves none; an earlier one just leaves history', () => {
+    const off = unassignSession(a, { provider: 'claude', sessionId: 'S2' }, 4);
+    expect(off.current).toBeUndefined();
+    expect(off.history.map((h) => h.sessionId)).toEqual(['s1']);
+    const earlier = unassignSession(a, { provider: 'claude', sessionId: 's1' }, 4);
+    expect(earlier.current?.sessionId).toBe('s2');
+    expect(earlier.history).toEqual([]);
+    expect(unassignSession(a, { provider: 'codex', sessionId: 's1' }, 4)).toBe(a);
+  });
+
+  it('a session can go to an agent of its harness and folder; a Global agent takes any folder', () => {
+    expect(canAssign(INPUT, { provider: 'claude', cwd: '/Users/test/proj' })).toBe(true);
+    expect(canAssign(INPUT, { provider: 'claude', cwd: '/Users/test/proj/sub' })).toBe(true);
+    expect(canAssign(INPUT, { provider: 'claude', cwd: '/Users/test/project' })).toBe(false);
+    expect(canAssign(INPUT, { provider: 'codex', cwd: '/Users/test/proj' })).toBe(false);
+    expect(canAssign({ ...INPUT, scope: { kind: 'global' } }, { provider: 'claude', cwd: '/elsewhere' })).toBe(true);
+    const views = [agentView(createAgent('a1', INPUT, 1), () => undefined), agentView({ ...createAgent('a2', INPUT, 1), archived: true }, () => undefined), agentView(createAgent('a3', { ...INPUT, provider: 'codex' }, 1), () => undefined)];
+    expect(assignableAgents(views, { provider: 'claude', cwd: '/Users/test/proj' }).map((v) => v.id)).toEqual(['a1']);
+    expect(assignableAgents(views, { provider: 'claude', cwd: '/Users/test/proj' }, 'a1')).toEqual([]);
+  });
+
+  it('reads a session key back', () => {
+    expect(refOfKey('codex:T1')).toEqual({ provider: 'codex', sessionId: 'T1' });
+    expect(refOfKey('agent:a1')).toBeUndefined();
+    expect(refOfKey('claude:')).toBeUndefined();
+  });
+});
+
+describe('configuring (#182)', () => {
+  it('takes an instructions file inside a project folder only', () => {
+    expect(sanitizeAgentInput({ ...INPUT, instructionsFile: './docs/agents/po.md' })).toMatchObject({ value: { instructionsFile: 'docs/agents/po.md' } });
+    expect(sanitizeAgentInput({ ...INPUT, scope: { kind: 'global' }, instructionsFile: 'po.md' })).toHaveProperty('error');
+    expect(sanitizeAgentInput({ ...INPUT, instructionsFile: '../other/po.md' })).toHaveProperty('error');
+    expect(sanitizeAgentInput({ ...INPUT, instructionsFile: '/etc/passwd' })).toHaveProperty('error');
+    expect(checkInstructionsPath('docs/a..b.md')).toEqual({ path: 'docs/a..b.md' });
+  });
+
+  it('every field stays editable; only a harness or folder change ends the current conversation', () => {
+    const linked = linkSession(createAgent('a1', INPUT, 1), { provider: 'claude', sessionId: 's1', linkedAt: 2 }, 2);
+    expect(editStartsFresh(linked, { ...INPUT })).toBe(false);
+    expect(editStartsFresh(linked, { ...INPUT, provider: 'codex' })).toBe(true);
+    expect(editStartsFresh(linked, { ...INPUT, scope: { kind: 'global' } })).toBe(true);
+    expect(editStartsFresh(createAgent('a2', INPUT, 1), { ...INPUT, provider: 'codex' })).toBe(false);
+  });
+
+  it('orders pinned first and archived last, most recent first within each', () => {
+    const v = (id: string, name: string, at: number, extra: object = {}) => ({ ...agentView(createAgent(id, { ...INPUT, name }, 1), () => undefined), lastActivityAt: at, ...extra });
+    const ordered = orderAgents([v('1', 'old', 1), v('2', 'archived', 99, { archived: true }), v('3', 'pinned', 0, { pinned: true }), v('4', 'new', 50)]);
+    expect(ordered.map((x) => x.name)).toEqual(['pinned', 'new', 'old', 'archived']);
+  });
+
+  it("adds the file's text to the instructions, naming the file", () => {
+    const text = agentInstructions({ name: 'PO', role: 'r', instructionsFile: 'docs/po.md' }, 'Write acceptance criteria first.');
+    expect(text).toContain('from docs/po.md');
+    expect(text).toContain('Write acceptance criteria first.');
+  });
+});
+
+describe('reading an instructions file (#182)', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'aw-agent-')));
+    fs.mkdirSync(path.join(dir, 'proj', 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'proj', 'docs', 'po.md'), 'Be brief.');
+    fs.writeFileSync(path.join(dir, 'outside.md'), 'secret');
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it('reads a file in the folder, and says what is wrong otherwise', () => {
+    const proj = path.join(dir, 'proj');
+    expect(readAgentFile(proj, 'docs/po.md', 'PO')).toEqual({ text: 'Be brief.' });
+    expect(readAgentFile(proj, 'docs/missing.md', 'PO')).toMatchObject({ error: expect.stringContaining('was not found') });
+    expect(readAgentFile(proj, 'docs', 'PO')).toMatchObject({ error: expect.stringContaining('is not a file') });
+    fs.symlinkSync(path.join(dir, 'outside.md'), path.join(proj, 'docs', 'link.md'));
+    expect(readAgentFile(proj, 'docs/link.md', 'PO')).toMatchObject({ error: expect.stringContaining('leads outside') });
+    fs.writeFileSync(path.join(proj, 'docs', 'long.md'), 'x'.repeat(MAX_AGENT_INSTRUCTIONS_FILE + 1));
+    expect(readAgentFile(proj, 'docs/long.md', 'PO')).toMatchObject({ error: expect.stringContaining('longer than') });
+  });
+});
+
 describe('the store', () => {
   it('creates, edits, links and removes, and persists each change', () => {
     const storage = memoryStorage();
@@ -189,6 +289,54 @@ describe('the store', () => {
     expect(store.remove(a.id)).toBe(true);
     expect(new DurableAgentStore(storage).list).toEqual([]);
     expect(fired).toBe(5);
+  });
+
+  it('assigns a session to one agent at most, and unassigns it so a resume does not claim it back (#181)', () => {
+    const storage = memoryStorage();
+    let n = 0;
+    const store = new DurableAgentStore(storage, () => 100, () => `id${++n}`);
+    const a = store.create(INPUT);
+    const b = store.create(INPUT);
+    store.link(a.id, { provider: 'claude', sessionId: 's1' });
+    store.assign(b.id, { provider: 'claude', sessionId: 'S1' });
+    expect(store.get(a.id)?.current).toBeUndefined();
+    expect(store.holderOf('claude', 's1')).toMatchObject({ agent: { id: b.id }, current: true });
+    store.link(b.id, { provider: 'claude', sessionId: 's2' });
+    expect(store.holderOf('claude', 's1')).toMatchObject({ agent: { id: b.id }, current: false });
+    expect(store.unassign({ provider: 'claude', sessionId: 's1' })).toBe(true);
+    expect(store.holderOf('claude', 's1')).toBeUndefined();
+    expect(isDetached(store.get(b.id)!, 'S1')).toBe(true);
+    expect(store.unassign({ provider: 'claude', sessionId: 'nobody' })).toBe(false);
+    // Assigning it again undoes the detachment.
+    store.assign(b.id, { provider: 'claude', sessionId: 's1' });
+    expect(isDetached(store.get(b.id)!, 's1')).toBe(false);
+  });
+
+  it('keeps memory and proposals, which approve through the store (#180)', () => {
+    const storage = memoryStorage();
+    let h = 0;
+    const store = new DurableAgentStore(storage, () => 100, () => 'a1', () => (++h).toString(16).padStart(8, '0'));
+    store.create(INPUT);
+    expect(store.memory('a1', { op: 'remember', kind: 'decision', text: 'Postgres' })).toHaveProperty('agent');
+    const proposed = store.propose('a1', { op: 'add', kind: 'preference', text: 'Prefers tables' });
+    expect(proposed).toEqual({ proposalId: 'p-00000002' });
+    expect(store.get('a1')?.memory.items.map((i) => i.text)).toEqual(['Postgres']);
+    store.memory('a1', { op: 'approve', proposalId: 'p-00000002' });
+    expect(new DurableAgentStore(storage).get('a1')?.memory.items.map((i) => [i.text, i.source])).toEqual([['Postgres', 'user'], ['Prefers tables', 'agent']]);
+    // An edit to the agent keeps its memory.
+    store.update('a1', { ...INPUT, role: 'Reviews PRs' });
+    expect(store.get('a1')?.memory.items).toHaveLength(2);
+    expect(store.memory('gone', { op: 'forget', itemId: 'm-00000001' })).toEqual({ error: 'That agent no longer exists.' });
+  });
+
+  it('pins and archives (#182)', () => {
+    const store = new DurableAgentStore(memoryStorage(), () => 100, () => 'a1');
+    store.create(INPUT);
+    expect(store.setFlag('a1', 'pinned', true)).toMatchObject({ pinned: true });
+    const archived = store.setFlag('a1', 'archived', true);
+    expect(archived).toMatchObject({ archived: true });
+    expect(archived?.pinned).toBeUndefined();
+    expect(store.setFlag('a1', 'archived', false)?.archived).toBeUndefined();
   });
 
   it('drops a stored record that does not parse rather than failing', () => {

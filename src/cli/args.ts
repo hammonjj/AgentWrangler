@@ -21,6 +21,13 @@ export type Command =
    */
   | { kind: 'delegate' | 'task'; objective: string | undefined; criteria: string[]; folder: string | undefined; harness: 'claude' | 'codex' | undefined; json: boolean }
   | { kind: 'tasks'; json: boolean }
+  /**
+   * A durable agent proposes a memory update for its user to approve (#180):
+   * `remember` adds an item (`text` undefined: read stdin), `forget` removes
+   * one by id. Only from inside an agent's conversation, which is the origin.
+   */
+  | { kind: 'remember'; text: string | undefined; memoryKind: string | undefined; json: boolean }
+  | { kind: 'forget'; itemId: string; json: boolean }
   /** `open`: sign this Mac's default browser in. `url`: print the single-use link instead (#127). */
   | { kind: 'web'; action: 'open' | 'url' }
   /** Start pairing a device on the home network: a QR code and a code, for five minutes (#137). */
@@ -53,6 +60,10 @@ Usage:
       --claude | --codex    which agent to prefer (default: let routing choose)
   aw task <objective…>      shortcut: always one task, no planner (same options as delegate)
   aw tasks                  tasks that are not finished
+  aw remember <text…>       from inside a durable agent's conversation: propose a memory note;
+                            stored only once the user approves it in the app ("-" reads stdin)
+      --kind <kind>         decision (default), preference, question or work
+  aw forget <id>            from inside a durable agent's conversation: propose removing a note
   aw web open               open the workbench in your default browser, signed in
   aw web url                print a single-use sign-in link instead (good once, for 2 minutes)
   aw web pair               pair a phone or tablet on your home network: shows a QR code to
@@ -74,6 +85,7 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
   if (argv[0] === 'send') return parseSend(argv.slice(1));
   // First too: its options take values, and the objective is free text.
   if (argv[0] === 'task' || argv[0] === 'delegate') return parseHandoff(argv[0], argv.slice(1));
+  if (argv[0] === 'remember') return parseRemember(argv.slice(1));
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const words = argv.filter((a) => !a.startsWith('--') || a === '--');
   if (flags.has('--help') || argv.includes('-h')) return { kind: 'help' };
@@ -117,6 +129,13 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
       return allowed('--json') ?? { kind: 'projects', json };
     case 'tasks':
       return allowed('--json') ?? { kind: 'tasks', json };
+    case 'forget': {
+      const bad = allowed('--json');
+      if (bad) return bad;
+      if (!rest[0]) return { error: 'aw forget: which note? Give its id, like m-1a2b3c4d.' };
+      if (rest.length > 1) return { error: `aw forget: unexpected "${rest[1]}"` };
+      return { kind: 'forget', itemId: rest[0], json };
+    }
     case 'web': {
       const [action, ...more] = rest;
       if (action === 'devices') {
@@ -161,6 +180,39 @@ function parseSend(tail: readonly string[]): Command | { error: string } {
   const text = words.join(' ');
   if (text.trim().length === 0) return { error: 'aw send: the message is empty.' };
   return { kind: 'send', ref, text };
+}
+
+/** `aw remember [--kind <kind>] [--json] <text…>`. `--` ends the options. */
+function parseRemember(tail: readonly string[]): Command | { error: string } {
+  const words: string[] = [];
+  let memoryKind: string | undefined;
+  let json = false;
+  for (let i = 0; i < tail.length; i++) {
+    const a = tail[i];
+    if (a === '--') {
+      words.push(...tail.slice(i + 1));
+      break;
+    }
+    if (a === '--kind') {
+      const value = tail[i + 1];
+      if (value === undefined || value.startsWith('--')) return { error: 'aw remember: --kind needs a value: decision, preference, question or work.' };
+      memoryKind = value;
+      i++;
+      continue;
+    }
+    if (a === '--json') {
+      json = true;
+      continue;
+    }
+    if (a === '--help' || a === '-h') return { kind: 'help' };
+    if (a.startsWith('--')) return { error: `aw remember: unknown option ${a}` };
+    words.push(a);
+  }
+  if (words.length === 0) return { error: 'aw remember: what should be remembered? Give one short line, or "-" to read it from stdin.' };
+  if (words.length === 1 && words[0] === '-') return { kind: 'remember', text: undefined, memoryKind, json };
+  const text = words.join(' ');
+  if (text.trim().length === 0) return { error: 'aw remember: the note is empty.' };
+  return { kind: 'remember', text, memoryKind, json };
 }
 
 /**

@@ -388,7 +388,12 @@ export class DashboardHost {
    */
   private onMessage(m: DashboardToHost): void {
     const req = dashboardRequest(m);
-    if (!this.access.gate.admit(this.access.context, req.action, req.resource)) return;
+    if (!this.access.gate.admit(this.access.context, req.action, req.resource)) {
+      // A refused agent change is still answered, so the view does not wait on it for good.
+      if (m.type === 'saveAgent' && typeof m.requestId === 'string') void this.webview.postMessage({ type: 'agentSaved', requestId: m.requestId, error: 'Not permitted.' } satisfies HostToDashboard);
+      if (m.type === 'agentMemory' || m.type === 'agentMakeCurrent' || m.type === 'assignSession') this.agentResult(m.requestId, { error: 'Not permitted.' });
+      return;
+    }
     // As this pane's client: the prompts, toasts and navigation it causes go
     // back to it, however many awaits later (#126, `requestScope.ts`).
     runInRequest(this.access.context, () => this.dispatch(m));
@@ -535,10 +540,14 @@ export class DashboardHost {
         break;
       case 'saveAgent': {
         if (typeof m.requestId !== 'string') break;
-        const result = this.agents
+        const requestId = m.requestId;
+        const pending = this.agents
           ? this.agents.save(typeof m.id === 'string' ? m.id : undefined, m.agent)
-          : { error: 'Agents are not available.' };
-        void this.webview.postMessage({ type: 'agentSaved', requestId: m.requestId, ...result } satisfies HostToDashboard);
+          : Promise.resolve({ error: 'Agents are not available.' });
+        void pending.then(
+          (result) => this.webview.postMessage({ type: 'agentSaved', requestId, ...result } satisfies HostToDashboard),
+          (error: unknown) => this.webview.postMessage({ type: 'agentSaved', requestId, error: error instanceof Error ? error.message : String(error) } satisfies HostToDashboard),
+        );
         break;
       }
       case 'deleteAgent':
@@ -547,7 +556,30 @@ export class DashboardHost {
       case 'agentNewConversation':
         if (typeof m.id === 'string') this.agents?.startFresh(m.id);
         break;
+      case 'agentFlag':
+        if (typeof m.id === 'string' && (m.flag === 'pinned' || m.flag === 'archived')) this.agents?.setFlag(m.id, m.flag, m.on === true);
+        break;
+      case 'agentMemory':
+        if (typeof m.id === 'string') this.agentResult(m.requestId, this.agents?.memory(m.id, m.op));
+        break;
+      case 'agentMakeCurrent':
+        if (typeof m.id === 'string' && typeof m.key === 'string') this.agentResult(m.requestId, this.agents?.makeCurrent(m.id, m.key));
+        break;
+      case 'assignSession': {
+        if (typeof m.key !== 'string') break;
+        // From the row menu, which has nowhere to show a refusal: say it here.
+        const result = this.agents?.assign(m.key, typeof m.agentId === 'string' ? m.agentId : undefined) ?? { error: 'Agents are not available.' };
+        if (result.error) this.dialogs.error(`Agent Wrangler: ${result.error}`);
+        this.agentResult(m.requestId, result);
+        break;
+      }
     }
+  }
+
+  private agentResult(requestId: unknown, result: { error?: string } | undefined): void {
+    if (typeof requestId !== 'string') return;
+    const error = result ? result.error : 'Agents are not available.';
+    void this.webview.postMessage({ type: 'agentResult', requestId, ...(error ? { error } : {}) } satisfies HostToDashboard);
   }
 
   private async answerQuestion(key: string, requestId: string, answers: Record<string, string>): Promise<void> {
@@ -660,7 +692,13 @@ export function dashboardRequest(m: DashboardToHost): AccessRequest {
     case 'saveAgent':
     case 'deleteAgent':
     case 'agentNewConversation':
+    case 'agentFlag':
+    case 'agentMemory':
+    case 'agentMakeCurrent':
       return { action: 'agent.write', resource: agentRef(m.id) };
+    // Assigning names the agent it goes to; unassigning names the session it comes off.
+    case 'assignSession':
+      return { action: 'agent.write', resource: agentRef(m.agentId) ?? (typeof m.key === 'string' ? { kind: 'session', id: m.key } : undefined) };
     default: {
       // Compile-time: every message type is handled above. Run time: a type
       // the webview made up is authorised as a mutation (so a refusal is

@@ -139,6 +139,8 @@ export const ACTIONS = {
   'prefs.write': 'mutate',
   /** Create, edit or delete a durable agent, or start it afresh (#179). Never a session or a permission. */
   'agent.write': 'mutate',
+  /** A durable agent proposes a memory update (`aw remember`, #180). Stores nothing until the user approves it with `agent.write`. */
+  'agent.propose': 'mutate',
   'task.propose': 'mutate',
   'task.delegate': 'mutate',
   'task.act': 'mutate',

@@ -51,10 +51,10 @@ export const RPC_AMBIGUOUS = -32005;
 /** The session exists, but not in a way that allows this (e.g. `send` to one AW does not run). */
 export const RPC_UNSUPPORTED = -32006;
 
-export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke'] as const;
+export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'agent.propose', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke'] as const;
 export type ControlMethod = (typeof CONTROL_METHODS)[number];
 /** Methods that change something. Logged by the core (method and session, never content). */
-export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate'];
+export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate', 'agent.propose'];
 /** The longest objective `task.propose` and `delegate` accept. An outcome, not a document. */
 export const MAX_TASK_OBJECTIVE_CHARS = 20_000;
 
@@ -305,6 +305,30 @@ export interface ControlDelegateResult {
   /** For `multiple`: the plan's tasks, in the order they would run. */
   tasks?: { key: string; title: string }[];
   note?: string;
+}
+
+/**
+ * `agent.propose` (#180): a durable agent suggests a change to its memory —
+ * add an item, or forget one by id. Like `task.propose` it only proposes: the
+ * user approves it in the app, and nothing is stored until they do. The
+ * origin is self-reported and says only which agent's card it is; an agent
+ * cannot write to memory, its own or another's.
+ */
+export interface ControlAgentProposeParams {
+  origin: { provider: 'claude' | 'codex'; sessionId: string };
+  op: 'add' | 'forget';
+  /** For `add`: decision, preference, question or work. */
+  kind?: string;
+  text?: string;
+  /** For `forget`: the item's id, as the agent was shown it. */
+  itemId?: string;
+}
+
+export interface ControlAgentProposeResult {
+  /** The agent's name. */
+  agent: string;
+  /** Absent when the same proposal was already waiting, or the memory already says it. */
+  proposalId?: string;
 }
 
 /**

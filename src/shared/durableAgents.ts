@@ -15,6 +15,7 @@
  * Pure: no Node or DOM imports (`src/shared`).
  */
 
+import { emptyMemory, MAX_MEMORY_CHARS, memoryChars, memoryPrompt, MEMORY_PROPOSAL_INSTRUCTIONS, parseStoredMemory, type AgentMemory, type AgentMemoryItem, type AgentMemoryProposal } from './agentMemory';
 import type { SessionProvider } from './harness';
 import type { SessionStatus } from './model';
 
@@ -36,6 +37,13 @@ export interface DurableAgent {
   scope: DurableAgentScope;
   /** The agent's own standing instructions. Repository instructions still apply and win. */
   instructions?: string;
+  /**
+   * A file in the agent's project folder whose text is added to its
+   * instructions (#182), relative to the folder. Read afresh at every launch
+   * and resume, so an edit to it reaches the next conversation; a missing file
+   * is reported, never skipped. Folder agents only.
+   */
+  instructionsFile?: string;
   provider: SessionProvider;
   /** Empty means the launcher's current default. */
   model?: string;
@@ -44,6 +52,18 @@ export interface DurableAgent {
   current?: AgentSessionRef;
   /** Earlier conversations, newest first. */
   history: AgentSessionRef[];
+  /**
+   * Sessions the user took off this agent by hand (#181), lower-cased ids.
+   * Such a session still carries the agent as its origin, so without this a
+   * resume of it would be mistaken for the agent's conversation continuing.
+   */
+  detached: string[];
+  /** Continuity: the "where we left off" record and the agent's pending proposals (#180). */
+  memory: AgentMemory;
+  /** Listed first (#182). */
+  pinned?: boolean;
+  /** Hidden from the directory until "Show archived" (#182). Still opens from a link. */
+  archived?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -54,6 +74,7 @@ export interface DurableAgentInput {
   role: string;
   scope: DurableAgentScope;
   instructions?: string;
+  instructionsFile?: string;
   provider: SessionProvider;
   model?: string;
   effort?: string;
@@ -62,9 +83,26 @@ export interface DurableAgentInput {
 export const MAX_AGENT_NAME = 60;
 export const MAX_AGENT_ROLE = 200;
 export const MAX_AGENT_INSTRUCTIONS = 8000;
+/** The most of an instructions file a conversation is sent; a longer file is refused, not cut. */
+export const MAX_AGENT_INSTRUCTIONS_FILE = 16_000;
+export const MAX_AGENT_INSTRUCTIONS_PATH = 300;
 /** Past conversations kept per agent. Older ones are still sessions; they only lose the link. */
 export const MAX_AGENT_HISTORY = 50;
 export const AGENT_EFFORTS = ['', 'low', 'medium', 'high', 'xhigh'] as const;
+
+/**
+ * An instructions file's path as typed, checked: relative to the agent's
+ * folder and inside it. Whether it exists, and where a symlink in it leads,
+ * is the host's to check.
+ */
+export function checkInstructionsPath(raw: string): { path: string } | { error: string } {
+  const p = raw.trim().replace(/^\.\/+/, '');
+  if (p.length > MAX_AGENT_INSTRUCTIONS_PATH) return { error: 'That instructions file path is too long.' };
+  if (p.startsWith('/') || p.startsWith('~')) return { error: 'Give the instructions file relative to the project folder, like docs/agents/po.md.' };
+  if (p.split('/').some((seg) => seg === '..')) return { error: 'The instructions file must be inside the project folder.' };
+  if (/[\0\n\r]/.test(p)) return { error: 'That is not a file path.' };
+  return { path: p };
+}
 
 /**
  * Check and tidy what a form sent. A browser is a client, so nothing here is
@@ -94,6 +132,14 @@ export function sanitizeAgentInput(raw: unknown): { value: DurableAgentInput } |
   if (model.length > 100 || /\s/.test(model)) return { error: 'That is not a model name.' };
   const effort = str(r.effort);
   if (!(AGENT_EFFORTS as readonly string[]).includes(effort)) return { error: 'Choose an effort from the list.' };
+  let instructionsFile: string | undefined;
+  const fileRaw = str(r.instructionsFile);
+  if (fileRaw) {
+    if (scope.kind !== 'folder') return { error: 'An instructions file needs a project folder; a Global agent has only its own instructions.' };
+    const checked = checkInstructionsPath(fileRaw);
+    if ('error' in checked) return checked;
+    instructionsFile = checked.path || undefined;
+  }
   return {
     value: {
       name,
@@ -101,6 +147,7 @@ export function sanitizeAgentInput(raw: unknown): { value: DurableAgentInput } |
       scope,
       provider,
       ...(instructions ? { instructions } : {}),
+      ...(instructionsFile ? { instructionsFile } : {}),
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
     },
@@ -109,22 +156,47 @@ export function sanitizeAgentInput(raw: unknown): { value: DurableAgentInput } |
 
 /** A new agent from a checked form. */
 export function createAgent(id: string, input: DurableAgentInput, now: number): DurableAgent {
-  return { id, ...input, history: [], createdAt: now, updatedAt: now };
+  return { id, ...input, history: [], detached: [], memory: emptyMemory(), createdAt: now, updatedAt: now };
+}
+
+/** Whether saving this edit ends the current conversation (#182 Q5): the form warns first. */
+export function editStartsFresh(agent: Pick<DurableAgent, 'provider' | 'scope' | 'current'>, input: Pick<DurableAgentInput, 'provider' | 'scope'>): boolean {
+  return agent.current !== undefined && !(agent.provider === input.provider && sameScope(agent.scope, input.scope));
 }
 
 /**
- * An edit. Identity, conversations and creation time are kept. A change of
- * provider or scope cannot continue the current conversation (a Codex thread
- * is not a Claude session; a session belongs to its folder), so it is moved
- * to history and the next message starts a new one.
+ * An edit. Identity, conversations, memory and creation time are kept. A
+ * change of provider or scope cannot continue the current conversation (a
+ * Codex thread is not a Claude session; a session belongs to its folder), so
+ * it is moved to history and the next message starts a new one. Everything
+ * else applies from the next launch or resume.
  */
 export function editAgent(agent: DurableAgent, input: DurableAgentInput, now: number): DurableAgent {
-  const next: DurableAgent = { id: agent.id, ...input, history: agent.history, createdAt: agent.createdAt, updatedAt: now };
+  const next: DurableAgent = {
+    id: agent.id,
+    ...input,
+    history: agent.history,
+    detached: agent.detached,
+    memory: agent.memory,
+    ...(agent.pinned ? { pinned: true } : {}),
+    ...(agent.archived ? { archived: true } : {}),
+    createdAt: agent.createdAt,
+    updatedAt: now,
+  };
   if (agent.current) {
-    const keeps = agent.provider === input.provider && sameScope(agent.scope, input.scope);
-    if (keeps) next.current = agent.current;
+    if (!editStartsFresh(agent, input)) next.current = agent.current;
     else next.history = pushHistory(agent.history, agent.current);
   }
+  return next;
+}
+
+/** Pin or archive (#182). Archiving unpins: an archived agent is out of the way, not first. */
+export function setAgentFlag(agent: DurableAgent, flag: 'pinned' | 'archived', on: boolean, now: number): DurableAgent {
+  const next: DurableAgent = { ...agent, updatedAt: now };
+  delete next[flag];
+  if (on) next[flag] = true;
+  if (flag === 'archived' && on) delete next.pinned;
+  if (flag === 'pinned' && on) delete next.archived;
   return next;
 }
 
@@ -144,10 +216,17 @@ function pushHistory(history: AgentSessionRef[], ref: AgentSessionRef): AgentSes
  */
 export function linkSession(agent: DurableAgent, ref: AgentSessionRef, now: number, previousId?: string): DurableAgent {
   const cur = agent.current;
-  if (cur && cur.provider === ref.provider && cur.sessionId === ref.sessionId) return agent;
-  const continued = cur !== undefined && previousId !== undefined && cur.sessionId === previousId;
+  if (cur && sameRef(cur, ref)) return agent;
+  const continued = cur !== undefined && previousId !== undefined && cur.sessionId.toLowerCase() === previousId.toLowerCase();
   const history = cur && !continued ? pushHistory(agent.history, cur) : agent.history;
-  return { ...agent, current: ref, history: history.filter((h) => !(h.provider === ref.provider && h.sessionId === ref.sessionId)), updatedAt: now };
+  const id = ref.sessionId.toLowerCase();
+  return {
+    ...agent,
+    current: ref,
+    history: history.filter((h) => !sameRef(h, ref)),
+    detached: agent.detached.filter((d) => d !== id),
+    updatedAt: now,
+  };
 }
 
 /** "New conversation": the next message starts afresh; the old one stays in history. */
@@ -156,8 +235,63 @@ export function startFresh(agent: DurableAgent, now: number): DurableAgent {
   return { ...agent, current: undefined, history: pushHistory(agent.history, agent.current), updatedAt: now };
 }
 
+function sameRef(a: Pick<AgentSessionRef, 'provider' | 'sessionId'>, b: Pick<AgentSessionRef, 'provider' | 'sessionId'>): boolean {
+  return a.provider === b.provider && a.sessionId.toLowerCase() === b.sessionId.toLowerCase();
+}
+
+/** Whether this conversation is the agent's, current or earlier. */
+export function hasSession(agent: Pick<DurableAgent, 'current' | 'history'>, ref: Pick<AgentSessionRef, 'provider' | 'sessionId'>): boolean {
+  return (agent.current !== undefined && sameRef(agent.current, ref)) || agent.history.some((h) => sameRef(h, ref));
+}
+
+/**
+ * Take a conversation off the agent by hand (#181). It stays a session,
+ * unassigned. Taking the current one off leaves the agent with none, so its
+ * next message starts a new conversation; the earlier ones are untouched.
+ */
+export function unassignSession(agent: DurableAgent, ref: Pick<AgentSessionRef, 'provider' | 'sessionId'>, now: number): DurableAgent {
+  if (!hasSession(agent, ref)) return agent;
+  const id = ref.sessionId.toLowerCase();
+  const next: DurableAgent = {
+    ...agent,
+    history: agent.history.filter((h) => !sameRef(h, ref)),
+    detached: [id, ...agent.detached.filter((d) => d !== id)].slice(0, MAX_AGENT_HISTORY),
+    updatedAt: now,
+  };
+  if (agent.current && sameRef(agent.current, ref)) delete next.current;
+  return next;
+}
+
+/** Whether the user took this conversation off the agent by hand. */
+export function isDetached(agent: Pick<DurableAgent, 'detached'>, sessionId: string): boolean {
+  return agent.detached.includes(sessionId.toLowerCase());
+}
+
 export function sessionKeyOf(ref: Pick<AgentSessionRef, 'provider' | 'sessionId'>): string {
   return `${ref.provider}:${ref.sessionId.toLowerCase()}`;
+}
+
+/** A session key back into a ref, for a key a client sent. */
+export function refOfKey(key: string): Pick<AgentSessionRef, 'provider' | 'sessionId'> | undefined {
+  const at = key.indexOf(':');
+  const provider = key.slice(0, at);
+  const sessionId = key.slice(at + 1);
+  if ((provider !== 'claude' && provider !== 'codex') || !sessionId) return undefined;
+  return { provider, sessionId };
+}
+
+/**
+ * Whether a session can become this agent's (#181): the same harness, and the
+ * agent's folder (a session belongs to the folder it runs in). A Global agent
+ * works in its own scratch folder, so it takes a session from anywhere: Global
+ * means "not tied to a project", and a conversation the user chooses to give
+ * it is theirs to give.
+ */
+export function canAssign(agent: Pick<DurableAgent, 'provider' | 'scope'>, session: { provider: string; cwd?: string }): boolean {
+  if (agent.provider !== session.provider) return false;
+  if (agent.scope.kind === 'global') return true;
+  const cwd = session.cwd?.replace(/\/+$/, '');
+  return cwd !== undefined && (cwd === agent.scope.dir || cwd.startsWith(`${agent.scope.dir}/`));
 }
 
 /**
@@ -182,11 +316,16 @@ export function parseStoredAgents(raw: unknown): DurableAgent[] {
     seen.add(a.id);
     const current = ref(a.current);
     const history = Array.isArray(a.history) ? a.history.map(ref).filter((h): h is AgentSessionRef => h !== undefined).slice(0, MAX_AGENT_HISTORY) : [];
+    const detached = Array.isArray(a.detached) ? a.detached.filter((d): d is string => typeof d === 'string' && d.length > 0).map((d) => d.toLowerCase()).slice(0, MAX_AGENT_HISTORY) : [];
     out.push({
       id: a.id,
       ...input.value,
       ...(current ? { current } : {}),
       history,
+      detached,
+      memory: parseStoredMemory(a.memory),
+      ...(a.pinned === true ? { pinned: true } : {}),
+      ...(a.archived === true ? { archived: true } : {}),
       createdAt: typeof a.createdAt === 'number' ? a.createdAt : 0,
       updatedAt: typeof a.updatedAt === 'number' ? a.updatedAt : 0,
     });
@@ -254,13 +393,21 @@ export function planAgentOpen(agent: DurableAgent, lookup: (key: string) => { st
  * not authority: the agent's record never grants permissions or turns a
  * discussion into delegated work, and the repository's own instructions win.
  */
-export function agentInstructions(agent: Pick<DurableAgent, 'name' | 'role' | 'instructions'>): string {
+export function agentInstructions(
+  agent: Pick<DurableAgent, 'name' | 'role' | 'instructions' | 'instructionsFile'> & { memory?: Pick<AgentMemory, 'items'> },
+  /** The instructions file's text, read by the host. */
+  fileText?: string,
+): string {
   const lines = [
     `You are "${agent.name}", a durable agent configured in Agent Wrangler. Your role: ${agent.role}`,
     'Project and repository instructions (CLAUDE.md, AGENTS.md and the documents they name) are authoritative; where these agent instructions conflict with them, follow the repository.',
     'These instructions describe your role and working style only. They do not grant permissions, change approval policy, or authorise you to start implementation the user has not asked for.',
   ];
   if (agent.instructions) lines.push('', 'Agent instructions:', agent.instructions);
+  if (fileText?.trim()) lines.push('', `Agent instructions from ${agent.instructionsFile ?? 'a file'} in the project:`, fileText.trim());
+  const notes = memoryPrompt(agent.memory?.items ?? []);
+  if (notes) lines.push('', notes);
+  if (agent.memory) lines.push('', MEMORY_PROPOSAL_INSTRUCTIONS);
   return lines.join('\n');
 }
 
@@ -277,6 +424,7 @@ export interface DurableAgentView {
   model?: string;
   effort?: string;
   instructions?: string;
+  instructionsFile?: string;
   /** The current conversation's session key, when there is one. */
   currentKey?: string;
   /** Its status when the session is known; absent when it is not. */
@@ -289,6 +437,45 @@ export interface DurableAgentView {
   lastActivityAt?: number;
   /** How many earlier conversations it remembers. */
   historyCount: number;
+  /** Its earlier conversations, newest first (#181). */
+  history: AgentHistoryView[];
+  /** The continuity record and what the agent proposes for it (#180). */
+  memory: AgentMemoryItem[];
+  proposals: AgentMemoryProposal[];
+  /** Characters the record uses, against `memoryCap`. */
+  memoryChars: number;
+  memoryCap: number;
+  pinned?: boolean;
+  archived?: boolean;
+}
+
+/**
+ * What the conversation pane shows of the agent a conversation belongs to
+ * (#180): its memory, to read and correct beside the conversation, and the
+ * agent's pending proposals as cards.
+ */
+export interface AgentMemoryPaneView {
+  agentId: string;
+  agentName: string;
+  items: AgentMemoryItem[];
+  proposals: AgentMemoryProposal[];
+  chars: number;
+  cap: number;
+}
+
+export function memoryPaneView(agent: Pick<DurableAgent, 'id' | 'name' | 'memory'>): AgentMemoryPaneView {
+  return { agentId: agent.id, agentName: agent.name, items: agent.memory.items, proposals: agent.memory.proposals, chars: memoryChars(agent.memory.items), cap: MAX_MEMORY_CHARS };
+}
+
+/** One earlier conversation, as the Agents view lists it. */
+export interface AgentHistoryView {
+  key: string;
+  provider: SessionProvider;
+  /** Absent when the store no longer has the session: listed, but there is nothing to open. */
+  title?: string;
+  status?: SessionStatus;
+  lastActivityAt?: number;
+  linkedAt: number;
 }
 
 export function scopeLabel(scope: DurableAgentScope): string {
@@ -317,14 +504,35 @@ export function agentView(agent: DurableAgent, lookup: (key: string) => AgentSes
     ...(agent.model ? { model: agent.model } : {}),
     ...(agent.effort ? { effort: agent.effort } : {}),
     ...(agent.instructions ? { instructions: agent.instructions } : {}),
+    ...(agent.instructionsFile ? { instructionsFile: agent.instructionsFile } : {}),
     ...(currentKey ? { currentKey } : {}),
     ...(cur ? { currentStatus: cur.status, currentTitle: cur.title, ...(cur.subtitle ? { currentSubtitle: cur.subtitle } : {}) } : {}),
     lastActivityAt: cur?.lastActivityAt ?? agent.current?.linkedAt ?? undefined,
     historyCount: agent.history.length,
+    history: agent.history.map((h) => {
+      const key = sessionKeyOf(h);
+      const s = lookup(key);
+      return { key, provider: h.provider, linkedAt: h.linkedAt, ...(s ? { title: s.title, status: s.status, lastActivityAt: s.lastActivityAt } : {}) };
+    }),
+    memory: agent.memory.items,
+    proposals: agent.memory.proposals,
+    memoryChars: memoryChars(agent.memory.items),
+    memoryCap: MAX_MEMORY_CHARS,
+    ...(agent.pinned ? { pinned: true } : {}),
+    ...(agent.archived ? { archived: true } : {}),
   };
 }
 
-/** Most recently used first, then by name: the agent you were just talking to is at the top. */
+/**
+ * Pinned first, archived last, and most recently used first within each,
+ * then by name: the agent you were just talking to is at the top.
+ */
 export function orderAgents(views: DurableAgentView[]): DurableAgentView[] {
-  return [...views].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.name.localeCompare(b.name));
+  const rank = (v: DurableAgentView) => (v.pinned ? 0 : v.archived ? 2 : 1);
+  return [...views].sort((a, b) => rank(a) - rank(b) || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0) || a.name.localeCompare(b.name));
+}
+
+/** The agents a session row may be given to (#181): not archived, not its owner already, most recent first. */
+export function assignableAgents(views: readonly DurableAgentView[], session: { provider: string; cwd?: string }, ownerId?: string): DurableAgentView[] {
+  return orderAgents(views.filter((v) => !v.archived && v.id !== ownerId && canAssign(v, session)));
 }

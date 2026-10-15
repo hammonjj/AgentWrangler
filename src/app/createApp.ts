@@ -305,6 +305,13 @@ export interface AgentWranglerApp {
    * Launches nothing. Throws `TaskError` for anything the caller should read.
    */
   delegate(req: ProposeTaskRequest): Promise<DelegateResult>;
+  /**
+   * `aw remember` / `aw forget` (#180): the durable agent whose conversation
+   * `origin` is proposes a memory update. Waits for the user's approval as a
+   * card; stores nothing. Throws when the conversation is not an agent's or
+   * the proposal is refused, with the reason for the agent to read.
+   */
+  proposeAgentMemory(origin: { provider: string; sessionId: string }, input: unknown): { agentName: string; proposalId?: string };
   /** Tasks that are not finished, newest first. Empty while orchestration is off. */
   taskList(): TaskSummary[];
   /**
@@ -680,10 +687,29 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * registry remembers (a resume should come back on the same model, mode and
    * effort), otherwise the current defaults.
    */
-  const claudeLaunch = (previous?: SessionRecord) => {
+  const claudeLaunch = (previous: SessionRecord | undefined, sessionId: string, opts?: { lenient?: boolean }) => {
     const launch = launchDefaults.resumed('claude', previous?.launch);
-    if (!previous || isOrchestrationOrigin(previous.origin)) return launch;
-    return { ...launch, policy: { ...launch.policy, claude: { ...launch.policy?.claude, conversationInstructions: withConversationDelegation(launch.policy?.claude?.conversationInstructions) } } };
+    if (previous && isOrchestrationOrigin(previous.origin)) return launch;
+    // A session assigned to an agent by hand may have no record, or no agent origin, of its own.
+    const fresh = agentResumeInstructions({ provider: 'claude', sessionId }, previous?.origin, opts?.lenient === true);
+    if (!previous && fresh === undefined) return launch;
+    return { ...launch, policy: { ...launch.policy, claude: { ...launch.policy?.claude, conversationInstructions: fresh ?? withConversationDelegation(launch.policy?.claude?.conversationInstructions) } } };
+  };
+  /**
+   * A durable agent's conversation resumes with the agent's instructions and
+   * memory as they are now (#180, #182), not the copy frozen in at launch.
+   * Undefined for any other session. A missing instructions file is the
+   * user's error to see when they resumed it; a resume nobody asked for (after
+   * a restart) carries on with what it was launched with, and logs why.
+   */
+  const agentResumeInstructions = (ref: { provider: string; sessionId: string }, origin: unknown, lenient: boolean): string | undefined => {
+    try {
+      return durableAgents.resumeInstructions(ref, origin);
+    } catch (error) {
+      if (!lenient) throw error;
+      log(`durable agent: resuming with the instructions it was launched with: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
   };
 
   // #4's startup is settled once hosts are adopted (above, synchronously) and
@@ -1017,7 +1043,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // A session AW ran before comes back the way it was started; one from a
     // terminal gets the current defaults.
     const previous = sessionRegistry.get(s.sessionId);
-    const runner = await runners.resume({ cwd: s.cwd, resume: s.sessionId, ...claudeLaunch(previous), origin: previous?.origin });
+    const runner = await runners.resume({ cwd: s.cwd, resume: s.sessionId, ...claudeLaunch(previous, s.sessionId), origin: previous?.origin });
     surface?.showSession(runner);
     log(`adopted ${s.sessionId} into this window`);
     return runner;
@@ -2540,7 +2566,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   const adopting = new Set<string>();
-  const adoptCodexSession = async (session: AgentSession): Promise<void> => {
+  /** Take a Codex thread over here. The runner it is now driven by, or undefined when the user backed out. */
+  const adoptCodexSession = async (session: AgentSession): Promise<Awaited<ReturnType<CodexRunnerService['resume']>> | undefined> => {
     if (!session.cwd) throw new Error('Agent Wrangler: this Codex conversation has no working folder to resume.');
     if (session.status !== 'waiting' && session.status !== 'done') {
       throw new Error('Agent Wrangler: wait for the current Codex turn to finish before taking over here.');
@@ -2550,16 +2577,18 @@ export function createApp(host: HostServices): AgentWranglerApp {
     if (existing?.openElsewhere) codexRunners.drop(existing.threadId);
     else if (existing) {
       surface?.showSession(existing);
-      return;
+      return existing;
     }
     const history = session.transcriptPath
       ? await readRolloutBlocks(session.transcriptPath).catch(() => ({ blocks: [], truncated: false }))
       : { blocks: [], truncated: false };
     // A thread AW started before comes back under the rules it was started with (#71).
     const previous = sessionRegistry.get(session.sessionId);
-    const policy = !previous || isOrchestrationOrigin(previous.origin)
+    // The agent that holds the thread now speaks in it (#181), with or without a record of its own.
+    const fresh = previous && isOrchestrationOrigin(previous.origin) ? undefined : agentResumeInstructions({ provider: 'codex', sessionId: session.sessionId }, previous?.origin, false);
+    const policy = (!previous && fresh === undefined) || (previous && isOrchestrationOrigin(previous.origin))
       ? previous?.launch.policy
-      : { ...previous.launch.policy, codex: { ...previous.launch.policy?.codex, developerInstructions: withConversationDelegation(previous.launch.policy?.codex?.developerInstructions) } };
+      : { ...previous?.launch.policy, codex: { ...previous?.launch.policy?.codex, developerInstructions: fresh ?? withConversationDelegation(previous?.launch.policy?.codex?.developerInstructions) } };
     let runner: Awaited<ReturnType<CodexRunnerService['resume']>>;
     for (;;) {
       try {
@@ -2584,20 +2613,35 @@ export function createApp(host: HostServices): AgentWranglerApp {
           'Fork here',
         );
         if (choice === 'Retry') continue;
-        if (choice !== 'Fork here') return;
+        if (choice !== 'Fork here') return undefined;
         runner = await codexRunners.fork(session.sessionId, session.cwd, history.blocks, session.model, policy);
         log(`forked active Codex conversation ${session.sessionId} as ${runner.threadId}`);
+        // A fork of an agent's conversation is that conversation, carried on under a new id.
+        const owner = durableAgents.directory.ownerOf('codex', session.sessionId);
+        if (owner?.current) durableAgents.continued(owner.id, { provider: 'codex', sessionId: runner.threadId }, session.sessionId);
         break;
       }
     }
     surface?.showSession(runner);
     log(`controlling Codex conversation ${runner.threadId} here`);
+    return runner;
   };
   const actions: SessionActions = {
     async adoptAndSend(key, text, images, signal) {
       if (adopting.has(key)) throw new Error('A takeover is already pending for this session.');
       adopting.add(key);
       try {
+        const codex = store.get(key);
+        if (codex?.provider === 'codex') {
+          // A durable agent's current Codex thread resumes when typed to (#181); any other takes *Take over here*.
+          if (!durableAgents.directory.ownerOf('codex', codex.sessionId)?.current) throw new Error('Take this Codex conversation over here first; your draft is preserved.');
+          const runner = await adoptCodexSession(codex);
+          if (!runner) throw new Error('Resume cancelled; your draft is preserved.');
+          if (signal.aborted) throw new Error('Send cancelled; the conversation was resumed here but no message was sent.');
+          if (!runner.canSend) throw new Error(runner.readOnlyReason ?? 'The conversation could not be resumed; your draft is preserved.');
+          if ((await runner.send(text, images)) !== 'applied') throw new Error('The conversation did not take the message; your draft is preserved.');
+          return;
+        }
         await waitForAdoptable(store, key, signal, true);
         const s = store.get(key);
         if (!s || signal.aborted) throw new Error('Send cancelled; your draft is preserved.');
@@ -2647,7 +2691,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (!s) return;
       if (adopting.has(key)) return;
       adopting.add(key);
-      const adoption = s.provider === 'codex' ? adoptCodexSession(s) : adoptSession(s).then(() => undefined);
+      const adoption = s.provider === 'codex' ? adoptCodexSession(s).then(() => undefined) : adoptSession(s).then(() => undefined);
       void adoption.catch((e) => dialogs.error(String(e))).finally(() => adopting.delete(key));
     },
     release(key) {
@@ -3151,7 +3195,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       runner = await runners.resume({
         cwd: decision.cwd,
         resume: decision.sessionId,
-        ...claudeLaunch(candidate),
+        ...claudeLaunch(candidate, decision.sessionId, { lenient: true }),
         origin: candidate?.origin,
       });
     } catch (err) {
@@ -3240,6 +3284,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     },
     proposeTask,
     delegate,
+    proposeAgentMemory: (origin, input) => durableAgents.propose(origin, input),
     taskList: () => (tasks ? tasks.list().filter((m) => !['completed', 'cancelled'].includes(m.state)).map(taskSummary) : []),
     async stopAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}) {
       // Claude sessions all run in hosts: an ordinary quit lets them go (in

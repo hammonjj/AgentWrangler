@@ -141,6 +141,13 @@ const DASHBOARD: Samples<DashboardToHost> = {
   saveAgent: [{ type: 'saveAgent', agent: { name: 'PO', role: 'Owns the backlog', scope: { kind: 'global' }, provider: 'claude' }, requestId: 'r1' }],
   deleteAgent: [{ type: 'deleteAgent', id: 'a1' }],
   agentNewConversation: [{ type: 'agentNewConversation', id: 'a1' }],
+  agentFlag: [{ type: 'agentFlag', id: 'a1', flag: 'pinned', on: true }],
+  agentMemory: [{ type: 'agentMemory', id: 'a1', op: { op: 'forget', itemId: 'm-00000000' }, requestId: 'r1' }],
+  agentMakeCurrent: [{ type: 'agentMakeCurrent', id: 'a1', key: KEY, requestId: 'r1' }],
+  assignSession: [
+    { type: 'assignSession', key: KEY, agentId: 'a1', requestId: 'r1' },
+    { type: 'assignSession', key: KEY, requestId: 'r2' },
+  ],
 };
 
 const CONVERSATION: Samples<ConversationToHost> = {
@@ -170,6 +177,7 @@ const CONVERSATION: Samples<ConversationToHost> = {
   taskAction: [{ type: 'taskAction', missionId: 'm1', action: 'retry' as never }],
   proposalDecision: [{ type: 'proposalDecision', missionId: 'm1', decision: 'cancel' as never }],
   delegationAction: [{ type: 'delegationAction', missionId: 'm1', action: 'cancel' as never }],
+  agentMemory: [{ type: 'agentMemory', agentId: 'a1', op: { op: 'approve', proposalId: 'p-00000000' }, requestId: 'r1' }],
   openAttempt: [{ type: 'openAttempt', sessionKey: KEY }],
   dictate: [{ type: 'dictate', action: 'start' }],
   fileSuggest: [{ type: 'fileSuggest', query: 'a' }],
@@ -299,7 +307,14 @@ describe('DashboardHost: every message is authorised before it acts', () => {
       expect(auth.asked[0].ctx.principal).toBe(LOCAL_OWNER);
       expect(auth.asked[0].ctx.via).toBe('browser');
       expect(rig.calls).toEqual([]);
-      expect(rig.webview.posted).toEqual([]);
+      // The one thing a refusal posts: an agent change is answered, so the Agents view is not left waiting.
+      const answers: Record<string, unknown> = {
+        saveAgent: { type: 'agentSaved', requestId: 'r1', error: 'Not permitted.' },
+        agentMemory: { type: 'agentResult', requestId: 'r1', error: 'Not permitted.' },
+        agentMakeCurrent: { type: 'agentResult', requestId: 'r1', error: 'Not permitted.' },
+        assignSession: { type: 'agentResult', requestId: (m as { requestId?: string }).requestId, error: 'Not permitted.' },
+      };
+      expect(rig.webview.posted).toEqual(answers[m.type] ? [answers[m.type]] : []);
       expect(rig.acc.audit).toHaveLength(1);
       expect(rig.acc.audit[0]).toMatchObject({ event: 'refused-unauthorised', principal: 'local-owner', via: 'browser' });
       rig.host.dispose();
@@ -336,6 +351,7 @@ describe('ConversationHost: every message is authorised before it acts', () => {
       // The one thing a refusal posts: a send is answered, so the composer is not left waiting.
       const posted = rig.webview.posted as HostToConversation[];
       if (m.type === 'send') expect(posted).toEqual([{ type: 'sendResult', requestId: 's1', error: 'Not permitted.' }]);
+      else if (m.type === 'agentMemory') expect(posted).toEqual([{ type: 'agentMemoryResult', requestId: 'r1', error: 'Not permitted.' }]);
       else expect(posted).toEqual([]);
       rig.host.dispose();
     },
@@ -420,6 +436,7 @@ describe('control backend (aw): every method is authorised before it acts', () =
       projects: { value: [] },
       stopSession: spy('stopSession', 'stopped'),
       proposeTask: spy('proposeTask', {}),
+      proposeAgentMemory: spy('proposeAgentMemory', { agentName: 'PO' }),
       delegate: spy('delegate', {}),
       taskList: () => {
         calls.push('taskList');
@@ -460,6 +477,7 @@ describe('control backend (aw): every method is authorised before it acts', () =
     proposeTask: (b) => b.proposeTask({ objective: 'synthetic', cwd: '/Users/test/proj' } as never),
     delegate: (b) => b.delegate({ objective: 'synthetic', cwd: '/Users/test/proj' } as never),
     tasks: (b) => b.tasks(),
+    proposeAgentMemory: (b) => b.proposeAgentMemory({ origin: { provider: 'claude', sessionId: 'synthetic-1' }, op: 'add', text: 'synthetic' }),
     webLink: (b) => b.webLink(),
     webPair: (b) => b.webPair(),
     webDevices: (b) => b.webDevices(),

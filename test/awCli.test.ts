@@ -314,6 +314,24 @@ describe('review fixes', () => {
   });
 });
 
+describe('aw remember / aw forget (#180)', () => {
+  it('takes the free words as the note, with a kind', () => {
+    expect(parseArgs(['remember', 'Ship', 'v2', 'in', 'March'])).toEqual({ kind: 'remember', text: 'Ship v2 in March', memoryKind: undefined, json: false });
+    expect(parseArgs(['remember', '--kind', 'preference', 'Prefers', 'tables', '--json'])).toEqual({ kind: 'remember', text: 'Prefers tables', memoryKind: 'preference', json: true });
+    expect(parseArgs(['remember', '-'])).toEqual({ kind: 'remember', text: undefined, memoryKind: undefined, json: false });
+    expect(parseArgs(['remember', '--', '--kind', 'is', 'a', 'flag'])).toEqual({ kind: 'remember', text: '--kind is a flag', memoryKind: undefined, json: false });
+    expect(parseArgs(['forget', 'm-1a2b3c4d'])).toEqual({ kind: 'forget', itemId: 'm-1a2b3c4d', json: false });
+  });
+
+  it('explains what is missing or wrong', () => {
+    expect(parseArgs(['remember'])).toHaveProperty('error');
+    expect(parseArgs(['remember', 'x', '--kind'])).toHaveProperty('error');
+    expect(parseArgs(['remember', 'x', '--force'])).toEqual({ error: 'aw remember: unknown option --force' });
+    expect(parseArgs(['forget'])).toHaveProperty('error');
+    expect(parseArgs(['forget', 'a', 'b'])).toEqual({ error: 'aw forget: unexpected "b"' });
+  });
+});
+
 describe('aw task (#80)', () => {
   const base = { criteria: [], folder: undefined, harness: undefined, json: false };
 

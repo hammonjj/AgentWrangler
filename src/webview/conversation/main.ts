@@ -60,6 +60,7 @@ import { CONV_NARROW_PX, isNarrowWidth } from '../../shared/phoneLayout';
 import { announceConversation } from '../common/shellBus';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { renderAnalyticsDetail } from './analyticsDetail';
+import { createMemoryStrip } from './agentMemory';
 
 // See `common/paneApi.ts`: one acquire, one message envelope and one state slot
 // per pane, so the dashboard can share this webview.
@@ -112,9 +113,10 @@ app.innerHTML = `
 </div>
 <div id="taskStrip" hidden></div>
 <div id="delegated" class="delegated" hidden></div>
+<div id="agentMemory" hidden></div>
 <div id="banner" hidden></div>
 <form id="findbar"><input id="find" type="search" placeholder="Find in conversation" aria-label="Find in conversation"><button>Find</button><button type="button" id="clearfind">Clear</button></form>
-<div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div><div id="convDelegationOffer" hidden></div><div id="proposals" hidden></div></div>
+<div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div><div id="convDelegationOffer" hidden></div><div id="proposals" hidden></div><div id="memoryProposals" hidden></div></div>
 <button id="jump" hidden></button>
 <button id="asknav" class="asknav" hidden></button>
 <div id="composer">
@@ -1357,6 +1359,10 @@ let assessmentOpen = false;
 let routingOpen = false;
 let policyOpen = false;
 let ladderOpen = false;
+
+// ---- the durable agent's memory (#180) ----
+
+const memoryStrip = createMemoryStrip(document.getElementById('agentMemory')!, document.getElementById('memoryProposals')!, post);
 
 // ---- task proposal cards (#81) ----
 
@@ -3029,6 +3035,7 @@ vscodeApi.onMessage((body) => {
       delegatedOpen = true;
       linked = m.linked ?? [];
       setProposals(m.proposals, m.delegations);
+      memoryStrip.set(m.agentMemory);
       stick = true;
       appendBlocks(m.blocks);
       // Opening a pane on a session that is already waiting lands on what it is
@@ -3082,6 +3089,16 @@ vscodeApi.onMessage((body) => {
       break;
     case 'proposals':
       setProposals(m.proposals, m.delegations);
+      break;
+    case 'agentMemory': {
+      // A proposal arriving at the end of the conversation is followed there, as a task proposal is.
+      const before = document.getElementById('memoryProposals')!.childElementCount;
+      memoryStrip.set(m.memory);
+      if (stick && (m.memory?.proposals.length ?? 0) > before) scrollToBottom();
+      break;
+    }
+    case 'agentMemoryResult':
+      memoryStrip.result(m.requestId, m.error);
       break;
     case 'composer':
       setComposer(m.composer);

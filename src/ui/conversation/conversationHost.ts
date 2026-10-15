@@ -38,6 +38,7 @@ import { CodexTranscriptSource } from './codexTranscriptSource';
 import type { ConversationSource } from './source';
 import { AgentDraftSource } from './agentDraftSource';
 import type { AgentConversations } from '../agentDirectory';
+import type { AgentMemoryPaneView } from '../../shared/durableAgents';
 import { agentIdOfDraftKey } from '../../shared/durableAgents';
 import { TranscriptSource } from './transcriptSource';
 
@@ -169,7 +170,38 @@ export class ConversationHost {
     // notice. Pushed on its own so the conversation is not re-initialised under
     // the user every time a task ticks.
     if (this.tasks) this.subs.push(this.tasks.onDidChange(() => this.pushTask()));
+    // An agent's memory changing, or this conversation being assigned to one, moves the strip (#180).
+    if (this.agents) this.subs.push(this.agents.onDidChange(() => this.pushMemory()));
   }
+
+  /** The memory of the agent this conversation belongs to, if any. */
+  private agentMemory(): AgentMemoryPaneView | undefined {
+    const key = this.session?.key;
+    return key ? this.agents?.memoryFor(key) : undefined;
+  }
+
+  private lastMemory?: string;
+  private pushMemory(): void {
+    if (!this.ready) return;
+    const memory = this.agentMemory();
+    const sig = JSON.stringify(memory ?? null);
+    if (sig !== this.lastMemory) {
+      this.lastMemory = sig;
+      this.post({ type: 'agentMemory', ...(memory ? { memory } : {}) });
+    }
+    // Whether typing resumes a stopped Codex thread follows whether it is an
+    // agent's current one (#181), which *Make current* or *New conversation*
+    // changes without touching the memory.
+    const s = this.session;
+    if (s?.provider === 'codex') {
+      const resumes = this.agents?.resumesOnType('codex', s.sessionId) === true;
+      if (resumes !== this.lastResumes) {
+        this.lastResumes = resumes;
+        void this.pushSession(s);
+      }
+    }
+  }
+  private lastResumes?: boolean;
 
   /** The strip for whatever the pane is showing now, or nothing. */
   private taskView(): TaskView | undefined {
@@ -388,6 +420,7 @@ export class ConversationHost {
     if (!session || !source) return;
     const init = await source.init();
     if (this.source !== source) return; // swapped while we read
+    const memory = this.agentMemory();
     this.post({
       type: 'init',
       session,
@@ -400,8 +433,11 @@ export class ConversationHost {
       delegations: this.delegations(),
       ...(session.linked ? { linked: session.linked } : {}),
       ...(session.wait ? { wait: session.wait } : {}),
+      ...(memory ? { agentMemory: memory } : {}),
     });
     this.lastLinked = JSON.stringify([session.linked ?? [], session.wait ?? null]);
+    this.lastMemory = JSON.stringify(memory ?? null);
+    this.lastResumes = session.provider === 'codex' ? this.agents?.resumesOnType('codex', session.sessionId) === true : undefined;
     this.post({ type: 'delegationOffer', offer: this.suggestion.offer });
   }
 
@@ -452,6 +488,7 @@ export class ConversationHost {
     if (titleChanged) this.onTitle(displayTitle(next));
     void this.pushSession(next);
     this.pushLinked();
+    this.pushMemory();
   }
 
   private async pushSession(session: AgentSession): Promise<void> {
@@ -471,9 +508,6 @@ export class ConversationHost {
     const runner = live?.provider === 'claude' ? live : undefined;
     const codexRunner = live?.provider === 'codex' ? live : undefined;
     const controlled = live !== undefined;
-    const adoptOnSend = !runner && session.provider === 'claude' && !!session.cwd;
-    const canSend = (live ? live.canSend : false) || adoptOnSend;
-
     const adopt = session.provider === 'claude' ? adoptActionFor(session, runner !== undefined) : undefined;
     const canAdoptCodex =
       session.provider === 'codex' &&
@@ -481,10 +515,14 @@ export class ConversationHost {
       (!codexRunner || !!codexRunner.readOnlyReason) &&
       !!session.cwd &&
       (session.status === 'waiting' || session.status === 'done');
+    // A durable agent's current Codex thread resumes when you type, as a Claude session does (#181).
+    const codexOnSend = canAdoptCodex && !codexRunner && this.agents?.resumesOnType('codex', session.sessionId) === true;
+    const adoptOnSend = (!runner && session.provider === 'claude' && !!session.cwd) || codexOnSend;
+    const canSend = (live ? live.canSend : false) || adoptOnSend;
     return {
       canSend,
       adoptOnSend,
-      sendHint: adoptOnSend ? (session.statusIsEstimated ? 'Send asks you to confirm taking over this session.' : ['busy', 'stuck', 'blocked'].includes(session.status) ? 'Send queues this message until the session is idle, then takes over here.' : 'Send resumes this session here and ends its previous process.') : undefined,
+      sendHint: codexOnSend ? 'Send resumes this Codex conversation here.' : adoptOnSend ? (session.statusIsEstimated ? 'Send asks you to confirm taking over this session.' : ['busy', 'stuck', 'blocked'].includes(session.status) ? 'Send queues this message until the session is idle, then takes over here.' : 'Send resumes this session here and ends its previous process.') : undefined,
       canInterrupt: canSend && (source?.composer?.busy ?? false),
       canAdopt: adopt === 'adopt' || canAdoptCodex,
       canResumeHere: adopt === 'resume-here',
@@ -509,6 +547,8 @@ export class ConversationHost {
     const req = conversationRequest(m, this.session?.key);
     if (!this.access.gate.admit(this.access.context, req.action, req.resource)) {
       if (m.type === 'send') this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Not permitted.' });
+      // So the strip's buttons do not wait on it for good.
+      if (m.type === 'agentMemory' && typeof m.requestId === 'string') this.post({ type: 'agentMemoryResult', requestId: m.requestId, error: 'Not permitted.' });
       return;
     }
     // As this pane's client: what it causes goes back to it (#126, `requestScope.ts`).
@@ -695,6 +735,12 @@ export class ConversationHost {
       case 'delegationAction':
         await this.delegationAction(m.missionId, m.action);
         return;
+      case 'agentMemory': {
+        if (typeof m.requestId !== 'string') return;
+        const result = typeof m.agentId === 'string' && this.agents ? this.agents.memory(m.agentId, m.op) : { error: 'Agents are not available.' };
+        this.post({ type: 'agentMemoryResult', requestId: m.requestId, ...(result.error ? { error: result.error } : {}) });
+        return;
+      }
       case 'openAttempt':
         // The same path a row click takes, so an attempt opens here rather
         // than anywhere else — a task's history must never cost a window.
@@ -996,6 +1042,9 @@ export function conversationRequest(m: ConversationToHost, key: string | undefin
       return { action: 'task.act', resource: mission(m.missionId) };
     case 'delegationAction':
       return { action: 'task.delegate', resource: mission(m.missionId) };
+    // Approving the agent's proposal is the user's write to the agent's record, like any other.
+    case 'agentMemory':
+      return { action: 'agent.write', resource: typeof m.agentId === 'string' && m.agentId ? { kind: 'agent', id: m.agentId } : undefined };
     default: {
       // See `dashboardRequest`: unreachable when typed, a mutation when made up.
       const unknown: never = m;

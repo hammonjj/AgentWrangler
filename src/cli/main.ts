@@ -21,6 +21,8 @@ import {
   type ControlSubscribeResult,
   type ControlSessionRef,
   type ControlDelegateResult,
+  type ControlAgentProposeParams,
+  type ControlAgentProposeResult,
   type ControlTaskProposeParams,
   type ControlTaskProposeResult,
   type ControlTasksResult,
@@ -237,6 +239,33 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
     case 'tasks': {
       const r = await client.request<ControlTasksResult>('tasks');
       print(r, () => formatTasks(r.tasks, now), cmd.json);
+      return 0;
+    }
+    case 'remember':
+    case 'forget': {
+      const origin = originOf(process.env);
+      if (!origin) {
+        process.stderr.write(`aw ${cmd.kind}: run this inside a durable agent's conversation. To change an agent's memory yourself, use Agents in the app.\n`);
+        return 2;
+      }
+      const text = cmd.kind === 'remember' ? (cmd.text ?? (await readStdin())) : undefined;
+      if (cmd.kind === 'remember' && !text?.trim()) {
+        process.stderr.write('aw remember: the note is empty.\n');
+        return 2;
+      }
+      const params: ControlAgentProposeParams =
+        cmd.kind === 'remember'
+          ? { origin, op: 'add', text: text!, ...(cmd.memoryKind ? { kind: cmd.memoryKind } : {}) }
+          : { origin, op: 'forget', itemId: cmd.itemId };
+      const r = await client.request<ControlAgentProposeResult>('agent.propose', params);
+      print(
+        r,
+        () =>
+          r.proposalId
+            ? `Proposed to ${safe(r.agent)}'s user. Nothing is stored until they approve it in Agent Wrangler; carry on without waiting.`
+            : `Nothing new: ${safe(r.agent)}'s memory already says that, or the same proposal is waiting.`,
+        cmd.json,
+      );
       return 0;
     }
     case 'web': {

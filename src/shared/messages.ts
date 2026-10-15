@@ -18,7 +18,8 @@ import type { LinkedWork, WaitInfo } from './orchestration/delegatedState';
 import type { MissionOp, MissionsSnapshot } from './orchestration/missionView';
 import type { AnalyticsDetail, AnalyticsRef, AnalyticsSelection, AnalyticsView } from './orchestration/analyticsView';
 import type { UsageState } from './usage';
-import type { DurableAgentInput, DurableAgentView } from './durableAgents';
+import type { AgentMemoryPaneView, DurableAgentInput, DurableAgentView } from './durableAgents';
+import type { MemoryOp } from './agentMemory';
 
 // ---- Dashboard ----
 
@@ -73,7 +74,9 @@ export type HostToDashboard =
       agents?: DurableAgentView[];
     }
   /** A `saveAgent` was carried out (`id`), or refused (`error`, shown in the form). */
-  | { type: 'agentSaved'; requestId: string; id?: string; error?: string }
+  | { type: 'agentSaved'; requestId: string; id?: string; error?: string; cancelled?: boolean }
+  /** An agent memory change, assignment or "make current" was carried out, or refused (`error`, shown in the Agents view). */
+  | { type: 'agentResult'; requestId: string; error?: string }
   /** Bring the Missions view up, scrolled to this mission: one was just created, or its notice was clicked. */
   | { type: 'showMissions'; missionId?: string }
   /** A Missions view action was refused or failed; shown beside the mission, not as a modal. */
@@ -212,7 +215,15 @@ export type DashboardToHost =
   /** Forget an agent. Its sessions stay, unassigned. The host confirms first. */
   | { type: 'deleteAgent'; id: string }
   /** Keep the agent's current conversation in history; its next message starts a new one. */
-  | { type: 'agentNewConversation'; id: string };
+  | { type: 'agentNewConversation'; id: string }
+  /** Pin or archive an agent (#182). */
+  | { type: 'agentFlag'; id: string; flag: 'pinned' | 'archived'; on: boolean }
+  /** Remember, edit, forget, or decide a proposal (#180). Answered with `agentResult`. */
+  | { type: 'agentMemory'; id: string; op: MemoryOp; requestId: string }
+  /** Make an earlier conversation the agent's current one again (#181). Answered with `agentResult`. */
+  | { type: 'agentMakeCurrent'; id: string; key: string; requestId: string }
+  /** The Sessions row menu: give this session to an agent, or (`agentId` absent) take it off its agent (#181). */
+  | { type: 'assignSession'; key: string; agentId?: string; requestId: string };
 
 // ---- Conversation pane ----
 
@@ -249,7 +260,13 @@ export type HostToConversation =
       linked?: LinkedWork[];
       /** What the conversation's own row is waiting for, with source and certainty (§3). */
       wait?: WaitInfo;
+      /** The durable agent this conversation belongs to: its memory and pending proposals (#180). */
+      agentMemory?: AgentMemoryPaneView;
     }
+  /** The agent's memory or proposals changed, or the conversation stopped belonging to one (`memory` absent). */
+  | { type: 'agentMemory'; memory?: AgentMemoryPaneView }
+  /** A memory change from this pane was carried out, or refused (`error`). */
+  | { type: 'agentMemoryResult'; requestId: string; error?: string }
   | { type: 'append'; blocks: ConvBlock[] }
   /** In-place update of one block: a tool's result, a streaming reply, an ask being settled. */
   | { type: 'patch'; id: string; block: Partial<ConvBlock> }
@@ -373,6 +390,8 @@ export type ConversationToHost =
   | { type: 'proposalDecision'; missionId: string; decision: ProposalDecision }
   /** A delegation card's button: approve the plan, plan again, run as one task, open it in Missions, cancel (#82). Only ever sent by a click. */
   | { type: 'delegationAction'; missionId: string; action: DelegationAction }
+  /** The memory strip or a memory proposal card (#180): remember, edit, forget, approve, reject. Only ever sent by a click. */
+  | { type: 'agentMemory'; agentId: string; op: MemoryOp; requestId: string }
   /**
    * A line in the strip's attempts list: show that attempt's conversation in
    * this pane. It is a session key, so it goes through the same path a row

@@ -15,7 +15,14 @@ function rig(notice?: string) {
   const messages: HostToConversation[] = [];
   const draft: AgentSession = { provider: 'claude', sessionId: 'agent:a1', key: 'agent:a1', title: 'PO', subtitle: 'Your first message starts it.', status: 'done', lastActivityAt: 1 };
   const start = vi.fn(async () => {});
-  const agents: AgentConversations = { draft: (id) => (id === 'a1' ? { session: draft, ...(notice ? { notice } : {}) } : undefined), start };
+  const agents: AgentConversations = {
+    draft: (id) => (id === 'a1' ? { session: draft, ...(notice ? { notice } : {}) } : undefined),
+    start,
+    memoryFor: (key) => (key === 'agent:a1' ? { agentId: 'a1', agentName: 'PO', items: [], proposals: [], chars: 0, cap: 4000 } : undefined),
+    memory: vi.fn(() => ({})),
+    resumesOnType: () => false,
+    onDidChange: disposable,
+  };
   type Args = ConstructorParameters<typeof ConversationHost>;
   const host = new ConversationHost(
     { postMessage: async (m) => { messages.push(m as HostToConversation); return true; }, onDidReceiveMessage: (listener) => { receive = listener; return disposable(); } },
@@ -28,7 +35,7 @@ function rig(notice?: string) {
     agents,
   );
   hosts.push(host);
-  return { host, receive: (m: ConversationToHost) => receive(m), messages, start };
+  return { host, receive: (m: ConversationToHost) => receive(m), messages, start, memory: agents.memory as ReturnType<typeof vi.fn> };
 }
 
 describe("a durable agent's empty conversation", () => {
@@ -60,6 +67,21 @@ describe("a durable agent's empty conversation", () => {
       const m = r.messages.find((x) => x.type === 'init');
       expect(m?.type === 'init' && m.blocks.some((b) => b.kind === 'note' && b.tone === 'warn')).toBe(true);
     });
+  });
+
+  it("carries the agent's memory, and a memory change from the pane goes to the agent and is answered (#180)", async () => {
+    const r = rig();
+    r.receive({ type: 'ready' });
+    r.host.show('agent:a1');
+    const init = await vi.waitFor(() => {
+      const m = r.messages.find((x) => x.type === 'init');
+      if (!m || m.type !== 'init') throw new Error('no init yet');
+      return m;
+    });
+    expect(init.agentMemory).toMatchObject({ agentId: 'a1', agentName: 'PO', cap: 4000 });
+    r.receive({ type: 'agentMemory', agentId: 'a1', op: { op: 'remember', kind: 'decision', text: 'Ship v2 in March' }, requestId: 'm1' });
+    await vi.waitFor(() => expect(r.messages.find((m) => m.type === 'agentMemoryResult')).toEqual({ type: 'agentMemoryResult', requestId: 'm1' }));
+    expect(r.memory).toHaveBeenCalledWith('a1', { op: 'remember', kind: 'decision', text: 'Ship v2 in March' });
   });
 
   it('shows nothing for an agent that no longer exists', async () => {
