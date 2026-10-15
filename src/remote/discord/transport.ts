@@ -11,6 +11,8 @@ import { Emitter, type Disposable } from '../../core/events';
 import type { RemoteAsk, RemoteNotice } from '../../shared/remote';
 import type {
   RemoteClose,
+  RemoteCommandInvocation,
+  RemoteCommandSpec,
   RemoteInvocation,
   RemoteMessageRef,
   RemoteTransport,
@@ -44,6 +46,10 @@ const TOKEN_TTL_MS = 15 * 60 * 1000;
 
 /** Interaction callback types. 6 acknowledges without changing the message yet. */
 const DEFERRED_UPDATE_MESSAGE = 6;
+/** 5: "thinking…", answered later by editing the original response (#59). */
+const DEFERRED_CHANNEL_MESSAGE = 5;
+/** Interaction types: 2 is a slash command, 3 a component (a button). */
+const APPLICATION_COMMAND = 2;
 /** Only the presser sees it. */
 const EPHEMERAL = 64;
 
@@ -57,7 +63,14 @@ export class DiscordTransport implements RemoteTransport {
   readonly id = 'discord';
 
   private invokeEmitter = new Emitter<RemoteInvocation>();
+  private commandEmitter = new Emitter<RemoteCommandInvocation>();
   private connectionEmitter = new Emitter<void>();
+  /** The commands to register on each connect (#59). */
+  private commands: RemoteCommandSpec[] = [];
+  /** invocationId -> the token its deferred response is completed with. */
+  private pendingCommands = new Map<string, PendingInteraction>();
+  private registeredFor?: string;
+  commandProblem?: string;
   private subs: Disposable[] = [];
   /** interactionId -> what is needed to answer the presser privately. */
   private pending = new Map<string, PendingInteraction>();
@@ -85,11 +98,67 @@ export class DiscordTransport implements RemoteTransport {
 
     this.subs.push(
       this.gateway.onDispatch((d) => void this.onDispatch(d.t, d.d)),
-      this.gateway.onDidChangeState(() => this.connectionEmitter.fire()),
+      this.gateway.onDidChangeState(() => {
+        if (this.gateway.connected) void this.registerCommands();
+        this.connectionEmitter.fire();
+      }),
     );
   }
 
   readonly onDidInvoke = (l: (i: RemoteInvocation) => void): Disposable => this.invokeEmitter.event(l);
+  readonly onDidCommand = (l: (i: RemoteCommandInvocation) => void): Disposable => this.commandEmitter.event(l);
+
+  setCommands(commands: RemoteCommandSpec[]): void {
+    this.commands = commands;
+    this.registeredFor = undefined;
+    if (this.gateway.connected) void this.registerCommands();
+  }
+
+  /**
+   * Guild-scoped, as a bulk overwrite (#59): the guild's commands become exactly these, so a
+   * removed one disappears. Guild commands update at once; global ones take up to an hour.
+   * A 403 is a bot invited without the `applications.commands` scope, and is said so.
+   */
+  private async registerCommands(): Promise<void> {
+    const appId = this.gateway.applicationId;
+    const { guildId } = this.deps.config();
+    if (!appId || !guildId || this.commands.length === 0) return;
+    const key = `${appId}:${guildId}:${this.commands.map((c) => c.name).join(',')}`;
+    if (key === this.registeredFor) return;
+    try {
+      await this.rest.request(
+        'PUT',
+        `/applications/${appId}/guilds/${guildId}/commands`,
+        this.commands.map((c) => ({ name: c.name, description: c.description.slice(0, 100), type: 1 })),
+        { priority: PRIORITY.update },
+      );
+      this.registeredFor = key;
+      this.commandProblem = undefined;
+      this.log(`registered ${this.commands.length} slash commands`);
+    } catch (err) {
+      this.commandProblem =
+        err instanceof DiscordHttpError && err.isForbidden
+          ? 'Discord refused the slash commands: re-invite the bot with the applications.commands scope (OAuth2 URL generator: bot + applications.commands).'
+          : `Could not register slash commands: ${String(err)}`;
+      this.log(this.commandProblem);
+    }
+  }
+
+  async replyToCommand(invocation: RemoteCommandInvocation, text: string): Promise<void> {
+    const pending = this.pendingCommands.get(invocation.invocationId);
+    this.pendingCommands.delete(invocation.invocationId);
+    if (!pending) return;
+    try {
+      await this.rest.request(
+        'PATCH',
+        `/webhooks/${pending.applicationId}/${pending.token}/messages/@original`,
+        { content: text.slice(0, 1900) },
+        { priority: PRIORITY.reply },
+      );
+    } catch (err) {
+      this.log(`command reply failed: ${String(err)}`);
+    }
+  }
   readonly onDidChangeConnection = (l: () => void): Disposable => this.connectionEmitter.event(l);
 
   get connected(): boolean {
@@ -180,8 +249,10 @@ export class DiscordTransport implements RemoteTransport {
     this.subs = [];
     this.gateway.dispose();
     this.invokeEmitter.dispose();
+    this.commandEmitter.dispose();
     this.connectionEmitter.dispose();
     this.pending.clear();
+    this.pendingCommands.clear();
   }
 
   // ---- internals ----
@@ -211,6 +282,7 @@ export class DiscordTransport implements RemoteTransport {
    */
   private async onDispatch(type: string, data: Record<string, unknown>): Promise<void> {
     if (type !== 'INTERACTION_CREATE') return;
+    if (data.type === APPLICATION_COMMAND) return this.onCommand(data);
 
     // 3 = MESSAGE_COMPONENT, 2 = button. Anything else is not ours.
     const interactionData = data.data as { custom_id?: unknown; component_type?: number } | undefined;
@@ -238,6 +310,44 @@ export class DiscordTransport implements RemoteTransport {
     this.invokeEmitter.fire({
       interactionId: parsed.interactionId,
       choiceId: parsed.choiceId,
+      actor: { id: user.id, displayName: user.global_name ?? user.username ?? user.id },
+      scope: {
+        guildId: typeof data.guild_id === 'string' ? data.guild_id : undefined,
+        channelId: typeof data.channel_id === 'string' ? data.channel_id : undefined,
+      },
+    });
+  }
+
+  /**
+   * A slash command (#59). Deferred at once, privately ("thinking…" only the caller sees),
+   * since three seconds is not enough for every answer; the reply edits that response.
+   */
+  private async onCommand(data: Record<string, unknown>): Promise<void> {
+    const name = (data.data as { name?: unknown } | undefined)?.name;
+    const id = String(data.id ?? '');
+    const token = String(data.token ?? '');
+    const applicationId = String(data.application_id ?? '');
+    if (typeof name !== 'string' || !id || !token) return;
+    try {
+      await this.rest.request(
+        'POST',
+        `/interactions/${id}/${token}/callback`,
+        { type: DEFERRED_CHANNEL_MESSAGE, data: { flags: EPHEMERAL } },
+        { priority: PRIORITY.close },
+      );
+    } catch (err) {
+      this.log(`command ack failed: ${String(err)}`);
+      return;
+    }
+    this.pendingCommands.set(id, { token, applicationId, receivedAtMs: this.now() });
+    const cutoff = this.now() - TOKEN_TTL_MS;
+    for (const [k, v] of this.pendingCommands) if (v.receivedAtMs < cutoff) this.pendingCommands.delete(k);
+    const member = data.member as { user?: { id?: string; username?: string; global_name?: string } } | undefined;
+    const user = member?.user ?? (data.user as { id?: string; username?: string; global_name?: string } | undefined);
+    if (!user?.id) return;
+    this.commandEmitter.fire({
+      invocationId: id,
+      name,
       actor: { id: user.id, displayName: user.global_name ?? user.username ?? user.id },
       scope: {
         guildId: typeof data.guild_id === 'string' ? data.guild_id : undefined,

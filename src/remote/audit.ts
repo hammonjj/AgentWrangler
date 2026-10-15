@@ -32,7 +32,9 @@ export type AuditEvent =
   | 'refused-unknown'
   | 'applied'
   | 'apply-failed'
-  | 'closed';
+  | 'closed'
+  /** A remote command ran (#59). `detail` is the command's name; never its reply. */
+  | 'command';
 
 export interface AuditRecord {
   event: AuditEvent;
