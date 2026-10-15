@@ -3068,3 +3068,10 @@ body:has(#app.touch) .projmenu .pmbrowse {
   width: 20px;
   height: 20px;
 }
+#app .jobs .jb-days {
+  min-width: 0;
+}
+/* Stacked, a row's fields take their own height, not their wide-layout basis. */
+#app.narrow :is(.agents, .jobs) .ag-row .ag-field {
+  flex: 0 0 auto;
+}
