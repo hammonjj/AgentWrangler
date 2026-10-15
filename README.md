@@ -284,7 +284,7 @@ including streaming replies, interruption, and approval decisions.
 ## Behavior
 
 - **One page, two panes, a divider you move.** The agent table and the conversation share one page, because they are never used apart. Drag the divider to give either side more room, double-click it to go back to the default, or focus it and use the arrow keys (Shift for a bigger step). The position is remembered per browser.
-  - **The page's bar** links the routes: *Agents* (durable agents, `#/agents`), *Sessions* (the session table, `#/sessions`; the bare `#/` still opens it), *Missions*, *Analytics* and *Preferences*, each its own URL (`#/missions`, `#/preferences`; a conversation is `#/c/<key>`), so the browser's Back button and bookmarks work.
+  - **The page's bar** links the routes: *Agents* (durable agents, `#/agents`), *Sessions* (the session table, `#/sessions`; the bare `#/` still opens it), *Jobs* (scheduled jobs, `#/jobs`), *Missions*, *Analytics* and *Preferences*, each its own URL (`#/missions`, `#/preferences`; a conversation is `#/c/<key>`), so the browser's Back button and bookmarks work.
   - **Agents** (#179) are roles you come back to: a name, a role, a scope (Global or one project), the harness, optional model and effort, and instructions of their own. An agent runs nothing. Select it and its conversation opens beside the list. With a conversation to continue, typing resumes it, Claude or Codex. With none, the pane is empty and the first message starts a session from the agent's settings. If the last conversation cannot be found, the pane says so rather than opening a different one. *New conversation* keeps the current one in the agent's history and lets the next message start afresh. The agent's instructions, and optionally a file in its project (`docs/agents/po.md`, read afresh each time), are appended to the session's system prompt at launch and at every resume. They describe a role, grant no permissions, and defer to the repository's own instructions. No Claude Code or Codex file is written. Every field stays editable; changing the harness or folder asks first, since the current conversation cannot follow. *Pin* lists an agent first; *Archive* hides it until *Show archived*. Agents are kept in the app's `state.json`. Decisions and limits: `docs/plans/durable-agents.md`.
     - **Memory** (#180) is the "where we left off" record an agent carries into every conversation: decisions, preferences, open questions and current work, at most 4,000 characters. Edit or forget items under *Memory* on the agent's card, or in the strip under the conversation's header. The agent can suggest a note with `aw remember` (or a removal with `aw forget`); it shows as a card to *Approve* or *Reject*, and nothing is stored until you approve.
     - **History and Sessions** (#181). *History* on the card lists earlier conversations to open, or *Make current* again. In *Sessions*, a row's chip names its agent (dashed for an earlier conversation), and the row menu can *Assign to* an agent or *Unassign*. Sessions started anywhere else stay unassigned.
@@ -411,6 +411,32 @@ nothing, not zeroes.
   | Time to first token | reported | not reported |
 
   Codex's per-thread usage estimate (`account/usage/read`) is not used yet: it is unverified.
+
+## Scheduled jobs (#164)
+
+A job starts a conversation at a set time without a click: weekdays and a time of day on the
+Mac's clock, a folder, a harness, model and effort, a prompt, and (Claude) a permission mode and
+an allowed-tools list. Create and manage jobs in the workbench's *Jobs* view (`#/jobs`). The plan
+is `docs/plans/scheduled-agents.md`.
+
+- **Off by default.** A new job does nothing until you turn it on. *Run now* starts one run
+  whether it is on or not.
+- **A normal session.** The core daemon launches it the way *New conversation* does, as itself on
+  your behalf (`session.start`, audited). It shows in Sessions, nothing is focused and nothing
+  restarts. The permission mode is never `bypassPermissions` (default `auto`). Tools on the
+  allowed list run without asking. Anything else waits in *Waiting* and reaches you through the
+  usual notifications. Nothing is ever approved for you.
+- **Sleep and missed runs.** The daemon decides each job's latest slot once a minute, on start
+  and on wake. A slot that passed while the Mac slept runs once inside the job's catch-up
+  window (default 4 h) and is recorded as *late*. Outside the window it is recorded as *missed*.
+  A slot never runs twice.
+- **Admission.** No run starts while the fleet is paused or while a usage window for the job's
+  provider is at its limit (by default the auto-pause percent). The slot is recorded as
+  *skipped* with the reason, and it is tried again while its catch-up window is open.
+- **History.** Each job keeps its last 50 runs: ran, late, skipped, missed or failed, with the
+  reason and the session it started.
+
+Jobs are stored in Agent Wrangler's own state (`state.json`), never in a project.
 
 ## Tasks (experimental)
 
