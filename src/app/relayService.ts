@@ -304,7 +304,9 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
       const id = url.searchParams.get('d') ?? '';
       const key = devices.relayKeyOf(id);
       if (!key) return html(404, pairMessagePage('No such device', 'Press “Pair a device…” in Preferences again.'));
-      const link = relayPairingLink(settings().site, id, key);
+      const s = settings();
+      if (!s.url || !s.anonKey) return html(400, pairMessagePage('Not set up', 'Set the Supabase project URL and anon key in Preferences first.'));
+      const link = relayPairingLink(s.site, id, key, { url: s.url, anonKey: s.anonKey });
       const svg = qrToSvg(encodeQr(link, 'M'), { title: 'Remote control pairing code' });
       html(
         200,

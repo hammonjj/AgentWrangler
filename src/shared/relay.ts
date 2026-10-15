@@ -340,14 +340,33 @@ export class RelayCodec {
   }
 }
 
-/** The link a device is paired with: the loader's origin, the device id and its key in the fragment. */
-export function relayPairingLink(origin: string, deviceId: string, key: string): string {
-  return `${origin.replace(/\/+$/, '')}/#pair=${encodeURIComponent(deviceId)}.${key}`;
+/** Which Supabase project a device talks through. Both public values; the link carries them so the site needs no configuration. */
+export interface RelayProject {
+  url: string;
+  anonKey: string;
 }
 
-/** The device id and key from a pairing fragment (`#pair=<id>.<key>`), or undefined. */
-export function parsePairingFragment(hash: string): { deviceId: string; key: string } | undefined {
-  const m = /^#?pair=([^.]{1,64})\.([A-Za-z0-9_-]{43})$/.exec(hash);
-  if (!m) return undefined;
-  return { deviceId: decodeURIComponent(m[1]), key: m[2] };
+export interface RelayPairing {
+  deviceId: string;
+  key: string;
+  project: RelayProject;
+}
+
+/**
+ * The link a device is paired with: the loader's origin, then in the fragment (which a browser
+ * never sends to the site) the device id, its key, and the project.
+ */
+export function relayPairingLink(origin: string, deviceId: string, key: string, project: RelayProject): string {
+  const p = new URLSearchParams({ pair: `${deviceId}.${key}`, u: project.url, a: project.anonKey });
+  return `${origin.replace(/\/+$/, '')}/#${p.toString()}`;
+}
+
+/** What a pairing fragment holds, or undefined when it is not one. */
+export function parsePairingFragment(hash: string): RelayPairing | undefined {
+  const p = new URLSearchParams(hash.replace(/^#/, ''));
+  const m = /^([^.]{1,64})\.([A-Za-z0-9_-]{43})$/.exec(p.get('pair') ?? '');
+  const url = p.get('u') ?? '';
+  const anonKey = p.get('a') ?? '';
+  if (!m || !/^https?:\/\/[^\s/]+$/.test(url) || !/^[A-Za-z0-9._-]{20,1024}$/.test(anonKey)) return undefined;
+  return { deviceId: m[1], key: m[2], project: { url, anonKey } };
 }

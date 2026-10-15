@@ -122,7 +122,27 @@ const web = {
   plugins: [watchLogger],
 };
 
-const configs = [web, sessionHost, coreDaemon, cli, launcher];
+/**
+ * The remote-control loader (#175): the static site Netlify serves, `dist/relay-site/`.
+ * One bundle (with supabase-js) plus the files in `static/`. It holds no workbench code:
+ * the Mac sends that over the relay.
+ */
+const relaySite = {
+  entryPoints: { loader: 'src/webview/relayLoader/main.ts' },
+  bundle: true,
+  format: 'iife',
+  platform: 'browser',
+  target: 'es2022',
+  outdir: 'dist/relay-site',
+  sourcemap: false,
+  minify: true,
+  plugins: [watchLogger],
+};
+
+const configs = [web, relaySite, sessionHost, coreDaemon, cli, launcher];
+
+rmSync('dist/relay-site', { recursive: true, force: true });
+cpSync('src/webview/relayLoader/static', 'dist/relay-site', { recursive: true });
 
 /**
  * Qualification stage 2's scratch-repo fixtures (plan §19.6), which the core

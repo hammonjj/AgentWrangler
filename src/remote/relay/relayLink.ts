@@ -129,8 +129,13 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
     if (seen.has(req.t) || tabs.has(req.t)) return log('relay: refused a repeated connect');
     if (!(await openConnect(key, req, uid, at))) return log(`relay: refused a connect that did not authenticate (device ${req.d.slice(0, 8)})`);
     seen.set(req.t, at);
-    if ([...tabs.values()].filter((t) => t.deviceId === req.d).length >= maxTabs) {
-      return log(`relay: device ${req.d.slice(0, 8)} has ${maxTabs} tabs open already`);
+    // A device at its cap opens a new tab by closing its oldest: a phone that reloaded or lost
+    // its network cannot always say goodbye, and its old tab would otherwise hold a place until
+    // the next missed ping.
+    const theirs = [...tabs.values()].filter((t) => t.deviceId === req.d);
+    if (theirs.length >= maxTabs) {
+      log(`relay: device ${req.d.slice(0, 8)} has ${maxTabs} tabs open; closing its oldest`);
+      theirs[0].socket.close(1001, 'replaced');
     }
 
     const topic = connectionTopic(uid, req.t);

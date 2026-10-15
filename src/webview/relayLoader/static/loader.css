@@ -1,0 +1,8 @@
+:root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+body { margin: 0; padding: max(24px, env(safe-area-inset-top)) 16px 24px; display: flex; justify-content: center; background: Canvas; color: CanvasText; }
+#loader { width: 100%; max-width: 420px; }
+#loader h1 { font-size: 1.4rem; margin: 0 0 12px; }
+#loader p { line-height: 1.45; margin: 0 0 12px; }
+#loader button { display: block; width: 100%; font: inherit; font-size: 1.05rem; font-weight: 600; padding: 12px; margin: 8px 0; border-radius: 8px; border: 0; }
+#loader button.primary { background: #2f6fde; color: #fff; }
+#loader button.quiet { background: transparent; color: inherit; border: 1px solid #8886; font-weight: 500; }
