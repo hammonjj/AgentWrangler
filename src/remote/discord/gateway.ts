@@ -109,6 +109,8 @@ export class DiscordGateway implements Disposable {
   private conn?: Connection;
   private sequence: number | null = null;
   private sessionId?: string;
+  /** The bot's application id, from READY: what its slash commands are registered under (#59). */
+  applicationId?: string;
   private resumeUrl?: string;
   private attempt = 0;
   private wantOpen = false;
@@ -293,8 +295,10 @@ export class DiscordGateway implements Disposable {
         const t = payload.t;
         if (typeof t !== 'string') return;
         if (t === 'READY') {
-          const d = payload.d as { session_id?: string; resume_gateway_url?: string; user?: { username?: string } };
+          const d = payload.d as { session_id?: string; resume_gateway_url?: string; user?: { username?: string }; application?: { id?: string } };
           this.sessionId = d?.session_id;
+          // Slash commands (#59) are registered under the application, which READY names.
+          if (typeof d?.application?.id === 'string') this.applicationId = d.application.id;
           this.resumeUrl = d?.resume_gateway_url;
           this.attempt = 0; // a good connection resets the backoff
           this.log(`gateway ready as ${d?.user?.username ?? 'unknown'}`);

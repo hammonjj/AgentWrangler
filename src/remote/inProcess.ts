@@ -25,6 +25,7 @@ import type { RemoteNotice } from '../shared/remote';
 import type { SessionActions } from '../ui/actions';
 import { guardSessionActions } from '../ui/guardedActions';
 import type { AuditLog } from './audit';
+import { createCommandRegistry, type CommandCapabilities } from './commands';
 import { RemoteConnector } from './connector';
 import { DISCORD_BOT_TOKEN_KEY } from './paths';
 import type { RemoteConfig } from './service';
@@ -47,6 +48,8 @@ export interface InProcessRemoteOptions {
   makeTransport?: (token: string, cfg: RemoteConfig) => RemoteTransport;
   mirrorFile?: string;
   audit?: AuditLog;
+  /** What remote commands may read and change (#59). Absent: none are offered. */
+  commands?: CommandCapabilities;
 }
 
 export interface InProcessRemoteControl {
@@ -57,7 +60,7 @@ export interface InProcessRemoteControl {
   notify(notice: RemoteNotice): Promise<void>;
   /** The machine woke. */
   wake(): void;
-  status(): { pid: number; hasToken: boolean; connected: boolean; mirrored: number };
+  status(): { pid: number; hasToken: boolean; connected: boolean; mirrored: number; commandProblem?: string };
   whenIdle(): Promise<void>;
   /** Hang up, leaving open cards in the mirror map for the next connector. */
   dispose(): Promise<void>;
@@ -82,6 +85,7 @@ export function createInProcessRemoteControl(opts: InProcessRemoteOptions): InPr
     makeTransport: opts.makeTransport,
     mirrorFile: opts.mirrorFile,
     audit: opts.audit,
+    ...(opts.commands ? { commands: createCommandRegistry(opts.commands) } : {}),
   });
 
   let syncing: Promise<void> = Promise.resolve();
@@ -108,7 +112,13 @@ export function createInProcessRemoteControl(opts: InProcessRemoteOptions): InPr
     reconcile: () => connector.reconcile(),
     notify: (notice) => connector.notify(notice),
     wake: () => connector.wake(),
-    status: () => ({ pid: process.pid, hasToken: connector.hasToken, connected: connector.connected, mirrored: connector.mirroredCount }),
+    status: () => ({
+      pid: process.pid,
+      hasToken: connector.hasToken,
+      connected: connector.connected,
+      mirrored: connector.mirroredCount,
+      ...(connector.commandProblem ? { commandProblem: connector.commandProblem } : {}),
+    }),
     async whenIdle() {
       await syncing;
       await connector.whenIdle();
