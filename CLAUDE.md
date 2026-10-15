@@ -136,7 +136,12 @@ Status options: In Progress `d486ef89` · Blocked `4303ea8c` · Done `0bacc5d9`
   host-local actions happen on the Mac. A path a browser sends is never a host path because it
   sent it (`src/core/web/pathAllowlist.ts`); "Open on this Mac" is for a loopback browser only.
   The workbench listens on `127.0.0.1` by default and on the LAN only when `web.lan.enabled` is
-  on, over TLS with paired devices: never add a listener, a relay or anything public.
+  on, over TLS with paired devices. Never add another listener or anything public. The one
+  relay allowed is the remote-control link (#112, `docs/plans/remote-control-supabase.md`):
+  outbound only, off by default, to James's own Supabase project, with every payload
+  end-to-end encrypted to a paired device so Supabase sees ciphertext only. Do not widen
+  it (no clear-text payloads, no second relay, no inbound port), and keep its threat model
+  in that plan current.
 - **One approval path.** Permission, question and plan answers from every client (browser,
   Discord, `aw`) go through `src/app/approvals.ts`, and every mutating action through
   `authorize()` (`src/core/access.ts`). No client-specific shortcut.
