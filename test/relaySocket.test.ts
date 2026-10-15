@@ -53,8 +53,9 @@ describe('a relay tab in browserConnections', () => {
     await tick();
     expect(t.received).toHaveLength(1);
     expect(t.sent.some((i) => i.k === 'data' && i.line.includes('"ack"') && i.line.includes('c1'))).toBe(true);
-    // Attribution, not authority: the owner, through a browser, from this device.
-    expect(t.contexts[0]).toMatchObject({ via: 'browser', deviceId: 'dev1' });
+    // Attribution, not authority: the owner, through a browser, from this device. The scope
+    // reaches the pane hosts, which is what lets pairing refuse a remote tab.
+    expect(t.contexts[0]).toMatchObject({ via: 'browser', deviceId: 'dev1', deviceScope: 'relay' });
     t.conns.dispose();
   });
 

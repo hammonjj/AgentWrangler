@@ -182,7 +182,13 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
     // First on the wire, before the panes can post anything.
     sendNow({ pane: SHELL_PANE, body: { type: 'hello', protocol: WIRE_PROTOCOL, build: opts.build() } satisfies HostToShell });
 
-    const context = ownerContext('browser', { deviceId: device.deviceId, connectionId });
+    // `deviceScope` rides along so the pane hosts' actions know where this tab is: pairing a
+    // remote device (#174) is refused to anything but a loopback tab.
+    const context = ownerContext('browser', {
+      deviceId: device.deviceId,
+      connectionId,
+      ...(device.deviceScope ? { deviceScope: device.deviceScope } : {}),
+    });
     let panes: BrowserPanes | undefined = opts.createPanes(transport, context);
     const shell = createShellChannel({
       connectionId,
