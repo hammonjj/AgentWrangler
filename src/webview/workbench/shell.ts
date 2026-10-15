@@ -207,6 +207,7 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
   const links = {
     agents: link({ kind: 'agents' }, 'Agents'),
     sessions: link({ kind: 'sessions' }, 'Sessions'),
+    jobs: link({ kind: 'jobs' }, 'Jobs'),
     missions: link({ kind: 'missions' }, 'Missions'),
     analytics: link({ kind: 'analytics' }, 'Analytics'),
     preferences: link({ kind: 'preferences' }, 'Preferences'),
@@ -300,7 +301,7 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     links.missions.hidden = settled && !hasMissions;
     // A conversation has no link of its own: it belongs to the view that opened it.
     const current =
-      route.kind === 'pair' ? 'preferences' : route.kind === 'conversation' ? (state.tableView === 'agents' ? 'agents' : state.tableView === 'missions' ? 'missions' : 'sessions') : route.kind;
+      route.kind === 'pair' ? 'preferences' : route.kind === 'conversation' ? (state.tableView === 'agents' || state.tableView === 'jobs' || state.tableView === 'missions' ? state.tableView : 'sessions') : route.kind;
     for (const [kind, a] of Object.entries(links)) {
       if (kind === current) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');

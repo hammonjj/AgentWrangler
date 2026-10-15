@@ -1974,7 +1974,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     log: (line) => log(line),
   });
   host.subscribe({ dispose: () => scheduledJobs.dispose() });
-  const jobDirectory = createJobDirectory(jobStore, scheduledJobs);
+  const jobDirectory = createJobDirectory(jobStore, scheduledJobs, dialogs);
 
   /**
    * "Run as task" (#33): the launcher's Tasks button. A quick pick, not a

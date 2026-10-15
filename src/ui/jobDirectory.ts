@@ -11,7 +11,8 @@ export interface JobDirectory {
   /** Create (no `id`) or edit. */
   save(id: string | undefined, input: unknown): { id: string } | { error: string };
   setEnabled(id: string, on: boolean): { error?: string };
-  remove(id: string): { error?: string };
+  /** Confirm, then delete the job and its history. Sessions it started stay. */
+  remove(id: string): Promise<void>;
   /** Start a run now, enabled or not. Admission (pause, usage) still applies. */
   runNow(id: string): Promise<{ runId: string } | { error: string }>;
   onDidChange(listener: () => void): Disposable;

@@ -19,6 +19,8 @@ export type AppRoute =
   /** Runtime sessions: the fleet console. Was called Agents before #179; `#/` still lands here. */
   | { kind: 'sessions' }
   | { kind: 'missions' }
+  /** Scheduled jobs (#166): work the daemon starts at a set time. */
+  | { kind: 'jobs' }
   | { kind: 'analytics' }
   /** No key: whatever the conversation pane is showing (an analytics detail has none). */
   | { kind: 'conversation'; key?: string }
@@ -32,16 +34,16 @@ export type AppRoute =
 export type RouteKind = AppRoute['kind'];
 
 /** The routes the table pane draws: Agents, its session views, Missions and Analytics. */
-export type TableRoute = Extract<AppRoute, { kind: 'agents' | 'sessions' | 'missions' | 'analytics' }>;
+export type TableRoute = Extract<AppRoute, { kind: 'agents' | 'sessions' | 'jobs' | 'missions' | 'analytics' }>;
 
 /**
  * The table's views as the shell names them. `sessions` is Status or Project,
  * whichever the table last used: the URL does not care how rows are grouped.
  */
-export type TableRouteView = 'agents' | 'sessions' | 'missions' | 'analytics';
+export type TableRouteView = 'agents' | 'sessions' | 'jobs' | 'missions' | 'analytics';
 
 /** The dashboard's own view names (`TableView` in `dashboard/main.ts`). */
-export type DashboardTableView = 'agents' | 'status' | 'project' | 'missions' | 'analytics';
+export type DashboardTableView = 'agents' | 'status' | 'project' | 'jobs' | 'missions' | 'analytics';
 
 export function parseRoute(hash: string): AppRoute {
   const path = hash.replace(/^#/, '').replace(/^\/+/, '').replace(/\/+$/, '');
@@ -54,6 +56,8 @@ export function parseRoute(hash: string): AppRoute {
       return { kind: 'sessions' };
     case 'agents':
       return { kind: 'agents' };
+    case 'jobs':
+      return { kind: 'jobs' };
     case 'missions':
       return { kind: 'missions' };
     case 'analytics':
@@ -100,6 +104,8 @@ export function routeTitle(route: AppRoute): string {
       return 'Agents';
     case 'sessions':
       return 'Sessions';
+    case 'jobs':
+      return 'Jobs';
     case 'missions':
       return 'Missions';
     case 'analytics':
@@ -116,7 +122,7 @@ export function routeTitle(route: AppRoute): string {
 }
 
 export function isTableRoute(route: AppRoute): route is TableRoute {
-  return route.kind === 'agents' || route.kind === 'sessions' || route.kind === 'missions' || route.kind === 'analytics';
+  return route.kind === 'agents' || route.kind === 'sessions' || route.kind === 'jobs' || route.kind === 'missions' || route.kind === 'analytics';
 }
 
 export function tableViewOf(route: TableRoute): TableRouteView {
@@ -124,12 +130,12 @@ export function tableViewOf(route: TableRoute): TableRouteView {
 }
 
 export function routeOfTableView(view: TableRouteView | DashboardTableView): TableRoute {
-  if (view === 'agents' || view === 'missions' || view === 'analytics') return { kind: view };
+  if (view === 'agents' || view === 'jobs' || view === 'missions' || view === 'analytics') return { kind: view };
   return { kind: 'sessions' };
 }
 
 export function shellTableView(view: DashboardTableView): TableRouteView {
-  return view === 'agents' || view === 'missions' || view === 'analytics' ? view : 'sessions';
+  return view === 'agents' || view === 'jobs' || view === 'missions' || view === 'analytics' ? view : 'sessions';
 }
 
 // ---- layout ----

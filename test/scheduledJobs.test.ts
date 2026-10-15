@@ -255,7 +255,7 @@ describe('the scheduler', () => {
       setTimeout: (fn) => timers.push(fn),
       clearTimeout: () => {},
     });
-    const directory = createJobDirectory(store, jobs);
+    const directory = createJobDirectory(store, jobs, { warn: async () => 'Delete' });
     return { store, jobs, directory, launches, sent, notices, timers, setClock: (t: number) => (clock = t) };
   }
 
@@ -381,5 +381,26 @@ describe('the scheduler', () => {
     expect(h.directory.save(undefined, INPUT)).toEqual({ id: 'j1' });
     expect(h.directory.save('nope', INPUT)).toEqual({ error: 'That job no longer exists.' });
     expect(h.directory.views()[0]).toMatchObject({ id: 'j1', enabled: false, scheduleText: 'Weekdays at 07:30', starting: false });
+  });
+});
+
+describe('the Jobs view', () => {
+  it('sends what the form holds in the shape the host checks', async () => {
+    const { blankJobForm, jobFormInput, jobFormFor } = await import('../src/webview/dashboard/jobs');
+    const form = { ...blankJobForm('/Users/test/proj'), name: 'Sweep', prompt: 'Go.', allowedTools: ' Read \n\n Bash(gh pr view:*) ', maxWindowPercent: '80' };
+    const input = jobFormInput(form);
+    expect(sanitizeJobInput(input)).toEqual({ value: expect.objectContaining({ name: 'Sweep', folder: '/Users/test/proj', allowedTools: ['Read', 'Bash(gh pr view:*)'], maxWindowPercent: 80, catchUpHours: 4 }) });
+    const job = createJob('j1', (sanitizeJobInput(input) as { value: JobInput }).value, 0);
+    expect(jobFormInput(jobFormFor({ ...job, scheduleText: '', starting: false }))).toEqual(input);
+  });
+
+  it('escapes what it draws and says a new job is off', async () => {
+    const { jobsHtml, newJobsUiState } = await import('../src/webview/dashboard/jobs');
+    const job = createJob('j1', { ...INPUT, name: '<b>x</b>' }, 0);
+    const html = jobsHtml([{ ...job, scheduleText: 'Weekdays at 07:30', starting: false }], newJobsUiState(), [], 0);
+    expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
+    expect(html).not.toContain('<b>x</b>');
+    expect(html).toContain('Turn on');
+    expect(html).not.toMatch(/style=/);
   });
 });

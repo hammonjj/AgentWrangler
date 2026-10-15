@@ -21,7 +21,7 @@ import type { Disposable } from '../core/events';
 import type { LaunchDefaults } from '../core/launchDefaults';
 import type { ScheduledJobStore } from '../core/scheduledJobStore';
 import type { SessionExecutors } from '../core/session/sessionExecutors';
-import type { HostNotice } from '../host/hostServices';
+import type { HostDialogs, HostNotice } from '../host/hostServices';
 import { admissionRefusal, decideSlot, jobOrigin, jobView, sanitizeJobInput, type AdmissionState, type JobRun, type JobView, type ScheduledJob } from '../shared/scheduledJobs';
 import type { JobDirectory } from '../ui/jobDirectory';
 
@@ -209,7 +209,7 @@ function defaultIsDirectory(dir: string): boolean {
 }
 
 /** The Jobs view's handle on the store and the scheduler (`ui/jobDirectory.ts`). */
-export function createJobDirectory(store: ScheduledJobStore, jobs: ScheduledJobs): JobDirectory {
+export function createJobDirectory(store: ScheduledJobStore, jobs: ScheduledJobs, confirm: Pick<HostDialogs, 'warn'>): JobDirectory {
   return {
     views: () => jobs.views(),
     save(id, input) {
@@ -222,8 +222,11 @@ export function createJobDirectory(store: ScheduledJobStore, jobs: ScheduledJobs
     setEnabled(id, on) {
       return store.setEnabled(id, on) ? {} : { error: 'That job no longer exists.' };
     },
-    remove(id) {
-      return store.remove(id) ? {} : { error: 'That job no longer exists.' };
+    async remove(id) {
+      const job = store.get(id);
+      if (!job) return;
+      const choice = await confirm.warn(`Delete the job "${job.name}"?`, { modal: true, detail: 'Its schedule and run history are forgotten. Sessions it started stay in Sessions.' }, 'Delete');
+      if (choice === 'Delete') store.remove(id);
     },
     runNow: (id) => jobs.runNow(id),
     onDidChange: (listener) => store.onDidChange(listener),

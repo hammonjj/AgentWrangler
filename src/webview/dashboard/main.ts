@@ -32,6 +32,8 @@ import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, pendingKey
 const PENDING_MAX_AGE_MS = 10 * 60_000;
 import { analyticsClickRef, analyticsDecision, analyticsFilterChange, analyticsHtml } from './analytics';
 import { agentsHtml, blankForm, formFor, formInput, newAgentsUiState, readForm, readMemoryForm } from './agents';
+import { createJobsController } from './jobs';
+import type { JobView } from '../../shared/scheduledJobs';
 import { assignableAgents, type DurableAgentView } from '../../shared/durableAgents';
 import type { MemoryOp } from '../../shared/agentMemory';
 import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestration/analyticsView';
@@ -76,7 +78,7 @@ import {
 } from '../../shared/usage';
 
 /** The table pane's views: durable agents (#179), status sections, project sections, missions (#43) and analytics (#49). */
-type TableView = 'agents' | 'status' | 'project' | 'missions' | 'analytics';
+type TableView = 'agents' | 'status' | 'project' | 'jobs' | 'missions' | 'analytics';
 
 interface WebviewState {
   collapsed?: string[];
@@ -191,6 +193,24 @@ let agentViews: DurableAgentView[] | undefined;
 const agentsUi = newAgentsUiState();
 /** A snapshot arrived while the agent form had focus; draw once it lets go. */
 let agentRenderDeferred = false;
+/** The Jobs view (#166): the host's list, and the view's own state. */
+let jobViews: JobView[] | undefined;
+const jobsView = createJobsController(app, (m) => post(m), () => renderJobs(true));
+/** A snapshot arrived while the job form had focus; draw once it lets go. */
+let jobRenderDeferred = false;
+
+/** Draw the Jobs view. A snapshot (`force` false) waits while a form field has focus. */
+function renderJobs(force: boolean): void {
+  if (tableView !== 'jobs') return;
+  if (!force && jobsView.typing()) {
+    jobRenderDeferred = true;
+    return;
+  }
+  jobRenderDeferred = false;
+  menuPosition = undefined;
+  rowMenu = undefined;
+  paint(`${bannerHtml()}${jobsView.html(jobViews, projects)}`);
+}
 
 function queryAnalytics(): void {
   post({ type: 'analyticsQuery', selection: analyticsSel });
@@ -1561,6 +1581,10 @@ function render(): void {
     paint(`${bannerHtml()}${agentsHtml(agentViews, agentsUi, projects, Date.now())}`);
     return;
   }
+  if (tableView === 'jobs') {
+    renderJobs(false);
+    return;
+  }
   if (tableView === 'analytics') {
     // A filter's dropdown is open: repainting would close it under the pointer.
     if (document.activeElement instanceof HTMLSelectElement && document.activeElement.closest('.analytics')) return;
@@ -1701,8 +1725,13 @@ vscodeApi.onMessage((body) => {
     render();
     return;
   }
+  if (m.type === 'jobResult') {
+    jobsView.result(m);
+    return;
+  }
   if (m.type === 'snapshot') {
     agentViews = m.agents;
+    jobViews = m.jobs;
     hostSessions = m.sessions;
     dismissals.settle(hostSessions);
     sessions = dismissals.apply(hostSessions);
@@ -1961,6 +1990,8 @@ app.addEventListener('click', (e) => {
     render();
     return;
   }
+
+  if (tableView === 'jobs' && jobsView.click(target, jobViews, currentProject())) return;
 
   if (tableView === 'agents' && target.closest('.agents')) {
     const button = target.closest<HTMLElement>('[data-ag]');
@@ -2371,6 +2402,7 @@ function agentRequestId(): string {
 // The agent form (#179): Save is a submit, so Return in a field saves too.
 // A memory box (#180) is a form of its own: Return remembers, or saves the edit.
 app.addEventListener('submit', (event) => {
+  if (jobsView.submit(event)) return;
   const memForm = (event.target as HTMLElement | null)?.closest<HTMLFormElement>('.agents form[data-mem-form]');
   if (memForm) {
     event.preventDefault();
@@ -2419,6 +2451,16 @@ const keepAgentDrafts = (event: Event) => {
 };
 app.addEventListener('input', keepAgentDrafts);
 app.addEventListener('change', keepAgentDrafts);
+app.addEventListener('input', (event) => jobsView.input(event));
+app.addEventListener('change', (event) => jobsView.input(event));
+
+// The snapshot held back while a job field had focus is drawn once focus leaves the form.
+app.addEventListener('focusout', () => {
+  if (!jobRenderDeferred) return;
+  setTimeout(() => {
+    if (!jobsView.typing()) renderJobs(false);
+  }, 0);
+});
 
 // The snapshot held back while a field had focus is drawn once focus leaves the form.
 app.addEventListener('focusout', () => {

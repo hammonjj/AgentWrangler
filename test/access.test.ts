@@ -148,6 +148,10 @@ const DASHBOARD: Samples<DashboardToHost> = {
     { type: 'assignSession', key: KEY, agentId: 'a1', requestId: 'r1' },
     { type: 'assignSession', key: KEY, requestId: 'r2' },
   ],
+  saveJob: [{ type: 'saveJob', job: { name: 'J', schedule: { weekdays: [1], time: '07:30' }, provider: 'claude', folder: '/Users/test/proj', prompt: 'p' }, requestId: 'r1' }],
+  jobEnable: [{ type: 'jobEnable', id: 'j1', on: true, requestId: 'r1' }],
+  deleteJob: [{ type: 'deleteJob', id: 'j1' }],
+  runJob: [{ type: 'runJob', id: 'j1', requestId: 'r1' }],
 };
 
 const CONVERSATION: Samples<ConversationToHost> = {
@@ -313,6 +317,9 @@ describe('DashboardHost: every message is authorised before it acts', () => {
         agentMemory: { type: 'agentResult', requestId: 'r1', error: 'Not permitted.' },
         agentMakeCurrent: { type: 'agentResult', requestId: 'r1', error: 'Not permitted.' },
         assignSession: { type: 'agentResult', requestId: (m as { requestId?: string }).requestId, error: 'Not permitted.' },
+        saveJob: { type: 'jobResult', requestId: 'r1', error: 'Not permitted.' },
+        jobEnable: { type: 'jobResult', requestId: 'r1', error: 'Not permitted.' },
+        runJob: { type: 'jobResult', requestId: 'r1', error: 'Not permitted.' },
       };
       expect(rig.webview.posted).toEqual(answers[m.type] ? [answers[m.type]] : []);
       expect(rig.acc.audit).toHaveLength(1);

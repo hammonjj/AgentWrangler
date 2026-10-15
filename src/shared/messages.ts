@@ -20,6 +20,7 @@ import type { AnalyticsDetail, AnalyticsRef, AnalyticsSelection, AnalyticsView }
 import type { UsageState } from './usage';
 import type { AgentMemoryPaneView, DurableAgentInput, DurableAgentView } from './durableAgents';
 import type { MemoryOp } from './agentMemory';
+import type { JobInput, JobView } from './scheduledJobs';
 
 // ---- Dashboard ----
 
@@ -72,7 +73,11 @@ export type HostToDashboard =
       missions?: MissionsSnapshot;
       /** The Agents view (#179): every durable agent, most recently used first. */
       agents?: DurableAgentView[];
+      /** The Jobs view (#166): every scheduled job, with its run history. */
+      jobs?: JobView[];
     }
+  /** A Jobs view request was carried out, or refused (`error`, shown in the view). `id` is the saved job. */
+  | { type: 'jobResult'; requestId: string; id?: string; error?: string }
   /** A `saveAgent` was carried out (`id`), or refused (`error`, shown in the form). */
   | { type: 'agentSaved'; requestId: string; id?: string; error?: string; cancelled?: boolean }
   /** An agent memory change, assignment or "make current" was carried out, or refused (`error`, shown in the Agents view). */
@@ -223,7 +228,15 @@ export type DashboardToHost =
   /** Make an earlier conversation the agent's current one again (#181). Answered with `agentResult`. */
   | { type: 'agentMakeCurrent'; id: string; key: string; requestId: string }
   /** The Sessions row menu: give this session to an agent, or (`agentId` absent) take it off its agent (#181). */
-  | { type: 'assignSession'; key: string; agentId?: string; requestId: string };
+  | { type: 'assignSession'; key: string; agentId?: string; requestId: string }
+  /** The job form (#166): create (`id` absent) or edit. Answered with `jobResult`. */
+  | { type: 'saveJob'; id?: string; job: JobInput; requestId: string }
+  /** Turn a job on or off. Answered with `jobResult`. */
+  | { type: 'jobEnable'; id: string; on: boolean; requestId: string }
+  /** Delete a job. The host confirms first. */
+  | { type: 'deleteJob'; id: string }
+  /** Run a job now. Answered with `jobResult`. */
+  | { type: 'runJob'; id: string; requestId: string };
 
 // ---- Conversation pane ----
 

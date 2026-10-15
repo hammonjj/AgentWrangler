@@ -33,6 +33,7 @@ describe('routes in the URL', () => {
     // Reclaimed for durable agents (#179); the bare URL above still means Sessions.
     ['#/agents', { kind: 'agents' }],
     ['#/missions', { kind: 'missions' }],
+    ['#/jobs', { kind: 'jobs' }],
     ['#/analytics/', { kind: 'analytics' }],
     ['#/preferences', { kind: 'preferences' }],
     ['#/preferences/pair', { kind: 'pair' }],
@@ -50,6 +51,7 @@ describe('routes in the URL', () => {
       { kind: 'agents' },
       { kind: 'sessions' },
       { kind: 'missions' },
+      { kind: 'jobs' },
       { kind: 'analytics' },
       { kind: 'preferences' },
       { kind: 'pair' },
