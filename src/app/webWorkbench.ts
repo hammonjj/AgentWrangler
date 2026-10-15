@@ -38,7 +38,7 @@ import { createDictationRoute } from '../core/web/dictationRoute';
 import type { WebFiles } from '../core/web/files';
 import { createFileViewRoute } from '../core/web/fileView';
 import type { WebRoute } from '../core/web/server';
-import type { HostServices, HostShell } from '../host/hostServices';
+import type { HostNotice, HostServices, HostShell } from '../host/hostServices';
 import { createWebFiles } from './webFiles';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { renderBrowserWorkbenchHtml } from '../ui/html';
@@ -144,6 +144,8 @@ export interface WebWorkbench extends Disposable {
   pairingOffer(): ReturnType<WebServer['pairingOffer']>;
   /** Remote control over the relay (#173), as Preferences shows it. */
   relayStatus(): { ok: boolean; lines: string[] };
+  /** A "needs you" notice to paired remote devices by Web Push (#177). */
+  relayPush(notice: HostNotice): void;
 }
 
 interface Running {
@@ -315,6 +317,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     devices,
     pairingOffer: () => web?.server.pairingOffer(),
     relayStatus: () => relay?.status() ?? { ok: true, lines: ['Off.'] },
+    relayPush: (notice) => relay?.push(notice),
     dispose: () => {
       if (disposed) return;
       disposed = true;

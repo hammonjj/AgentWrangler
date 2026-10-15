@@ -51,10 +51,21 @@ export function startDaemonClients(opts: DaemonClientsOptions): DaemonClients {
   // Dialogs and the shell go to the client that asked (#126, #140). The Mac's
   // own shell is only for a loopback browser's "Open on this Mac".
   const macShell = createMacShell(log);
-  // Notices (#141): browser tabs only. The host has no native banner (#161): osascript's is Script Editor's.
-  host.useBroker({ ...local, dialogs: registry.dialogs, shell: registry.shell, notify: registry.notifier(local.notify) });
+  // Notices (#141): browser tabs, and paired remote devices by Web Push (#177). The host has no
+  // native banner (#161): osascript's is Script Editor's.
+  const toTabs = registry.notifier(local.notify);
+  host.useBroker({
+    ...local,
+    dialogs: registry.dialogs,
+    shell: registry.shell,
+    notify: (notice) => {
+      toTabs(notice);
+      if (notice.tag !== undefined) web?.relayPush(notice);
+    },
+  });
   app.attachSurface(registry.surface);
-  const web = opts.webviewDir
+  // Assigned once; the notifier above reads it only when a notice arrives, after this.
+  const web: WebWorkbench | undefined = opts.webviewDir
     ? startWebWorkbench({
         app,
         host,

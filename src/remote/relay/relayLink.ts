@@ -48,6 +48,10 @@ export interface RelayLinkOptions {
   build(): string;
   /** The workbench's files for a build, or undefined when it is not this daemon's. */
   assets?(build: string): Promise<RelayAsset[] | undefined>;
+  /** The VAPID public key a device subscribes to Web Push with (#177), sent with `open`. */
+  vapidKey?(): string | undefined;
+  /** A device sent its push subscription (unchecked: `sub` is foreign input), or null to stop. */
+  onPush?(deviceId: string, sub: unknown): void;
   /** The heartbeat row's id; kept by the caller so a restart updates the same row. */
   daemonId: string;
   log(line: string): void;
@@ -175,14 +179,16 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
           return;
         }
         const assets = items.filter((i): i is Extract<RelayItem, { k: 'assets' }> => i.k === 'assets');
-        socket.receive(items.filter((i) => i.k !== 'assets'));
+        for (const i of items) if (i.k === 'push') opts.onPush?.(req.d, i.sub);
+        socket.receive(items.filter((i) => i.k !== 'assets' && i.k !== 'push'));
         for (const a of assets) await sendAssets(socket, a.build);
       });
     });
 
     tabs.set(req.t, { deviceId: req.d, channel, socket });
     // First on the wire: the build, so the loader knows which assets it needs.
-    socket.sendFirst({ k: 'open', build: opts.build(), protocol: RELAY_PROTOCOL });
+    const vapid = opts.vapidKey?.();
+    socket.sendFirst({ k: 'open', build: opts.build(), protocol: RELAY_PROTOCOL, ...(vapid ? { vapid } : {}) });
     opts.attach(socket, ownerContext('browser', { deviceId: req.d, deviceScope: 'relay' }));
     log(`relay: tab opened for device ${req.d.slice(0, 8)} (${tabs.size} open)`);
     changed.fire();

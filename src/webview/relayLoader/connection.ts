@@ -47,6 +47,8 @@ export class RelayConnection {
   private held: RelayItem[] = [];
   closed = false;
   build = '';
+  /** The daemon's VAPID public key (#177), for a push subscription. */
+  vapid: string | undefined;
 
   constructor(
     private readonly client: SupabaseClient,
@@ -154,6 +156,7 @@ export class RelayConnection {
       for (const i of items) {
         if (i.k === 'open') {
           this.build = i.build;
+          this.vapid = i.vapid;
           this.opened?.(i.build);
           this.opened = undefined;
         } else if (i.k === 'asset') this.assetListener?.(i);
