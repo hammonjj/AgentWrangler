@@ -40,6 +40,8 @@ import {
   type ControlDelegateResult,
   type ControlTaskProposeParams,
   type ControlTaskProposeResult,
+  type ControlAgentProposeParams,
+  type ControlAgentProposeResult,
   type ControlTaskView,
   type ControlWebLinkResult,
   type ControlWebDevice,
@@ -85,6 +87,8 @@ export interface ControlBackend {
   /** Delegate an outcome (#82): the planner decides one task or several. Throws `ControlError` when orchestration is off. */
   delegate(params: ControlDelegateParams): Promise<ControlDelegateResult>;
   tasks(): ControlTaskView[];
+  /** A durable agent's memory proposal (#180). Throws `ControlError` when the conversation is not an agent's. */
+  proposeAgentMemory(params: ControlAgentProposeParams): ControlAgentProposeResult;
   /** A single-use browser sign-in link (#127). Throws `ControlError` when the browser workbench is off. */
   webLink(): ControlWebLinkResult;
   /** Start pairing a device (#137). Throws `ControlError` while LAN access is not listening. */
@@ -228,7 +232,12 @@ export class ControlServer implements Disposable {
     const mutating = MUTATING_CONTROL_METHODS.includes(method);
     if (mutating || method === 'subscribe') {
       // The session, or the repository a task is for; never the text.
-      const target = method === 'task.propose' || method === 'delegate' ? path.basename(String(p.folder ?? '')) : String(p.ref);
+      const target =
+        method === 'task.propose' || method === 'delegate'
+          ? path.basename(String(p.folder ?? ''))
+          : method === 'agent.propose'
+            ? `memory ${p.op === 'forget' ? 'forget' : 'add'}`
+            : String(p.ref);
       this.opts.log(`control socket: ${method} ${target.slice(0, 80)} by ${conn.client ?? '?'}`);
     }
     if (mutating && this.mutationsStopped) throw new ControlError(RPC_UNSUPPORTED, 'Agent Wrangler is quitting');
@@ -257,6 +266,8 @@ export class ControlServer implements Disposable {
         return (await backend.delegate(taskParams(p))) satisfies ControlDelegateResult;
       case 'tasks':
         return { tasks: backend.tasks() };
+      case 'agent.propose':
+        return backend.proposeAgentMemory(agentProposeParams(p)) satisfies ControlAgentProposeResult;
       case 'web.link':
         // Never the link itself: it is a credential for two minutes.
         this.opts.log(`control socket: web.link by ${conn.client ?? '?'}`);
@@ -381,6 +392,30 @@ export function taskParams(p: Record<string, unknown>): ControlTaskProposeParams
     acceptanceCriteria: ((criteria as string[] | undefined) ?? []).map((c) => c.trim()).filter(Boolean),
     ...(p.harness ? { harness: p.harness } : {}),
     ...(origin ? { origin } : {}),
+  };
+}
+
+/** `agent.propose`'s params, checked for shape; what they say is checked by the agent's memory rules. */
+export function agentProposeParams(p: Record<string, unknown>): ControlAgentProposeParams {
+  const o = p.origin as { provider?: unknown; sessionId?: unknown } | undefined;
+  if (!o || (o.provider !== 'claude' && o.provider !== 'codex') || typeof o.sessionId !== 'string' || !/^[\w-]{4,128}$/.test(o.sessionId)) {
+    throw new ControlError(RPC_INVALID_PARAMS, 'run this inside an agent conversation: it is the conversation that proposes');
+  }
+  if (p.op !== 'add' && p.op !== 'forget') throw new ControlError(RPC_INVALID_PARAMS, 'op must be add or forget');
+  const str = (v: unknown, max: number, name: string) => {
+    if (v === undefined) return undefined;
+    if (typeof v !== 'string' || v.length > max) throw new ControlError(RPC_INVALID_PARAMS, `${name} must be a string of at most ${max} characters`);
+    return v;
+  };
+  const kind = str(p.kind, 20, 'kind');
+  const text = str(p.text, 2000, 'text');
+  const itemId = str(p.itemId, 20, 'itemId');
+  return {
+    origin: { provider: o.provider, sessionId: o.sessionId },
+    op: p.op,
+    ...(kind !== undefined ? { kind } : {}),
+    ...(text !== undefined ? { text } : {}),
+    ...(itemId !== undefined ? { itemId } : {}),
   };
 }
 

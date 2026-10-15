@@ -235,6 +235,17 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       return app.taskList();
     },
 
+    proposeAgentMemory(params) {
+      admit('agent.propose', `${params.origin.provider}:${params.origin.sessionId}`);
+      try {
+        const r = app.proposeAgentMemory(params.origin, params);
+        if (r.proposalId) deps.flash?.(`${r.agentName} proposed a memory update: approve or reject it in Agents or its conversation`);
+        return { agent: r.agentName, ...(r.proposalId ? { proposalId: r.proposalId } : {}) };
+      } catch (err) {
+        throw new ControlError(RPC_UNSUPPORTED, err instanceof Error ? err.message : String(err));
+      }
+    },
+
     webLink: () => {
       admit('web.link');
       const link = deps.webLink?.();

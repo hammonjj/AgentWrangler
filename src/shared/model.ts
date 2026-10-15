@@ -172,10 +172,12 @@ export interface AgentSession {
    */
   nickname?: string;
   /**
-   * The durable agent this is the current conversation of (#179; host
-   * decorates). Absent for an unassigned session, which is most of them.
+   * The durable agent this conversation belongs to (#179, #181; host
+   * decorates): `current` when it is the one the agent continues, otherwise
+   * one of its earlier conversations. Absent for an unassigned session,
+   * which is most of them.
    */
-  durableAgent?: { id: string; name: string };
+  durableAgent?: { id: string; name: string; current: boolean };
   /**
    * Its process is stopped (SIGSTOP) and spending nothing until resumed (host
    * decorates from PauseService). A paused session keeps whatever `status` it

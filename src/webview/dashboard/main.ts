@@ -31,15 +31,16 @@ import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, pendingKey
  */
 const PENDING_MAX_AGE_MS = 10 * 60_000;
 import { analyticsClickRef, analyticsDecision, analyticsFilterChange, analyticsHtml } from './analytics';
-import { agentsHtml, blankForm, formFor, formInput, newAgentsUiState, readForm } from './agents';
-import type { DurableAgentView } from '../../shared/durableAgents';
+import { agentsHtml, blankForm, formFor, formInput, newAgentsUiState, readForm, readMemoryForm } from './agents';
+import { assignableAgents, type DurableAgentView } from '../../shared/durableAgents';
+import type { MemoryOp } from '../../shared/agentMemory';
 import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestration/analyticsView';
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
 import { requestComposerFocus } from '../common/composerFocus';
 import { announceAttention, announceTableView, onTableViewRequest } from '../common/shellBus';
 import { attentionTotal } from '../../shared/tabAttention';
-import { canPauseSession, clampMenuPosition, dismissAction, ITEM_H_TOUCH, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
+import { canPauseSession, clampMenuPosition, dismissAction, ITEM_H_TOUCH, rowMenuItems, rowMenuSize, type RowMenuItem } from '../../shared/rowMenu';
 import { canDismissAhead, MAX_AGE_MS, PendingDismissals } from '../../shared/pendingDismissals';
 import { onLongPress, trackTouch } from '../common/phone';
 import {
@@ -333,19 +334,27 @@ function rowMenuHtml(): string {
   if (!s) return '';
 
   const items = rowMenuItems(s);
-  const menuSize = rowMenuSize(items, app.classList.contains('touch') ? ITEM_H_TOUCH : undefined);
+  // Durable agents (#181): give this conversation to an agent, or take it off the one that has it.
+  const agentRows = [
+    ...(s.durableAgent
+      ? [`<button class="rmrow" role="menuitem" data-row-unassign title="${esc(`It stays a session, no longer ${s.durableAgent.name}'s.`)}">${esc(`Unassign from ${s.durableAgent.name}`)}</button>`]
+      : []),
+    ...assignableAgents(agentViews ?? [], s, s.durableAgent?.id)
+      .slice(0, 5)
+      .map((a) => `<button class="rmrow" role="menuitem" data-row-assign="${esc(a.id)}" title="${esc(`Make this ${a.name}'s current conversation. Its current one moves to its history.`)}">${esc(`Assign to ${a.name}`)}</button>`),
+  ];
+  const menuSize = rowMenuSize(
+    [...items, ...agentRows.map((): RowMenuItem => ({ action: 'copyId', label: '' }))],
+    app.classList.contains('touch') ? ITEM_H_TOUCH : undefined,
+  );
   const { left, top } = clampMenuPosition(rowMenu, menuSize, {
     width: document.documentElement.clientWidth,
     height: document.documentElement.clientHeight,
   });
-  const rows = items
-    .map(
-      (i) =>
-        `<button class="rmrow${i.danger ? ' danger' : ''}" role="menuitem" data-row-action="${i.action}"${
-          i.title ? ` title="${esc(i.title)}"` : ''
-        }>${esc(i.label)}</button>`,
-    )
-    .join('');
+  const row = (i: RowMenuItem) =>
+    `<button class="rmrow${i.danger ? ' danger' : ''}" role="menuitem" data-row-action="${i.action}"${i.title ? ` title="${esc(i.title)}"` : ''}>${esc(i.label)}</button>`;
+  // The agent items sit above the danger items, which stay last.
+  const rows = [...items.filter((i) => !i.danger).map(row), ...agentRows, ...items.filter((i) => i.danger).map(row)].join('');
   return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}">${rows}</div>`;
 }
 
@@ -386,9 +395,11 @@ function projectGroups(list: SessionDTO[]): string[] {
  */
 /** The durable agent this is the conversation of (#179). Absent on an unassigned session. */
 function durableAgentChip(s: SessionDTO): string {
-  return s.durableAgent
-    ? `<span class="chip dagent" title="The current conversation of the agent ${esc(s.durableAgent.name)}. Open it from Agents or here: it is the same conversation.">${esc(s.durableAgent.name)}</span>`
-    : '';
+  if (!s.durableAgent) return '';
+  const name = esc(s.durableAgent.name);
+  return s.durableAgent.current
+    ? `<span class="chip dagent" title="The current conversation of the agent ${name}. Open it from Agents or here: it is the same conversation.">${name}</span>`
+    : `<span class="chip dagent earlier" title="An earlier conversation of the agent ${name}, in its history.">${name} · earlier</span>`;
 }
 
 function pausedChip(s: SessionDTO): string {
@@ -1671,10 +1682,22 @@ vscodeApi.onMessage((body) => {
     if (agentsUi.pendingSave !== m.requestId) return;
     agentsUi.pendingSave = undefined;
     if (m.error) agentsUi.error = m.error;
-    else {
+    else if (!m.cancelled) {
       agentsUi.form = undefined;
       agentsUi.error = undefined;
     }
+    render();
+    return;
+  }
+  if (m.type === 'agentResult') {
+    // The row menu's assignments are answered by the host, which shows a refusal itself.
+    if (agentsUi.pendingAction !== m.requestId) return;
+    agentsUi.pendingAction = undefined;
+    agentsUi.panelError = m.error;
+    // The memory box that was saved is done with; a refused one, and the other box, keep what was typed.
+    if (!m.error && agentsUi.memorySubmitted === 'add') agentsUi.memoryAdd = undefined;
+    if (!m.error && agentsUi.memorySubmitted === 'edit') agentsUi.memoryEdit = undefined;
+    agentsUi.memorySubmitted = undefined;
     render();
     return;
   }
@@ -1918,9 +1941,11 @@ app.addEventListener('click', (e) => {
   // a row must dismiss and stop there, rather than also opening that session.
   if (rowMenu) {
     const item = target.closest('[data-row-action]') as HTMLElement | null;
+    const assign = target.closest<HTMLElement>('[data-row-assign],[data-row-unassign]');
     const key = rowMenu.key;
     closeRowMenu();
     if (item) post({ type: 'action', key, action: item.dataset.rowAction as DashboardAction });
+    else if (assign) post({ type: 'assignSession', key, ...(assign.dataset.rowAssign ? { agentId: assign.dataset.rowAssign } : {}), requestId: agentRequestId() });
     e.stopPropagation();
     return;
   }
@@ -1975,6 +2000,72 @@ app.addEventListener('click', (e) => {
         return;
       case 'delete':
         if (id) post({ type: 'deleteAgent', id });
+        return;
+      case 'pin':
+        if (agent) post({ type: 'agentFlag', id: agent.id, flag: 'pinned', on: !agent.pinned });
+        return;
+      case 'archive':
+        if (agent) post({ type: 'agentFlag', id: agent.id, flag: 'archived', on: !agent.archived });
+        return;
+      case 'showarchived':
+        agentsUi.showArchived = !agentsUi.showArchived;
+        render();
+        return;
+      case 'panel': {
+        const tab = button.dataset.tab === 'history' ? 'history' : 'memory';
+        if (!id) return;
+        agentsUi.panel = agentsUi.panel?.id === id && agentsUi.panel.tab === tab ? undefined : { id, tab };
+        agentsUi.panelError = undefined;
+        agentsUi.memoryAdd = undefined;
+        agentsUi.memoryEdit = undefined;
+        render();
+        return;
+      }
+      case 'mem': {
+        // Forget, approve, reject: one click each, answered with `agentResult`.
+        const op = button.dataset.op;
+        if (!id || agentsUi.pendingAction) return;
+        const pid = button.dataset.pid;
+        const memOp: MemoryOp | undefined =
+          op === 'forget' && button.dataset.item
+            ? { op: 'forget', itemId: button.dataset.item }
+            : op === 'approve' && pid
+              ? { op: 'approve', proposalId: pid }
+              : op === 'reject' && pid
+                ? { op: 'reject', proposalId: pid }
+                : undefined;
+        if (!memOp) return;
+        agentsUi.pendingAction = agentRequestId();
+        agentsUi.panelError = undefined;
+        post({ type: 'agentMemory', id, op: memOp, requestId: agentsUi.pendingAction });
+        render();
+        return;
+      }
+      case 'memedit': {
+        const item = agent?.memory.find((i) => i.id === button.dataset.item);
+        if (!agent || !item) return;
+        agentsUi.memoryEdit = { agentId: agent.id, itemId: item.id, kind: item.kind, text: item.text };
+        agentsUi.panelError = undefined;
+        render();
+        app.querySelector<HTMLInputElement>(`.agents form[data-item="${CSS.escape(item.id)}"] [data-m="text"]`)?.focus();
+        return;
+      }
+      case 'memcancel':
+        agentsUi.memoryEdit = undefined;
+        agentsUi.panelError = undefined;
+        (document.activeElement as HTMLElement | null)?.blur();
+        render();
+        return;
+      case 'histopen':
+        // An earlier conversation is a session like any other: the row click's path opens it.
+        if (button.dataset.key) post({ type: 'rowClick', key: button.dataset.key });
+        return;
+      case 'makecurrent':
+        if (!id || !button.dataset.key || agentsUi.pendingAction) return;
+        agentsUi.pendingAction = agentRequestId();
+        agentsUi.panelError = undefined;
+        post({ type: 'agentMakeCurrent', id, key: button.dataset.key, requestId: agentsUi.pendingAction });
+        render();
         return;
     }
     return;
@@ -2273,14 +2364,39 @@ app.addEventListener('change', (event) => {
   if (intent) runMissionIntent(intent);
 });
 
+function agentRequestId(): string {
+  return `ag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 // The agent form (#179): Save is a submit, so Return in a field saves too.
+// A memory box (#180) is a form of its own: Return remembers, or saves the edit.
 app.addEventListener('submit', (event) => {
-  const form = (event.target as HTMLElement | null)?.closest<HTMLFormElement>('.agents form');
+  const memForm = (event.target as HTMLElement | null)?.closest<HTMLFormElement>('.agents form[data-mem-form]');
+  if (memForm) {
+    event.preventDefault();
+    const draft = readMemoryForm(memForm);
+    if (!draft || agentsUi.pendingAction) return;
+    if (draft.itemId) agentsUi.memoryEdit = draft;
+    else agentsUi.memoryAdd = draft;
+    agentsUi.memorySubmitted = draft.itemId ? 'edit' : 'add';
+    agentsUi.pendingAction = agentRequestId();
+    agentsUi.panelError = undefined;
+    post({
+      type: 'agentMemory',
+      id: draft.agentId,
+      op: draft.itemId ? { op: 'edit', itemId: draft.itemId, kind: draft.kind, text: draft.text } : { op: 'remember', kind: draft.kind, text: draft.text },
+      requestId: agentsUi.pendingAction,
+    });
+    (document.activeElement as HTMLElement | null)?.blur();
+    render();
+    return;
+  }
+  const form = (event.target as HTMLElement | null)?.closest<HTMLFormElement>('.agents form[data-ag-form]');
   if (!form || !agentsUi.form) return;
   event.preventDefault();
   if (agentsUi.pendingSave) return;
   agentsUi.form = readForm(form, agentsUi.form);
-  const requestId = `ag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const requestId = agentRequestId();
   agentsUi.pendingSave = requestId;
   agentsUi.error = undefined;
   post({ type: 'saveAgent', ...(agentsUi.form.id ? { id: agentsUi.form.id } : {}), agent: formInput(agentsUi.form), requestId });
@@ -2288,15 +2404,21 @@ app.addEventListener('submit', (event) => {
   render();
 });
 
-// Keep what was typed in the agent form, so a repaint after focus leaves draws it back.
-app.addEventListener('input', (event) => {
-  const form = (event.target as HTMLElement | null)?.closest?.<HTMLFormElement>('.agents form');
+// Keep what was typed in the agent form and the memory boxes, so a repaint after focus leaves draws it back.
+const keepAgentDrafts = (event: Event) => {
+  const target = event.target as HTMLElement | null;
+  const memForm = target?.closest?.<HTMLFormElement>('.agents form[data-mem-form]');
+  if (memForm) {
+    const draft = readMemoryForm(memForm);
+    if (draft?.itemId) agentsUi.memoryEdit = draft;
+    else if (draft) agentsUi.memoryAdd = draft;
+    return;
+  }
+  const form = target?.closest?.<HTMLFormElement>('.agents form[data-ag-form]');
   if (form && agentsUi.form) agentsUi.form = readForm(form, agentsUi.form);
-});
-app.addEventListener('change', (event) => {
-  const form = (event.target as HTMLElement | null)?.closest?.<HTMLFormElement>('.agents form');
-  if (form && agentsUi.form) agentsUi.form = readForm(form, agentsUi.form);
-});
+};
+app.addEventListener('input', keepAgentDrafts);
+app.addEventListener('change', keepAgentDrafts);
 
 // The snapshot held back while a field had focus is drawn once focus leaves the form.
 app.addEventListener('focusout', () => {
