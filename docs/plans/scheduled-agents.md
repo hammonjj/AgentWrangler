@@ -132,3 +132,8 @@ Where the build differs from the plan above, or settles something the plan left 
   restarts.
 - **At most 5 reviews per sweep run.** The rest wait for the next run, and the run's history says
   how many are left.
+- **The brief's sources (2026-10-15).** A job's session runs on the Mac under the user's own
+  Claude Code login, so it can use the Slack integration set up on that Mac. That is the source
+  to rely on for now. The Microsoft 365 calendar and mail tools stay on the brief's list, but
+  they are not confirmed to work in daemon-launched sessions. When they are not reachable, the
+  brief says so in its last line and is written from Slack and GitHub.
