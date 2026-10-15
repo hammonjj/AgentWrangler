@@ -25,6 +25,7 @@ import type { HostDialogs, HostNotice } from '../host/hostServices';
 import { admissionRefusal, decideSlot, jobOrigin, jobView, runSessionKey, sanitizeJobInput, type AdmissionState, type JobRun, type JobView, type ScheduledJob } from '../shared/scheduledJobs';
 import { GLOBAL_PROJECT_DIR } from '../shared/model';
 import type { JobDirectory } from '../ui/jobDirectory';
+import type { SweepItem } from '../shared/prSweep';
 
 export interface ScheduledJobDeps {
   jobs: ScheduledJobStore;
@@ -56,6 +57,8 @@ export interface StartSessionOptions {
   origin: unknown;
   /** Told the session's id as soon as it is known. */
   onSessionId?: (sessionId: string) => void;
+  /** Rules for this session only, on top of the job's (a sweep's review file). Set by core code, never by a client. */
+  extraAllowedTools?: string[];
 }
 
 /** Start one session with a job's settings. Throws when it could not start or did not take the prompt. */
@@ -119,12 +122,13 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
   /** One session of a job, launched as "new conversation" is, with the job's settings, and sent its prompt. */
   const startSession: StartJobSession = async (job, opts) => {
     const claude = job.provider === 'claude';
+    const allowed = [...job.allowedTools, ...(opts.extraAllowedTools ?? [])];
     const handle = await deps.sessions.launch(
       deps.launchDefaults.request(job.provider, opts.cwd, {
         ...(job.model ? { model: job.model } : {}),
         ...(job.effort ? { effort: job.effort } : {}),
         ...(claude ? { sessionId: randomUUID(), permissionMode: job.permissionMode ?? 'auto' } : {}),
-        ...(claude && job.allowedTools.length ? { policy: { claude: { allowedTools: [...job.allowedTools] } } } : {}),
+        ...(claude && allowed.length ? { policy: { claude: { allowedTools: allowed } } } : {}),
         origin: opts.origin,
       }),
     );
@@ -280,8 +284,24 @@ function defaultIsDirectory(dir: string): boolean {
 }
 
 /** The Jobs view's handle on the store and the scheduler (`ui/jobDirectory.ts`). */
-export function createJobDirectory(store: ScheduledJobStore, jobs: ScheduledJobs, confirm: Pick<HostDialogs, 'warn'>): JobDirectory {
+export function createJobDirectory(
+  store: ScheduledJobStore,
+  jobs: ScheduledJobs,
+  confirm: Pick<HostDialogs, 'warn'>,
+  sweep?: { preview(cwd: string): Promise<{ repo: string; items: SweepItem[] }>; onDidChange(listener: () => void): Disposable },
+): JobDirectory {
   return {
+    async preview(id) {
+      const job = store.get(id);
+      if (!job) return { error: 'That job no longer exists.' };
+      if (job.kind !== 'prSweep' || !sweep) return { error: 'Only a PR review sweep has a preview.' };
+      if (job.folder === GLOBAL_PROJECT_DIR) return { error: 'A PR sweep needs a repository folder.' };
+      try {
+        return await sweep.preview(job.folder);
+      } catch (error) {
+        return { error: (error as Error).message };
+      }
+    },
     views: () => jobs.views(),
     save(id, input) {
       const checked = sanitizeJobInput(input);
@@ -300,6 +320,9 @@ export function createJobDirectory(store: ScheduledJobStore, jobs: ScheduledJobs
       if (choice === 'Delete') store.remove(id);
     },
     runNow: (id) => jobs.runNow(id),
-    onDidChange: (listener) => store.onDidChange(listener),
+    onDidChange: (listener) => {
+      const subs = [store.onDidChange(listener), ...(sweep ? [sweep.onDidChange(listener)] : [])];
+      return { dispose: () => subs.forEach((s) => s.dispose()) };
+    },
   };
 }

@@ -152,6 +152,7 @@ const DASHBOARD: Samples<DashboardToHost> = {
   jobEnable: [{ type: 'jobEnable', id: 'j1', on: true, requestId: 'r1' }],
   deleteJob: [{ type: 'deleteJob', id: 'j1' }],
   runJob: [{ type: 'runJob', id: 'j1', requestId: 'r1' }],
+  previewJob: [{ type: 'previewJob', id: 'j1', requestId: 'r1' }],
 };
 
 const CONVERSATION: Samples<ConversationToHost> = {

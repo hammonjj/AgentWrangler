@@ -589,6 +589,16 @@ export class DashboardHost {
       case 'deleteJob':
         if (typeof m.id === 'string') void this.jobs?.remove(m.id);
         break;
+      case 'previewJob': {
+        if (typeof m.id !== 'string' || typeof m.requestId !== 'string') break;
+        const { id, requestId } = m;
+        const pending = this.jobs ? this.jobs.preview(id) : Promise.resolve({ error: 'Jobs are not available.' });
+        void pending.then(
+          (r) => this.webview.postMessage({ type: 'jobPreview', requestId, id, ...r } satisfies HostToDashboard),
+          (error: unknown) => this.webview.postMessage({ type: 'jobPreview', requestId, id, error: error instanceof Error ? error.message : String(error) } satisfies HostToDashboard),
+        );
+        break;
+      }
       case 'runJob': {
         if (typeof m.id !== 'string' || !this.jobs) {
           this.jobResult(m.requestId, undefined);
@@ -739,6 +749,9 @@ export function dashboardRequest(m: DashboardToHost): AccessRequest {
       return { action: 'job.write', resource: jobRef(m.id) };
     case 'runJob':
       return { action: 'job.run', resource: jobRef(m.id) };
+    // Reads GitHub as the user and changes nothing.
+    case 'previewJob':
+      return { action: 'view.read', resource: jobRef(m.id) };
     default: {
       // Compile-time: every message type is handled above. Run time: a type
       // the webview made up is authorised as a mutation (so a refusal is

@@ -145,6 +145,8 @@ export const ACTIONS = {
   'job.write': 'mutate',
   /** Run a scheduled job now (#165). Starts a session the way `session.start` does. */
   'job.run': 'mutate',
+  /** A PR sweep job that opted in posts a finished review as a PENDING GitHub review the user submits (#170). Never an approval. */
+  'job.post': 'mutate',
   'task.propose': 'mutate',
   'task.delegate': 'mutate',
   'task.act': 'mutate',

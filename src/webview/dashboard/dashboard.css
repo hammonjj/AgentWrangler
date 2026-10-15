@@ -3081,3 +3081,8 @@ body:has(#app.touch) .projmenu .pmbrowse {
   gap: 6px;
   font-size: 0.9em;
 }
+#app .jobs .jb-warn,
+#app .jobs .jb-posts {
+  color: var(--aw-waiting);
+  border-color: var(--aw-waiting);
+}

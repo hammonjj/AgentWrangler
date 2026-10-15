@@ -1729,6 +1729,10 @@ vscodeApi.onMessage((body) => {
     jobsView.result(m);
     return;
   }
+  if (m.type === 'jobPreview') {
+    jobsView.preview(m);
+    return;
+  }
   if (m.type === 'snapshot') {
     agentViews = m.agents;
     jobViews = m.jobs;

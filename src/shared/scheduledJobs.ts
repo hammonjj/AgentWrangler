@@ -78,6 +78,12 @@ export interface ScheduledJob {
   /** Say so with a notification when a run's session finishes its turn (#167): the daily brief. */
   notifyOnDone?: boolean;
   /**
+   * PR sweeps only (#170): post each review as a pending GitHub review the
+   * user submits. Leaves the machine under the user's name, so it is a
+   * per-job opt-in. Never an approval or a change request.
+   */
+  postPendingReview?: boolean;
+  /**
    * Skip a run while any usage window is at or above this percent. Empty
    * means the auto-pause percent.
    */
@@ -102,6 +108,7 @@ export interface JobInput {
   prompt: string;
   allowedTools?: string[];
   notifyOnDone?: boolean;
+  postPendingReview?: boolean;
   maxWindowPercent?: number;
 }
 
@@ -193,6 +200,7 @@ export function sanitizeJobInput(v: unknown): { value: JobInput } | { error: str
       prompt,
       allowedTools: o.provider === 'claude' ? allowedTools : [],
       ...(o.notifyOnDone === true ? { notifyOnDone: true } : {}),
+      ...(o.postPendingReview === true && o.kind === 'prSweep' && o.provider === 'claude' ? { postPendingReview: true } : {}),
       ...(maxWindowPercent !== undefined ? { maxWindowPercent } : {}),
     },
   };
@@ -222,6 +230,7 @@ function fromInput(i: JobInput): Omit<ScheduledJob, 'id' | 'enabled' | 'createdA
     prompt: i.prompt,
     allowedTools: [...(i.allowedTools ?? [])],
     ...(i.notifyOnDone ? { notifyOnDone: true } : {}),
+    ...(i.postPendingReview ? { postPendingReview: true } : {}),
     ...(i.maxWindowPercent !== undefined ? { maxWindowPercent: i.maxWindowPercent } : {}),
   };
 }
