@@ -21,7 +21,9 @@ import type { WebDeviceStore } from '../core/web/devices';
 import { encodeQr, qrToSvg } from '../core/web/qr';
 import { PAIR_CSS_PATH, pairMessagePage } from '../core/web/pairPages';
 import type { WebRoute } from '../core/web/server';
-import type { HostServices } from '../host/hostServices';
+import type { HostNotice, HostServices } from '../host/hostServices';
+import { NoticeDeduper } from '../shared/webCapabilities';
+import { loadOrCreateVapid, parsePushSubscription, sendPush, type VapidKeys } from '../remote/relay/webPush';
 import type { RequestContext } from '../core/access';
 import type { RelayAsset, RelayLink } from '../remote/relay/relayLink';
 import { startRelayLink } from '../remote/relay/relayLink';
@@ -68,6 +70,11 @@ export interface RelayService extends Disposable {
   readonly onDidChange: (listener: () => void) => Disposable;
   /** The build a remote tab must be on (the loader fetches its assets). */
   build(): string;
+  /**
+   * A "needs you" notice (#177): to every paired device with a push subscription, by Web Push,
+   * while remote control is on. The same tag within a minute goes once.
+   */
+  push(notice: HostNotice): void;
 }
 
 type State =
@@ -96,6 +103,43 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     anonKey: String(host.settings.get<string>('remote.relay.anonKey', '') ?? '').trim(),
     site: String(host.settings.get<string>('remote.relay.siteUrl', DEFAULT_SITE) ?? '').trim() || DEFAULT_SITE,
   });
+
+  // ---- Web Push (#177) ----
+
+  let vapid: VapidKeys | undefined;
+  const vapidKeys = (): VapidKeys | undefined => {
+    try {
+      return (vapid ??= loadOrCreateVapid(host.dataDir));
+    } catch (e) {
+      log(`relay: no push keys: ${String(e)}`);
+      return undefined;
+    }
+  };
+  const pushDedupe = new NoticeDeduper(60_000);
+  const push = (notice: HostNotice) => {
+    if (!settings().enabled) return;
+    if (notice.tag !== undefined && !pushDedupe.first(notice.tag, Date.now())) return;
+    const keys = vapidKeys();
+    if (!keys) return;
+    // Short and id-only: the push service carries it encrypted, but it is shown on a lock screen.
+    const payload = {
+      title: notice.title.slice(0, 80),
+      body: notice.body.slice(0, 160),
+      ...(notice.tag ? { tag: notice.tag } : {}),
+      ...(notice.sessionKey ? { key: notice.sessionKey } : {}),
+    };
+    for (const target of devices.relayPushTargets()) {
+      void sendPush(target.push, payload, keys, settings().site).then((outcome) => {
+        if (outcome === 'gone') devices.setRelayPush(target.id, undefined);
+        else if (outcome === 'failed') log(`relay: push to device ${target.id.slice(0, 8)} failed`);
+      });
+    }
+  };
+  const onPush = (deviceId: string, raw: unknown) => {
+    const sub = raw === null ? undefined : parsePushSubscription(raw);
+    if (raw !== null && !sub) return log(`relay: device ${deviceId.slice(0, 8)} sent a push subscription that is not one`);
+    devices.setRelayPush(deviceId, sub);
+  };
 
   const daemonId = (): string => {
     let id = host.globalState.get<string>(DAEMON_ID_KEY, '');
@@ -176,6 +220,8 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
         attach: (socket, context) => opts.attach(socket, context, build()),
         build,
         assets,
+        vapidKey: () => vapidKeys()?.publicKey,
+        onPush,
         daemonId: daemonId(),
         log,
       }).catch((e) => {
@@ -345,6 +391,7 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     },
     onDidChange: (listener) => changed.event(listener),
     build,
+    push,
     dispose: () => {
       if (disposed) return;
       disposed = true;

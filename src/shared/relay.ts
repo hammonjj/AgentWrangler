@@ -61,7 +61,9 @@ export type RelayDirection = 'd2b' | 'b2d';
  * - `assets`: the loader asks for the workbench's files for `build`; `asset` is one of them.
  */
 export type RelayItem =
-  | { k: 'open'; build: string; protocol: number }
+  | { k: 'open'; build: string; protocol: number; vapid?: string }
+  /** The device's Web Push subscription (#177), or null to stop. The daemon checks its shape. */
+  | { k: 'push'; sub: unknown }
   | { k: 'data'; line: string }
   | { k: 'ping' }
   | { k: 'pong' }
@@ -78,7 +80,10 @@ export function parseRelayItems(value: unknown): RelayItem[] | undefined {
     switch (i.k) {
       case 'open':
         if (typeof i.build !== 'string' || typeof i.protocol !== 'number') return undefined;
-        out.push({ k: 'open', build: i.build, protocol: i.protocol });
+        out.push({ k: 'open', build: i.build, protocol: i.protocol, ...(typeof i.vapid === 'string' ? { vapid: i.vapid } : {}) });
+        break;
+      case 'push':
+        out.push({ k: 'push', sub: i.sub ?? null });
         break;
       case 'data':
         if (typeof i.line !== 'string') return undefined;

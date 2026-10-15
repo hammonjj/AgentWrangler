@@ -13,6 +13,7 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { importRelayKey, parsePairingFragment } from '../../shared/relay';
 import { RelayConnection, RelayWebSocket, type RelayDevice } from './connection';
+import { pushOnConnect, watchPush } from './push';
 import { forgetDevice, loadAssets, loadDevice, saveAssets, saveDevice, type StoredAssets, type StoredDevice } from './store';
 
 const root = document.getElementById('loader') as HTMLElement;
@@ -162,8 +163,10 @@ async function main(): Promise<void> {
     live.add(c);
     c.onClose(() => live.delete(c));
     await c.open();
+    pushOnConnect(c);
     return c;
   };
+  watchPush();
   // A closed or reloaded tab says so, rather than leaving the Mac to notice at the next ping.
   window.addEventListener('pagehide', () => {
     for (const c of live) c.close();

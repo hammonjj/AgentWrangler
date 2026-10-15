@@ -57,6 +57,8 @@ interface StoredDevice extends WebDevice {
   recoveryHash?: string;
   /** A relay device's AES key, base64url (#174). The file is 0600, like the TLS keys beside it. */
   relayKey?: string;
+  /** A relay device's Web Push subscription (#177): where its notices go while no page is open. */
+  push?: { endpoint: string; p256dh: string; auth: string };
 }
 
 interface DevicesFile {
@@ -142,6 +144,20 @@ export class WebDeviceStore {
       this.changed.fire();
     }
     return d.relayKey;
+  }
+
+  /** Keep, replace or (undefined) forget a relay device's push subscription (#177). */
+  setRelayPush(id: string, push: StoredDevice['push'] | undefined): void {
+    const d = this.devices.find((x) => x.id === id && x.scope === 'relay');
+    if (!d || JSON.stringify(d.push) === JSON.stringify(push)) return;
+    if (push) d.push = push;
+    else delete d.push;
+    this.save();
+  }
+
+  /** Current relay devices that can be sent a notice (#177). */
+  relayPushTargets(): { id: string; push: NonNullable<StoredDevice['push']> }[] {
+    return this.live().flatMap((d) => (d.scope === 'relay' && d.push ? [{ id: d.id, push: d.push }] : []));
   }
 
   /**
