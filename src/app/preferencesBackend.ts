@@ -12,7 +12,8 @@ import type { LanStatus } from '../core/web/lan';
 import type { HostServices } from '../host/hostServices';
 import { parseRoutingSettings, ROUTING_KEY } from '../shared/orchestration/executionPolicy';
 import { sourceStatus } from '../shared/orchestration/sourceHealth';
-import type { OrchestrationPrefsView } from '../shared/preferences';
+import { isRelayActionId, type OrchestrationPrefsView } from '../shared/preferences';
+import type { RelayService } from './relayService';
 import type { PreferencesBackend } from '../ui/preferencesHost';
 
 export interface PreferencesBackendOptions {
@@ -22,6 +23,8 @@ export interface PreferencesBackendOptions {
   lan: { status(): LanStatus; onDidChange(listener: () => void): Disposable };
   /** The process's device store (#137). */
   devices: WebDeviceStore;
+  /** Remote control over the relay (#173), read when asked: it is made after this. */
+  relay?: () => RelayService | undefined;
 }
 
 export function createPreferencesBackend(opts: PreferencesBackendOptions): PreferencesBackend {
@@ -30,14 +33,27 @@ export function createPreferencesBackend(opts: PreferencesBackendOptions): Prefe
     settings: host.settings,
     log: (line) => host.log(line),
     // Prompts (a bot token) go to whoever pressed the button: the host runs this in that request.
-    runAction: (id) => app.runSettingAction(id),
-    // The addresses LAN access is bound to (#136), under its switch.
+    runAction: (id) => {
+      if (!isRelayActionId(id)) return app.runSettingAction(id);
+      const relay = opts.relay?.();
+      return relay ? relay.runAction(id) : Promise.resolve({ ok: false, lines: ['Remote control is not available here.'] });
+    },
+    // The addresses LAN access is bound to (#136), and the relay's state (#173), under their switches.
     status: {
       read: () => {
         const s = lan.status();
-        return { 'web.lan.enabled': { ok: s.state !== 'error', lines: s.lines } };
+        const relay = opts.relay?.();
+        return {
+          'web.lan.enabled': { ok: s.state !== 'error', lines: s.lines },
+          ...(relay ? { 'remote.relay.enabled': relay.status() } : {}),
+        };
       },
-      onDidChange: lan.onDidChange,
+      onDidChange: (listener) => {
+        const subs = [lan.onDidChange(listener)];
+        const relay = opts.relay?.();
+        if (relay) subs.push(relay.onDidChange(listener));
+        return { dispose: () => subs.forEach((s) => s.dispose()) };
+      },
     },
     // Never a credential: only what the list shows. The host authorises a revocation before this runs.
     webDevices: {

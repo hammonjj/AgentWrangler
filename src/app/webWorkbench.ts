@@ -20,16 +20,16 @@
  * Run by the core daemon (`src/daemon/startCore.ts`, through `clients.ts`).
  */
 import * as path from 'node:path';
-import type { WebSocket } from 'ws';
 import type { AgentWranglerApp } from './createApp';
 import { createPreferencesBackend } from './preferencesBackend';
+import { startRelayService, type RelayService } from './relayService';
 import { createWorkbenchHosts } from './workbenchHosts';
 import type { PreferencesBackend } from '../ui/preferencesHost';
 import type { RequestContext } from '../core/access';
 import type { ClientRegistry } from '../core/clients';
 import type { ControlWebLinkResult } from '../core/control/protocol';
 import { Emitter, type Disposable } from '../core/events';
-import { createBrowserConnections } from '../core/web/browserConnections';
+import { createBrowserConnections, type ClientSocket, type ConnectionLimits } from '../core/web/browserConnections';
 import { LAN_DEFAULT_PORT, LanAccess, localHostName, type LanStatus } from '../core/web/lan';
 import { WEB_DEFAULT_PORT, WebServer } from '../core/web/server';
 import { LocalCertificates, WEB_TLS_DIR } from '../core/web/tls';
@@ -59,11 +59,25 @@ export interface BrowserClientsOptions {
   hostShell?: HostShell;
   /** What each browser's `#/preferences` route is served from (#135). Absent: no `preferences` pane. */
   preferences?: PreferencesBackend;
+  /** Connection limits other than the defaults (the relay's, #173). */
+  limits?: Partial<ConnectionLimits>;
 }
 
+/**
+ * A remote tab over the relay (#173; plan §4): the table at most every 5 s and not at all while
+ * hidden (it gets one on coming back), and a ping every two minutes rather than every 30 s.
+ * Every frame is a billed Supabase message.
+ */
+export const RELAY_CONNECTION_LIMITS: Partial<ConnectionLimits> = {
+  maxBufferedBytes: 4 * 1024 * 1024,
+  snapshotIntervalMs: 5_000,
+  hiddenSnapshotIntervalMs: 24 * 60 * 60 * 1000,
+  pingIntervalMs: 120_000,
+};
+
 export interface BrowserClients extends Disposable {
-  /** An upgraded socket from an authenticated device. Owned from here on. */
-  attach(socket: WebSocket, device: RequestContext): void;
+  /** An upgraded socket from an authenticated device, or a relay tab. Owned from here on. */
+  attach(socket: ClientSocket, device: RequestContext): void;
   /** A revoked device's connections, closed now (#137). */
   closeDevice(deviceId: string): number;
 }
@@ -77,6 +91,7 @@ export function createBrowserClients(opts: BrowserClientsOptions): BrowserClient
     folderAllowed: opts.folderAllowed,
     ...(opts.hostShell ? { hostShell: opts.hostShell } : {}),
     isMutating: isMutatingPaneMessage,
+    ...(opts.limits ? { limits: opts.limits } : {}),
     appAction: (action, context) => {
       // The same gate every mutating action passes (#123); a refusal is audited and does nothing.
       const name = action === 'restartCodex' ? 'codex.restart' : 'hooks.remove';
@@ -127,6 +142,8 @@ export interface WebWorkbench extends Disposable {
   readonly devices: WebDeviceStore;
   /** A pairing offer for `aw web pair`; undefined while LAN access is not listening. */
   pairingOffer(): ReturnType<WebServer['pairingOffer']>;
+  /** Remote control over the relay (#173), as Preferences shows it. */
+  relayStatus(): { ok: boolean; lines: string[] };
 }
 
 interface Running {
@@ -159,8 +176,39 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     lanStatus = status;
     statusChanged.fire();
   };
+  // Remote control over the relay (#173): made below, read by Preferences when asked.
+  let relay: RelayService | undefined;
   // Preferences in every browser (#135): one backend for all of them.
-  const preferences = createPreferencesBackend({ app, host, devices, lan: { status: () => lanStatus, onDidChange: statusChanged.event } });
+  const preferences = createPreferencesBackend({
+    app,
+    host,
+    devices,
+    lan: { status: () => lanStatus, onDidChange: statusChanged.event },
+    relay: () => relay,
+  });
+
+  // Remote tabs (#173): their own connections, with the relay's limits. Nothing host-local:
+  // no "Open on this Mac", no host paths, no folder browsing.
+  const relayClients = createBrowserClients({
+    app,
+    host,
+    ui: { ...ui, allowRemotePath: () => false },
+    clients,
+    log,
+    preferences,
+    build: () => relay?.build() ?? '',
+    folderAllowed: async () => false,
+    limits: RELAY_CONNECTION_LIMITS,
+  });
+  relay = startRelayService({
+    host,
+    devices,
+    webviewDir: opts.webviewDir,
+    attach: (socket, context) => relayClients.attach(socket, context),
+    closeDevice: (id) => void relayClients.closeDevice(id),
+    port: () => (web?.listening ? web.server.port : undefined),
+    log,
+  });
 
   const stop = () => {
     web?.lan.dispose();
@@ -211,6 +259,8 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
         createFileViewRoute({ allowlist: files.allowlist, log }),
         // Browser dictation (#141): audio recorded in the page, transcribed by the core.
         createDictationRoute({ transcribe: (audio, ext) => app.dictation.transcribeAudio(audio, ext), log }),
+        // Remote control's sign-in callback and pairing QR (#173, #174): loopback only.
+        ...(relay?.routes ?? []),
         ...(extra?.routes ?? []),
       ],
       // One store for the process, shared with `aw web devices` and Preferences (#137).
@@ -264,6 +314,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     refresh: () => void web?.lan.refresh(),
     devices,
     pairingOffer: () => web?.server.pairingOffer(),
+    relayStatus: () => relay?.status() ?? { ok: true, lines: ['Off.'] },
     dispose: () => {
       if (disposed) return;
       disposed = true;
@@ -273,6 +324,8 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
       web?.browsers.dispose();
       web?.files.dispose();
       web = undefined;
+      relay?.dispose();
+      relayClients.dispose();
       statusChanged.dispose();
     },
   };

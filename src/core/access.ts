@@ -71,17 +71,18 @@ export interface RequestContext {
   /** Browser: which tab. Attribution only, never identity. */
   readonly connectionId?: string;
   /**
-   * Browser: which listener the device signed in on. Where the client is, so
-   * the host-local actions (#140) know whether "this Mac" is in front of it.
-   * Not authority: `authorize` never reads it. Absent is treated as `lan`.
+   * Browser: which listener the device signed in on, or `relay` for a remote-control device
+   * (#173). Where the client is, so the host-local actions (#140) know whether "this Mac" is
+   * in front of it: only `loopback` is. Not authority: `authorize` never reads it. Absent is
+   * treated as `lan`.
    */
-  readonly deviceScope?: 'loopback' | 'lan';
+  readonly deviceScope?: 'loopback' | 'lan' | 'relay';
 }
 
 /** A context for the owner, through `via`. Device and connection ids ride along for the audit only. */
 export function ownerContext(
   via: Via,
-  ids: { deviceId?: string; connectionId?: string; deviceScope?: 'loopback' | 'lan' } = {},
+  ids: { deviceId?: string; connectionId?: string; deviceScope?: 'loopback' | 'lan' | 'relay' } = {},
 ): RequestContext {
   return Object.freeze({
     principal: LOCAL_OWNER,

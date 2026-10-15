@@ -144,6 +144,8 @@ export async function startCoreDaemon(opts: StartCoreDaemonOptions): Promise<Sta
       // Pairing and the device list (#137): `aw web pair`, `aw web devices`, `aw web revoke`.
       webPair: () => clients?.pairingOffer(),
       webDevices,
+      // Remote control over the relay (#173): one line in `aw status`.
+      remoteStatus: () => clients?.web?.relayStatus(),
     }),
   });
   try {

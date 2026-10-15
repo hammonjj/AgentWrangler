@@ -138,6 +138,7 @@ describe('dependentParentKeys', () => {
       'web.enabled',
       'web.lan.enabled',
       'remote.enabled',
+      'remote.relay.enabled',
     ]);
   });
 

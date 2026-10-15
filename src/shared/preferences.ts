@@ -57,8 +57,8 @@ export type PreferencesToHost =
 export interface WebDeviceView {
   id: string;
   name: string;
-  /** `loopback`: a browser on this Mac. `lan`: paired over the home network. */
-  scope: 'loopback' | 'lan';
+  /** `loopback`: a browser on this Mac. `lan`: paired over the home network. `relay`: paired for remote control (#174). */
+  scope: 'loopback' | 'lan' | 'relay';
   createdAt: number;
   lastSeen: number;
 }
@@ -158,9 +158,14 @@ export function revokeWebDeviceId(message: unknown): string | undefined {
 }
 
 /** The actions Preferences can invoke. A closed set: the host switches on it. */
-export type SettingActionId = 'connectDiscord' | 'testRemote' | 'disconnectDiscord';
+export type SettingActionId = 'connectDiscord' | 'testRemote' | 'disconnectDiscord' | 'connectRelay' | 'pairRelayDevice' | 'disconnectRelay';
 
-export const SETTING_ACTION_IDS: SettingActionId[] = ['connectDiscord', 'testRemote', 'disconnectDiscord'];
+export const SETTING_ACTION_IDS: SettingActionId[] = ['connectDiscord', 'testRemote', 'disconnectDiscord', 'connectRelay', 'pairRelayDevice', 'disconnectRelay'];
+
+/** The actions remote control over the relay owns (#173); the rest are the app's. */
+export function isRelayActionId(id: SettingActionId): id is 'connectRelay' | 'pairRelayDevice' | 'disconnectRelay' {
+  return id === 'connectRelay' || id === 'pairRelayDevice' || id === 'disconnectRelay';
+}
 
 export function isSettingActionId(value: unknown): value is SettingActionId {
   return typeof value === 'string' && (SETTING_ACTION_IDS as string[]).includes(value);

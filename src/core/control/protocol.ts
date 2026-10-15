@@ -120,6 +120,8 @@ export interface ControlStatusResult {
   byStatus: Partial<Record<ControlStatus, number>>;
   /** Sessions AW runs: in hosts (survive a quit; every Claude one) and as children of the app (do not; Codex `--stdio`). */
   running: { hosted: number; app: number };
+  /** Remote control over the relay (#173), as Preferences says it. Absent: no web workbench here. */
+  remote?: { ok: boolean; lines: string[] };
 }
 
 export interface ControlSessionsParams {
