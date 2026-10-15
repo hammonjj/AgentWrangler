@@ -9,4 +9,4 @@ if [ -z "$API_URL" ]; then
   exit 1
 fi
 SUPABASE_URL="$API_URL" SUPABASE_ANON_KEY="$ANON_KEY" SUPABASE_SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" \
-  npx vitest run test/supabaseRls.integration.test.ts
+  npx vitest run test/supabaseRls.integration.test.ts test/relaySupabase.integration.test.ts

@@ -493,6 +493,43 @@ export const SETTINGS: SettingSpec[] = [
     description:
       'Post a message when an agent finishes its task, alongside the permission prompts. It has no buttons — nothing is waiting on you — and names the agent, repository and branch, never anything it said. Auto-pause is announced the same way and is not covered by this switch: everything stopping is not optional news.',
   },
+  {
+    key: 'remote.relay.enabled',
+    label: 'Remote control over the internet',
+    group: 'Experimental',
+    type: 'boolean',
+    default: false,
+    description:
+      'Use the workbench from a phone or another computer anywhere, through your own Supabase project, without opening anything on this Mac: it only connects out. Everything sent is encrypted to a device you paired here, so Supabase relays only ciphertext. Set up the project first (docs/remote-control-setup.md), then sign in and pair a device below.',
+  },
+  {
+    key: 'remote.relay.url',
+    dependsOn: 'remote.relay.enabled',
+    label: 'Supabase project URL',
+    group: 'Experimental',
+    type: 'string',
+    default: '',
+    description: 'From your Supabase project’s Settings › API, e.g. https://abcd1234.supabase.co.',
+  },
+  {
+    key: 'remote.relay.anonKey',
+    dependsOn: 'remote.relay.enabled',
+    label: 'Supabase anon (publishable) key',
+    group: 'Experimental',
+    type: 'string',
+    default: '',
+    description:
+      'From the same page. It is a public value: it only names the project, and every table and channel needs your own sign-in. Never paste the service-role or secret key here.',
+  },
+  {
+    key: 'remote.relay.siteUrl',
+    dependsOn: 'remote.relay.enabled',
+    label: 'Remote control site',
+    group: 'Experimental',
+    type: 'string',
+    default: 'https://agentwrangler.netlify.app',
+    description: 'Where the remote control page is served. The pairing QR code opens it.',
+  },
 ];
 
 /**

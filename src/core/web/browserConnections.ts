@@ -24,7 +24,7 @@
  * client, so prompts, toasts and navigation its own clicks cause come back to
  * it (#126). Run by the core daemon.
  */
-import type { RawData, WebSocket } from 'ws';
+import type { RawData } from 'ws';
 import { Emitter, type Disposable } from '../events';
 import { ownerContext, type RequestContext } from '../access';
 import type { ClientRegistry } from '../clients';
@@ -32,6 +32,23 @@ import type { HostShell } from '../../host/hostServices';
 import { CommandResults } from './commandResults';
 import { createShellChannel, type ShellConversation } from './shellChannel';
 import { SHELL_PANE, WIRE_PROTOCOL, isCommandId, parseShellToHost, type AppActionName, type HostToShell } from '../../shared/shellProtocol';
+
+/**
+ * The part of a `ws` WebSocket a connection uses. A real socket from the listeners is one; the
+ * remote-control relay (#173, `src/remote/relay/virtualSocket.ts`) supplies another, whose
+ * bytes go through Supabase, so everything below is the same for both.
+ */
+export interface ClientSocket {
+  readonly bufferedAmount: number;
+  readonly readyState: number;
+  readonly OPEN: number;
+  send(data: string): void;
+  ping(): void;
+  close(code?: number, reason?: string): void;
+  terminate(): void;
+  on(event: 'message', listener: (data: RawData, isBinary: boolean) => void): unknown;
+  on(event: 'pong' | 'close' | 'error', listener: () => void): unknown;
+}
 
 /** What carries a document's pane envelopes; the pane hosts are written against it. */
 export interface EnvelopeTransport {
@@ -92,7 +109,7 @@ export interface BrowserConnectionsOptions {
 
 export interface BrowserConnections extends Disposable {
   /** An upgraded socket from an authenticated device. Owned from here on. */
-  attach(ws: WebSocket, device: RequestContext): void;
+  attach(ws: ClientSocket, device: RequestContext): void;
   /**
    * Close every connection of a revoked device now (#137): its client
    * registrations go (and its prompts resolve as cancelled) and its pane hosts
@@ -115,11 +132,11 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
   const limits: ConnectionLimits = { ...DEFAULT_CONNECTION_LIMITS, ...opts.limits };
   const results = opts.results ?? new CommandResults();
   /** Each open socket, and how to close it. */
-  const connections = new Map<WebSocket, () => void>();
+  const connections = new Map<ClientSocket, () => void>();
   /** Each open socket's device, for revocation (#137). */
-  const deviceOf = new Map<WebSocket, string | undefined>();
+  const deviceOf = new Map<ClientSocket, string | undefined>();
 
-  function attach(ws: WebSocket, device: RequestContext): void {
+  function attach(ws: ClientSocket, device: RequestContext): void {
     const incoming = new Emitter<unknown>();
     let open = true;
     let alive = true;

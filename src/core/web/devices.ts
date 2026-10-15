@@ -29,8 +29,15 @@ export const WEB_DEVICES_FILE = 'web-devices.json';
  * is never accepted on the LAN listener and a LAN one (pairing, #137) never on
  * loopback: each listener verifies against its own scope only, and they use
  * different cookies as well.
+ *
+ * A `relay` device (#174) has no cookie at all: it was paired for remote control and holds a
+ * symmetric key instead, which this store keeps (it must: the daemon encrypts to it). It is
+ * never accepted by either listener, and is listed and revoked like the others.
  */
 export type DeviceScope = 'loopback' | 'lan';
+
+/** Where a stored device works: a listener's scope, or the relay. */
+export type DeviceKind = DeviceScope | 'relay';
 
 export interface WebDevice {
   id: string;
@@ -40,7 +47,7 @@ export interface WebDevice {
   lastSeen: number;
   principal: string;
   /** Where the credential works. A file from before #136 has none, which reads as loopback. */
-  scope: DeviceScope;
+  scope: DeviceKind;
 }
 
 interface StoredDevice extends WebDevice {
@@ -48,6 +55,8 @@ interface StoredDevice extends WebDevice {
   credentialHash: string;
   /** sha256 of the recovery token (LAN devices), hex. See `issueRecovery`. */
   recoveryHash?: string;
+  /** A relay device's AES key, base64url (#174). The file is 0600, like the TLS keys beside it. */
+  relayKey?: string;
 }
 
 interface DevicesFile {
@@ -93,6 +102,46 @@ export class WebDeviceStore {
     this.save();
     this.changed.fire();
     return { device: publicView(stored), credential };
+  }
+
+  /**
+   * A new relay device (#174) and its key. The key goes into the pairing link, once, and stays
+   * here so the daemon can talk to the device; it has no cookie credential (a random hash that
+   * nothing will ever match stands in for one).
+   */
+  issueRelay(name: string, key: string, id: string = crypto.randomUUID()): WebDevice {
+    const at = this.now();
+    const stored: StoredDevice = {
+      id,
+      name: name.slice(0, 80),
+      createdAt: at,
+      lastSeen: at,
+      principal: LOCAL_OWNER.id,
+      scope: 'relay',
+      credentialHash: crypto.randomBytes(32).toString('hex'),
+      relayKey: key,
+    };
+    this.devices = [...this.live(), stored];
+    this.save();
+    this.changed.fire();
+    return publicView(stored);
+  }
+
+  /**
+   * A current relay device's key, and mark it seen. Undefined for an unknown, revoked, expired
+   * or non-relay device: a `connect` naming it is refused.
+   */
+  relayKeyOf(id: string): string | undefined {
+    const at = this.now();
+    const d = this.devices.find((x) => x.id === id);
+    if (!d || d.scope !== 'relay' || !d.relayKey || at - d.lastSeen > DEVICE_TTL_MS) return undefined;
+    if (at - d.lastSeen > LAST_SEEN_WRITE_MS) {
+      d.lastSeen = at;
+      this.devices = this.live();
+      this.save();
+      this.changed.fire();
+    }
+    return d.relayKey;
   }
 
   /**
@@ -198,8 +247,10 @@ export class WebDeviceStore {
           (d): d is StoredDevice =>
             !!d && typeof d.id === 'string' && typeof d.credentialHash === 'string' && /^[0-9a-f]{64}$/.test(d.credentialHash) && typeof d.lastSeen === 'number',
         )
-        // Anything but an explicit 'lan' is loopback, the narrower of the two.
-        .map((d): StoredDevice => ({ ...d, scope: d.scope === 'lan' ? 'lan' : 'loopback' }));
+        // Anything but an explicit 'lan' is loopback, the narrower of the two. A relay device
+        // must have its key, or it is nothing.
+        .filter((d) => d.scope !== 'relay' || typeof d.relayKey === 'string')
+        .map((d): StoredDevice => ({ ...d, scope: d.scope === 'lan' || d.scope === 'relay' ? d.scope : 'loopback' }));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') this.log(`web: could not read ${path.basename(this.file)}; starting with no devices`);
       return [];

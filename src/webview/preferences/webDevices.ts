@@ -31,7 +31,7 @@ export function createWebDevicesBlock(send: (message: PreferencesToHost) => void
   const desc = document.createElement('p');
   desc.className = 'pf-desc';
   desc.textContent =
-    'Browsers that can open Agent Wrangler: on this Mac (aw web open) and paired over your home network (aw web pair). Revoke signs one out for good and disconnects its open tabs at once.';
+    'Browsers that can open Agent Wrangler: on this Mac (aw web open), paired over your home network (aw web pair), and paired for remote control (Experimental). Revoke signs one out for good and disconnects its open tabs at once.';
   const list = document.createElement('div');
   list.className = 'pf-devicelist';
   block.append(head, desc, list);
@@ -82,7 +82,7 @@ function draw(): void {
     name.textContent = d.name;
     const meta = document.createElement('span');
     meta.className = 'pf-devicemeta';
-    meta.textContent = `${d.scope === 'lan' ? 'Home network' : 'This Mac'} · added ${when(d.createdAt)} · last seen ${when(d.lastSeen)} · ${d.id.slice(0, 8)}`;
+    meta.textContent = `${d.scope === 'lan' ? 'Home network' : d.scope === 'relay' ? 'Remote control' : 'This Mac'} · added ${when(d.createdAt)} · last seen ${when(d.lastSeen)} · ${d.id.slice(0, 8)}`;
     text.append(name, meta);
     const button = document.createElement('button');
     button.type = 'button';

@@ -59,6 +59,8 @@ export interface ControlBackendDeps {
   webPair?: () => ControlWebPairResult | undefined;
   /** The process's browser devices (#137). Revoking closes the device's connections (the server listens). */
   webDevices?: Pick<WebDeviceStore, 'list' | 'revoke'>;
+  /** Remote control over the relay (#173), for `aw status`. Looked up per call. */
+  remoteStatus?: () => { ok: boolean; lines: string[] } | undefined;
 }
 
 /** What `aw` is, to `authorize`. One context for every connection: the token is per user, not per client. */
@@ -131,7 +133,8 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
         byStatus[s.status] = (byStatus[s.status] ?? 0) + 1;
       }
       const counts = app.sessionCounts();
-      return { ...describe(), byStatus, running: { hosted: counts.hosted, app: counts.local } };
+      const remote = deps.remoteStatus?.();
+      return { ...describe(), byStatus, running: { hosted: counts.hosted, app: counts.local }, ...(remote ? { remote } : {}) };
     },
 
     sessions: ({ all }) => {

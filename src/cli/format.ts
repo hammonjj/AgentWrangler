@@ -98,6 +98,7 @@ export function formatStatus(st: ControlStatusResult, now: number): string {
     `Agent Wrangler is running (pid ${st.appPid}, build ${st.build}, up ${ago(st.startedAt, now).replace(' ago', '')}).`,
     total === 0 ? 'No sessions in the table.' : `${total} session${total === 1 ? '' : 's'}: ${parts.join(', ')}.`,
     `Run by Agent Wrangler: ${st.running.hosted} that survive a quit, ${st.running.app} that end with it.`,
+    ...(st.remote ? [`Remote control: ${st.remote.lines.map(safe).join(' ')}`] : []),
   ].join('\n');
 }
 

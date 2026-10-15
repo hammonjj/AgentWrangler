@@ -423,24 +423,45 @@ function watchScroll(scroller: HTMLElement): void {
  * and they belong beside the fields they are about — a token typed from a menu
  * while the settings sit in another window is two places to look for one job.
  */
-const ACTIONS: { id: SettingActionId; label: string; tone?: 'primary' | 'danger'; title: string }[] = [
-  {
-    id: 'connectDiscord',
-    label: 'Connect Discord…',
-    tone: 'primary',
-    title: 'Paste a bot token. It is checked against Discord, then kept in the system keychain.',
-  },
-  { id: 'testRemote', label: 'Test connection', title: 'Check the token, server, channel, authorised users and gateway.' },
-  { id: 'disconnectDiscord', label: 'Disconnect', tone: 'danger', title: 'Forget the token and close the connection.' },
-];
+type ActionSpec = { id: SettingActionId; label: string; tone?: 'primary' | 'danger'; title: string };
 
-function renderActions(group: string): HTMLElement {
+/** Each feature's buttons, under the switch whose reveal they live in. */
+const ACTIONS: Record<string, ActionSpec[]> = {
+  'remote.enabled': [
+    {
+      id: 'connectDiscord',
+      label: 'Connect Discord…',
+      tone: 'primary',
+      title: 'Paste a bot token. It is checked against Discord, then kept in the system keychain.',
+    },
+    { id: 'testRemote', label: 'Test connection', title: 'Check the token, server, channel, authorised users and gateway.' },
+    { id: 'disconnectDiscord', label: 'Disconnect', tone: 'danger', title: 'Forget the token and close the connection.' },
+  ],
+  // Remote control over the relay (#173, #174).
+  'remote.relay.enabled': [
+    {
+      id: 'connectRelay',
+      label: 'Sign in with GitHub…',
+      tone: 'primary',
+      title: 'Sign this Mac in to your Supabase project as you. The sign-in is kept in the system keychain.',
+    },
+    { id: 'pairRelayDevice', label: 'Pair a device…', title: 'Show a QR code for a phone or another computer to scan. Only from a browser on this Mac.' },
+    { id: 'disconnectRelay', label: 'Sign out', tone: 'danger', title: 'Forget this Mac’s sign-in and close every remote tab.' },
+  ],
+};
+
+/** The switch an action's bar is under. */
+function actionParent(id: SettingActionId): string | undefined {
+  return Object.keys(ACTIONS).find((k) => ACTIONS[k].some((a) => a.id === id));
+}
+
+function renderActions(parentKey: string): HTMLElement {
   const bar = document.createElement('div');
   bar.className = 'pf-actions';
 
   const buttons = document.createElement('div');
   buttons.className = 'pf-actionrow';
-  for (const action of ACTIONS) {
+  for (const action of ACTIONS[parentKey] ?? []) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `pf-action${action.tone ? ` ${action.tone}` : ''}`;
@@ -458,18 +479,20 @@ function renderActions(group: string): HTMLElement {
   const result = document.createElement('pre');
   result.className = 'pf-actionresult';
   result.hidden = true;
-  actionResults.set(group, result);
+  actionResults.set(parentKey, result);
 
   bar.append(buttons, result);
   return bar;
 }
 
-function showActionResult(ok: boolean, lines: string[]): void {
-  for (const result of actionResults.values()) {
-    result.textContent = lines.join('\n');
-    result.classList.toggle('bad', !ok);
-    result.hidden = lines.length === 0;
-  }
+/** Shown under the bar the action belongs to, not every bar. */
+function showActionResult(id: SettingActionId, ok: boolean, lines: string[]): void {
+  const parent = actionParent(id);
+  const result = parent ? actionResults.get(parent) : undefined;
+  if (!result) return;
+  result.textContent = lines.join('\n');
+  result.classList.toggle('bad', !ok);
+  result.hidden = lines.length === 0;
 }
 
 function setActionsBusy(busy: boolean, running?: SettingActionId): void {
@@ -524,9 +547,11 @@ function render(): void {
       }
       section.appendChild(renderRow(spec));
     }
-    // The Discord buttons live inside the reveal, under the fields they act on.
-    const wrapper = dependents.get('remote.enabled');
-    if (group === 'Experimental' && wrapper) wrapper.firstElementChild!.appendChild(renderActions(group));
+    // A feature's buttons live inside its reveal, under the fields they act on.
+    for (const parentKey of Object.keys(ACTIONS)) {
+      const wrapper = dependents.get(parentKey);
+      if (wrapper && settings.some((s) => s.key === parentKey)) wrapper.firstElementChild!.appendChild(renderActions(parentKey));
+    }
     // The browser devices (#137), after the settings that let them in.
     if (group === WEB_DEVICES_GROUP) section.appendChild(createWebDevicesBlock(post));
     main.appendChild(section);
@@ -568,12 +593,12 @@ function onHostMessage(message: HostToPreferences | undefined): void {
   if (!message || !root?.isConnected) return;
   if (message.type === 'actionBusy') {
     setActionsBusy(true, message.id);
-    showActionResult(true, ['Working…']);
+    showActionResult(message.id, true, ['Working…']);
     return;
   }
   if (message.type === 'actionResult') {
     setActionsBusy(false);
-    showActionResult(message.ok, message.lines);
+    showActionResult(message.id, message.ok, message.lines);
     return;
   }
   if (message.type === 'status') {

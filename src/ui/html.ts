@@ -150,6 +150,17 @@ export function renderBrowserWorkbenchHtml(opts: { asset: (name: string) => stri
   });
 }
 
+/**
+ * What the remote-control loader (#175) builds the same page from: the body markup, the body
+ * class, and the files in load order. It gets them from the daemon over the relay.
+ */
+export const RELAY_WORKBENCH_PAGE = {
+  body: BODY.workbench,
+  bodyClass: 'aw-shell aw-web',
+  styles: ['theme.css', 'workbench.css'],
+  scripts: ['webshim.js', 'workbench.js'],
+} as const;
+
 function attr(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
