@@ -34,10 +34,13 @@ describe('relay keys and ids', () => {
 
   it('round-trips a pairing link through its fragment', () => {
     const key = newRelayKey();
-    const link = relayPairingLink('https://agentwrangler.netlify.app/', 'abc-123', key);
-    expect(link).toBe(`https://agentwrangler.netlify.app/#pair=abc-123.${key}`);
-    expect(parsePairingFragment(new URL(link).hash)).toEqual({ deviceId: 'abc-123', key });
+    const project = { url: 'https://abcd1234.supabase.co', anonKey: 'sb_publishable_ABCDEFGHIJKLMNOPQRSTUV' };
+    const link = relayPairingLink('https://agentwrangler.netlify.app/', 'abc-123', key, project);
+    expect(link.startsWith('https://agentwrangler.netlify.app/#pair=abc-123.')).toBe(true);
+    expect(parsePairingFragment(new URL(link).hash)).toEqual({ deviceId: 'abc-123', key, project });
     expect(parsePairingFragment('#pair=abc.short')).toBeUndefined();
+    // A project URL with a path, or a key with odd characters, is not one a link carries.
+    expect(parsePairingFragment(new URL(relayPairingLink('https://x', 'a', key, { ...project, url: 'https://evil.example/x' })).hash)).toBeUndefined();
   });
 });
 

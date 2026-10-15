@@ -82,6 +82,13 @@ function readState(): unknown {
 /** The build this page was served as; the server's `hello` must match it. */
 const BUILD = document.querySelector<HTMLMetaElement>('meta[name="aw-build"]')?.content ?? '';
 const SOCKET_URL = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+/**
+ * The remote-control loader (#175) supplies its own sockets, carried over the relay instead
+ * of to this page's origin. Its origin is the loader's site, not the Mac, so nothing here may
+ * fetch from `location` then: there is no sign-in to probe and no recovery token to keep.
+ */
+const relaySocket = (globalThis as { agentWranglerSocket?: () => WebSocket }).agentWranglerSocket;
+const openSocket = (): WebSocket => (relaySocket ? relaySocket() : new WebSocket(SOCKET_URL));
 const BACKOFF_FIRST_MS = 500;
 const BACKOFF_MAX_MS = 10_000;
 /** Envelopes kept for resending. A tab offline for long enough loses the oldest. */
@@ -108,7 +115,7 @@ let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
 function connect(): void {
   retryTimer = undefined;
-  const ws = new WebSocket(SOCKET_URL);
+  const ws = openSocket();
   socket = ws;
   let opened = false;
   ws.addEventListener('open', () => {
@@ -140,7 +147,7 @@ function scheduleReconnect(): void {
 async function reconnect(): Promise<void> {
   // A server that answers but will not upgrade us has most likely signed this
   // device out; the page itself says so, and how to sign in again.
-  if (failedOpens >= AUTH_PROBE_AFTER) {
+  if (failedOpens >= AUTH_PROBE_AFTER && !relaySocket) {
     try {
       const res = await fetch('/', { method: 'HEAD', cache: 'no-store', credentials: 'same-origin' });
       if (res.status === 401) {
@@ -182,7 +189,7 @@ function sendRaw(envelope: unknown): void {
  * so a browser that loses its device cookie can sign itself back in.
  */
 function keepRecoveryToken(): void {
-  if (location.protocol !== 'https:') return;
+  if (location.protocol !== 'https:' || relaySocket) return;
   try {
     if (localStorage.getItem(REAUTH_STORAGE_KEY)) return;
   } catch {

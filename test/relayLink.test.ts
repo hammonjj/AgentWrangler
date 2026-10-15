@@ -240,6 +240,31 @@ describe('relay link', () => {
     link.dispose();
   });
 
+  it('closes a device\'s oldest tab when a new one would pass its cap', async () => {
+    const hub = new Hub();
+    const key = newRelayKey();
+    const link = await startRelayLink({
+      network: network(hub),
+      keyOf: () => key,
+      attach: echoAttach([]),
+      build: () => 'b1',
+      daemonId: 'd',
+      log: () => undefined,
+      batchMs: 5,
+      maxTabsPerDevice: 2,
+    });
+    const first = await browser(hub, 'dev1', key);
+    await until(() => link.tabs === 1);
+    await browser(hub, 'dev1', key);
+    await until(() => link.tabs === 2);
+    await browser(hub, 'dev1', key);
+    await until(() => first.received.some((i) => i.k === 'close'));
+    expect(first.received.at(-1)).toMatchObject({ k: 'close', reason: 'replaced' });
+    await until(() => link.tabs === 2);
+    expect(link.tabs).toBe(2);
+    link.dispose();
+  });
+
   it('serves the workbench assets for its own build only', async () => {
     const hub = new Hub();
     const key = newRelayKey();
