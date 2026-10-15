@@ -415,7 +415,9 @@ nothing, not zeroes.
 ## Scheduled jobs (#164)
 
 A job starts a conversation at a set time without a click: weekdays and a time of day on the
-Mac's clock, a folder, a harness, model and effort, a prompt, and (Claude) a permission mode and
+Mac's clock, or a repeat through the day (every 15 minutes to 6 hours between a start and an end
+time, e.g. hourly 08:00–20:00; a run that is still going makes the next slot wait, so runs never
+overlap), a folder, a harness, model and effort, a prompt, and (Claude) a permission mode and
 an allowed-tools list. Create and manage jobs in the workbench's *Jobs* view (`#/jobs`). The plan
 is `docs/plans/scheduled-agents.md`.
 
@@ -434,7 +436,7 @@ is `docs/plans/scheduled-agents.md`.
 - **Admission.** No run starts while the fleet is paused or while a usage window for the job's
   provider is at its limit (by default the auto-pause percent). The slot is recorded as
   *skipped* with the reason, and it is tried again while its catch-up window is open.
-- **History.** Each job keeps its last 50 runs: ran, late, skipped, missed or failed, with the
+- **History.** Each job keeps its last 100 runs: ran, late, skipped, missed or failed, with the
   reason and the session it started.
 
 Jobs are stored in Agent Wrangler's own state (`state.json`), never in a project.

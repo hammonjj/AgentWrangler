@@ -497,3 +497,70 @@ describe('fixes from review', () => {
     expect(launched).toEqual(['j1']);
   });
 });
+
+describe('repeating through the day (#184)', () => {
+  const hourly = { weekdays: [1, 2, 3, 4, 5], time: '08:00', every: { minutes: 60, until: '20:00' } };
+
+  it('checks the repeat', () => {
+    const ok = sanitizeJobInput({ ...INPUT, schedule: { ...hourly, every: { minutes: '60', until: '20:00' } } });
+    expect('value' in ok && ok.value.schedule).toEqual(hourly);
+    expect('error' in sanitizeJobInput({ ...INPUT, schedule: { ...hourly, every: { minutes: 7, until: '20:00' } } })).toBe(true);
+    expect('error' in sanitizeJobInput({ ...INPUT, schedule: { ...hourly, every: { minutes: 60, until: '07:00' } } })).toBe(true);
+    const once = sanitizeJobInput({ ...INPUT, schedule: { weekdays: [1], time: '08:00', every: { minutes: '', until: '20:00' } } });
+    expect('value' in once && once.value.schedule.every).toBeUndefined();
+  });
+
+  it('finds hourly slots, the last at the end time, and none overnight', () => {
+    expect(latestSlot(hourly, at(2026, 10, 12, 10, 59))).toBe(at(2026, 10, 12, 10));
+    expect(latestSlot(hourly, at(2026, 10, 12, 20, 30))).toBe(at(2026, 10, 12, 20));
+    expect(latestSlot(hourly, at(2026, 10, 13, 7, 0))).toBe(at(2026, 10, 12, 20)); // Tuesday early → Monday's last
+    expect(nextSlot(hourly, at(2026, 10, 12, 10, 0))).toBe(at(2026, 10, 12, 11));
+    expect(nextSlot(hourly, at(2026, 10, 16, 20, 1))).toBe(at(2026, 10, 19, 8)); // Friday night → Monday 08:00
+    expect(describeSchedule(hourly)).toBe('Weekdays, every hour, 08:00–20:00');
+    expect(describeSchedule({ ...hourly, every: { minutes: 30, until: '12:00' } })).toBe('Weekdays, every 30 min, 08:00–12:00');
+  });
+
+  it('runs each slot once, and after a gap only the latest', () => {
+    let job = enabledJob({ schedule: hourly });
+    expect(decideSlot(job, at(2026, 10, 12, 9, 1))).toEqual({ kind: 'run', slot: at(2026, 10, 12, 9), late: false });
+    job = recordRun(job, { id: 'r', slot: at(2026, 10, 12, 9), at: 0, outcome: 'ran' });
+    expect(decideSlot(job, at(2026, 10, 12, 9, 30))).toEqual({ kind: 'none' });
+    expect(decideSlot(job, at(2026, 10, 12, 13, 10))).toEqual({ kind: 'run', slot: at(2026, 10, 12, 13), late: true });
+  });
+
+  it('waits while the previous run is still going, without a notification', async () => {
+    const storage = memoryStorage();
+    const store = new ScheduledJobStore(storage, () => at(2026, 10, 1), () => 'j1');
+    store.create({ ...INPUT, schedule: hourly });
+    store.setEnabled('j1', true);
+    store.record('j1', { id: 'r0', slot: at(2026, 10, 12, 9), at: 0, outcome: 'ran', provider: 'claude', sessionId: 's0' });
+    let busy = true;
+    let clock = at(2026, 10, 12, 10);
+    const launched: string[] = [];
+    const notices: string[] = [];
+    const jobs = createScheduledJobs({
+      jobs: store,
+      sessions: { async launch(req) { launched.push(req.cwd); return { provider: 'claude', sessionId: 's1', send: async () => 'applied' } as never; } },
+      launchDefaults: { request: (provider, cwd, o) => ({ provider, cwd, ...o }) },
+      admission: () => ({ fleetPaused: false, autoPausePercent: 98 }),
+      mayStart: () => true,
+      runActive: (r) => busy && r.sessionId === 's0',
+      notify: (n) => notices.push(n.title),
+      log: () => {},
+      now: () => clock,
+      isDirectory: () => true,
+      setInterval: () => 0,
+      clearInterval: () => {},
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+    });
+    await jobs.tick();
+    expect(launched).toHaveLength(0);
+    expect(store.get('j1')!.history[0]).toMatchObject({ outcome: 'skipped', reason: 'the previous run is still going' });
+    expect(notices).toEqual([]);
+    busy = false;
+    clock = at(2026, 10, 12, 10, 20);
+    await jobs.tick();
+    expect(launched).toHaveLength(1);
+  });
+});

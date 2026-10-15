@@ -28,6 +28,8 @@ import {
   type MissionsSnapshot,
 } from '../../shared/orchestration/missionView';
 import { localModelName } from '../../shared/modelName';
+import type { ModelChoice } from '../../shared/conversation';
+import { modelOptionsHtml, type ModelHarness } from './modelSelect';
 import { certaintyMark, certaintyText, LINKED_PHASE_LABEL, linkedTone, outcomeFacts, TASK_PHASE_LABEL } from '../../shared/orchestration/delegatedLabels';
 import type { PlanEdit, PlanOverrides } from '../../shared/orchestration/plan';
 import { TASK_ACTION_LABEL, TASK_STRIP_ACTIONS, routeChipTitle, type TaskViewAction } from '../../shared/orchestration/taskView';
@@ -142,7 +144,8 @@ function isOpen(v: MissionView, ui: MissionsUiState): boolean {
 }
 
 /** The whole view. Missions that need the user first, then running, then the rest by recency. */
-export function missionsHtml(snap: MissionsSnapshot, ui: MissionsUiState, nowMs: number): string {
+export function missionsHtml(snap: MissionsSnapshot, ui: MissionsUiState, nowMs: number, models: readonly ModelChoice[] = []): string {
+  catalog = models;
   // Needs-you first, from the shared phase (#101), so the order agrees with the tab's count.
   const needsYou = (v: MissionView) =>
     v.phase ? v.phase.needsYou : v.state === 'plan-review' || v.state === 'review' || v.state === 'planning-failed' || v.metrics.waiting > 0;
@@ -292,6 +295,15 @@ function options(values: readonly { value: string; label: string }[], current: s
   return values.map((o) => `<option value="${esc(o.value)}"${(current ?? '') === o.value ? ' selected' : ''}>${esc(o.label)}</option>`).join('');
 }
 
+/** The models the CLIs report, for the Model pin (#183). Set by each `missionsHtml` draw. */
+let catalog: readonly ModelChoice[] = [];
+
+/** The models a harness pin offers: that harness's, or both when the launcher's harness applies. */
+function pinHarness(harness: string | undefined): ModelHarness | undefined {
+  if (!harness) return undefined;
+  return harness === 'codex' ? 'codex' : 'claude';
+}
+
 function editorHtml(v: MissionView, t: MissionTaskView, snap: MissionsSnapshot): string {
   const others = v.tasks.filter((x) => x.taskId !== t.taskId);
   const depOf = (id: string) => t.deps.find((d) => d.taskId === id)?.kind ?? 'none';
@@ -327,7 +339,7 @@ function editorHtml(v: MissionView, t: MissionTaskView, snap: MissionsSnapshot):
 <fieldset class="pgroup"><legend>Depends on</legend>${deps}</fieldset>
 <fieldset class="pgroup pins"><legend>Pins and caps (this task only)</legend>
 <label class="pmini"><span>Harness</span><select data-pin="harness">${options(harnesses, t.pins?.harness)}</select></label>
-<label class="pmini"><span>Model</span><input type="text" data-pin="model" placeholder="launcher’s" value="${esc(t.pins?.model ?? '')}"></label>
+<label class="pmini"><span>Model</span><select data-pin="model">${modelOptionsHtml(catalog, pinHarness(t.pins?.harness), t.pins?.model ?? '', 'launcher’s')}</select></label>
 <label class="pmini"><span>Effort</span><select data-pin="effort">${options(efforts, t.pins?.effort)}</select></label>
 <label class="pmini"><span>Max tier</span><select data-cap="maxTier">${options(tiers, t.caps?.maxTier)}</select></label>
 <label class="pmini"><span>Max effort</span><select data-cap="maxEffort">${options(capEfforts, t.caps?.maxEffort)}</select></label>

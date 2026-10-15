@@ -13,6 +13,8 @@
 import { MEMORY_KINDS, MEMORY_KIND_LABEL, MAX_MEMORY_ITEM, type AgentMemoryKind } from '../../shared/agentMemory';
 import { AGENT_EFFORTS, type DurableAgentInput, type DurableAgentView } from '../../shared/durableAgents';
 import { capitalize, formatAge, GLOBAL_PROJECT_DIR, type ProjectDTO } from '../../shared/model';
+import type { ModelChoice } from '../../shared/conversation';
+import { modelOptionsHtml } from './modelSelect';
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -215,7 +217,7 @@ ${ui.panelError ? `<p class="ag-error" role="alert">${esc(ui.panelError)}</p>` :
 </div>`;
 }
 
-function formHtml(f: AgentFormDraft, ui: AgentsUiState, projects: readonly ProjectDTO[]): string {
+function formHtml(f: AgentFormDraft, ui: AgentsUiState, projects: readonly ProjectDTO[], models: readonly ModelChoice[]): string {
   const opt = (value: string, label: string, selected: boolean) => `<option value="${esc(value)}"${selected ? ' selected' : ''}>${esc(label)}</option>`;
   const folders = projects.filter((p) => p.dir !== GLOBAL_PROJECT_DIR);
   // A folder that has since left the list stays selectable on the agent it belongs to.
@@ -230,7 +232,7 @@ function formHtml(f: AgentFormDraft, ui: AgentsUiState, projects: readonly Proje
 <label class="ag-field"><span>Scope</span><select data-f="scope">${scopes}</select></label>
 <span class="ag-row">
 <label class="ag-field"><span>Harness</span><select data-f="provider">${opt('claude', 'Claude', f.provider === 'claude')}${opt('codex', 'Codex', f.provider === 'codex')}</select></label>
-<label class="ag-field"><span>Model</span><input data-f="model" maxlength="100" value="${esc(f.model)}" placeholder="Default"></label>
+<label class="ag-field"><span>Model</span><select data-f="model">${modelOptionsHtml(models, f.provider, f.model)}</select></label>
 <label class="ag-field"><span>Effort</span><select data-f="effort">${efforts}</select></label>
 </span>
 <label class="ag-field"><span>Instructions</span><textarea data-f="instructions" rows="5" maxlength="8000" placeholder="How this agent works: what it owns, how it reports, what it should not do. The repository's own instructions still apply.">${esc(f.instructions)}</textarea></label>
@@ -242,13 +244,13 @@ ${ui.error ? `<p class="ag-error" role="alert">${esc(ui.error)}</p>` : ''}
 </form>`;
 }
 
-export function agentsHtml(agents: readonly DurableAgentView[] | undefined, ui: AgentsUiState, projects: readonly ProjectDTO[], nowMs: number): string {
+export function agentsHtml(agents: readonly DurableAgentView[] | undefined, ui: AgentsUiState, projects: readonly ProjectDTO[], nowMs: number, models: readonly ModelChoice[] = []): string {
   const all = agents ?? [];
   const list = visibleAgents(all, ui);
   const archived = all.filter((a) => a.archived).length;
   const archivedToggle = archived > 0 ? `<button type="button" class="ag-btn" data-ag="showarchived" aria-pressed="${ui.showArchived === true}">${ui.showArchived ? 'Hide archived' : `Show archived (${archived})`}</button>` : '';
   const bar = `<div class="ag-bar"><span class="ag-hint">Agents you come back to. Selecting one continues its conversation.</span>${archivedToggle}<button type="button" class="ag-btn primary" data-ag="new"${ui.form && !ui.form.id ? ' disabled' : ''}>+ New agent</button></div>`;
-  const form = ui.form ? formHtml(ui.form, ui, projects) : '';
+  const form = ui.form ? formHtml(ui.form, ui, projects, models) : '';
   const body =
     list.length === 0
       ? ui.form

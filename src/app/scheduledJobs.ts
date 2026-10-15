@@ -35,6 +35,8 @@ export interface ScheduledJobDeps {
   admission: (provider: ScheduledJob['provider']) => AdmissionState;
   /** May the daemon start a session on the owner's behalf (`authorize`, audited). */
   mayStart: (jobId: string) => boolean;
+  /** The run's session is still working or waiting on a permission prompt. */
+  runActive?: (run: JobRun) => boolean;
   notify: (notice: HostNotice) => void;
   log: (line: string) => void;
   /** The scratch folder Global conversations work in (`GLOBAL_PROJECT_DIR`). */
@@ -190,12 +192,16 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
       log(`scheduled job ${job.id}: missed its slot`);
       return;
     }
-    const refusal = admissionRefusal(job, deps.admission(job.provider), at);
+    // Runs never overlap: a repeating job whose last run is still working waits for it (#184).
+    const previous = job.history.find((r) => r.sessionId !== undefined);
+    const overlapping = previous !== undefined && deps.runActive?.(previous) === true;
+    const refusal = overlapping ? 'the previous run is still going' : admissionRefusal(job, deps.admission(job.provider), at);
     if (refusal) {
       const firstSkip = !job.history.some((r) => r.slot === d.slot);
       const run: JobRun = { id: runId(), slot: d.slot, at, outcome: 'skipped', reason: refusal };
       jobs.record(job.id, run);
-      if (firstSkip) {
+      // An overlap is routine for a frequent job: it is in the history, not worth a notification.
+      if (firstSkip && !overlapping) {
         log(`scheduled job ${job.id}: skipped (${refusal})`);
         notifyOnce(job, run, 'Scheduled job skipped');
       }

@@ -33,6 +33,7 @@ const PENDING_MAX_AGE_MS = 10 * 60_000;
 import { analyticsClickRef, analyticsDecision, analyticsFilterChange, analyticsHtml } from './analytics';
 import { agentsHtml, blankForm, formFor, formInput, newAgentsUiState, readForm, readMemoryForm } from './agents';
 import { createJobsController } from './jobs';
+import { modelOptionsHtml } from './modelSelect';
 import type { JobView } from '../../shared/scheduledJobs';
 import { assignableAgents, type DurableAgentView } from '../../shared/durableAgents';
 import type { MemoryOp } from '../../shared/agentMemory';
@@ -209,7 +210,7 @@ function renderJobs(force: boolean): void {
   jobRenderDeferred = false;
   menuPosition = undefined;
   rowMenu = undefined;
-  paint(`${bannerHtml()}${jobsView.html(jobViews, projects)}`);
+  paint(`${bannerHtml()}${jobsView.html(jobViews, projects, modelCatalog)}`);
 }
 
 function queryAnalytics(): void {
@@ -1217,6 +1218,8 @@ type LauncherState = {
   openai: { model: string; effort: string };
 };
 let launchProvider: LaunchProvider = 'anthropic';
+/** The models the CLIs report, for every model dropdown in the pane (#183). */
+let modelCatalog: ModelChoice[] = [];
 
 function modelValue(provider: LaunchProvider, model: string): string {
   return `${provider}:${model}`;
@@ -1224,6 +1227,7 @@ function modelValue(provider: LaunchProvider, model: string): string {
 
 function renderLaunchDefaults(launcher: LauncherState): void {
   launchProvider = launcher.provider;
+  modelCatalog = launcher.models;
   tasksBtn.hidden = launcher.tasks !== true;
   const models = launcher.models;
   // The CLI's list has a default row of its own, already labelled with the
@@ -1578,7 +1582,7 @@ function render(): void {
     menuPosition = undefined;
     rowMenu = undefined;
     // Its own route (the shell's Agents link), so no session tabs above it.
-    paint(`${bannerHtml()}${agentsHtml(agentViews, agentsUi, projects, Date.now())}`);
+    paint(`${bannerHtml()}${agentsHtml(agentViews, agentsUi, projects, Date.now(), modelCatalog)}`);
     return;
   }
   if (tableView === 'jobs') {
@@ -1605,7 +1609,7 @@ function render(): void {
     missionRenderDeferred = false;
     menuPosition = undefined;
     rowMenu = undefined;
-    paint(`${bannerHtml()}${tabsHtml()}${missionsHtml(missionsSnap, missionsUi, Date.now())}`);
+    paint(`${bannerHtml()}${tabsHtml()}${missionsHtml(missionsSnap, missionsUi, Date.now(), modelCatalog)}`);
     if (missionsUi.reveal) {
       app.querySelector<HTMLElement>(`[data-mission="${CSS.escape(missionsUi.reveal)}"]`)?.scrollIntoView({ block: 'nearest' });
       missionsUi.reveal = undefined;
@@ -2451,7 +2455,16 @@ const keepAgentDrafts = (event: Event) => {
     return;
   }
   const form = target?.closest?.<HTMLFormElement>('.agents form[data-ag-form]');
-  if (form && agentsUi.form) agentsUi.form = readForm(form, agentsUi.form);
+  if (form && agentsUi.form) {
+    const before = agentsUi.form.provider;
+    agentsUi.form = readForm(form, agentsUi.form);
+    // Another harness has other models (#183). Swapped in place: the form is not repainted while it has focus.
+    if (agentsUi.form.provider !== before) {
+      agentsUi.form = { ...agentsUi.form, model: '', effort: '' };
+      const select = form.querySelector<HTMLSelectElement>('[data-f="model"]');
+      if (select) select.innerHTML = modelOptionsHtml(modelCatalog, agentsUi.form.provider, '');
+    }
+  }
 };
 app.addEventListener('input', keepAgentDrafts);
 app.addEventListener('change', keepAgentDrafts);
