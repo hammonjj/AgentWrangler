@@ -85,7 +85,11 @@ export class ScheduledJobStore {
     const next = fn(this.read());
     this.jobs = next;
     if (JSON.stringify(next) === before) return;
-    void this.storage.update(STORAGE_KEY, next);
+    // An entry today's checks refuse (a tighter limit, a hand edit) is kept as stored rather than
+    // deleted by an unrelated write; it stays out of the list until it reads again.
+    const raw = this.storage.get<unknown>(STORAGE_KEY, []);
+    const unreadable = Array.isArray(raw) ? raw.filter((r) => parseStoredJobs([r]).length === 0) : [];
+    void this.storage.update(STORAGE_KEY, [...next, ...unreadable]);
     this.emitter.fire();
   }
 }

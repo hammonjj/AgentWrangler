@@ -34,6 +34,7 @@ import {
   pendingReviewPayload,
   planSweep,
   reviewPrompt,
+  reviewReadRules,
   sweepSummary,
   type LedgerEntry,
   type PrCandidate,
@@ -204,13 +205,14 @@ export function createPrSweep(deps: PrSweepDeps): PrSweep {
             fs.mkdirSync(deps.reviewsDir, { recursive: true });
             fs.rmSync(reviewFile, { force: true });
           }
-          writeEntry(item.key, (e) => ({ ...e, pendingSha: item.headSha, pendingAt: now(), jobId: job.id, ...(reviewFile ? { reviewFile } : { reviewFile: undefined }), postError: undefined }));
+          // The earlier review's session is forgotten here, so its late "done" cannot mark this head reviewed.
+          writeEntry(item.key, (e) => ({ ...e, pendingSha: item.headSha, pendingAt: now(), jobId: job.id, sessionId: undefined, provider: undefined, reviewFile, postError: undefined }));
           await start(job, {
             cwd: tree,
             prompt: reviewPrompt(job.prompt, repo, item, reviewFile),
             origin: { ...jobOrigin(job.id, runId), pr: item.key },
-            // `//` is an absolute path in Claude Code's rule syntax: exactly this file, nothing else.
-            ...(reviewFile ? { extraAllowedTools: [`Write(/${reviewFile})`, `Edit(/${reviewFile})`] } : {}),
+            // `//` is an absolute path in Claude Code's rule syntax: this checkout to read, and (opted in) exactly one file to write.
+            extraAllowedTools: [...reviewReadRules(tree), ...(reviewFile ? [`Write(/${reviewFile})`, `Edit(/${reviewFile})`] : [])],
             onSessionId: (sessionId) => writeEntry(item.key, (e) => ({ ...e, provider: job.provider, sessionId })),
           });
           started++;

@@ -48,8 +48,11 @@ export interface JobRun {
   toldDone?: boolean;
 }
 
-/** Permission modes a job may run in. Never `bypassPermissions`. */
-export const JOB_PERMISSION_MODES = ['auto', 'default', 'acceptEdits', 'plan', 'dontAsk'] as const satisfies readonly PermissionModeName[];
+/**
+ * Permission modes a job may run in. Never `bypassPermissions`, and never
+ * `auto`: its classifier approves tool calls nobody is watching.
+ */
+export const JOB_PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'dontAsk'] as const satisfies readonly PermissionModeName[];
 export type JobPermissionMode = (typeof JOB_PERMISSION_MODES)[number];
 
 export interface ScheduledJob {
@@ -67,7 +70,7 @@ export interface ScheduledJob {
   /** Empty means the launcher's current default. */
   model?: string;
   effort?: string;
-  /** Claude only. Empty means `auto`. */
+  /** Claude only. Empty means `default`: anything not allowed waits in Waiting. */
   permissionMode?: JobPermissionMode;
   /** Absolute folder the session works in, or `GLOBAL_PROJECT_DIR` for the Global scratch folder. */
   folder: string;
@@ -165,7 +168,8 @@ export function sanitizeJobInput(v: unknown): { value: JobInput } | { error: str
   const prompt = str(o.prompt);
   if (!prompt) return { error: 'Write what the job should do.' };
   if (prompt.length > MAX_JOB_PROMPT) return { error: `Keep the prompt under ${MAX_JOB_PROMPT} characters.` };
-  if (o.permissionMode !== undefined && o.permissionMode !== '' && !isMode(o.permissionMode)) {
+  // `auto` was briefly the default; stored jobs that carry it fall back to `default`.
+  if (o.permissionMode !== undefined && o.permissionMode !== '' && o.permissionMode !== 'auto' && !isMode(o.permissionMode)) {
     return { error: 'That permission mode is not allowed for a job.' };
   }
   let catchUpHours = DEFAULT_CATCH_UP_HOURS;

@@ -289,12 +289,12 @@ describe('the scheduler', () => {
     expect(h.launches).toHaveLength(1);
   });
 
-  it('defaults a Claude job to auto, never to the launcher default or bypass', async () => {
+  it('defaults a Claude job to default, never to auto, the launcher default or bypass', async () => {
     const h = harness();
     h.store.create(INPUT);
     h.store.setEnabled('j1', true);
     await h.jobs.tick();
-    expect(h.launches[0]!.permissionMode).toBe('auto');
+    expect(h.launches[0]!.permissionMode).toBe('default');
   });
 
   it('labels a catch-up run late', async () => {
@@ -446,5 +446,54 @@ describe('the daily brief (#167)', () => {
       const r = sanitizeJobInput({ ...input, name: input.name || 'x', prompt: input.prompt || 'x' });
       expect('value' in r).toBe(true);
     }
+  });
+});
+
+describe('fixes from review', () => {
+  it('keeps a stored job that no longer reads instead of deleting it on the next write', () => {
+    const storage = memoryStorage({ 'agentWrangler.scheduledJobs': [{ id: 'broken', name: '' }] });
+    const store = new ScheduledJobStore(storage, () => 1, () => 'j');
+    store.create(INPUT);
+    expect((storage.doc['agentWrangler.scheduledJobs'] as Array<{ id: string }>).map((j) => j.id)).toEqual(['j', 'broken']);
+    expect(store.list.map((j) => j.id)).toEqual(['j']);
+  });
+
+  it('reads a job stored with auto as default', () => {
+    const job = { ...createJob('j1', INPUT, 0), permissionMode: 'auto' };
+    expect(parseStoredJobs([job])[0]!.permissionMode).toBeUndefined();
+  });
+
+  it('does not start a job turned off while an earlier job was still launching', async () => {
+    const storage = memoryStorage();
+    let n = 0;
+    const store = new ScheduledJobStore(storage, () => at(2026, 10, 1), () => `j${++n}`);
+    store.create(INPUT);
+    store.create({ ...INPUT, name: 'Second' });
+    store.setEnabled('j1', true);
+    store.setEnabled('j2', true);
+    const launched: string[] = [];
+    const jobs = createScheduledJobs({
+      jobs: store,
+      sessions: {
+        async launch(req) {
+          launched.push((req.origin as { jobId: string }).jobId);
+          if (launched.length === 1) store.setEnabled('j2', false); // turned off mid-tick
+          return { provider: 'claude', sessionId: 's', send: async () => 'applied' } as never;
+        },
+      },
+      launchDefaults: { request: (provider, cwd, o) => ({ provider, cwd, ...o }) },
+      admission: () => ({ fleetPaused: false, autoPausePercent: 98 }),
+      mayStart: () => true,
+      notify: () => {},
+      log: () => {},
+      now: () => MON_0730,
+      isDirectory: () => true,
+      setInterval: () => 0,
+      clearInterval: () => {},
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+    });
+    await jobs.tick();
+    expect(launched).toEqual(['j1']);
   });
 });

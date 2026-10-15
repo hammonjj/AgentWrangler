@@ -423,7 +423,8 @@ is `docs/plans/scheduled-agents.md`.
   whether it is on or not.
 - **A normal session.** The core daemon launches it the way *New conversation* does, as itself on
   your behalf (`session.start`, audited). It shows in Sessions, nothing is focused and nothing
-  restarts. The permission mode is never `bypassPermissions` (default `auto`). Tools on the
+  restarts. The permission mode is never `bypassPermissions` or `auto`, whose classifier approves calls
+  nobody is watching (default `default`). Tools on the
   allowed list run without asking. Anything else waits in *Waiting* and reaches you through the
   usual notifications. Nothing is ever approved for you.
 - **Sleep and missed runs.** The daemon decides each job's latest slot once a minute, on start

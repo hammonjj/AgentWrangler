@@ -73,11 +73,8 @@ Use this repository's own review process if it has one (look for a review skill,
 
 Do not post anything to GitHub, do not push, and do not approve or request changes.`;
 
-/** What a PR sweep may run without asking: reading the PR and the code. */
+/** What a PR sweep may run without asking: reading the PR. Reading code is granted per session, for its own checkout only (`reviewReadRules`). */
 export const PR_SWEEP_ALLOWED_TOOLS: readonly string[] = [
-  'Read',
-  'Grep',
-  'Glob',
   'Skill',
   'Agent',
   'Bash(git diff:*)',

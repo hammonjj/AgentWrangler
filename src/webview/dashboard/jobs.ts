@@ -208,7 +208,7 @@ function formHtml(f: JobFormDraft, ui: JobsUiState, projects: readonly ProjectDT
   if (f.folder && f.folder !== GLOBAL_PROJECT_DIR && !folders.some((p) => p.dir === f.folder)) folders.unshift({ dir: f.folder, name: f.folder.split('/').filter(Boolean).pop() ?? f.folder });
   const folderOpts = [opt('', 'Choose a folder…', !f.folder), opt(GLOBAL_PROJECT_DIR, 'Global (no project)', f.folder === GLOBAL_PROJECT_DIR), ...folders.map((p) => opt(p.dir, `${p.name} — ${p.dir}`, p.dir === f.folder))].join('');
   const efforts = AGENT_EFFORTS.map((e) => opt(e, e ? capitalize(e) : 'Default', f.effort === e)).join('');
-  const modes = [opt('', 'Auto (default)', !f.permissionMode), ...JOB_PERMISSION_MODES.filter((m) => m !== 'auto').map((m) => opt(m, MODE_TEXT[m] ?? m, f.permissionMode === m))].join('');
+  const modes = [opt('', 'Ask for anything not allowed (default)', !f.permissionMode), ...JOB_PERMISSION_MODES.filter((m) => m !== 'default').map((m) => opt(m, MODE_TEXT[m] ?? m, f.permissionMode === m))].join('');
   const days = DAY_ORDER.map(
     (d) => `<label class="jb-day"><input type="checkbox" data-day="${d}"${f.weekdays.includes(d) ? ' checked' : ''}><span>${DAYS[d]}</span></label>`,
   ).join('');

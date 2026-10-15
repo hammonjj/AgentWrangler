@@ -321,6 +321,7 @@ describe('DashboardHost: every message is authorised before it acts', () => {
         saveJob: { type: 'jobResult', requestId: 'r1', error: 'Not permitted.' },
         jobEnable: { type: 'jobResult', requestId: 'r1', error: 'Not permitted.' },
         runJob: { type: 'jobResult', requestId: 'r1', error: 'Not permitted.' },
+        previewJob: { type: 'jobPreview', requestId: 'r1', id: 'j1', error: 'Not permitted.' },
       };
       expect(rig.webview.posted).toEqual(answers[m.type] ? [answers[m.type]] : []);
       expect(rig.acc.audit).toHaveLength(1);

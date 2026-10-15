@@ -399,6 +399,9 @@ export class DashboardHost {
       if (m.type === 'saveAgent' && typeof m.requestId === 'string') void this.webview.postMessage({ type: 'agentSaved', requestId: m.requestId, error: 'Not permitted.' } satisfies HostToDashboard);
       if (m.type === 'agentMemory' || m.type === 'agentMakeCurrent' || m.type === 'assignSession') this.agentResult(m.requestId, { error: 'Not permitted.' });
       if (m.type === 'saveJob' || m.type === 'jobEnable' || m.type === 'runJob') this.jobResult(m.requestId, { error: 'Not permitted.' });
+      if (m.type === 'previewJob' && typeof m.requestId === 'string' && typeof m.id === 'string') {
+        void this.webview.postMessage({ type: 'jobPreview', requestId: m.requestId, id: m.id, error: 'Not permitted.' } satisfies HostToDashboard);
+      }
       return;
     }
     // As this pane's client: the prompts, toasts and navigation it causes go

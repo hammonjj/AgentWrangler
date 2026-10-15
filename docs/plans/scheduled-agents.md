@@ -121,6 +121,9 @@ Where the build differs from the plan above, or settles something the plan left 
   file under AW's state. That file path is the only rule it gets on top of the job's list. The
   daemon posts the file with no `event`, so the agent never holds a GitHub write permission and
   cannot approve. Posting is its own audited action, `job.post`.
+- **No job runs in `auto`.** §3 proposed it as the default, but its classifier approves tool calls,
+  which is approving silently. A job's default is `default`: anything not on its list waits in
+  *Waiting*. `auto` is not offered at all.
 - **The brief and the sweep run in `dontAsk`.** In `auto` mode the classifier could approve a
   tool that is not on the list. In `dontAsk` anything not on the list is refused, so nothing is
   left waiting on a prompt nobody will see.

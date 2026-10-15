@@ -127,7 +127,7 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
       deps.launchDefaults.request(job.provider, opts.cwd, {
         ...(job.model ? { model: job.model } : {}),
         ...(job.effort ? { effort: job.effort } : {}),
-        ...(claude ? { sessionId: randomUUID(), permissionMode: job.permissionMode ?? 'auto' } : {}),
+        ...(claude ? { sessionId: randomUUID(), permissionMode: job.permissionMode ?? 'default' } : {}),
         ...(claude && allowed.length ? { policy: { claude: { allowedTools: allowed } } } : {}),
         origin: opts.origin,
       }),
@@ -210,12 +210,14 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
     ticking ??= (async () => {
       try {
         const at = now();
-        for (const job of jobs.list) {
-          if (!job.enabled) continue;
+        for (const { id } of jobs.list) {
+          // Read again: an earlier job's run (a sweep) can take minutes, and this one may have been turned off, edited or deleted meanwhile.
+          const job = jobs.get(id);
+          if (!job?.enabled) continue;
           try {
             await decide(job, at);
           } catch (error) {
-            log(`scheduled job ${job.id}: ${(error as Error).message}`);
+            log(`scheduled job ${id}: ${(error as Error).message}`);
           }
         }
       } finally {
