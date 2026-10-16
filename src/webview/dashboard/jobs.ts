@@ -45,6 +45,7 @@ export interface JobFormDraft {
   prompt: string;
   allowedTools: string;
   notifyOnDone: boolean;
+  allowOverlap: boolean;
   postPendingReview: boolean;
   maxWindowPercent: string;
 }
@@ -103,6 +104,7 @@ function formOf(j: JobInput): JobFormDraft {
     prompt: j.prompt,
     allowedTools: (j.allowedTools ?? []).join('\n'),
     notifyOnDone: j.notifyOnDone === true,
+    allowOverlap: j.allowOverlap === true,
     postPendingReview: j.postPendingReview === true,
     maxWindowPercent: j.maxWindowPercent !== undefined ? String(j.maxWindowPercent) : '',
   };
@@ -123,6 +125,7 @@ export function jobFormInput(f: JobFormDraft): JobInput {
     prompt: f.prompt,
     allowedTools: f.allowedTools.split('\n').map((t) => t.trim()).filter(Boolean),
     ...(f.notifyOnDone ? { notifyOnDone: true } : {}),
+    ...(f.allowOverlap ? { allowOverlap: true } : {}),
     ...(f.postPendingReview && f.kind === 'prSweep' ? { postPendingReview: true } : {}),
     ...(f.maxWindowPercent.trim() ? { maxWindowPercent: Number(f.maxWindowPercent) } : {}),
   };
@@ -249,6 +252,7 @@ ${claude ? `<label class="jb-check"><input type="checkbox" data-f="postPendingRe
     : ''
 }
 <label class="jb-check"><input type="checkbox" data-f="notifyOnDone"${f.notifyOnDone ? ' checked' : ''}><span>Notify me when a run has finished, with a link to it</span></label>
+<label class="jb-check"><input type="checkbox" data-f="allowOverlap"${f.allowOverlap ? ' checked' : ''}><span>Allow jobs to overlap</span></label>
 <label class="ag-field"><span>Prompt</span><textarea data-f="prompt" rows="6" maxlength="20000" placeholder="What the job should do each time it runs.">${esc(f.prompt)}</textarea></label>
 ${
   claude
@@ -311,6 +315,7 @@ export function readJobForm(form: HTMLElement, draft: JobFormDraft): JobFormDraf
     prompt: value('prompt') ?? draft.prompt,
     allowedTools: value('allowedTools') ?? draft.allowedTools,
     notifyOnDone: form.querySelector<HTMLInputElement>('[data-f="notifyOnDone"]')?.checked ?? draft.notifyOnDone,
+    allowOverlap: form.querySelector<HTMLInputElement>('[data-f="allowOverlap"]')?.checked ?? draft.allowOverlap,
     postPendingReview: form.querySelector<HTMLInputElement>('[data-f="postPendingReview"]')?.checked ?? draft.postPendingReview,
   };
 }

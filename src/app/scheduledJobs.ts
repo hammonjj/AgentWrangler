@@ -192,9 +192,9 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
       log(`scheduled job ${job.id}: missed its slot`);
       return;
     }
-    // Runs never overlap: a repeating job whose last run is still working waits for it (#184).
+    // Runs do not overlap unless the job allows it: a job whose last run is still working skips the slot (#184).
     const previous = job.history.find((r) => r.sessionId !== undefined);
-    const overlapping = previous !== undefined && deps.runActive?.(previous) === true;
+    const overlapping = !job.allowOverlap && previous !== undefined && deps.runActive?.(previous) === true;
     const refusal = overlapping ? 'the previous run is still going' : admissionRefusal(job, deps.admission(job.provider), at);
     if (refusal) {
       const firstSkip = !job.history.some((r) => r.slot === d.slot);
