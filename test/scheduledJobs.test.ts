@@ -563,4 +563,31 @@ describe('repeating through the day (#184)', () => {
     await jobs.tick();
     expect(launched).toHaveLength(1);
   });
+
+  it('starts a slot while the previous run is still going when the job allows overlap', async () => {
+    const storage = memoryStorage();
+    const store = new ScheduledJobStore(storage, () => at(2026, 10, 1), () => 'j1');
+    store.create({ ...INPUT, schedule: hourly, allowOverlap: true });
+    store.setEnabled('j1', true);
+    store.record('j1', { id: 'r0', slot: at(2026, 10, 12, 9), at: 0, outcome: 'ran', provider: 'claude', sessionId: 's0' });
+    const launched: string[] = [];
+    const jobs = createScheduledJobs({
+      jobs: store,
+      sessions: { async launch(req) { launched.push(req.cwd); return { provider: 'claude', sessionId: 's1', send: async () => 'applied' } as never; } },
+      launchDefaults: { request: (provider, cwd, o) => ({ provider, cwd, ...o }) },
+      admission: () => ({ fleetPaused: false, autoPausePercent: 98 }),
+      mayStart: () => true,
+      runActive: () => true,
+      notify: () => {},
+      log: () => {},
+      now: () => at(2026, 10, 12, 10),
+      isDirectory: () => true,
+      setInterval: () => 0,
+      clearInterval: () => {},
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+    });
+    await jobs.tick();
+    expect(launched).toHaveLength(1);
+  });
 });

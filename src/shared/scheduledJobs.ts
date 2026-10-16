@@ -88,6 +88,8 @@ export interface ScheduledJob {
   allowedTools: string[];
   /** Say so with a notification when a run's session finishes its turn (#167): the daily brief. */
   notifyOnDone?: boolean;
+  /** Start a slot even while the previous run is still working. Off: that slot is skipped. */
+  allowOverlap?: boolean;
   /**
    * PR sweeps only (#170): post each review as a pending GitHub review the
    * user submits. Leaves the machine under the user's name, so it is a
@@ -119,6 +121,7 @@ export interface JobInput {
   prompt: string;
   allowedTools?: string[];
   notifyOnDone?: boolean;
+  allowOverlap?: boolean;
   postPendingReview?: boolean;
   maxWindowPercent?: number;
 }
@@ -237,6 +240,7 @@ export function sanitizeJobInput(v: unknown): { value: JobInput } | { error: str
       prompt,
       allowedTools: o.provider === 'claude' ? allowedTools : [],
       ...(o.notifyOnDone === true ? { notifyOnDone: true } : {}),
+      ...(o.allowOverlap === true ? { allowOverlap: true } : {}),
       ...(o.postPendingReview === true && o.kind === 'prSweep' && o.provider === 'claude' ? { postPendingReview: true } : {}),
       ...(maxWindowPercent !== undefined ? { maxWindowPercent } : {}),
     },
@@ -267,6 +271,7 @@ function fromInput(i: JobInput): Omit<ScheduledJob, 'id' | 'enabled' | 'createdA
     prompt: i.prompt,
     allowedTools: [...(i.allowedTools ?? [])],
     ...(i.notifyOnDone ? { notifyOnDone: true } : {}),
+    ...(i.allowOverlap ? { allowOverlap: true } : {}),
     ...(i.postPendingReview ? { postPendingReview: true } : {}),
     ...(i.maxWindowPercent !== undefined ? { maxWindowPercent: i.maxWindowPercent } : {}),
   };
