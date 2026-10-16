@@ -1488,6 +1488,59 @@ tr.subrow > td {
   white-space: nowrap;
 }
 
+/* A nested row that opens: like an Outlook thread, the steps drop under it. */
+.subagent-table tr.subrow-item.openable {
+  cursor: pointer;
+}
+.subagent-table tr.subrow-item.openable:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+.subagent-table .twist {
+  display: inline-block;
+  width: 1.1em;
+  color: var(--vscode-descriptionForeground);
+}
+.subagent-table .bgchip {
+  margin-left: 6px;
+}
+.subagent-table tbody tr.subprog {
+  display: block;
+}
+.subagent-table .subprog td {
+  display: block;
+  padding: 2px 12px 6px 30px;
+}
+.subprog-note {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+.subprog-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.subprog-steps .step {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 0;
+}
+.subprog-steps .step.say {
+  color: var(--vscode-foreground);
+}
+.subprog-steps .step.tool {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+}
+.subprog-steps .step.error {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+.subprog-steps .mark {
+  display: inline-block;
+  width: 1.2em;
+}
+
 /* Narrow layout: stack the subrow grid better. */
 #app.narrow tr.subrow > td {
   padding-left: 12px;

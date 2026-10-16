@@ -6,7 +6,10 @@ import type { SessionStore } from '../core/sessionStore';
 import { withHostedPermission, type HostedPermission } from '../core/sessionView';
 import type { CapabilityCatalog } from '../core/capabilityCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
-import type { DashboardAction, DashboardToHost, HostToDashboard } from '../shared/messages';
+import type { DashboardAction, DashboardToHost, HostToDashboard, SubagentStep } from '../shared/messages';
+import { archivePage, subagentPath } from '../claude/conversationArchive';
+import { subagentSteps } from '../claude/subagentSteps';
+import { transcriptPathFor } from '../claude/transcriptHistory';
 import { sessionRef, type AccessRequest, type ActionName, type BoundAccess, type ResourceRef } from '../core/access';
 import { runInRequest } from '../core/requestScope';
 import type { TaskBadge } from '../shared/orchestration/taskView';
@@ -422,6 +425,9 @@ export class DashboardHost {
       case 'rowClick':
         this.actions.smartOpen(m.key);
         break;
+      case 'subagentProgress':
+        void this.sendSubagentProgress(m.key, m.agentId);
+        break;
       case 'action':
         if (m.action === 'openInTab') this.actions.openInTab(m.key);
         else if (m.action === 'rename') this.actions.rename(m.key);
@@ -622,6 +628,22 @@ export class DashboardHost {
     void this.webview.postMessage({ type: 'jobResult', requestId, ...out } satisfies HostToDashboard);
   }
 
+  /** The newest steps of one subagent, read from its own transcript beside the parent's. */
+  private async sendSubagentProgress(key: string, agentId: string): Promise<void> {
+    const reply = (steps: SubagentStep[], error?: string): void => {
+      void this.webview.postMessage({ type: 'subagentProgress', key, agentId, steps, ...(error ? { error } : {}) } satisfies HostToDashboard);
+    };
+    const s = this.store.get(key);
+    const file = s?.provider === 'claude' ? (s.transcriptPath ?? (s.cwd && s.sessionId ? transcriptPathFor(s.sessionId, s.cwd) : undefined)) : undefined;
+    if (!file) return reply([], 'No transcript is available for this session.');
+    try {
+      const page = await archivePage(subagentPath(file, agentId), undefined, '', true);
+      reply(subagentSteps(page.blocks));
+    } catch {
+      reply([], 'Its transcript is not written yet.');
+    }
+  }
+
   private agentResult(requestId: unknown, result: { error?: string } | undefined): void {
     if (typeof requestId !== 'string') return;
     const error = result ? result.error : 'Agents are not available.';
@@ -698,6 +720,8 @@ export function dashboardRequest(m: DashboardToHost): AccessRequest {
       return { action: 'view.read' };
     case 'rowClick':
       return { action: 'session.open', resource: sessionRef(m.key) };
+    case 'subagentProgress':
+      return { action: 'view.read', resource: sessionRef(m.key) };
     case 'action':
       // An action name the webview made up is classed as the heaviest row action.
       return { action: Object.hasOwn(ROW_ACTIONS, m.action) ? ROW_ACTIONS[m.action] : 'session.close', resource: sessionRef(m.key) };

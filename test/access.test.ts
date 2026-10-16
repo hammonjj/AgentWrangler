@@ -116,6 +116,7 @@ const ROW_ACTIONS: Record<DashboardAction, true> = {
 const DASHBOARD: Samples<DashboardToHost> = {
   ready: [{ type: 'ready' }],
   rowClick: [{ type: 'rowClick', key: KEY }],
+  subagentProgress: [{ type: 'subagentProgress', key: KEY, agentId: 'a1' }],
   action: (Object.keys(ROW_ACTIONS) as DashboardAction[]).map((action) => ({ type: 'action', key: KEY, action, requestId: 'r1' })),
   answerQuestion: [{ type: 'answerQuestion', key: KEY, requestId: 'r1', answers: { q: 'a' } }],
   openExternal: [{ type: 'openExternal', url: 'https://example.com' }],

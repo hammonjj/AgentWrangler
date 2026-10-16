@@ -16,7 +16,7 @@ import {
   type ColumnId,
   type ColumnPrefs,
 } from '../../shared/columns';
-import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
+import type { DashboardAction, DashboardToHost, HostToDashboard, SubagentStep } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
 import { sortSubagents, subagentText } from '../../shared/subagents';
 import { taskChips } from '../../shared/orchestration/taskView';
@@ -170,6 +170,10 @@ function saveColumns(next: ColumnPrefs): void {
 const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 const expandedSubagents = new Set<string>(saved?.expandedSubagents ?? []);
+/** Nested rows opened to show progress, as `${sessionKey}|${subagentId}`; not saved, since the steps are not. */
+const openSubagentRows = new Set<string>();
+/** The latest steps the host sent for a nested row, by the same key. */
+const subagentProgress = new Map<string, { steps: SubagentStep[]; error?: string }>();
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
 let tableView: TableView = saved?.tableView ?? 'status';
@@ -822,21 +826,70 @@ function ageCell(s: SessionDTO): string {
   return `<td class="c-age" title="${esc(title)}" data-age-ts="${since}">${formatAge(now, since)}</td>`;
 }
 
+/** Open or close a nested row, asking the host for its steps on opening. */
+function toggleSubagentRow(el: HTMLElement): void {
+  const { saKey, saId, saAgent } = el.dataset;
+  if (!saKey || !saId || !saAgent) return;
+  const rowKey = `${saKey}|${saId}`;
+  if (openSubagentRows.has(rowKey)) openSubagentRows.delete(rowKey);
+  else {
+    openSubagentRows.add(rowKey);
+    post({ type: 'subagentProgress', key: saKey, agentId: saAgent });
+  }
+  render();
+}
+
+/** A snapshot moved on: ask again for every opened nested row whose subagent may still be working. */
+function refreshOpenSubagentRows(): void {
+  for (const s of sessions) {
+    if (!expandedSubagents.has(s.key)) continue;
+    for (const sa of s.subagentList ?? []) {
+      if (sa.agentId && sa.status === 'working' && openSubagentRows.has(`${s.key}|${sa.id}`)) {
+        post({ type: 'subagentProgress', key: s.key, agentId: sa.agentId });
+      }
+    }
+  }
+}
+
 /** Check if subagent row is expanded. */
 function subagentExpanded(key: string): boolean {
   return expandedSubagents.has(key);
 }
 
 /** Render a single subagent row in the subtable. */
-function subagentRowHtml(sa: import('../../shared/model').SubagentInfo): string {
+function subagentRowHtml(sessionKey: string, sa: import('../../shared/model').SubagentInfo): string {
   const statusDot = `<span class="dot st-${sa.status === 'working' ? 'busy' : sa.status === 'done' ? 'done' : 'blocked'}" aria-hidden="true"></span>`;
   const agentType = sa.agentType ? ` (${esc(sa.agentType)})` : '';
   const statusWord = sa.status === 'working' ? 'working' : sa.status === 'done' ? 'done' : 'attention';
-  return `<tr class="subrow-item">
+  const rowKey = `${sessionKey}|${sa.id}`;
+  // Progress comes from the subagent's own transcript, so a row without its agent id has none to show.
+  const canOpen = Boolean(sa.agentId);
+  const open = canOpen && openSubagentRows.has(rowKey);
+  const twist = canOpen ? `<span class="twist" aria-hidden="true">${open ? '▾' : '▸'}</span>` : '';
+  const bg = sa.background ? '<span class="chip bgchip" title="Running in the background">bg</span>' : '';
+  const item = `<tr class="subrow-item${canOpen ? ' openable' : ''}"${canOpen ? ` tabindex="0" aria-expanded="${open}" data-sa-key="${esc(sessionKey)}" data-sa-id="${esc(sa.id)}" data-sa-agent="${esc(sa.agentId!)}" title="${open ? 'Hide progress' : 'Show progress'}"` : ''}>
   <td class="c-dot">${statusDot}</td>
-  <td class="c-label"><span class="label">${esc(sa.label)}${agentType}</span></td>
+  <td class="c-label"><span class="label">${twist}${esc(sa.label)}${agentType}${bg}</span></td>
   <td class="c-status"><span class="status">${statusWord}</span></td>
 </tr>`;
+  return open ? item + subagentProgressRow(subagentProgress.get(rowKey)) : item;
+}
+
+/** The steps under an opened nested row: newest last, tools with a state mark. */
+function subagentProgressRow(p: { steps: SubagentStep[]; error?: string } | undefined): string {
+  let body: string;
+  if (!p) body = '<div class="subprog-note">Loading…</div>';
+  else if (p.error) body = `<div class="subprog-note">${esc(p.error)}</div>`;
+  else if (p.steps.length === 0) body = '<div class="subprog-note">Nothing yet.</div>';
+  else {
+    body = `<ol class="subprog-steps">${p.steps
+      .map((st) => {
+        const mark = st.kind === 'tool' ? (st.state === 'running' ? '…' : st.state === 'error' ? '✗' : '✓') : '';
+        return `<li class="step ${st.kind}${st.state ? ` ${st.state}` : ''}"><span class="mark" aria-hidden="true">${mark}</span>${esc(st.text)}</li>`;
+      })
+      .join('')}</ol>`;
+  }
+  return `<tr class="subprog"><td colspan="3">${body}</td></tr>`;
 }
 
 /** Render the subtable for subagents. */
@@ -845,8 +898,8 @@ function subagentSubrow(s: SessionDTO, span: number): string {
   const open = subagentExpanded(s.key);
   if (!open) return '';
   const sorted = sortSubagents(s.subagentList);
-  const rows = sorted.map((sa) => subagentRowHtml(sa)).join('');
-  return `<tr class="subrow" data-key="${esc(s.key)}">
+  const rows = sorted.map((sa) => subagentRowHtml(s.key, sa)).join('');
+  return `<tr class="subrow open" data-key="${esc(s.key)}">
   <td class="c-sub" colspan="${span}">
     <table class="subagent-table">
       <thead><tr><th class="c-dot"></th><th class="c-label">Subagent</th><th class="c-status">Status</th></tr></thead>
@@ -1672,6 +1725,14 @@ vscodeApi.onMessage((body) => {
     showMission(m.missionId);
     return;
   }
+  if (m.type === 'subagentProgress') {
+    const sa = sessions.find((s) => s.key === m.key)?.subagentList?.find((x) => x.agentId === m.agentId);
+    if (sa) {
+      subagentProgress.set(`${m.key}|${sa.id}`, { steps: m.steps, error: m.error });
+      render();
+    }
+    return;
+  }
   if (m.type === 'analytics') {
     analyticsData = m.view;
     if (tableView === 'analytics') render();
@@ -1775,6 +1836,7 @@ vscodeApi.onMessage((body) => {
     renderControls();
     renderDiscord();
     render();
+    refreshOpenSubagentRows();
   }
 });
 
@@ -1961,7 +2023,7 @@ window.addEventListener('resize', measure);
 app.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
   const target = e.target as HTMLElement;
-  if (!(target instanceof HTMLTableRowElement) || !target.matches('tr.row, tr.sec')) return;
+  if (!(target instanceof HTMLTableRowElement) || !target.matches('tr.row, tr.sec, tr.subrow-item.openable')) return;
   e.preventDefault();
   target.click();
 });
@@ -2175,6 +2237,13 @@ app.addEventListener('click', (e) => {
     }
     saveState();
     render();
+    e.stopPropagation();
+    return;
+  }
+  // A nested row opens (or closes) its progress; it never opens the conversation.
+  const saRow = target.closest<HTMLElement>('tr.subrow-item.openable');
+  if (saRow) {
+    toggleSubagentRow(saRow);
     e.stopPropagation();
     return;
   }

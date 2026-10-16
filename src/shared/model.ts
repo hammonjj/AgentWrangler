@@ -88,6 +88,15 @@ export interface SubagentInfo {
   agentType?: string;
   status: 'working' | 'attention' | 'done';
   lastActivityAt?: number;
+  /**
+   * Claude Code's id for the subagent's own transcript
+   * (`<session>/subagents/agent-<agentId>.jsonl`). Known once its tool result
+   * arrives, which for a background subagent is right after launch. Without it
+   * the row cannot show progress.
+   */
+  agentId?: string;
+  /** Launched with `run_in_background`: it outlives the turn that started it. */
+  background?: boolean;
 }
 
 export interface AgentSession {

@@ -25,12 +25,21 @@ import type { SweepItem } from './prSweep';
 
 // ---- Dashboard ----
 
+/** One line of a subagent's progress: what it said or which tool it called, newest last. */
+export interface SubagentStep {
+  kind: 'say' | 'tool';
+  text: string;
+  /** Tools only: still running, finished, or failed. */
+  state?: 'running' | 'done' | 'error';
+}
+
 /**
  * `hooks` is absent until the host has checked settings.json once. `usage` is
  * absent when the usage cards are turned off; present-but-empty until the
  * first read lands.
  */
 export type HostToDashboard =
+  | { type: 'subagentProgress'; key: string; agentId: string; steps: SubagentStep[]; error?: string }
   | {
       type: 'snapshot';
       sessions: SessionDTO[];
@@ -164,6 +173,8 @@ export type DashboardAction =
 
 export type DashboardToHost =
   | { type: 'ready' }
+  /** A nested subagent row was opened: send the latest of its own transcript. Answered with `subagentProgress`. */
+  | { type: 'subagentProgress'; key: string; agentId: string }
   | { type: 'rowClick'; key: string }
   /**
    * `requestId` is carried by the three permission actions only: it is the
