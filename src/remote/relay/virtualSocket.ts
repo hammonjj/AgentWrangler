@@ -8,7 +8,8 @@
  * - `send` queues a `data` item; everything queued within `batchMs` goes as one batch, so a
  *   burst of envelopes is one Broadcast (and one billed message) rather than many.
  * - `ping` queues a `ping`; the loader answers `pong`, which is reported as the socket's pong.
- * - `close` sends a `close` and ends the socket; `terminate` just ends it.
+ * - `close` and `terminate` both send a `close` and end the socket: the tab cannot see the
+ *   channel go away.
  * - `bufferedAmount` is what is queued plus what is on its way, so the backpressure ceiling
  *   still closes a connection whose phone stopped reading.
  *
@@ -68,8 +69,13 @@ export class RelaySocket implements ClientSocket {
     this.end();
   }
 
+  /**
+   * Unlike a TCP socket, ending here does not reach the tab: its channel stays subscribed and
+   * it would go on sending into nothing. So the tab is told, as for a close; if it cannot hear
+   * it, its own silence check ends it (`relayLoader/connection.ts`).
+   */
   terminate(): void {
-    this.end();
+    this.close(4408, 'dropped');
   }
 
   on(event: 'message', listener: MessageListener): this;

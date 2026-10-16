@@ -78,4 +78,13 @@ describe('a relay tab in browserConnections', () => {
     expect(t.isEnded()).toBe(true);
     expect(t.conns.size).toBe(0);
   });
+
+  it('tells the tab when it drops it, since the tab cannot see the channel go', async () => {
+    const t = setup();
+    await tick();
+    t.socket.terminate();
+    await tick();
+    expect(t.isEnded()).toBe(true);
+    expect(t.sent.at(-1)).toMatchObject({ k: 'close', code: 4408 });
+  });
 });
