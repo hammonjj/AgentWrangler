@@ -867,9 +867,11 @@ function subagentRowHtml(sessionKey: string, sa: import('../../shared/model').Su
   const open = canOpen && openSubagentRows.has(rowKey);
   const twist = canOpen ? `<span class="twist" aria-hidden="true">${open ? '▾' : '▸'}</span>` : '';
   const bg = sa.background ? '<span class="chip bgchip" title="Running in the background">bg</span>' : '';
+  const modelName = modelLabel(sa.model) ?? sa.model;
+  const modelChip = modelName ? `<span class="chip modelchip" title="Model: ${esc(sa.model!)}">${esc(modelName)}</span>` : '';
   const item = `<tr class="subrow-item${canOpen ? ' openable' : ''}"${canOpen ? ` tabindex="0" aria-expanded="${open}" data-sa-key="${esc(sessionKey)}" data-sa-id="${esc(sa.id)}" data-sa-agent="${esc(sa.agentId!)}" title="${open ? 'Hide progress' : 'Show progress'}"` : ''}>
   <td class="c-dot">${statusDot}</td>
-  <td class="c-label"><span class="label">${twist}${esc(sa.label)}${agentType}${bg}</span></td>
+  <td class="c-label"><span class="label">${twist}${esc(sa.label)}${agentType}${bg}${modelChip}</span></td>
   <td class="c-status"><span class="status">${statusWord}</span></td>
 </tr>`;
   return open ? item + subagentProgressRow(subagentProgress.get(rowKey)) : item;

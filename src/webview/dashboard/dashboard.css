@@ -1500,7 +1500,8 @@ tr.subrow > td {
   width: 1.1em;
   color: var(--vscode-descriptionForeground);
 }
-.subagent-table .bgchip {
+.subagent-table .bgchip,
+.subagent-table .modelchip {
   margin-left: 6px;
 }
 .subagent-table tbody tr.subprog {
