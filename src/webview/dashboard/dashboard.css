@@ -2976,6 +2976,47 @@ body:has(#app.touch) .projmenu .pmbrowse {
   padding: 6px 8px 8px;
   border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
 }
+/* A job's run history: a table under the card that slides down when opened. */
+#app .jobs .jb-history.slide {
+  transform-origin: top;
+  animation: jb-slide 0.18s ease-out;
+}
+@keyframes jb-slide {
+  from {
+    opacity: 0;
+    transform: scaleY(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #app .jobs .jb-history.slide {
+    animation: none;
+  }
+}
+#app .jobs .jb-runs {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+#app .jobs .jb-runs th {
+  text-align: left;
+  font-weight: normal;
+  opacity: 0.7;
+}
+#app .jobs .jb-runs th,
+#app .jobs .jb-runs td {
+  padding: 3px 8px 3px 0;
+  vertical-align: middle;
+}
+#app .jobs .jb-run.open {
+  cursor: pointer;
+}
+#app .jobs .jb-run.open:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
 #app :is(.agents, .jobs) .ag-props,
 #app :is(.agents, .jobs) .ag-mem,
 #app :is(.agents, .jobs) .ag-histlist {

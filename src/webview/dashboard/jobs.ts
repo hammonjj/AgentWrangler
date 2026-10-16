@@ -56,6 +56,8 @@ export interface JobsUiState {
   error?: string;
   /** The job whose history is open. */
   open?: string;
+  /** The job whose history was opened by the click being rendered: it slides down once. */
+  slide?: string;
   /** A Run now or on/off the view is waiting on, by job. */
   pending: Map<string, string>;
   /** The last refusal for a job's Run now or switch, shown on its card. */
@@ -142,8 +144,8 @@ function when(ms: number): string {
 function runHtml(r: JobRun, nowMs: number): string {
   const key = runSessionKey(r);
   const what = r.manual ? 'Run now' : r.slot !== undefined ? `Slot ${when(r.slot)}` : '';
-  return `<li class="ag-hist"><span class="ag-histtext"><span class="ag-chip ag-st ${OUTCOME_CLASS[r.outcome]}">${esc(OUTCOME_TEXT[r.outcome])}</span> ${esc(what)} <span class="ag-age" title="${esc(when(r.at))}">${esc(formatAge(nowMs, r.at))} ago</span>${r.reason ? ` <span class="jb-reason">${esc(r.reason)}</span>` : ''}</span>
-${key ? `<span class="ag-memacts"><button type="button" class="ag-btn" data-jb="session" data-key="${esc(key)}">Open session</button></span>` : ''}</li>`;
+  const open = key ? ` class="jb-run open" data-jb="session" data-key="${esc(key)}" title="Open this run's conversation"` : ' class="jb-run"';
+  return `<tr${open}><td><span class="ag-chip ag-st ${OUTCOME_CLASS[r.outcome]}">${esc(OUTCOME_TEXT[r.outcome])}</span></td><td>${esc(what)}</td><td><span class="ag-age" title="${esc(when(r.at))}">${esc(formatAge(nowMs, r.at))} ago</span></td><td class="jb-reason">${esc(r.reason ?? '')}</td></tr>`;
 }
 
 function itemHtml(j: JobView, ui: JobsUiState, nowMs: number): string {
@@ -174,7 +176,7 @@ ${j.kind === 'prSweep' ? `<button type="button" class="ag-btn ag-tab${ui.preview
 ${j.latestSessionKey ? `<button type="button" class="ag-btn" data-jb="session" data-key="${esc(j.latestSessionKey)}" title="Open the latest run's conversation">Open latest</button>` : ''}
 <button type="button" class="ag-btn" data-jb="edit" data-id="${id}">Edit</button>
 <button type="button" class="ag-btn danger" data-jb="delete" data-id="${id}" title="Forget this job and its history. Sessions it started stay.">Delete</button>
-</span>${note ? `<p class="ag-error jb-note" role="alert">${esc(note)}</p>` : ''}${open ? historyHtml(j, nowMs) : ''}${ui.previewOpen === j.id ? previewHtml(ui.previews.get(j.id)) : ''}</li>`;
+</span>${note ? `<p class="ag-error jb-note" role="alert">${esc(note)}</p>` : ''}${open ? historyHtml(j, ui, nowMs) : ''}${ui.previewOpen === j.id ? previewHtml(ui.previews.get(j.id)) : ''}</li>`;
 }
 
 const NEED_TEXT: Record<ReviewNeed, string> = {
@@ -206,9 +208,11 @@ function firstLine(s: string): string {
   return line.length > 140 ? `${line.slice(0, 139)}…` : line;
 }
 
-function historyHtml(j: JobView, nowMs: number): string {
-  return `<div class="ag-panel" data-panel="history">${
-    j.history.length ? `<ul class="ag-histlist">${j.history.map((r) => runHtml(r, nowMs)).join('')}</ul>` : '<p class="ag-note">No runs yet.</p>'
+function historyHtml(j: JobView, ui: JobsUiState, nowMs: number): string {
+  return `<div class="ag-panel jb-history${ui.slide === j.id ? ' slide' : ''}" data-panel="history">${
+    j.history.length
+      ? `<table class="jb-runs"><thead><tr><th>Outcome</th><th>Trigger</th><th>When</th><th>Note</th></tr></thead><tbody>${j.history.map((r) => runHtml(r, nowMs)).join('')}</tbody></table>`
+      : '<p class="ag-note">No runs yet.</p>'
   }</div>`;
 }
 
@@ -280,9 +284,7 @@ const MODE_TEXT: Record<string, string> = { default: 'Ask for everything', accep
 export function jobsHtml(jobs: readonly JobView[] | undefined, ui: JobsUiState, projects: readonly ProjectDTO[], nowMs: number, models: readonly ModelChoice[] = []): string {
   const all = jobs ?? [];
   const adding = ui.form !== undefined && !ui.form.id;
-  const templates = JOB_TEMPLATES.map(
-    (t) => `<button type="button" class="ag-btn${t.id === 'custom' ? ' primary' : ''}" data-jb="new" data-template="${t.id}" title="${esc(t.hint)}"${adding ? ' disabled' : ''}>+ ${esc(t.id === 'custom' ? 'New job' : t.label)}</button>`,
-  ).join('');
+  const templates = `<button type="button" class="ag-btn primary" data-jb="new" data-template="custom"${adding ? ' disabled' : ''}>+ New job</button>`;
   const bar = `<div class="ag-bar"><span class="ag-hint">Work that starts at a set time. New jobs are off until you turn them on.</span>${templates}</div>`;
   const form = ui.form ? formHtml(ui.form, ui, projects, models) : '';
   const body =
@@ -381,7 +383,9 @@ export function createJobsController(app: HTMLElement, post: (m: DashboardToHost
         case 'history':
           if (!id) break;
           ui.open = ui.open === id ? undefined : id;
+          ui.slide = ui.open;
           render();
+          ui.slide = undefined;
           break;
         case 'delete':
           if (id) post({ type: 'deleteJob', id });
