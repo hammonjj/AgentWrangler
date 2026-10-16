@@ -95,6 +95,8 @@ export interface SubagentInfo {
    * the row cannot show progress.
    */
   agentId?: string;
+  /** Model the subagent's own transcript shows it running on; often a lower tier than the parent's. */
+  model?: string;
   /** Launched with `run_in_background`: it outlives the turn that started it. */
   background?: boolean;
 }

@@ -6,7 +6,8 @@ import type { AgentProvider, TranscriptAppendEvent } from '../core/provider';
 import type { TurnStats } from '../core/turnStats';
 import { clearWorktreeCache, worktreeFor } from '../core/worktree';
 import { clearCheckoutRootCache, projectNameFor } from '../core/checkout';
-import type { AgentSession, HookHealth, TurnProgress } from '../shared/model';
+import type { AgentSession, HookHealth, SubagentInfo, TurnProgress } from '../shared/model';
+import { subagentPath } from './conversationArchive';
 import { settleBlockAt, statusFromHookState, turnBlockedMsAt, type HookSessionState } from './hookEvents';
 import { currentState, type InstallState } from './hookInstall';
 import { HookLog, hookLogDir, type PermissionBehavior } from './hookLog';
@@ -18,6 +19,41 @@ import { claudeRateLimitFromTranscript } from './rateLimit';
 import { blockClearedByClaude, deriveStatus, holdForBackground, turnOver, turnStartFor } from './status';
 import { TranscriptIndex, type IndexedTranscript } from './transcriptIndex';
 import type { TranscriptSummary } from './transcriptTail';
+
+const subagentModels = new Map<string, string>();
+
+/** The model a subagent's transcript first shows; read once, since it does not change. */
+function subagentModelOf(file: string, agentId: string): string | undefined {
+  let sub: string;
+  try {
+    sub = subagentPath(file, agentId);
+  } catch {
+    return undefined;
+  }
+  const known = subagentModels.get(sub);
+  if (known) return known;
+  let fd: number | undefined;
+  try {
+    fd = fsSync.openSync(sub, 'r');
+    const buf = Buffer.alloc(65536);
+    const n = fsSync.readSync(fd, buf, 0, buf.length, 0);
+    const model = /"model":"([^"]+)"/.exec(buf.toString('utf8', 0, n))?.[1];
+    if (model && model !== '<synthetic>') subagentModels.set(sub, model);
+    return subagentModels.get(sub);
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) fsSync.closeSync(fd);
+  }
+}
+
+function withSubagentModels(list: SubagentInfo[] | undefined, file: string | undefined): SubagentInfo[] | undefined {
+  if (!list || !file) return list;
+  return list.map((sa) => {
+    const model = sa.agentId ? subagentModelOf(file, sa.agentId) : undefined;
+    return model ? { ...sa, model } : sa;
+  });
+}
 
 /**
  * Background work a live session still has running. The last `Stop`'s own list
@@ -232,7 +268,7 @@ export class ClaudeProvider implements AgentProvider {
       activeTool: status === 'busy' ? hook?.activeTool : undefined,
       progress: status === 'busy' && hook ? this.buildProgress(hook, now) : undefined,
       provider: this.id,
-      subagentList: s?.subagentList,
+      subagentList: withSubagentModels(s?.subagentList, idx?.path),
       sessionId: r.sessionId,
       key: `${this.id}:${r.sessionId.toLowerCase()}`,
       name: r.name,
