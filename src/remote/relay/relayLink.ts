@@ -89,6 +89,8 @@ interface Tab {
 
 /** Connection ids accepted lately, so a replayed `connect` cannot open a second channel. */
 const SEEN_TTL_MS = 10 * 60 * 1000;
+/** A batch whose parts took this long for Supabase to acknowledge is logged. */
+const SLOW_SEND_MS = 1_500;
 
 export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink> {
   const { network, log } = opts;
@@ -149,10 +151,15 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
     const socket = new RelaySocket({
       batchMs,
       send: async (items) => {
-        for (const part of await codec.seal(items)) {
+        const started = now();
+        const parts = await codec.seal(items);
+        for (const part of parts) {
           count('sent', part);
           await channel.send(RELAY_EVENT_FRAME, part);
         }
+        // Everything behind this batch waited as long: the clue when a remote tab feels slow.
+        const took = now() - started;
+        if (took >= SLOW_SEND_MS) log(`relay: a batch of ${items.length} items in ${parts.length} parts took ${took} ms to send`);
       },
       onEnd: () => {
         if (ended) return;
