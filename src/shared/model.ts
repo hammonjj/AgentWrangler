@@ -404,8 +404,8 @@ export const STATUS_RANK: Record<SessionStatus, number> = {
   blocked: 0,
   waiting: 1,
   stuck: 2,
-  done: 3,
-  busy: 4,
+  busy: 3,
+  done: 4,
   ended: 5,
 };
 
@@ -429,8 +429,8 @@ export function capitalize(s: string): string {
   return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
 }
 
-/** Blocked first (an agent frozen mid-task), then waiting, stuck, done (finished,
- * worth a look), busy, ended; within a rank, most recent activity first. */
+/** Blocked first (an agent frozen mid-task), then waiting, stuck, busy, done
+ * (finished, worth a look), ended; within a rank, most recent activity first. */
 export function compareSessions(a: AgentSession, b: AgentSession): number {
   const rank = STATUS_RANK[a.status] - STATUS_RANK[b.status];
   if (rank !== 0) return rank;
@@ -449,8 +449,8 @@ export type SectionId = SessionStatus | 'paused' | 'archived';
 export const SECTION_ORDER: SectionId[] = [
   'waiting',
   'stuck',
-  'done',
   'busy',
+  'done',
   'paused',
   'ended',
   'archived',
