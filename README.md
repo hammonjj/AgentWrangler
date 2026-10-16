@@ -429,13 +429,13 @@ is `docs/plans/scheduled-agents.md`.
   nobody is watching (default `default`). Tools on the
   allowed list run without asking. Anything else waits in *Waiting* and reaches you through the
   usual notifications. Nothing is ever approved for you.
-- **Sleep and missed runs.** The daemon decides each job's latest slot once a minute, on start
-  and on wake. A slot that passed while the Mac slept runs once inside the job's catch-up
-  window (default 4 h) and is recorded as *late*. Outside the window it is recorded as *missed*.
-  A slot never runs twice.
+- **Sleep and missed runs.** The daemon decides each job's latest slot every 10 seconds, on start
+  and on wake. A slot starts only inside the job's run grace period (seconds after the slot,
+  default 30, minimum 10). A slot that passed while the Mac slept or was off is recorded as
+  *missed* and does not run. A slot never runs twice.
 - **Admission.** No run starts while the fleet is paused or while a usage window for the job's
   provider is at its limit (by default the auto-pause percent). The slot is recorded as
-  *skipped* with the reason, and it is tried again while its catch-up window is open.
+  *skipped* with the reason, and it is tried again while its run grace period is open.
 - **History.** Each job keeps its last 100 runs: ran, late, skipped, missed or failed, with the
   reason and the session it started.
 

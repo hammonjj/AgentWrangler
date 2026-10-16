@@ -27,9 +27,9 @@ one approval path.
 ## 2. Missed runs and sleep
 
 The daemon cannot run while the Mac sleeps, and the plan does not add a `pmset` wake (it would be a
-system-level side effect the user did not ask for). Each job has a window, `time` plus `catchUpHours`
-(default 4). On start or wake (`watchForSleep`), a job whose slot passed inside its window and has
-not run today runs once, and the run is labelled "late" in the table. Outside the window the slot
+system-level side effect the user did not ask for). Each job has a window, `time` plus `runGraceSeconds`
+(default 30; it replaced `catchUpHours`, so a slot missed while asleep no longer runs on wake). A job
+whose slot passed inside its window and has not run starts once. Outside the window the slot
 is skipped and the job's history says "missed". Never run twice for one slot.
 
 ## 3. How a job starts a session
@@ -46,8 +46,8 @@ is skipped and the job's history says "missed". Never run twice for one slot.
   epic's job (#112); this plan only emits the same pending-action event.
 - **Budget:** admission reuses the scheduler's rules (#45): skip a run when any usage window is
   above the job's threshold (default: the auto-pause percent), and never start while the fleet is
-  paused. A skipped run is recorded with the reason, and a catch-up window can still pick it up
-  later.
+  paused. A skipped run is recorded with the reason, and the run grace period can still pick it up
+  while it is open.
 - **Visibility:** each run records slot, start, outcome (`ran`, `late`, `skipped:<reason>`,
   `missed`, `failed`) and the session id. "Wrong means did nothing and said so."
 
@@ -87,7 +87,7 @@ is skipped and the job's history says "missed". Never run twice for one slot.
 |---|---|
 | A: team requests, drafts? | Personal and team requests, labelled; drafts excluded |
 | A: what posts under the user's name? | (a) local only, then (b) pending review; never approve or request changes |
-| A: time, weekdays? | 07:30, Monday to Friday, `catchUpHours` 4 |
+| A: time, weekdays? | 07:30, Monday to Friday, `runGraceSeconds` 30 |
 | B: which calendar and inbox? | Microsoft 365 (Outlook calendar and mail), answered 2026-10-15 |
 | B: where to read? | In the app first; phone comes with #112 |
 

@@ -8,9 +8,10 @@
  * the same path as "new conversation", so it shows in the table and its
  * permission prompts wait in *Waiting*: nothing here approves anything.
  *
- * Jobs are off by default. A slot that passed while the Mac slept runs once
- * inside the job's catch-up window and is labelled late; outside it the slot
- * is recorded as missed. One slot never runs twice.
+ * Jobs are off by default. A slot starts only inside the job's run grace
+ * period (seconds after the slot, so a tick that lands a little late still
+ * runs it); past it the slot is recorded as missed and does not run, even
+ * after the Mac wakes. One slot never runs twice.
  *
  * Times are the Mac's local wall clock. Pure: no Node or DOM imports.
  */
@@ -72,8 +73,8 @@ export interface ScheduledJob {
   /** ms epoch it was last turned on: slots before it are none of its business. */
   enabledAt?: number;
   schedule: JobSchedule;
-  /** How long after its slot a job may still start, late. */
-  catchUpHours: number;
+  /** How many seconds after its slot a job may still start; past it the slot is missed. */
+  runGraceSeconds: number;
   provider: SessionProvider;
   /** Empty means the launcher's current default. */
   model?: string;
@@ -112,7 +113,7 @@ export interface JobInput {
   name: string;
   kind?: JobKind;
   schedule: JobSchedule;
-  catchUpHours?: number;
+  runGraceSeconds?: number;
   provider: SessionProvider;
   model?: string;
   effort?: string;
@@ -127,14 +128,13 @@ export interface JobInput {
 }
 
 export const MAX_JOB_HISTORY = 100;
-export const DEFAULT_CATCH_UP_HOURS = 4;
-export const MAX_CATCH_UP_HOURS = 23;
+export const DEFAULT_RUN_GRACE_SECONDS = 30;
+/** The evaluator ticks this often, so a shorter grace could miss a slot the tick has not seen yet. */
+export const MIN_RUN_GRACE_SECONDS = 10;
+export const MAX_RUN_GRACE_SECONDS = 86_400;
 export const MAX_JOB_PROMPT = 20_000;
 export const MAX_ALLOWED_TOOLS = 100;
-/** A slot this close behind the clock is on time, not late (the evaluator ticks once a minute). */
-export const ON_TIME_MS = 5 * 60_000;
 
-const HOUR = 3_600_000;
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 // ---- Input -----------------------------------------------------------------
@@ -208,11 +208,13 @@ export function sanitizeJobInput(v: unknown): { value: JobInput } | { error: str
   if (o.permissionMode !== undefined && o.permissionMode !== '' && o.permissionMode !== 'auto' && !isMode(o.permissionMode)) {
     return { error: 'That permission mode is not allowed for a job.' };
   }
-  let catchUpHours = DEFAULT_CATCH_UP_HOURS;
-  if (o.catchUpHours !== undefined && o.catchUpHours !== '') {
-    const n = Number(o.catchUpHours);
-    if (!Number.isFinite(n) || n < 0 || n > MAX_CATCH_UP_HOURS) return { error: `Catch-up is 0 to ${MAX_CATCH_UP_HOURS} hours.` };
-    catchUpHours = n;
+  let runGraceSeconds = DEFAULT_RUN_GRACE_SECONDS;
+  if (o.runGraceSeconds !== undefined && o.runGraceSeconds !== '') {
+    const n = Number(o.runGraceSeconds);
+    if (!Number.isFinite(n) || n < MIN_RUN_GRACE_SECONDS || n > MAX_RUN_GRACE_SECONDS) {
+      return { error: `The run grace period is ${MIN_RUN_GRACE_SECONDS} to ${MAX_RUN_GRACE_SECONDS} seconds.` };
+    }
+    runGraceSeconds = Math.round(n);
   }
   let maxWindowPercent: number | undefined;
   if (o.maxWindowPercent !== undefined && o.maxWindowPercent !== '' && o.maxWindowPercent !== null) {
@@ -231,7 +233,7 @@ export function sanitizeJobInput(v: unknown): { value: JobInput } | { error: str
       name,
       kind: isKind(o.kind) ? o.kind : 'custom',
       schedule,
-      catchUpHours,
+      runGraceSeconds,
       provider: o.provider,
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
@@ -262,7 +264,7 @@ function fromInput(i: JobInput): Omit<ScheduledJob, 'id' | 'enabled' | 'createdA
     name: i.name,
     kind: i.kind ?? 'custom',
     schedule: { weekdays: [...i.schedule.weekdays], time: i.schedule.time, ...(i.schedule.every ? { every: { ...i.schedule.every } } : {}) },
-    catchUpHours: i.catchUpHours ?? DEFAULT_CATCH_UP_HOURS,
+    runGraceSeconds: i.runGraceSeconds ?? DEFAULT_RUN_GRACE_SECONDS,
     provider: i.provider,
     ...(i.model ? { model: i.model } : {}),
     ...(i.effort ? { effort: i.effort } : {}),
@@ -366,9 +368,9 @@ export function nextSlot(schedule: JobSchedule, now: number): number | undefined
 
 export type SlotDecision =
   | { kind: 'none' }
-  /** Start now. `late` when the slot passed more than `ON_TIME_MS` ago. */
-  | { kind: 'run'; slot: number; late: boolean }
-  /** The slot passed outside the catch-up window: record it, do not run. */
+  /** Start now: the slot is inside the run grace period. */
+  | { kind: 'run'; slot: number }
+  /** The slot passed outside the run grace period: record it, do not run. */
   | { kind: 'missed'; slot: number };
 
 /**
@@ -384,10 +386,10 @@ export function decideSlot(job: ScheduledJob, now: number): SlotDecision {
   if (job.enabledAt !== undefined && slot < job.enabledAt) return { kind: 'none' };
   const prior = job.history.find((r) => r.slot === slot);
   const age = now - slot;
-  const open = age <= job.catchUpHours * HOUR || age <= ON_TIME_MS;
+  const open = age <= job.runGraceSeconds * 1000;
   if (prior && prior.outcome !== 'skipped') return { kind: 'none' };
   if (!open) return prior ? { kind: 'none' } : { kind: 'missed', slot };
-  return { kind: 'run', slot, late: age > ON_TIME_MS };
+  return { kind: 'run', slot };
 }
 
 // ---- Admission --------------------------------------------------------------

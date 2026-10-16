@@ -1,7 +1,7 @@
 /**
  * Scheduled jobs (#164, #165) as the core daemon runs them.
  *
- * Once a minute, and on start and wake, each enabled job's latest slot is
+ * Every few seconds (`TICK_MS`), and on start and wake, each enabled job's latest slot is
  * decided (`decideSlot`): run it, record it missed, or leave it. A run goes
  * through the same launch path as "new conversation", as the daemon acting
  * on the owner's behalf (`session.start`), with the job's model, effort,
@@ -13,7 +13,7 @@
  * Admission follows the scheduler's rules (#45): no start while the fleet is
  * paused, while the provider is rate-limited, or while a usage window is at
  * the job's limit. A refused slot is recorded as skipped with the reason and
- * tried again while its catch-up window is open.
+ * tried again while its run grace period is open.
  */
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -86,7 +86,8 @@ export interface ScheduledJobs {
   dispose(): void;
 }
 
-export const TICK_MS = 60_000;
+/** Must not exceed `MIN_RUN_GRACE_SECONDS`, or a slot could pass between ticks and miss its grace. */
+export const TICK_MS = 10_000;
 /** The first decision after start, once usage and the session scan have had a moment. */
 export const FIRST_TICK_MS = 15_000;
 
@@ -188,7 +189,7 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
     const d = decideSlot(job, at);
     if (d.kind === 'none') return;
     if (d.kind === 'missed') {
-      jobs.record(job.id, { id: runId(), slot: d.slot, at, outcome: 'missed', reason: 'the Mac was asleep or off past the catch-up window' });
+      jobs.record(job.id, { id: runId(), slot: d.slot, at, outcome: 'missed', reason: 'the Mac was asleep or off past the run grace period' });
       log(`scheduled job ${job.id}: missed its slot`);
       return;
     }
@@ -207,7 +208,7 @@ export function createScheduledJobs(deps: ScheduledJobDeps): ScheduledJobs {
       }
       return;
     }
-    await launch(job, { id: runId(), slot: d.slot, at, outcome: d.late ? 'late' : 'ran' });
+    await launch(job, { id: runId(), slot: d.slot, at, outcome: 'ran' });
   }
 
   function tick(): Promise<void> {
