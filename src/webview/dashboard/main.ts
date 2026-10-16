@@ -1529,14 +1529,10 @@ function tabsHtml(): string {
     `<button role="tab" aria-selected="${tableView === view}" data-table-view="${view}" data-fk="tab:${view}"${extra}>${label}</button>`;
   // The host's count (status contract A3: each ask once, open proposals
   // included); the mission phases are the fallback for an older host.
-  const waiting = missionsSnap?.attention ?? missionsSnap?.missions.filter((m) => m.phase?.needsYou).length ?? 0;
-  const missions = missionsSnap
-    ? tab('missions', `Missions${waiting > 0 ? ` <span class="tabcount">${waiting}</span>` : ''}`, waiting > 0 ? ` title="${waiting} mission${waiting === 1 ? '' : 's'} waiting for you"` : '')
-    : '';
-  // Agents that need you: the rows the Waiting section holds. Missions keep their own count.
+  // Agents that need you: the rows the Waiting section holds.
   const needYou = attentionTotal(sessions);
   const status = tab('status', `Status${needYou > 0 ? ` <span class="tabcount">${needYou}</span>` : ''}`, needYou > 0 ? ` title="${needYou} agent${needYou === 1 ? '' : 's'} waiting for you"` : '');
-  return `<div class="tabletabs" role="tablist" aria-label="Table view">${status}${tab('project', 'Project')}${missions}</div>`;
+  return `<div class="tabletabs" role="tablist" aria-label="Table view">${status}${tab('project', 'Project')}</div>`;
 }
 
 /** Switch to Missions, open one mission and scroll to it: the drill-down for delegated work (§10). */

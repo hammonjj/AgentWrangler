@@ -208,7 +208,6 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     agents: link({ kind: 'agents' }, 'Agents'),
     sessions: link({ kind: 'sessions' }, 'Sessions'),
     jobs: link({ kind: 'jobs' }, 'Jobs'),
-    missions: link({ kind: 'missions' }, 'Missions'),
     analytics: link({ kind: 'analytics' }, 'Analytics'),
     preferences: link({ kind: 'preferences' }, 'Preferences'),
     connect: link({ kind: 'connect' }, 'Connect'),
@@ -298,7 +297,6 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     }
 
     links.analytics.hidden = settled && !hasMissions;
-    links.missions.hidden = settled && !hasMissions;
     // A conversation has no link of its own: it belongs to the view that opened it.
     const current =
       route.kind === 'pair' ? 'preferences' : route.kind === 'conversation' ? (state.tableView === 'agents' || state.tableView === 'jobs' || state.tableView === 'missions' ? state.tableView : 'sessions') : route.kind;
