@@ -53,6 +53,7 @@ import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { resetsInText } from '../../shared/usage';
 import { isRemoteHost, paneApi } from '../common/paneApi';
 import { takeComposerFocus } from '../common/composerFocus';
+import { onSwitch } from '../common/conversationSwitch';
 import { renderSideBySide } from '../common/sideBySide';
 import { uploadFile } from '../common/upload';
 import { trackTouch } from '../common/phone';
@@ -116,6 +117,7 @@ app.innerHTML = `
 <div id="agentMemory" hidden></div>
 <div id="banner" hidden></div>
 <form id="findbar"><input id="find" type="search" placeholder="Find in conversation" aria-label="Find in conversation"><button>Find</button><button type="button" id="clearfind">Clear</button></form>
+<div id="opening" hidden></div>
 <div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div><div id="convDelegationOffer" hidden></div><div id="proposals" hidden></div><div id="memoryProposals" hidden></div></div>
 <button id="jump" hidden></button>
 <button id="asknav" class="asknav" hidden></button>
@@ -2926,6 +2928,45 @@ function leaveAnalyticsDetail(): void {
   analyticsDetailEl.replaceChildren();
 }
 
+// ---- opening another conversation (before the host's init arrives) ----
+
+const openingEl = document.getElementById('opening')!;
+/** Long enough for a slow relay; a click the host never answers (a cancelled picker) gives the old one back. */
+const SWITCH_TIMEOUT_MS = 20_000;
+let switching: { timer: ReturnType<typeof setTimeout>; ttl: string; meta: string; pillClass: string; pillText: string; readOnly: boolean } | undefined;
+
+onSwitch((to) => {
+  if (to.key !== undefined && to.key === activeSession) return;
+  // A second click before the first answer keeps what the first one hid.
+  if (switching) clearTimeout(switching.timer);
+  const shown = switching ?? { ttl: ttl.textContent ?? '', meta: meta.textContent ?? '', pillClass: pill.className, pillText: pill.textContent ?? '', readOnly: msgEl.readOnly };
+  switching = { ...shown, timer: setTimeout(() => endSwitch(true), SWITCH_TIMEOUT_MS) };
+  ttl.textContent = to.title;
+  meta.textContent = '';
+  pill.className = 'pill';
+  pill.textContent = 'Opening…';
+  openingEl.textContent = `Opening ${to.title}…`;
+  openingEl.hidden = false;
+  app.classList.add('switching');
+  msgEl.readOnly = true;
+});
+
+/** `restore`: no conversation came, so put the last one's header back. */
+function endSwitch(restore: boolean): void {
+  if (!switching) return;
+  clearTimeout(switching.timer);
+  if (restore) {
+    ttl.textContent = switching.ttl;
+    meta.textContent = switching.meta;
+    pill.className = switching.pillClass;
+    pill.textContent = switching.pillText;
+  }
+  msgEl.readOnly = switching.readOnly;
+  switching = undefined;
+  openingEl.hidden = true;
+  app.classList.remove('switching');
+}
+
 vscodeApi.onMessage((body) => {
   const m = body as HostToConversation;
   switch (m.type) {
@@ -2998,6 +3039,7 @@ vscodeApi.onMessage((body) => {
       showAnalyticsDetail(m.detail);
       break;
     case 'init':
+      endSwitch(false);
       leaveAnalyticsDetail();
       renderDelegationOffer(document.getElementById('convDelegationOffer')!, undefined, () => {});
       if (activeSession !== m.session.key) {

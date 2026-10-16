@@ -720,6 +720,23 @@ body,
   padding: 10px 12px 16px;
 }
 
+/* A click in the table, before the host's answer: the last conversation is
+ * hidden (not dropped, in case the open never comes) and the pane says what
+ * it is opening. */
+#convApp.switching > :is(#scroll, #taskStrip, #delegated, #agentMemory, #banner, #jump, #asknav) {
+  display: none !important;
+}
+#convApp #opening {
+  flex: 1 1 auto;
+  padding: 16px 12px;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+#convApp.switching #composer {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 /*
  * "Load earlier messages".
  *

@@ -6,7 +6,8 @@
  * slice of a `ws` socket it uses (`ClientSocket`), and turns what it sends into relay items:
  *
  * - `send` queues a `data` item; everything queued within `batchMs` goes as one batch, so a
- *   burst of envelopes is one Broadcast (and one billed message) rather than many.
+ *   burst of envelopes is one Broadcast (and one billed message) rather than many. On a link
+ *   that was quiet, the first one goes at once.
  * - `ping` queues a `ping`; the loader answers `pong`, which is reported as the socket's pong.
  * - `close` and `terminate` both send a `close` and end the socket: the tab cannot see the
  *   channel go away.
@@ -37,6 +38,8 @@ export class RelaySocket implements ClientSocket {
   private queuedBytes = 0;
   private flightBytes = 0;
   private sending = false;
+  /** When the last batch's send settled. */
+  private settledAt = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly messageListeners: MessageListener[] = [];
   private readonly pongListeners: (() => void)[] = [];
@@ -122,12 +125,18 @@ export class RelaySocket implements ClientSocket {
     this.schedule();
   }
 
+  /**
+   * A link that has been quiet for `batchMs` sends on the next turn (so what one turn queues is
+   * still one batch): waiting out the window there only delayed the answer to a click. Right
+   * after a batch, it waits the window out, which is what caps a stream of patches.
+   */
   private schedule(): void {
     if (this.timer || this.sending) return;
+    const wait = Math.max(0, this.opts.batchMs - (Date.now() - this.settledAt));
     this.timer = setTimeout(() => {
       this.timer = undefined;
       this.flushNow();
-    }, this.opts.batchMs);
+    }, wait);
   }
 
   private flushNow(): void {
@@ -144,6 +153,7 @@ export class RelaySocket implements ClientSocket {
       .catch(() => this.end())
       .finally(() => {
         this.sending = false;
+        this.settledAt = Date.now();
         this.flightBytes = 0;
         if (this.queue.length > 0) this.schedule();
       });

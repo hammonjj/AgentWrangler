@@ -44,6 +44,8 @@ export class RelayConnection {
   private queue: RelayItem[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private sending = false;
+  /** When the last batch's send settled. */
+  private settledAt = 0;
   private inbound = Promise.resolve();
   /** The socket's: everything but `open` and assets. Only one. */
   private listener: ((items: RelayItem[]) => void) | undefined;
@@ -132,7 +134,8 @@ export class RelayConnection {
 
   /**
    * Queue an item for the next batch. `now` sends it without waiting for the batch timer: a
-   * hidden window's timers can be throttled past the daemon's ping deadline.
+   * hidden window's timers can be throttled past the daemon's ping deadline. A link quiet for
+   * the batch window sends on the next turn anyway, so a click does not wait the window out.
    */
   send(item: RelayItem, now = false): void {
     if (this.closed) return;
@@ -140,7 +143,9 @@ export class RelayConnection {
     if (now && !this.sending) {
       if (this.timer) clearTimeout(this.timer);
       this.flush();
-    } else if (!this.timer && !this.sending) this.timer = setTimeout(() => this.flush(), RELAY_BATCH_MS);
+    } else if (!this.timer && !this.sending) {
+      this.timer = setTimeout(() => this.flush(), Math.max(0, RELAY_BATCH_MS - (Date.now() - this.settledAt)));
+    }
   }
 
   close(): void {
@@ -168,6 +173,7 @@ export class RelayConnection {
       .catch(() => this.end('send-failed'))
       .finally(() => {
         this.sending = false;
+        this.settledAt = Date.now();
         // What queued meanwhile is already a batch; a timer here could hold a pong too long.
         if (this.queue.length > 0 && !this.timer) this.flush();
       });

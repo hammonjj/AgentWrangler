@@ -41,6 +41,7 @@ import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestrati
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
 import { requestComposerFocus } from '../common/composerFocus';
+import { announceSwitch } from '../common/conversationSwitch';
 import { announceAttention, announceTableView, onTableViewRequest } from '../common/shellBus';
 import { attentionTotal } from '../../shared/tabAttention';
 import { canPauseSession, clampMenuPosition, dismissAction, ITEM_H_TOUCH, rowMenuItems, rowMenuSize, type RowMenuItem } from '../../shared/rowMenu';
@@ -51,6 +52,7 @@ import {
   capitalize,
   backgroundTasksChip,
   displayLabel,
+  displayTitle,
   etaText,
   formatAge,
   formatDuration,
@@ -1493,8 +1495,16 @@ document.addEventListener(
   true,
 );
 
+/** A row's conversation into the pane; the pane clears for it before the host answers. */
+function openRow(key: string): void {
+  const s = sessions.find((x) => x.key === key);
+  announceSwitch({ key, title: s ? displayTitle(s) : 'conversation' });
+  post({ type: 'rowClick', key });
+}
+
 newBtn.addEventListener('click', () => {
   requestComposerFocus();
+  announceSwitch({ title: 'New conversation' });
   post({ type: 'newConversation', cwd: currentProject(), provider: launchProvider === 'openai' ? 'codex' : 'claude' });
 });
 
@@ -2157,7 +2167,7 @@ app.addEventListener('click', (e) => {
         return;
       case 'histopen':
         // An earlier conversation is a session like any other: the row click's path opens it.
-        if (button.dataset.key) post({ type: 'rowClick', key: button.dataset.key });
+        if (button.dataset.key) openRow(button.dataset.key);
         return;
       case 'makecurrent':
         if (!id || !button.dataset.key || agentsUi.pendingAction) return;
@@ -2350,7 +2360,7 @@ app.addEventListener('click', (e) => {
     return;
   }
   if (row) {
-    post({ type: 'rowClick', key: row.dataset.key! });
+    openRow(row.dataset.key!);
     return;
   }
   if (secRow) {

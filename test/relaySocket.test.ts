@@ -42,6 +42,33 @@ function setup() {
   return { socket, sent, received, contexts, conns, isEnded: () => ended };
 }
 
+describe('relay batching', () => {
+  function socket(batchMs: number) {
+    const batches: RelayItem[][] = [];
+    const s = new RelaySocket({ batchMs, send: async (items) => void batches.push(items), onEnd: () => undefined });
+    return { s, batches };
+  }
+
+  it('sends at once on a quiet link, one turn as one batch', async () => {
+    const { s, batches } = socket(10_000);
+    s.send('a');
+    s.send('b');
+    await tick(5);
+    expect(batches).toEqual([[{ k: 'data', line: 'a' }, { k: 'data', line: 'b' }]]);
+  });
+
+  it('waits the window out right after a batch', async () => {
+    const { s, batches } = socket(200);
+    s.send('a');
+    await tick(5);
+    s.send('b');
+    await tick(20);
+    expect(batches).toHaveLength(1);
+    await tick(250);
+    expect(batches).toHaveLength(2);
+  });
+});
+
 describe('a relay tab in browserConnections', () => {
   it('gets the hello first and its messages acknowledged', async () => {
     const t = setup();
