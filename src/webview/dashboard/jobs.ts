@@ -9,7 +9,7 @@
  * stacks off `#app.narrow`, never a media query. No inline styles. Every
  * check that matters is made again by the host (`shared/scheduledJobs.ts`).
  */
-import { DEFAULT_CATCH_UP_HOURS, JOB_PERMISSION_MODES, REPEAT_MINUTES, runSessionKey, type JobInput, type JobOutcome, type JobRun, type JobView } from '../../shared/scheduledJobs';
+import { DEFAULT_RUN_GRACE_SECONDS, JOB_PERMISSION_MODES, MAX_RUN_GRACE_SECONDS, MIN_RUN_GRACE_SECONDS, REPEAT_MINUTES, runSessionKey, type JobInput, type JobOutcome, type JobRun, type JobView } from '../../shared/scheduledJobs';
 import { AGENT_EFFORTS } from '../../shared/durableAgents';
 import { JOB_TEMPLATES, jobTemplate, type JobTemplateId } from '../../shared/jobTemplates';
 import { capitalize, formatAge, GLOBAL_PROJECT_DIR, type ProjectDTO } from '../../shared/model';
@@ -36,7 +36,7 @@ export interface JobFormDraft {
   /** Minutes between runs, or empty for once a day (#184). */
   repeat: string;
   until: string;
-  catchUpHours: string;
+  runGraceSeconds: string;
   provider: 'claude' | 'codex';
   model: string;
   effort: string;
@@ -95,7 +95,7 @@ function formOf(j: JobInput): JobFormDraft {
     time: j.schedule.time,
     repeat: j.schedule.every ? String(j.schedule.every.minutes) : '',
     until: j.schedule.every?.until ?? '20:00',
-    catchUpHours: String(j.catchUpHours ?? DEFAULT_CATCH_UP_HOURS),
+    runGraceSeconds: String(j.runGraceSeconds ?? DEFAULT_RUN_GRACE_SECONDS),
     provider: j.provider,
     model: j.model ?? '',
     effort: j.effort ?? '',
@@ -116,7 +116,7 @@ export function jobFormInput(f: JobFormDraft): JobInput {
     name: f.name,
     ...(f.kind ? { kind: f.kind } : {}),
     schedule: { weekdays: [...f.weekdays], time: f.time, ...(f.repeat ? { every: { minutes: Number(f.repeat), until: f.until } } : {}) },
-    catchUpHours: Number(f.catchUpHours === '' ? DEFAULT_CATCH_UP_HOURS : f.catchUpHours),
+    runGraceSeconds: Number(f.runGraceSeconds === '' ? DEFAULT_RUN_GRACE_SECONDS : f.runGraceSeconds),
     provider: f.provider,
     ...(f.model.trim() ? { model: f.model.trim() } : {}),
     ...(f.effort ? { effort: f.effort } : {}),
@@ -234,7 +234,7 @@ function formHtml(f: JobFormDraft, ui: JobsUiState, projects: readonly ProjectDT
 ${f.repeat ? `<label class="ag-field"><span>Until</span><input type="time" data-f="until" required value="${esc(f.until)}"></label>` : ''}
 </span>
 <span class="ag-row">
-<label class="ag-field"><span>Catch-up hours</span><input type="number" min="0" max="23" step="1" data-f="catchUpHours" value="${esc(f.catchUpHours)}"></label>
+<label class="ag-field"><span>Run grace period (seconds)</span><input type="number" min="${MIN_RUN_GRACE_SECONDS}" max="${MAX_RUN_GRACE_SECONDS}" step="1" data-f="runGraceSeconds" value="${esc(f.runGraceSeconds)}"></label>
 <label class="ag-field"><span>Usage limit %</span><input type="number" min="1" max="100" step="1" data-f="maxWindowPercent" value="${esc(f.maxWindowPercent)}" placeholder="Auto-pause %"></label>
 </span>
 <label class="ag-field"><span>Folder</span><select data-f="folder">${folderOpts}</select></label>
@@ -264,7 +264,7 @@ ${
       }</p>`
     : '<p class="ag-note">Codex jobs ask for anything outside their sandbox; the request waits in Waiting for you.</p>'
 }
-<p class="ag-note">A slot missed while the Mac was asleep runs once when it wakes, inside the catch-up window, and is marked late. Nothing starts while the fleet is paused or usage is at the limit; the run is recorded as skipped.</p>
+<p class="ag-note">A run starts only within the grace period after its slot. A slot missed while the Mac was asleep or off is recorded as missed and does not run. Nothing starts while the fleet is paused or usage is at the limit; the run is recorded as skipped.</p>
 ${ui.error ? `<p class="ag-error" role="alert">${esc(ui.error)}</p>` : ''}
 <span class="ag-formactions"><button type="submit" class="ag-btn primary"${busy ? ' disabled' : ''}>${busy ? 'Saving…' : 'Save'}</button><button type="button" class="ag-btn" data-jb="cancel">Cancel</button></span>
 </form>`;
@@ -305,7 +305,7 @@ export function readJobForm(form: HTMLElement, draft: JobFormDraft): JobFormDraf
     time: value('time') ?? draft.time,
     repeat: value('repeat') ?? draft.repeat,
     until: value('until') ?? draft.until,
-    catchUpHours: value('catchUpHours') ?? draft.catchUpHours,
+    runGraceSeconds: value('runGraceSeconds') ?? draft.runGraceSeconds,
     maxWindowPercent: value('maxWindowPercent') ?? draft.maxWindowPercent,
     folder: value('folder') ?? draft.folder,
     provider: (value('provider') ?? draft.provider) === 'codex' ? 'codex' : 'claude',

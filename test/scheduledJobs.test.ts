@@ -60,7 +60,7 @@ describe('checking what the form sent', () => {
         name: 'Sweep',
         kind: 'custom',
         schedule: { weekdays: [1, 3, 5], time: '07:05' },
-        catchUpHours: 4,
+        runGraceSeconds: 30,
         provider: 'claude',
         folder: '/Users/test/proj',
         prompt: 'Review the open PRs.',
@@ -77,7 +77,8 @@ describe('checking what the form sent', () => {
     [{ ...INPUT, folder: 'proj' }, 'folder'],
     [{ ...INPUT, prompt: ' ' }, 'should do'],
     [{ ...INPUT, permissionMode: 'bypassPermissions' }, 'not allowed'],
-    [{ ...INPUT, catchUpHours: 30 }, 'Catch-up'],
+    [{ ...INPUT, runGraceSeconds: 5 }, 'grace period'],
+    [{ ...INPUT, runGraceSeconds: 90_000 }, 'grace period'],
     [{ ...INPUT, maxWindowPercent: 0 }, 'percent'],
   ])('refuses %j', (input, words) => {
     const r = sanitizeJobInput(input);
@@ -121,13 +122,12 @@ describe('slots', () => {
 
 describe('deciding a slot', () => {
   const cases: Array<[string, number, Partial<ScheduledJob>, ReturnType<typeof decideSlot>]> = [
-    ['on time at the slot', MON_0730, {}, { kind: 'run', slot: MON_0730, late: false }],
-    ['on time a minute after', MON_0730 + 60_000, {}, { kind: 'run', slot: MON_0730, late: false }],
-    ['late inside the window', MON_0730 + 2 * HOUR, {}, { kind: 'run', slot: MON_0730, late: true }],
-    ['at the window edge', MON_0730 + 4 * HOUR, {}, { kind: 'run', slot: MON_0730, late: true }],
-    ['missed past the window', MON_0730 + 4 * HOUR + 1, {}, { kind: 'missed', slot: MON_0730 }],
-    ['a zero window still runs on time', MON_0730 + 60_000, { catchUpHours: 0 }, { kind: 'run', slot: MON_0730, late: false }],
-    ['a zero window misses after the grace', MON_0730 + 10 * 60_000, { catchUpHours: 0 }, { kind: 'missed', slot: MON_0730 }],
+    ['on time at the slot', MON_0730, {}, { kind: 'run', slot: MON_0730 }],
+    ['inside the default 30 s grace', MON_0730 + 20_000, {}, { kind: 'run', slot: MON_0730 }],
+    ['at the grace edge', MON_0730 + 30_000, {}, { kind: 'run', slot: MON_0730 }],
+    ['missed past the grace', MON_0730 + 30_001, {}, { kind: 'missed', slot: MON_0730 }],
+    ['missed after a long sleep', MON_0730 + 2 * HOUR, {}, { kind: 'missed', slot: MON_0730 }],
+    ['a longer grace still runs', MON_0730 + 2 * HOUR, { runGraceSeconds: 3 * 3600 }, { kind: 'run', slot: MON_0730 }],
     ['nothing for a slot before it was turned on', MON_0730 + HOUR, { enabledAt: MON_0730 + 1 }, { kind: 'none' }],
   ];
   it.each(cases)('%s', (_name, now, over, expected) => {
@@ -141,15 +141,15 @@ describe('deciding a slot', () => {
     }
   });
 
-  it('retries a skipped slot while its window is open, and then leaves the skip as the record', () => {
+  it('retries a skipped slot while its grace is open, and then leaves the skip as the record', () => {
     const job = recordRun(enabledJob(), { id: 'r', slot: MON_0730, at: MON_0730, outcome: 'skipped', reason: 'the fleet is paused' });
-    expect(decideSlot(job, MON_0730 + HOUR)).toEqual({ kind: 'run', slot: MON_0730, late: true });
-    expect(decideSlot(job, MON_0730 + 5 * HOUR)).toEqual({ kind: 'none' });
+    expect(decideSlot(job, MON_0730 + 20_000)).toEqual({ kind: 'run', slot: MON_0730 });
+    expect(decideSlot(job, MON_0730 + 60_000)).toEqual({ kind: 'none' });
   });
 
-  it('after a long sleep, runs or misses only the latest slot', () => {
-    // Off from Friday morning to Monday 08:00: one late run for Monday, nothing for Friday.
-    expect(decideSlot(enabledJob(), at(2026, 10, 12, 8))).toEqual({ kind: 'run', slot: MON_0730, late: true });
+  it('after a long sleep, records only the latest slot as missed', () => {
+    // Off from Friday morning to Monday 08:00: Monday is missed, nothing for Friday.
+    expect(decideSlot(enabledJob(), at(2026, 10, 12, 8))).toEqual({ kind: 'missed', slot: MON_0730 });
   });
 });
 
@@ -297,12 +297,12 @@ describe('the scheduler', () => {
     expect(h.launches[0]!.permissionMode).toBe('default');
   });
 
-  it('labels a catch-up run late', async () => {
-    const h = harness({ now: MON_0730 + 2 * HOUR });
+  it('runs a slot inside the grace period', async () => {
+    const h = harness({ now: MON_0730 + 20_000 });
     h.store.create(INPUT);
     h.store.setEnabled('j1', true);
     await h.jobs.tick();
-    expect(h.store.get('j1')!.history[0]!.outcome).toBe('late');
+    expect(h.store.get('j1')!.history[0]!.outcome).toBe('ran');
   });
 
   it('records a missed slot once and starts nothing', async () => {
@@ -315,7 +315,7 @@ describe('the scheduler', () => {
     expect(h.store.get('j1')!.history.map((r) => r.outcome)).toEqual(['missed']);
   });
 
-  it('skips while paused, says why once, and runs late once the pause lifts', async () => {
+  it('skips while paused, says why once, and runs once the pause lifts inside the grace', async () => {
     const admission = { fleetPaused: true };
     const h = harness({ admission });
     h.store.create(INPUT);
@@ -326,10 +326,10 @@ describe('the scheduler', () => {
     expect(h.store.get('j1')!.history).toMatchObject([{ outcome: 'skipped', reason: 'the fleet is paused' }]);
     expect(h.notices).toHaveLength(1);
     admission.fleetPaused = false;
-    h.setClock(MON_0730 + HOUR);
+    h.setClock(MON_0730 + 20_000);
     await h.jobs.tick();
     expect(h.launches).toHaveLength(1);
-    expect(h.store.get('j1')!.history.map((r) => r.outcome)).toEqual(['late']);
+    expect(h.store.get('j1')!.history.map((r) => r.outcome)).toEqual(['ran']);
   });
 
   it('fails, without launching, when the folder is gone or the daemon may not start a session', async () => {
@@ -367,13 +367,13 @@ describe('the scheduler', () => {
   });
 
   it('decides on start and on wake', async () => {
-    const h = harness({ now: MON_0730 + HOUR });
+    const h = harness({ now: MON_0730 + 10_000 });
     h.store.create(INPUT);
     h.store.setEnabled('j1', true);
     h.jobs.onWake();
     await h.jobs.tick(); // joins the wake's evaluation
     expect(h.launches).toHaveLength(1);
-    expect(h.timers.length).toBeGreaterThanOrEqual(2); // the minute ticker and the first tick after start
+    expect(h.timers.length).toBeGreaterThanOrEqual(2); // the ticker and the first tick after start
   });
 
   it('saves through the directory with the same checks as the form', () => {
@@ -413,7 +413,7 @@ describe('the Jobs view', () => {
     const { blankJobForm, jobFormInput, jobFormFor } = await import('../src/webview/dashboard/jobs');
     const form = { ...blankJobForm('/Users/test/proj'), name: 'Sweep', prompt: 'Go.', allowedTools: ' Read \n\n Bash(gh pr view:*) ', maxWindowPercent: '80' };
     const input = jobFormInput(form);
-    expect(sanitizeJobInput(input)).toEqual({ value: expect.objectContaining({ name: 'Sweep', folder: '/Users/test/proj', allowedTools: ['Read', 'Bash(gh pr view:*)'], maxWindowPercent: 80, catchUpHours: 4 }) });
+    expect(sanitizeJobInput(input)).toEqual({ value: expect.objectContaining({ name: 'Sweep', folder: '/Users/test/proj', allowedTools: ['Read', 'Bash(gh pr view:*)'], maxWindowPercent: 80, runGraceSeconds: 30 }) });
     const job = createJob('j1', (sanitizeJobInput(input) as { value: JobInput }).value, 0);
     expect(jobFormInput(jobFormFor({ ...job, scheduleText: '', starting: false }))).toEqual(input);
   });
@@ -522,10 +522,10 @@ describe('repeating through the day (#184)', () => {
 
   it('runs each slot once, and after a gap only the latest', () => {
     let job = enabledJob({ schedule: hourly });
-    expect(decideSlot(job, at(2026, 10, 12, 9, 1))).toEqual({ kind: 'run', slot: at(2026, 10, 12, 9), late: false });
+    expect(decideSlot(job, at(2026, 10, 12, 9) + 10_000)).toEqual({ kind: 'run', slot: at(2026, 10, 12, 9) });
     job = recordRun(job, { id: 'r', slot: at(2026, 10, 12, 9), at: 0, outcome: 'ran' });
     expect(decideSlot(job, at(2026, 10, 12, 9, 30))).toEqual({ kind: 'none' });
-    expect(decideSlot(job, at(2026, 10, 12, 13, 10))).toEqual({ kind: 'run', slot: at(2026, 10, 12, 13), late: true });
+    expect(decideSlot(job, at(2026, 10, 12, 13, 10))).toEqual({ kind: 'missed', slot: at(2026, 10, 12, 13) });
   });
 
   it('waits while the previous run is still going, without a notification', async () => {
@@ -559,7 +559,7 @@ describe('repeating through the day (#184)', () => {
     expect(store.get('j1')!.history[0]).toMatchObject({ outcome: 'skipped', reason: 'the previous run is still going' });
     expect(notices).toEqual([]);
     busy = false;
-    clock = at(2026, 10, 12, 10, 20);
+    clock = at(2026, 10, 12, 10) + 20_000;
     await jobs.tick();
     expect(launched).toHaveLength(1);
   });
