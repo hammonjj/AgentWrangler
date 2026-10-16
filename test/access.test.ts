@@ -185,6 +185,7 @@ const CONVERSATION: Samples<ConversationToHost> = {
   agentMemory: [{ type: 'agentMemory', agentId: 'a1', op: { op: 'approve', proposalId: 'p-00000000' }, requestId: 'r1' }],
   openAttempt: [{ type: 'openAttempt', sessionKey: KEY }],
   dictate: [{ type: 'dictate', action: 'start' }],
+  dictateAudio: [{ type: 'dictateAudio', mime: 'audio/webm', durationMs: 1000, data: 'AAAA' }],
   fileSuggest: [{ type: 'fileSuggest', query: 'a' }],
   dropPaths: [{ type: 'dropPaths', paths: ['/Users/test/proj/a.ts'] }],
 };

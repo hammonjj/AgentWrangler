@@ -24,6 +24,7 @@ import { imageMediaType, mentionForPath } from '../../shared/attachments';
 import type { ConversationCapabilities, ImageAttachment } from '../../shared/conversation';
 import { MAX_IMAGE_BYTES, rememberFullText } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
+import { audioExtension, dictationUploadProblem } from '../../shared/webCapabilities';
 import type { Disposable } from '../../core/events';
 import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../../shared/orchestration/taskView';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
@@ -136,6 +137,8 @@ export class ConversationHost {
   private capsSeq = 0;
   /** This pane started the recording the shared `DictationService` is making. */
   private ownsDictation = false;
+  /** A `dictateAudio` upload from this pane is being transcribed. */
+  private uploadBusy = false;
   /** Drawn in place of the conversation until the next session is shown (#49). */
   private detail?: AnalyticsDetail;
 
@@ -702,6 +705,9 @@ export class ConversationHost {
       case 'dictate':
         await this.dictate(m.action);
         return;
+      case 'dictateAudio':
+        await this.transcribeUpload(m);
+        return;
       case 'openDiff':
         // No diff editor here means the card's own +/- block is all there is.
         // Saying so is better than a button that swallows the click.
@@ -906,6 +912,33 @@ export class ConversationHost {
     }
   }
 
+  /**
+   * Transcribe a recording the page made itself and sent as a message (#185): the path a
+   * remote-control tab takes, since it cannot reach `POST /dictation`. Answers with a
+   * `dictation` message; never sends anything to the agent.
+   */
+  private async transcribeUpload(m: Extract<ConversationToHost, { type: 'dictateAudio' }>): Promise<void> {
+    const problem = dictationUploadProblem(m);
+    if (problem) {
+      this.post({ type: 'dictation', state: 'idle', message: problem });
+      return;
+    }
+    if (this.uploadBusy) {
+      this.post({ type: 'dictation', state: 'idle', message: 'Another recording is being transcribed. Try again in a moment.' });
+      return;
+    }
+    this.uploadBusy = true;
+    try {
+      const text = await this.dictation.transcribeAudio(Buffer.from(m.data, 'base64'), audioExtension(m.mime)!);
+      this.post({ type: 'dictation', state: 'idle', text });
+    } catch (e) {
+      this.post({ type: 'dictation', state: 'idle', message: `Could not transcribe: ${(e as Error).message}` });
+      if (e instanceof DictationSetupError) await this.ui.offerDictationSetup(e);
+    } finally {
+      this.uploadBusy = false;
+    }
+  }
+
   /** Throw away a recording this pane started, if there is one. Harmless otherwise. */
   private cancelDictation(): void {
     if (!this.ownsDictation) return;
@@ -1009,6 +1042,7 @@ export function conversationRequest(m: ConversationToHost, key: string | undefin
     case 'openFile':
       return { action: 'host.open' };
     case 'dictate':
+    case 'dictateAudio':
       return { action: 'dictation.use' };
     case 'send': {
       // The first message to a durable agent starts its session (#179).

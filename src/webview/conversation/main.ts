@@ -2729,7 +2729,10 @@ function stopDictation(): void {
   setMicState('transcribing');
   if (browserMic) {
     browserMic.stop().then(
-      (text) => onDictationMessage({ type: 'dictation', state: 'idle', text }),
+      // `undefined`: sent over the relay, the host answers with a `dictation` message.
+      (text) => {
+        if (text !== undefined) onDictationMessage({ type: 'dictation', state: 'idle', text });
+      },
       (e: unknown) => onDictationMessage({ type: 'dictation', state: 'idle', message: (e as Error).message }),
     );
     return;
@@ -2740,6 +2743,7 @@ function stopDictation(): void {
 /** In a browser the microphone is the browser's; in the window the host's. */
 const browserMic = isBrowserHost()
   ? createBrowserDictation({
+      sendAudio: (audio) => post({ type: 'dictateAudio', ...audio }),
       onLimit: () => {
         if (micState === 'recording') {
           flashDictation('info', 'Recording reached its limit and stopped.');

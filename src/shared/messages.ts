@@ -422,6 +422,12 @@ export type ConversationToHost =
    * `cancel` throws the audio away without transcribing.
    */
   | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' }
+  /**
+   * A recording made with the page's own microphone, sent over the pane socket because a
+   * remote-control tab has no `POST /dictation` (#185). `data` is the audio, base64; the host
+   * answers with a `dictation` message, as for `dictate`.
+   */
+  | { type: 'dictateAudio'; mime: string; durationMs: number; data: string }
   /** An `@` is being typed: what files in the session's folder match so far. */
   | { type: 'fileSuggest'; query: string }
   /**

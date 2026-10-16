@@ -142,3 +142,16 @@ export const DICTATION_HEADER = 'x-aw-dictation';
 /** The recording's length as the client measured it; checked against `DICTATION_MAX_MS`. */
 export const DICTATION_DURATION_HEADER = 'x-aw-duration-ms';
 export const DICTATION_PATH = '/dictation';
+
+/**
+ * Why a recording sent as a pane message (`dictateAudio`) is refused, or undefined when it is
+ * fine. The same ceilings as `POST /dictation`; the base64 text is measured before it is decoded.
+ */
+export function dictationUploadProblem(m: { mime: string; durationMs: number; data: string }): string | undefined {
+  if (!audioExtension(m.mime)) return 'That is not audio Agent Wrangler can read.';
+  if (!(m.durationMs <= DICTATION_MAX_MS) || m.data.length > Math.ceil((DICTATION_MAX_BYTES * 4) / 3) + 4) {
+    return 'That recording is too long. Keep it under five minutes.';
+  }
+  if (m.data.length === 0) return 'The recording was empty.';
+  return undefined;
+}
