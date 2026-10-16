@@ -26,7 +26,7 @@ function notable(status: AgentSession['status']): boolean {
 function materialFingerprint(s: AgentSession): string {
   // Serialize subagent list, excluding timestamps that move on every poll
   const subagentListStr = s.subagentList
-    ? JSON.stringify(s.subagentList.map((sa) => ({ id: sa.id, label: sa.label, status: sa.status, agentType: sa.agentType })))
+    ? JSON.stringify(s.subagentList.map((sa) => ({ id: sa.id, label: sa.label, status: sa.status, agentType: sa.agentType, agentId: sa.agentId })))
     : 'null';
   return [
     s.status,
