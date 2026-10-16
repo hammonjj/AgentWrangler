@@ -25,6 +25,13 @@ import {
 
 /** How long the daemon has to answer a connect before the Mac counts as unreachable. */
 const OPEN_TIMEOUT_MS = 12_000;
+/**
+ * The daemon pings every 30 s, so this long without a frame means it has dropped this tab or
+ * cannot reach it. Nothing else would say so: the channel stays subscribed from this end, and
+ * a tab that went on sending into it would wait for acks and updates that never come.
+ */
+const SILENCE_MS = 90_000;
+const SILENCE_CHECK_MS = 15_000;
 
 export interface RelayDevice {
   deviceId: string;
@@ -43,6 +50,11 @@ export class RelayConnection {
   private assetListener: ((item: Extract<RelayItem, { k: 'asset' }>) => void) | undefined;
   private opened: ((build: string) => void) | undefined;
   private closeListeners: ((reason: string) => void)[] = [];
+  private lastHeard = Date.now();
+  private silenceTimer: ReturnType<typeof setInterval> | undefined;
+  private readonly checkSilence = () => {
+    if (Date.now() - this.lastHeard > SILENCE_MS) this.end('silent');
+  };
   /** Items that arrived before the socket listened (the hello, while assets load). */
   private held: RelayItem[] = [];
   closed = false;
@@ -74,7 +86,10 @@ export class RelayConnection {
         reject(new Error(reason));
       });
     });
-    channel.on('broadcast', { event: RELAY_EVENT_FRAME }, (m) => this.receive(m.payload));
+    channel.on('broadcast', { event: RELAY_EVENT_FRAME }, (m) => {
+      this.lastHeard = Date.now();
+      this.receive(m.payload);
+    });
     await new Promise<void>((resolve, reject) => {
       channel.subscribe((status, err) => {
         if (status === 'SUBSCRIBED') resolve();
@@ -88,6 +103,11 @@ export class RelayConnection {
     const r = await lobby.httpSend(RELAY_EVENT_CONNECT, await sealConnect(this.device.key, this.device.deviceId, this.uid, id, Date.now()));
     void this.client.removeChannel(lobby);
     if (!r.success) throw new Error(r.status === 401 || r.status === 403 ? 'not-owner' : 'relay-unreachable');
+    // A hidden window's timers are throttled to about one a minute, so it is checked again the
+    // moment it is looked at.
+    this.lastHeard = Date.now();
+    this.silenceTimer = setInterval(this.checkSilence, SILENCE_CHECK_MS);
+    document.addEventListener('visibilitychange', this.checkSilence);
     return opened;
   }
 
@@ -110,10 +130,17 @@ export class RelayConnection {
     this.closeListeners.push(listener);
   }
 
-  send(item: RelayItem): void {
+  /**
+   * Queue an item for the next batch. `now` sends it without waiting for the batch timer: a
+   * hidden window's timers can be throttled past the daemon's ping deadline.
+   */
+  send(item: RelayItem, now = false): void {
     if (this.closed) return;
     this.queue.push(item);
-    if (!this.timer && !this.sending) this.timer = setTimeout(() => this.flush(), RELAY_BATCH_MS);
+    if (now && !this.sending) {
+      if (this.timer) clearTimeout(this.timer);
+      this.flush();
+    } else if (!this.timer && !this.sending) this.timer = setTimeout(() => this.flush(), RELAY_BATCH_MS);
   }
 
   close(): void {
@@ -141,7 +168,8 @@ export class RelayConnection {
       .catch(() => this.end('send-failed'))
       .finally(() => {
         this.sending = false;
-        if (this.queue.length > 0 && !this.timer) this.timer = setTimeout(() => this.flush(), RELAY_BATCH_MS);
+        // What queued meanwhile is already a batch; a timer here could hold a pong too long.
+        if (this.queue.length > 0 && !this.timer) this.flush();
       });
   }
 
@@ -175,6 +203,8 @@ export class RelayConnection {
     if (this.closed) return;
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
+    if (this.silenceTimer) clearInterval(this.silenceTimer);
+    document.removeEventListener('visibilitychange', this.checkSilence);
     if (this.channel) void this.client.removeChannel(this.channel);
     for (const l of [...this.closeListeners]) l(reason);
   }
@@ -215,7 +245,7 @@ export class RelayWebSocket extends EventTarget {
     c.onItems((items) => {
       for (const item of items) {
         if (item.k === 'data') this.dispatchEvent(new MessageEvent('message', { data: item.line }));
-        else if (item.k === 'ping') c.send({ k: 'pong' });
+        else if (item.k === 'ping') c.send({ k: 'pong' }, true);
       }
     });
     this.readyState = 1;
