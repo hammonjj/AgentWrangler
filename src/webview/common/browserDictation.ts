@@ -12,7 +12,7 @@
  * recorder type to ask for, and whether the page may record at all, are the
  * pure functions in `shared/webCapabilities.ts`.
  */
-import { isRelayHost, notOverRelay } from './relayHost';
+import { isRelayHost } from './relayHost';
 import {
   DICTATION_DURATION_HEADER,
   DICTATION_HEADER,
@@ -23,6 +23,16 @@ import {
   secureContextProblem,
 } from '../../shared/webCapabilities';
 
+/** 32 kbit/s: clear speech, and five minutes is about 1.2 MB. */
+const RELAY_AUDIO_BPS = 32_000;
+
+async function toBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
 /** The workbench is in a browser with the shim (it says so on `<html>`). */
 export function isBrowserHost(): boolean {
   return document.documentElement.dataset.awHost === 'browser';
@@ -31,14 +41,21 @@ export function isBrowserHost(): boolean {
 export interface BrowserDictation {
   /** Open the microphone. Rejects with a message fit to show beside the composer. */
   start(): Promise<void>;
-  /** Close it, upload what was said, and resolve with the text (`''` for silence). */
-  stop(): Promise<string>;
+  /**
+   * Close it, upload what was said, and resolve with the text (`''` for silence). Over the
+   * relay it resolves `undefined`: the text comes back later as a `dictation` message.
+   */
+  stop(): Promise<string | undefined>;
   /** Close the microphone and keep nothing. */
   cancel(): void;
 }
 
 /** `onLimit` is called when the recording reached the five-minute or 10 MB ceiling and stopped itself: call `stop()` to transcribe it. */
-export function createBrowserDictation(opts: { onLimit(): void }): BrowserDictation {
+export function createBrowserDictation(opts: {
+  onLimit(): void;
+  /** Hand a recording to the host as a pane message; used instead of `POST /dictation` over the relay (#185). */
+  sendAudio(audio: { mime: string; durationMs: number; data: string }): void;
+}): BrowserDictation {
   let recorder: MediaRecorder | undefined;
   let stream: MediaStream | undefined;
   let chunks: Blob[] = [];
@@ -57,7 +74,6 @@ export function createBrowserDictation(opts: { onLimit(): void }): BrowserDictat
 
   return {
     async start() {
-      if (isRelayHost()) throw new Error(notOverRelay('Dictation'));
       const insecure = secureContextProblem({
         isSecureContext: window.isSecureContext,
         protocol: location.protocol,
@@ -80,7 +96,8 @@ export function createBrowserDictation(opts: { onLimit(): void }): BrowserDictat
       }
       chunks = [];
       bytes = 0;
-      const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      // Over the relay every byte is metered and the audio does not compress: speech needs little.
+      const rec = new MediaRecorder(stream, { ...(mimeType ? { mimeType } : {}), ...(isRelayHost() ? { audioBitsPerSecond: RELAY_AUDIO_BPS } : {}) });
       recorder = rec;
       finished = new Promise<Blob>((resolve) => {
         rec.addEventListener('stop', () => resolve(new Blob(chunks, { type: rec.mimeType || mimeType || 'audio/webm' })), { once: true });
@@ -114,6 +131,12 @@ export function createBrowserDictation(opts: { onLimit(): void }): BrowserDictat
       const duration = Date.now() - startedAt;
       release();
       if (blob.size === 0) return '';
+      if (isRelayHost()) {
+        // No HTTP route over the relay: the audio goes down the encrypted pane socket, and the
+        // host answers with a `dictation` message.
+        opts.sendAudio({ mime: blob.type || 'audio/webm', durationMs: Math.min(duration, DICTATION_MAX_MS), data: await toBase64(blob) });
+        return undefined;
+      }
       const res = await fetch(DICTATION_PATH, {
         method: 'POST',
         credentials: 'same-origin',
