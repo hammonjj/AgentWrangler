@@ -210,7 +210,6 @@ function startRouter(wb: HTMLElement): (input: RouterInput) => void {
     jobs: link({ kind: 'jobs' }, 'Jobs'),
     analytics: link({ kind: 'analytics' }, 'Analytics'),
     preferences: link({ kind: 'preferences' }, 'Preferences'),
-    connect: link({ kind: 'connect' }, 'Connect'),
   };
   bar.append(back, heading, nav, actionsMenu(dashboard));
   // First in the document, above the table's launcher: the first tab stop and
