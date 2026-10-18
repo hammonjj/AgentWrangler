@@ -155,6 +155,74 @@ Every per-user row cascades from `auth.users`, so deleting the account is one de
   because RLS is per user, not per device, but nothing it sends decrypts and nothing is sent to it.
 - **Rotation.** Re-pair. Per-device frame counts stay far below AES-GCM's random-nonce bound.
 
+### 3.1 Password sign-in that enrolls the device (#187)
+
+QR pairing fails for the case it was built for. iOS gives a Home Screen web app its own storage,
+so a key saved by Safari is not there. Nothing can open the pairing link inside the installed
+app, and the GitHub redirect can leave it. So the phone gets one form, email and password, that
+signs in **and** enrolls the device. The result is the same per-device key as QR pairing, so
+everything below enrollment (cipher, replay, revocation, `connect`) is unchanged. QR pairing
+stays as a fallback.
+
+**One password, two values.** Supabase must never hold anything that enrolls a device, so the
+password itself is never sent. Both ends derive the following values:
+
+```
+master    = PBKDF2-SHA-256(password, salt = "aw-v1|" + lowercase(email), 600 000 iterations, 512 bits)
+authValue = hex(HKDF-SHA-256(master, info = "aw auth",   256 bits))   → the Supabase password
+enrollKey =     HKDF-SHA-256(master, info = "aw enroll", 256 bits)    → AES-256-GCM key, never sent
+```
+
+PBKDF2 and HKDF are in WebCrypto and `node:crypto`, so no library is needed. The two HKDF
+outputs are independent: knowing `authValue` does not give `enrollKey`. It does let someone test
+password guesses offline (see §5).
+
+**Setting it (the Mac).** Preferences › Remote › Password sign-in is a loopback-only action
+(`authorize()`). James enters the password twice, with a minimum of 12 characters. The daemon
+derives both values. It sets `authValue` as the Supabase password of the user it is already
+signed in as (`auth.updateUser`, same `auth.uid()`, so no schema change, as §6 planned) and keeps
+`enrollKey` in its data dir (mode 0600), like the device keys. It never stores the password.
+Preferences shows the account email as the user name. Changing the password replaces both
+values and leaves enrolled devices working. Turning password sign-in off deletes `enrollKey`,
+after which the daemon refuses every enrollment.
+
+**Enrolling (the phone, over the lobby):**
+
+1. The loader derives both values and signs in with `signInWithPassword(email, authValue)`.
+2. It makes an ephemeral ECDH P-256 key pair and posts `enroll` to the lobby. The request
+   holds a random id `n` in clear, plus `{pub, ts, label}` sealed under `enrollKey` with
+   additional data `"enroll" | uid | n`. The label is a short device description, such as
+   "iPhone Safari".
+3. The daemon opens the request with `enrollKey`. It refuses the request if it does not
+   authenticate, if `ts` is older than 2 minutes, or if `n` was already seen. After 5 refusals in
+   an hour it stops accepting enrollments for an hour and logs it.
+4. The daemon creates a device id and a random 256-bit key, as QR pairing does. It records the
+   device as "enrolled with password" with its label and time. It replies on the lobby with
+   `enrolled`, which holds its own ephemeral ECDH public key sealed under `enrollKey` (with
+   additional data binding `n` and the phone's `pub`), and `{deviceId, key}` sealed under
+   `HKDF(ECDH shared secret, "aw enroll reply")`.
+5. The loader imports the key as non-extractable, stores it the way QR pairing does, and goes on
+   to the normal `connect`.
+
+The ECDH step means that a recorded enrollment exchange does not reveal the device key, even if
+the password is cracked later. `enrollKey` authenticates both ends, so Supabase cannot swap in
+its own key.
+
+**Loader states:**
+
+| State | What the user sees |
+|---|---|
+| No device, no session | Email and password form, then enroll and connect. |
+| Device stored, no session (expired, or signed out) | The same form. It only signs in. |
+| Device stored, session valid | Connects, as now. |
+| Device revoked | The device is forgotten and the form comes back, which enrolls a new device. |
+
+The "Not paired yet" dead end goes away. GitHub sign-in and the `#pair=` link still work.
+
+**Supabase setup.** Turn on the Email provider and keep sign-ups closed. James's user already
+has a confirmed email from GitHub; check that before building. Turn "Secure password change" off
+or handle its reauthentication prompt in the daemon.
+
 ## 4. Budget: staying on the free tiers
 
 Supabase (official docs, 2026-10): 5 GB uncached egress, 2M Realtime messages, 200 concurrent
@@ -194,6 +262,10 @@ sent over the relay so drift is visible before Supabase warns.
 | Assets injected into the relay stream | Assets are accepted only if they decrypt and authenticate under the device key. |
 | A remote device runs host-local actions or names host paths | `deviceScope: 'relay'` is not loopback ("Open on this Mac" refused); `pathAllowlist.ts` applies. |
 | The daemon's Supabase refresh token is stolen from the Mac | It gives that user's Supabase access (ciphertext and topics), not device keys. Stored mode 0600 like the other secrets; Disconnect revokes it. |
+| Supabase, or anyone with its database or logs, guesses the remote password offline (§3.1) | They hold `authValue` or its hash, so each guess costs 600 000 PBKDF2 iterations. A correct guess yields `enrollKey`, which can enroll a device. Residual risk, scaled by password strength: a minimum of 12 characters, a passphrase recommended. A new enrollment shows in Preferences › Remote with its label and time, and is revocable. |
+| The remote password is stolen | The thief can enroll a device. Revoke it and change the password; existing devices keep working. |
+| Online password guessing | Supabase Auth rate-limits sign-in. Without a session the lobby cannot be reached. The daemon stops enrolling for an hour after 5 refusals. |
+| A recorded enrollment, decrypted after the password is cracked | The device key travels under an ephemeral ECDH secret, not under `enrollKey`. |
 | Quota exhaustion (a bug, or a stolen session spamming topics) | Free tier restricts rather than bills; the daemon's frame and byte counts and Supabase's email warn. Disconnect in Preferences stops the daemon side. |
 
 ## 6. Rules that keep later options open
@@ -234,3 +306,4 @@ rules make sure nothing built now has to be torn out to get them.
 | 5 | #176 | Remote actions + relay capability | Send, answer prompts and plans from the phone; HTTP-backed features hidden or explained. |
 | 6 | #177 | PWA + Web Push from the daemon | Installable loader; a lock-screen notice opens the conversation. |
 | 7 | #178 | Commands in the web client | The #59 registry's commands work over the relay and Discord. |
+| 8 | #187 | Password sign-in that enrolls the device (§3.1) | A Home Screen app on a phone with no stored device signs in with email and password and reaches the workbench. A wrong password, a replayed `enroll`, or one sent with password sign-in off enrolls nothing. |
