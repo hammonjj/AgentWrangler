@@ -14,7 +14,8 @@ vi.mock('../src/remote/relay/supabaseNetwork', () => ({
   },
 }));
 
-vi.mock('../src/remote/relay/relayLink', () => ({
+vi.mock('../src/remote/relay/relayLink', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/remote/relay/relayLink')>()),
   startRelayLink: async (opts: RelayLinkOptions) => {
     const listeners: (() => void)[] = [];
     const link = {

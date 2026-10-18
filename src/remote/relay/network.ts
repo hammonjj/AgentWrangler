@@ -36,3 +36,11 @@ export interface RelayNetwork extends Disposable {
   /** Upsert the daemon's heartbeat row (`public.daemons`). */
   heartbeat(daemonId: string, build: string): Promise<void>;
 }
+
+/** What setting the remote password needs from the signed-in account (#187). */
+export interface RelayAccount {
+  /** The account's email: the user name on the phone, and the password's salt. */
+  readonly email: string | undefined;
+  /** Set the account's Supabase password (the derived `authValue`, never the password). */
+  updatePassword(value: string): Promise<void>;
+}

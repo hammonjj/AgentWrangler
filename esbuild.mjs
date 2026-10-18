@@ -1,5 +1,6 @@
 import esbuild from 'esbuild';
-import { cpSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const watch = process.argv.includes('--watch');
 
@@ -143,6 +144,25 @@ const configs = [web, relaySite, sessionHost, coreDaemon, cli, launcher];
 
 rmSync('dist/relay-site', { recursive: true, force: true });
 cpSync('src/webview/relayLoader/static', 'dist/relay-site', { recursive: true });
+writeRelayProject();
+
+/**
+ * The loader's `project.json` (#187): which Supabase project a device with nothing stored
+ * signs in to. Taken from this Mac's own settings (`remote.relay.url`, `remote.relay.anonKey`,
+ * both public values) so it is never committed. Absent when they are not set.
+ */
+function writeRelayProject() {
+  const file = join(process.env.HOME ?? '', 'Library/Application Support/Agent Wrangler/settings.json');
+  if (!existsSync(file)) return;
+  try {
+    const s = JSON.parse(readFileSync(file, 'utf8'));
+    const url = String(s['remote.relay.url'] ?? '').trim().replace(/\/+$/, '');
+    const anonKey = String(s['remote.relay.anonKey'] ?? '').trim();
+    if (url && anonKey) writeFileSync('dist/relay-site/project.json', `${JSON.stringify({ url, anonKey })}\n`);
+  } catch {
+    // An unreadable settings file leaves the site without one, as on another machine.
+  }
+}
 
 /**
  * Qualification stage 2's scratch-repo fixtures (plan §19.6), which the core

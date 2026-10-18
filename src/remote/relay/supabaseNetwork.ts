@@ -7,7 +7,7 @@
  * token is handed back to be stored, since Supabase rotates them.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import type { RelayChannel, RelayNetwork } from './network';
+import type { RelayAccount, RelayChannel, RelayNetwork } from './network';
 
 export interface SupabaseNetworkOptions {
   url: string;
@@ -22,7 +22,7 @@ export interface SupabaseNetworkOptions {
 }
 
 /** Sign in with the stored refresh token. Rejects when it no longer works. */
-export async function connectSupabaseNetwork(opts: SupabaseNetworkOptions): Promise<RelayNetwork & { login: string }> {
+export async function connectSupabaseNetwork(opts: SupabaseNetworkOptions): Promise<RelayNetwork & RelayAccount & { login: string }> {
   const client: SupabaseClient = createClient(opts.url, opts.anonKey, {
     auth: { persistSession: false, autoRefreshToken: true, detectSessionInUrl: false },
     realtime: { params: { log_level: 'error' } },
@@ -56,6 +56,11 @@ export async function connectSupabaseNetwork(opts: SupabaseNetworkOptions): Prom
   return {
     uid,
     login,
+    email: data.user.email || undefined,
+    async updatePassword(value) {
+      const { error: e } = await client.auth.updateUser({ password: value });
+      if (e) throw new Error(e.message);
+    },
     join(topic, joinOpts) {
       const channel = client.channel(topic, { config: { private: true, broadcast: { self: false, ack: true }, presence: { key: '' } } });
       const listeners = new Map<string, ((p: unknown) => void)[]>();

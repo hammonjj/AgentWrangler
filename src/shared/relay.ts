@@ -347,6 +347,151 @@ export class RelayCodec {
   }
 }
 
+// ---- password sign-in and enrollment (#187; plan §3.1) ----
+
+/** A device asking, on the lobby, to be enrolled with the remote password. */
+export const RELAY_EVENT_ENROLL = 'enroll';
+/** The daemon's answer, on the reply topic the device named. */
+export const RELAY_EVENT_ENROLLED = 'enrolled';
+export const RELAY_PASSWORD_MIN = 12;
+export const RELAY_PBKDF2_ITERATIONS = 600_000;
+
+/** What a remote password turns into. Neither is the password, and only `authValue` leaves the device. */
+export interface RelayPasswordValues {
+  /** The Supabase password, hex. */
+  authValue: string;
+  /** The enrollment key, base64url (32 bytes). Never sent anywhere. */
+  enrollKey: string;
+}
+
+/**
+ * The two values a remote password stands for: PBKDF2 over the password, salted with the
+ * account's email, then HKDF to two independent keys. Both ends run this.
+ */
+export async function deriveRelayPassword(email: string, password: string, iterations = RELAY_PBKDF2_ITERATIONS): Promise<RelayPasswordValues> {
+  const base = await crypto.subtle.importKey('raw', encoder.encode(password) as BufferSource, 'PBKDF2', false, ['deriveBits']);
+  const master = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: encoder.encode(`aw-v1|${email.trim().toLowerCase()}`) as BufferSource, iterations },
+    base,
+    512,
+  );
+  const hkdf = await crypto.subtle.importKey('raw', master, 'HKDF', false, ['deriveBits']);
+  const expand = async (info: string) =>
+    new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: encoder.encode(info) as BufferSource }, hkdf, 256));
+  const auth = await expand('aw auth');
+  return { authValue: [...auth].map((b) => b.toString(16).padStart(2, '0')).join(''), enrollKey: toBase64Url(await expand('aw enroll')) };
+}
+
+/** A device asking to be enrolled. `c` seals `{ts, pub, label}` under the enrollment key. */
+export interface EnrollRequest {
+  v: number;
+  /** The reply topic's id: the device has joined `connectionTopic(uid, t)` and waits there. */
+  t: string;
+  n: string;
+  c: string;
+}
+
+/** The daemon's answer: its ECDH public key in clear, and the device's id and key sealed. */
+export interface EnrollReply {
+  v: number;
+  p: string;
+  n: string;
+  c: string;
+}
+
+export function parseEnrollRequest(value: unknown): EnrollRequest | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const r = value as Record<string, unknown>;
+  if (typeof r.v !== 'number' || !isRelayId(r.t) || typeof r.n !== 'string' || typeof r.c !== 'string' || r.c.length > 4096) return undefined;
+  return { v: r.v, t: r.t, n: r.n, c: r.c };
+}
+
+export function parseEnrollReply(value: unknown): EnrollReply | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const r = value as Record<string, unknown>;
+  if (typeof r.v !== 'number' || typeof r.p !== 'string' || r.p.length > 200 || typeof r.n !== 'string' || typeof r.c !== 'string' || r.c.length > 4096) return undefined;
+  return { v: r.v, p: r.p, n: r.n, c: r.c };
+}
+
+function enrollKeyOf(enrollKey: string): Promise<CryptoKey> {
+  return importRelayKey(enrollKey);
+}
+
+/** An ephemeral ECDH key pair, and its public half as base64 (raw point). */
+export async function newEnrollKeyPair(): Promise<{ pair: CryptoKeyPair; pub: string }> {
+  const pair = (await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits'])) as CryptoKeyPair;
+  const pub = toBase64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey)));
+  return { pair, pub };
+}
+
+/**
+ * The key the device's id and key travel under: HKDF over the ECDH secret, salted with the
+ * enrollment key. A recorded exchange stays closed to someone who learns the password later
+ * (no ECDH secret), and neither end can be impersonated without the enrollment key.
+ */
+async function enrollWrapKey(own: CryptoKey, theirPub: string, enrollKey: string, t: string): Promise<CryptoKey> {
+  const pub = await crypto.subtle.importKey('raw', fromBase64(theirPub) as BufferSource, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: pub }, own, 256);
+  const hkdf = await crypto.subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: fromBase64Url(enrollKey) as BufferSource, info: encoder.encode(`aw enroll reply|${t}`) as BufferSource },
+    hkdf,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+}
+
+export async function sealEnroll(enrollKey: string, uid: string, t: string, pub: string, label: string, nowMs: number): Promise<EnrollRequest> {
+  const plain = encoder.encode(JSON.stringify({ ts: nowMs, pub, label: label.slice(0, 80) }));
+  const { n, c } = await seal(await enrollKeyOf(enrollKey), plain, aad(['enroll', lobbyTopic(uid), t]));
+  return { v: RELAY_PROTOCOL, t, n, c };
+}
+
+/** The device's ECDH key and label when `req` was sealed with `enrollKey`, for this lobby, recently. */
+export async function openEnroll(enrollKey: string, req: EnrollRequest, uid: string, nowMs: number): Promise<{ pub: string; label: string } | undefined> {
+  if (req.v !== RELAY_PROTOCOL) return undefined;
+  const plain = await open(await enrollKeyOf(enrollKey), req.n, req.c, aad(['enroll', lobbyTopic(uid), req.t]));
+  if (!plain) return undefined;
+  try {
+    const body = JSON.parse(decoder.decode(plain)) as { ts?: unknown; pub?: unknown; label?: unknown };
+    if (typeof body.ts !== 'number' || Math.abs(nowMs - body.ts) > RELAY_CONNECT_WINDOW_MS) return undefined;
+    if (typeof body.pub !== 'string' || body.pub.length > 200) return undefined;
+    return { pub: body.pub, label: typeof body.label === 'string' ? body.label.slice(0, 80) : 'Remote device' };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The daemon's answer to an enrollment it accepted: the new device's id and key. */
+export async function sealEnrollReply(enrollKey: string, uid: string, t: string, devicePub: string, deviceId: string, key: string): Promise<EnrollReply> {
+  const own = await newEnrollKeyPair();
+  const wrap = await enrollWrapKey(own.pair.privateKey, devicePub, enrollKey, t);
+  const { n, c } = await seal(wrap, encoder.encode(JSON.stringify({ d: deviceId, k: key })), aad(['enrolled', uid, t, devicePub, own.pub]));
+  return { v: RELAY_PROTOCOL, p: own.pub, n, c };
+}
+
+/** The device's id and key from the daemon's answer, or undefined when it does not authenticate. */
+export async function openEnrollReply(
+  enrollKey: string,
+  uid: string,
+  t: string,
+  own: { pair: CryptoKeyPair; pub: string },
+  reply: EnrollReply,
+): Promise<{ deviceId: string; key: string } | undefined> {
+  if (reply.v !== RELAY_PROTOCOL) return undefined;
+  try {
+    const wrap = await enrollWrapKey(own.pair.privateKey, reply.p, enrollKey, t);
+    const plain = await open(wrap, reply.n, reply.c, aad(['enrolled', uid, t, own.pub, reply.p]));
+    if (!plain) return undefined;
+    const body = JSON.parse(decoder.decode(plain)) as { d?: unknown; k?: unknown };
+    if (typeof body.d !== 'string' || body.d.length === 0 || body.d.length > 64 || typeof body.k !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.k)) return undefined;
+    return { deviceId: body.d, key: body.k };
+  } catch {
+    return undefined;
+  }
+}
+
 /** Which Supabase project a device talks through. Both public values; the link carries them so the site needs no configuration. */
 export interface RelayProject {
   url: string;

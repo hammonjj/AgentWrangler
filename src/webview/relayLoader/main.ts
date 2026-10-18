@@ -7,12 +7,14 @@
  * the files of the daemon's build, caches them, and builds the same page the Mac serves on
  * loopback, with the webshim's sockets carried over the relay.
  *
- * States, in order: not paired → paired, not signed in → connecting → (Mac unreachable) →
- * running the workbench. Each says what to do next.
+ * States, in order: not signed in (an email and password form, which also sets up a device
+ * that has no key yet, #187) → connecting → (Mac unreachable) → running the workbench. Each
+ * says what to do next. A QR pairing link still works and skips the setup.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { importRelayKey, parsePairingFragment } from '../../shared/relay';
+import { importRelayKey, parsePairingFragment, type RelayProject } from '../../shared/relay';
 import { RelayConnection, RelayWebSocket, type RelayDevice } from './connection';
+import { signInWithPassword } from './enroll';
 import { pushOnConnect, watchPush } from './push';
 import { forgetDevice, loadAssets, loadDevice, saveAssets, saveDevice, type StoredAssets, type StoredDevice } from './store';
 
@@ -51,12 +53,6 @@ async function pairFromFragment(): Promise<StoredDevice | undefined> {
   };
   await saveDevice(device);
   return device;
-}
-
-function supabaseFor(device: StoredDevice): SupabaseClient {
-  return createClient(device.project.url, device.project.anonKey, {
-    auth: { flowType: 'pkce', persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
-  });
 }
 
 async function signIn(client: SupabaseClient): Promise<void> {
@@ -136,22 +132,128 @@ function startWorkbench(assets: StoredAssets, first: RelayConnection, next: () =
   load(0);
 }
 
+/**
+ * The Supabase project this site talks through: `project.json`, written beside the loader when
+ * it is built for deploying (public values). A paired device also carries it.
+ */
+async function siteProject(): Promise<RelayProject | undefined> {
+  try {
+    const res = await fetch('/project.json', { cache: 'no-store' });
+    if (!res.ok) return undefined;
+    const p = (await res.json()) as { url?: unknown; anonKey?: unknown };
+    return typeof p.url === 'string' && /^https:\/\/[^\s/]+$/.test(p.url) && typeof p.anonKey === 'string' && p.anonKey.length >= 20 ? { url: p.url, anonKey: p.anonKey } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The email and password form (#187). With no device stored it also sets this device up;
+ * with one, it only signs in. Reloads the page once it has.
+ */
+function passwordForm(client: SupabaseClient, project: RelayProject, device: StoredDevice | undefined, error?: string): void {
+  show(
+    'Sign in',
+    [
+      device
+        ? 'Sign in with the email and remote password set on your Mac.'
+        : 'Sign in with your email and the remote password set on your Mac (Preferences › Remote control › Set password…). This also sets up this device.',
+    ],
+    [],
+  );
+  if (error) {
+    const p = document.createElement('p');
+    p.className = 'error';
+    p.textContent = error;
+    root.appendChild(p);
+  }
+  const form = document.createElement('form');
+  const field = (label: string, input: HTMLInputElement) => {
+    const l = document.createElement('label');
+    l.textContent = label;
+    l.htmlFor = input.id;
+    form.append(l, input);
+  };
+  const email = document.createElement('input');
+  email.id = 'email';
+  email.type = 'email';
+  email.autocomplete = 'username';
+  email.required = true;
+  email.value = localStorage.getItem('aw-email') ?? '';
+  const password = document.createElement('input');
+  password.id = 'password';
+  password.type = 'password';
+  password.autocomplete = 'current-password';
+  password.required = true;
+  field('Email', email);
+  field('Password', password);
+  const submit = document.createElement('button');
+  submit.type = 'submit';
+  submit.className = 'primary';
+  submit.textContent = 'Sign in';
+  form.appendChild(submit);
+  root.appendChild(form);
+  (email.value ? password : email).focus();
+
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    submit.disabled = true;
+    submit.textContent = device ? 'Signing in…' : 'Signing in and setting up…';
+    void (async () => {
+      const r = await signInWithPassword(client, email.value, password.value, !device);
+      if (!r.ok) {
+        const messages: Record<typeof r.why, string> = {
+          credentials: 'Wrong email or password.',
+          'not-owner': 'Supabase refused this account: it is not the project’s owner.',
+          unreachable: 'Could not reach Supabase. Check the connection and try again.',
+          'mac-silent':
+            'Signed in, but your Mac did not set this device up. Make sure it is awake with Remote control connected, and that password sign-in is on (Preferences › Remote control). After 5 wrong attempts it pauses for an hour.',
+          refused: 'Your Mac’s answer did not check out. Set the password on the Mac again, then retry.',
+        };
+        passwordForm(client, project, device, messages[r.why]);
+        return;
+      }
+      localStorage.setItem('aw-email', email.value.trim());
+      if (r.device) await saveDevice({ deviceId: r.device.deviceId, key: await importRelayKey(r.device.key), project, pairedAt: Date.now() });
+      location.reload();
+    })().catch((e) => passwordForm(client, project, device, e instanceof Error ? e.message : String(e)));
+  });
+
+  const github = document.createElement('button');
+  github.type = 'button';
+  github.className = 'quiet';
+  github.textContent = 'Sign in with GitHub instead';
+  github.title = 'Only for a device paired with a QR code.';
+  github.addEventListener('click', () => void signIn(client));
+  if (device) root.appendChild(github);
+  if (device) {
+    const forget = document.createElement('button');
+    forget.type = 'button';
+    forget.className = 'quiet';
+    forget.textContent = 'Forget this device';
+    forget.addEventListener('click', () => void forgetDevice().then(() => location.reload()));
+    root.appendChild(forget);
+  }
+}
+
 async function main(): Promise<void> {
   const device = (await pairFromFragment()) ?? (await loadDevice().catch(() => undefined));
-  if (!device) {
-    show('Not paired yet', [
-      'This page opens Agent Wrangler on your Mac from anywhere.',
-      'On the Mac, open Preferences › Experimental › Remote control and press “Pair a device…”, then scan the code with this device’s camera.',
+  const project = device?.project ?? (await siteProject());
+  if (!project) {
+    show('Not set up', [
+      'This page opens Agent Wrangler on your Mac from anywhere, but this copy of it does not say which Supabase project to use.',
+      'Pair with the QR code from the Mac (Preferences › Remote control › Pair with QR code…), or redeploy the site with its project.json.',
     ]);
     return;
   }
-  const client = supabaseFor(device);
+  const client = createClient(project.url, project.anonKey, {
+    auth: { flowType: 'pkce', persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+  });
   const { data } = await client.auth.getSession();
-  if (!data.session) {
-    show('Sign in', ['This device is paired. Sign in with the GitHub account the Mac is signed in with.'], [
-      { label: 'Sign in with GitHub', run: () => void signIn(client) },
-      { label: 'Forget this pairing', tone: 'quiet', run: () => void forgetDevice().then(() => location.reload()) },
-    ]);
+  if (!device || !data.session) {
+    // Signed in (by GitHub, say) but with no device: sign out first, so the form sets it up.
+    if (!device && data.session) await client.auth.signOut({ scope: 'local' });
+    passwordForm(client, project, device);
     return;
   }
   await client.realtime.setAuth(data.session.access_token);

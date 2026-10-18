@@ -26,18 +26,20 @@ import { NoticeDeduper } from '../shared/webCapabilities';
 import { loadOrCreateVapid, parsePushSubscription, sendPush, type VapidKeys } from '../remote/relay/webPush';
 import type { RequestContext } from '../core/access';
 import type { RelayAsset, RelayLink } from '../remote/relay/relayLink';
-import { startRelayLink } from '../remote/relay/relayLink';
+import { EnrollLimiter, startRelayLink } from '../remote/relay/relayLink';
+import type { RelayAccount } from '../remote/relay/network';
 import { connectSupabaseNetwork } from '../remote/relay/supabaseNetwork';
 import {
   RELAY_CALLBACK_PATH,
+  RELAY_ENROLL_KEY_SECRET,
   RELAY_REFRESH_TOKEN_SECRET,
   signInFresh,
   signOutRelay,
   startRelaySignIn,
   type RelaySignIn,
 } from '../remote/relay/relayAuth';
-import type { SettingStatus } from '../shared/preferences';
-import { newRelayKey, relayPairingLink } from '../shared/relay';
+import type { RelayActionId, SettingStatus } from '../shared/preferences';
+import { RELAY_PASSWORD_MIN, deriveRelayPassword, newRelayKey, relayPairingLink } from '../shared/relay';
 import { RELAY_WORKBENCH_PAGE } from '../ui/html';
 
 export const RELAY_SETTING_KEYS = ['remote.relay.enabled', 'remote.relay.url', 'remote.relay.anonKey', 'remote.relay.siteUrl'] as const;
@@ -65,7 +67,7 @@ export interface RelayServiceOptions {
 export interface RelayService extends Disposable {
   /** `/remote/callback` and `/remote/pair`, on the loopback listener only. */
   readonly routes: WebRoute[];
-  runAction(id: 'connectRelay' | 'pairRelayDevice' | 'disconnectRelay'): Promise<{ ok: boolean; lines: string[] }>;
+  runAction(id: RelayActionId): Promise<{ ok: boolean; lines: string[] }>;
   status(): SettingStatus;
   readonly onDidChange: (listener: () => void) => Disposable;
   /** The build a remote tab must be on (the loader fetches its assets). */
@@ -82,7 +84,7 @@ export interface RelayService extends Disposable {
 type State =
   | { kind: 'off'; why: string }
   | { kind: 'connecting'; why?: string }
-  | { kind: 'on'; login: string; link: RelayLink; dispose: () => void }
+  | { kind: 'on'; login: string; account: RelayAccount; link: RelayLink; dispose: () => void }
   | { kind: 'error'; why: string };
 
 export function startRelayService(opts: RelayServiceOptions): RelayService {
@@ -96,6 +98,9 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
   /** Before rebuilding a link whose lobby went deaf: none at first, doubling while new links fail their check too. */
   let lostDelayMs = 0;
   let disposed = false;
+  /** The enrollment key (#187), read from the Keychain at each sign-in; undefined while password sign-in is off. */
+  let enrollKey: string | undefined;
+  const enrollLimiter = new EnrollLimiter();
 
   const setState = (next: State) => {
     state = next;
@@ -211,6 +216,7 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     if (!s.url || !s.anonKey) return setState({ kind: 'off', why: 'Set the Supabase project URL and anon key below, then sign in.' });
     if (!host.secrets.available) return setState({ kind: 'error', why: 'The macOS Keychain is not available, so the sign-in cannot be kept.' });
     const refreshToken = await host.secrets.get(RELAY_REFRESH_TOKEN_SECRET);
+    enrollKey = (await host.secrets.get(RELAY_ENROLL_KEY_SECRET).catch(() => undefined)) || undefined;
     if (mine !== generation) return;
     if (!refreshToken) return setState({ kind: 'off', why: 'Not signed in. Press “Sign in with GitHub…”.' });
     setState({ kind: 'connecting', why });
@@ -242,6 +248,15 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
         onLobbyLost: (reason) => {
           if (mine === generation) lobbyLost(reason);
         },
+        enroll: {
+          key: () => enrollKey,
+          issue: (label) => {
+            const key = newRelayKey();
+            const device = devices.issueRelay(`${label} (password)`, key);
+            return { id: device.id, key };
+          },
+          limiter: enrollLimiter,
+        },
       }).catch((e) => {
         network.dispose();
         throw e;
@@ -260,6 +275,7 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
       setState({
         kind: 'on',
         login: network.login,
+        account: network,
         link,
         dispose: () => {
           sub.dispose();
@@ -312,6 +328,50 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     return { ok: true, lines: ['A pairing QR code opened in a new tab. Scan it with the device’s camera.', 'It is listed under Browser › Devices as “Remote device”; revoke it there.'] };
   }
 
+  /** Password sign-in (#187; plan §3.1): set the account's Supabase password and keep the enrollment key. */
+  async function setPassword(): Promise<{ ok: boolean; lines: string[] }> {
+    if (currentRequest()?.deviceScope !== 'loopback') return { ok: false, lines: ['Set the password from a browser on this Mac (aw web open), not from a remote device.'] };
+    if (state.kind !== 'on') return { ok: false, lines: ['Sign this Mac in first (“Sign in with GitHub…”), and wait until it is connected.'] };
+    const { account } = state;
+    const email = account.email;
+    if (!email) return { ok: false, lines: ['This account has no email address in Supabase, and the phone signs in with one.'] };
+    const password = await host.dialogs.input({
+      title: 'Remote control password',
+      prompt: `The password a phone signs in with, as ${email}. At least ${RELAY_PASSWORD_MIN} characters; a passphrase is best. It is not stored on this Mac.`,
+      password: true,
+      validateInput: (v) => (v.length < RELAY_PASSWORD_MIN ? `At least ${RELAY_PASSWORD_MIN} characters.` : undefined),
+    });
+    if (password === undefined) return { ok: false, lines: [] };
+    if (password.length < RELAY_PASSWORD_MIN) return { ok: false, lines: [`✗  The password must be at least ${RELAY_PASSWORD_MIN} characters.`] };
+    const again = await host.dialogs.input({ title: 'Remote control password', prompt: 'The same password again.', password: true });
+    if (again === undefined) return { ok: false, lines: [] };
+    if (again !== password) return { ok: false, lines: ['✗  The two passwords differ. Nothing was changed.'] };
+    const values = await deriveRelayPassword(email, password);
+    try {
+      await account.updatePassword(values.authValue);
+    } catch (e) {
+      return { ok: false, lines: [`✗  Supabase refused the password: ${e instanceof Error ? e.message : String(e)}`] };
+    }
+    await host.secrets.store(RELAY_ENROLL_KEY_SECRET, values.enrollKey);
+    enrollKey = values.enrollKey;
+    log('relay: the remote password was set');
+    changed.fire();
+    return {
+      ok: true,
+      lines: [
+        `Password set. On the phone, open ${settings().site} (from the Home Screen icon if it has one) and sign in as ${email}.`,
+        'Each device that signs in is listed under Browser › Devices with “(password)” after its name; revoke it there.',
+      ],
+    };
+  }
+
+  async function clearPassword(): Promise<{ ok: boolean; lines: string[] }> {
+    await host.secrets.delete(RELAY_ENROLL_KEY_SECRET);
+    enrollKey = undefined;
+    changed.fire();
+    return { ok: true, lines: ['Password sign-in is off: no new device can sign in with it. Devices already set up keep working until you revoke them.'] };
+  }
+
   async function disconnect(): Promise<{ ok: boolean; lines: string[] }> {
     const s = settings();
     const token = await host.secrets.get(RELAY_REFRESH_TOKEN_SECRET);
@@ -321,6 +381,13 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     setState({ kind: 'off', why: 'Signed out. Nothing connects out.' });
     return { ok: true, lines: ['Signed out. Remote tabs are closed and the sign-in is gone from the Keychain.'] };
   }
+
+  const passwordLine = (email: string | undefined): string => {
+    if (!enrollKey) return 'Password sign-in is off. Press “Set password…” to let a phone sign in with one.';
+    const paused = enrollLimiter.pausedUntilAt(Date.now());
+    if (paused) return `Password sign-in is paused after too many wrong attempts, until ${new Date(paused).toLocaleTimeString()}.`;
+    return `Password sign-in is on${email ? ` for ${email}` : ''}.`;
+  };
 
   // ---- routes ----
 
@@ -386,6 +453,8 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     routes: [callbackRoute, pairRoute],
     runAction: async (id) => {
       if (id === 'connectRelay') return connect();
+      if (id === 'setRelayPassword') return setPassword();
+      if (id === 'clearRelayPassword') return clearPassword();
       if (id === 'pairRelayDevice') return pair();
       return disconnect();
     },
@@ -413,6 +482,7 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
               `Connected as ${state.login}. Only outbound; Supabase sees ciphertext.`,
               lobby,
               `${state.link.tabs} remote tab${state.link.tabs === 1 ? '' : 's'} open.`,
+              passwordLine(state.account.email),
               `Since ${new Date(c.since).toLocaleTimeString()}: sent ${c.sentMessages} messages (${Math.round(c.sentBytes / 1024)} KB), received ${c.receivedMessages}.`,
             ],
           };
