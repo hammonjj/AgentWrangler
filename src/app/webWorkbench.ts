@@ -136,7 +136,10 @@ export interface WebWorkbench extends Disposable {
   /** LAN access's state, for Preferences. */
   readonly lanStatus: LanStatus;
   readonly onDidChangeLanStatus: (listener: () => void) => Disposable;
-  /** Re-read the network now: addresses change across sleep. */
+  /**
+   * Re-read the network now: addresses change across sleep, and the relay's lobby may have
+   * gone deaf (#186).
+   */
   refresh(): void;
   /** Paired devices (#137): `aw web devices` and Preferences read and revoke through it. */
   readonly devices: WebDeviceStore;
@@ -313,7 +316,10 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
       return lanStatus;
     },
     onDidChangeLanStatus: (listener) => statusChanged.event(listener),
-    refresh: () => void web?.lan.refresh(),
+    refresh: () => {
+      void web?.lan.refresh();
+      relay?.wake();
+    },
     devices,
     pairingOffer: () => web?.server.pairingOffer(),
     relayStatus: () => relay?.status() ?? { ok: true, lines: ['Off.'] },

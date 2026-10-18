@@ -105,8 +105,20 @@ Tunnelling these routes is a later issue, not v1.
 
 | Topic | Who joins | Carries |
 |---|---|---|
-| `aw:<uid>:lobby` | the daemon always; a device while connecting | `connect` requests from devices (device id in clear, the rest encrypted), and Presence for the daemon's own online state |
+| `aw:<uid>:lobby` | the daemon always; a device while connecting | `connect` requests from devices (device id in clear, the rest encrypted), Presence for the daemon's own online state, and the daemon's `probe` (a random nonce, nothing else) |
 | `aw:<uid>:c:<random>` | one device tab and the daemon | that tab's workbench traffic |
+
+**The lobby checks itself (#186).** A dead Realtime socket can leave the daemon joined to a
+lobby it no longer hears, while the REST heartbeat keeps succeeding. On 2026-10-17 that left
+phones on "Your Mac is not answering" until the daemon was restarted. So every 5 minutes, on
+wake from sleep, and 10 s after the lobby reports an error or closes, the daemon posts a
+`probe` to the lobby over REST, the way a phone posts `connect`. The REST send did not come from
+the lobby's socket, so `self: false` does not filter it, and the lobby hears it while the
+socket works. If two probes in a row go unanswered (15 s each), the service rebuilds the link.
+The first rebuild happens at once; if the new link fails its check too, the next waits 30 s,
+doubling to an hour. `aw status` and Preferences say when the lobby last answered. A channel
+error alone does not trigger a rebuild, because supabase-js usually rejoins by itself, and a
+rebuild closes the open tabs.
 
 One channel per tab, so a phone does not receive (and pay egress for) another tab's frames.
 Authorisation is RLS on `realtime.messages`: a user may join and send on topics starting
@@ -159,7 +171,7 @@ per GB, and 2 per 10,000 requests. Netlify Functions are not used.
 | Table snapshot (~85 KB JSON, up to 1/s over LAN) | Over the relay: at most every **5 s** while visible, **none** while hidden (the tab gets one on becoming visible), and skipped when unchanged apart from the clock. |
 | Frame count | All envelopes due in a **250 ms** window go in one frame per direction. A busy viewer sends at most about 4 frames/s. |
 | Bytes | Every frame is deflate-compressed (`CompressionStream` / `zlib`) before encryption. JSON compresses about 5–10×. |
-| Idle cost | Nothing streams with no tab connected. The daemon's lobby join and Presence are cheap. |
+| Idle cost | Nothing streams with no tab connected. The daemon's lobby join and Presence are cheap; the lobby probe is about 2 × 288 messages a day. |
 | Asset download | Cached per build in IndexedDB; about 200 KB compressed per device per daemon rebuild. |
 | Project pause | Heartbeat upsert to `daemons` every 6 h while the link is on. |
 | Netlify deploys | Auto-deploy **off**. Deploy only when `src/webview/relayLoader/` changes. |

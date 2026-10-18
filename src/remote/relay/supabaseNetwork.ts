@@ -1,6 +1,8 @@
 /**
  * The relay's network over Supabase (#173): Realtime Broadcast on private topics, and the
- * `public.daemons` heartbeat. Signed in as the owner with a refresh token the daemon keeps in
+ * `public.daemons` heartbeat. A joined channel that errors or closes later is reported to
+ * `onLost` (#186); supabase-js usually rejoins by itself, so the relay link checks before it
+ * rebuilds anything. Signed in as the owner with a refresh token the daemon keeps in
  * the Keychain (`relayAuth.ts`); supabase-js refreshes the access token, and every new refresh
  * token is handed back to be stored, since Supabase rotates them.
  */
@@ -49,6 +51,7 @@ export async function connectSupabaseNetwork(opts: SupabaseNetworkOptions): Prom
   const meta = data.user.user_metadata as { user_name?: unknown; preferred_username?: unknown } | undefined;
   const login = typeof meta?.user_name === 'string' ? meta.user_name : typeof meta?.preferred_username === 'string' ? meta.preferred_username : data.user.email ?? uid;
   const timeout = opts.joinTimeoutMs ?? 15_000;
+  let disposed = false;
 
   return {
     uid,
@@ -56,6 +59,7 @@ export async function connectSupabaseNetwork(opts: SupabaseNetworkOptions): Prom
     join(topic, joinOpts) {
       const channel = client.channel(topic, { config: { private: true, broadcast: { self: false, ack: true }, presence: { key: '' } } });
       const listeners = new Map<string, ((p: unknown) => void)[]>();
+      let leaving = false;
       return new Promise<RelayChannel>((resolve, reject) => {
         let settled = false;
         const timer = setTimeout(() => {
@@ -74,6 +78,10 @@ export async function connectSupabaseNetwork(opts: SupabaseNetworkOptions): Prom
                 const r = await channel.send({ type: 'broadcast', event, payload });
                 if (r !== 'ok') throw new Error(`broadcast ${r}`);
               },
+              httpSend: async (event, payload) => {
+                const r = await channel.httpSend(event, payload);
+                if (!r.success) throw new Error(`broadcast over REST failed (${r.status})`);
+              },
               on: (event, listener) => {
                 const list = listeners.get(event);
                 if (list) {
@@ -86,6 +94,7 @@ export async function connectSupabaseNetwork(opts: SupabaseNetworkOptions): Prom
                 });
               },
               leave: async () => {
+                leaving = true;
                 await client.removeChannel(channel);
               },
             });
@@ -96,6 +105,9 @@ export async function connectSupabaseNetwork(opts: SupabaseNetworkOptions): Prom
             reject(new Error(err?.message ?? `join ${status.toLowerCase()}`));
           } else if (status === 'CHANNEL_ERROR' && settled) {
             opts.log(`relay: channel error: ${err?.message ?? 'unknown'}`);
+            if (!leaving && !disposed) joinOpts?.onLost?.(`error: ${err?.message ?? 'unknown'}`);
+          } else if ((status === 'CLOSED' || status === 'TIMED_OUT') && settled && !leaving && !disposed) {
+            joinOpts?.onLost?.(status.toLowerCase().replace('_', ' '));
           }
         });
       });
@@ -105,6 +117,7 @@ export async function connectSupabaseNetwork(opts: SupabaseNetworkOptions): Prom
       if (e) throw new Error(e.message);
     },
     dispose() {
+      disposed = true;
       sub.data.subscription.unsubscribe();
       void client.removeAllChannels().catch(() => undefined);
       client.auth.stopAutoRefresh().catch(() => undefined);

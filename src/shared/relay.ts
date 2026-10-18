@@ -25,6 +25,8 @@ export const RELAY_PROTOCOL = 1;
 /** Broadcast events. */
 export const RELAY_EVENT_CONNECT = 'connect';
 export const RELAY_EVENT_FRAME = 'f';
+/** The daemon's lobby self-check (#186): a random nonce, nothing else. */
+export const RELAY_EVENT_PROBE = 'probe';
 
 /** Under Supabase's 256 KB Broadcast payload limit on the free plan, with room for the envelope. */
 export const RELAY_MAX_PART_BYTES = 150 * 1024;
