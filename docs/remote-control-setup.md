@@ -25,7 +25,18 @@ the free tiers.
    - Site URL: `https://agentwrangler.netlify.app`
    - Redirect URLs: `https://agentwrangler.netlify.app/**` and
      `http://127.0.0.1:*/remote/callback` (the daemon's own sign-in).
-4. Turn off the providers you do not use (Email is on by default).
+4. Leave **Email** on (it is on by default): a phone signs in with your email and the remote
+   password (#187). Turn off the other providers you do not use. Sign-ups stay closed (§3), so
+   Email lets no one new in. Leave "Secure password change" off, or the daemon cannot set the
+   password from Preferences.
+
+## 2a. Password sign-in
+
+On the Mac, once Remote control says it is connected: Preferences › Remote control ›
+**Set password…**. The password is not stored anywhere. The Mac turns it into the Supabase
+password for your account and an enrollment key it keeps in the Keychain (plan §3.1). On the
+phone, open the site (or its Home Screen icon) and sign in with your account's email and that
+password. This also sets the phone up, and it shows under Browser › Devices as "(password)".
 
 ## 3. Make yourself the owner, then close sign-ups
 
@@ -43,7 +54,10 @@ the free tiers.
 ## 4. Netlify site
 
 The site is `agentwrangler.netlify.app`. It serves only the static loader
-(`dist/relay-site/`, built by `npm run build`).
+(`dist/relay-site/`, built by `npm run build`). The build also writes `project.json` there from
+this Mac's `remote.relay.url` and `remote.relay.anonKey` settings. It tells a phone that has
+nothing stored which project to sign in to. Build on the Mac with those settings before
+deploying, or password sign-in on a new device says "Not set up".
 
 - Site settings › Build & deploy: **stop auto publishing / builds.** A production deploy costs
   about 15 of the free plan's 300 monthly credits, and the loader only changes when

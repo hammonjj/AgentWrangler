@@ -17,6 +17,8 @@ import type { ClientSocket } from '../../core/web/browserConnections';
 import {
   RELAY_BATCH_MS,
   RELAY_EVENT_CONNECT,
+  RELAY_EVENT_ENROLL,
+  RELAY_EVENT_ENROLLED,
   RELAY_EVENT_FRAME,
   RELAY_EVENT_PROBE,
   RELAY_PROTOCOL,
@@ -26,8 +28,11 @@ import {
   lobbyTopic,
   newRelayId,
   openConnect,
+  openEnroll,
   parseConnectRequest,
+  parseEnrollRequest,
   parseSealedPart,
+  sealEnrollReply,
   type RelayItem,
 } from '../../shared/relay';
 import type { RelayChannel, RelayNetwork } from './network';
@@ -74,6 +79,44 @@ export interface RelayLinkOptions {
   probeTimeoutMs?: number;
   /** After the lobby reports an error, how long supabase-js gets to rejoin before a check. Default: 10 s. */
   lostGraceMs?: number;
+  /** Password enrollment (#187). Absent: `enroll` requests are ignored. */
+  enroll?: {
+    /** The enrollment key, or undefined while password sign-in is off. */
+    key(): string | undefined;
+    /** A new relay device for an accepted enrollment, and its key. */
+    issue(label: string): { id: string; key: string };
+    /** Kept by the caller so a rebuilt link does not reset it. */
+    limiter: EnrollLimiter;
+  };
+}
+
+/** Failed enrollments allowed in an hour before enrollment pauses for an hour. */
+export const ENROLL_FAILURES_PER_HOUR = 5;
+const HOUR_MS = 60 * 60 * 1000;
+
+/** Refused enrollments: after `ENROLL_FAILURES_PER_HOUR` in an hour, none is tried for an hour. */
+export class EnrollLimiter {
+  private failures: number[] = [];
+  private pausedUntil = 0;
+
+  /** Whether an enrollment may be tried now. */
+  open(at: number): boolean {
+    return at >= this.pausedUntil;
+  }
+
+  /** Count a failure; true when it starts a pause. */
+  fail(at: number): boolean {
+    this.failures = [...this.failures.filter((t) => at - t < HOUR_MS), at];
+    if (this.failures.length < ENROLL_FAILURES_PER_HOUR) return false;
+    this.failures = [];
+    this.pausedUntil = at + HOUR_MS;
+    return true;
+  }
+
+  /** When enrollment resumes, if it is paused. */
+  pausedUntilAt(at: number): number | undefined {
+    return at < this.pausedUntil ? this.pausedUntil : undefined;
+  }
 }
 
 /** The lobby's last self-check. */
@@ -299,6 +342,42 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
     opts.attach(socket, ownerContext('browser', { deviceId: req.d, deviceScope: 'relay' }));
     log(`relay: tab opened for device ${req.d.slice(0, 8)} (${tabs.size} open)`);
     changed.fire();
+  }
+
+  // ---- password enrollment (#187; plan §3.1) ----
+
+  lobby.on(RELAY_EVENT_ENROLL, (payload) => {
+    count('received', payload);
+    void enroll(payload).catch((e) => log(`relay: enrollment failed: ${e instanceof Error ? e.message : String(e)}`));
+  });
+
+  async function enroll(payload: unknown): Promise<void> {
+    const e = opts.enroll;
+    if (disposed || !e) return;
+    const req = parseEnrollRequest(payload);
+    if (!req) return;
+    const enrollKey = e.key();
+    if (!enrollKey) return log('relay: refused an enrollment: password sign-in is off');
+    const at = now();
+    if (!e.limiter.open(at)) return log('relay: refused an enrollment: paused after too many failures');
+    for (const [id, t] of seen) if (at - t > SEEN_TTL_MS) seen.delete(id);
+    if (seen.has(req.t) || tabs.has(req.t)) return log('relay: refused a repeated enrollment');
+    seen.set(req.t, at);
+    const body = await openEnroll(enrollKey, req, uid, at);
+    if (!body) {
+      const paused = e.limiter.fail(at);
+      return log(`relay: refused an enrollment that did not authenticate${paused ? '; pausing enrollment for an hour' : ''}`);
+    }
+    const device = e.issue(body.label);
+    const reply = await sealEnrollReply(enrollKey, uid, req.t, body.pub, device.id, device.key);
+    const channel = await network.join(connectionTopic(uid, req.t));
+    try {
+      count('sent', reply);
+      await channel.send(RELAY_EVENT_ENROLLED, reply);
+    } finally {
+      setTimeout(() => void channel.leave().catch(() => undefined), 1_000).unref?.();
+    }
+    log(`relay: enrolled device ${device.id.slice(0, 8)} with the remote password`);
   }
 
   async function sendAssets(socket: RelaySocket, build: string): Promise<void> {

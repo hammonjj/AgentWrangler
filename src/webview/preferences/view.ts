@@ -445,7 +445,13 @@ const ACTIONS: Record<string, ActionSpec[]> = {
       tone: 'primary',
       title: 'Sign this Mac in to your Supabase project as you. The sign-in is kept in the system keychain.',
     },
-    { id: 'pairRelayDevice', label: 'Pair a device…', title: 'Show a QR code for a phone or another computer to scan. Only from a browser on this Mac.' },
+    {
+      id: 'setRelayPassword',
+      label: 'Set password…',
+      title: 'Choose the password a phone signs in with (with this account’s email). Signing in also sets the phone up. Only from a browser on this Mac.',
+    },
+    { id: 'clearRelayPassword', label: 'Turn off password sign-in', title: 'Stop new devices signing in with the password. Devices already set up keep working.' },
+    { id: 'pairRelayDevice', label: 'Pair with QR code…', title: 'Show a QR code for a phone or another computer to scan. Only from a browser on this Mac.' },
     { id: 'disconnectRelay', label: 'Sign out', tone: 'danger', title: 'Forget this Mac’s sign-in and close every remote tab.' },
   ],
 };

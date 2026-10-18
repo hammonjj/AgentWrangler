@@ -189,18 +189,20 @@ after which the daemon refuses every enrollment.
 **Enrolling (the phone, over the lobby):**
 
 1. The loader derives both values and signs in with `signInWithPassword(email, authValue)`.
-2. It makes an ephemeral ECDH P-256 key pair and posts `enroll` to the lobby. The request
-   holds a random id `n` in clear, plus `{pub, ts, label}` sealed under `enrollKey` with
-   additional data `"enroll" | uid | n`. The label is a short device description, such as
-   "iPhone Safari".
+2. It makes an ephemeral ECDH P-256 key pair and joins the reply topic `aw:<uid>:c:<t>` for a
+   random id `t`. Then it posts `enroll` to the lobby over REST. The request holds `t` in clear,
+   plus `{pub, ts, label}` sealed under `enrollKey` with additional data
+   `"enroll" | lobby topic | t`. The label is a short device description, such as
+   "iPhone Home Screen app".
 3. The daemon opens the request with `enrollKey`. It refuses the request if it does not
-   authenticate, if `ts` is older than 2 minutes, or if `n` was already seen. After 5 refusals in
-   an hour it stops accepting enrollments for an hour and logs it.
-4. The daemon creates a device id and a random 256-bit key, as QR pairing does. It records the
-   device as "enrolled with password" with its label and time. It replies on the lobby with
-   `enrolled`, which holds its own ephemeral ECDH public key sealed under `enrollKey` (with
-   additional data binding `n` and the phone's `pub`), and `{deviceId, key}` sealed under
-   `HKDF(ECDH shared secret, "aw enroll reply")`.
+   authenticate, if `ts` is more than 2 minutes off, or if `t` was already seen. After 5 refusals
+   in an hour it stops accepting enrollments for an hour and logs it. A refused request gets no
+   answer.
+4. The daemon creates a device id and a random 256-bit key, as QR pairing does. It lists the
+   device as "<label> (password)". It joins the reply topic and sends `enrolled`: its own
+   ephemeral ECDH public key in clear, and `{deviceId, key}` sealed under
+   `HKDF(ikm = ECDH shared secret, salt = enrollKey, info = "aw enroll reply|" + t)`, with
+   additional data binding uid, `t` and both public keys.
 5. The loader imports the key as non-extractable, stores it the way QR pairing does, and goes on
    to the normal `connect`.
 
@@ -219,9 +221,14 @@ its own key.
 
 The "Not paired yet" dead end goes away. GitHub sign-in and the `#pair=` link still work.
 
-**Supabase setup.** Turn on the Email provider and keep sign-ups closed. James's user already
-has a confirmed email from GitHub; check that before building. Turn "Secure password change" off
-or handle its reauthentication prompt in the daemon.
+**Which project.** A device with nothing stored cannot learn the project from a pairing link.
+So the loader reads `/project.json`, which `npm run build` writes into `dist/relay-site/` from
+the building Mac's `remote.relay.url` and `remote.relay.anonKey`. Both are public values, and
+the file is never committed.
+
+**Supabase setup.** Turn on the Email provider and keep sign-ups closed. Leave "Secure password
+change" off, so the daemon can set the password with its stored session
+(`docs/remote-control-setup.md` §2).
 
 ## 4. Budget: staying on the free tiers
 

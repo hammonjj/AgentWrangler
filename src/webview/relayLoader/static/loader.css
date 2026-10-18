@@ -5,4 +5,9 @@ body { margin: 0; padding: max(24px, env(safe-area-inset-top)) 16px 24px; displa
 #loader p { line-height: 1.45; margin: 0 0 12px; }
 #loader button { display: block; width: 100%; font: inherit; font-size: 1.05rem; font-weight: 600; padding: 12px; margin: 8px 0; border-radius: 8px; border: 0; }
 #loader button.primary { background: #2f6fde; color: #fff; }
+#loader form { margin: 0 0 12px; }
+#loader label { display: block; font-size: 0.9rem; margin: 12px 0 4px; }
+#loader input { display: block; box-sizing: border-box; width: 100%; font: inherit; font-size: 1.05rem; padding: 10px; border-radius: 8px; border: 1px solid #8888; background: Field; color: FieldText; }
+#loader p.error { color: #d33; }
+#loader button:disabled { opacity: 0.6; }
 #loader button.quiet { background: transparent; color: inherit; border: 1px solid #8886; font-weight: 500; }

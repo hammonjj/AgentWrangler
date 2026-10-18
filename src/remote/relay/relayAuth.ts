@@ -11,6 +11,8 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 export const RELAY_CALLBACK_PATH = '/remote/callback';
 /** The Keychain item (`HostSecrets`) holding the daemon's Supabase refresh token. */
 export const RELAY_REFRESH_TOKEN_SECRET = 'remote.relay.refreshToken';
+/** The Keychain item holding the enrollment key derived from the remote password (#187). */
+export const RELAY_ENROLL_KEY_SECRET = 'remote.relay.enrollKey';
 /** A sign-in not finished in this long is forgotten. */
 const PENDING_MS = 10 * 60 * 1000;
 

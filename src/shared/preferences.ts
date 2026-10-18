@@ -158,13 +158,17 @@ export function revokeWebDeviceId(message: unknown): string | undefined {
 }
 
 /** The actions Preferences can invoke. A closed set: the host switches on it. */
-export type SettingActionId = 'connectDiscord' | 'testRemote' | 'disconnectDiscord' | 'connectRelay' | 'pairRelayDevice' | 'disconnectRelay';
+export type SettingActionId = 'connectDiscord' | 'testRemote' | 'disconnectDiscord' | RelayActionId;
 
-export const SETTING_ACTION_IDS: SettingActionId[] = ['connectDiscord', 'testRemote', 'disconnectDiscord', 'connectRelay', 'pairRelayDevice', 'disconnectRelay'];
+/** The actions remote control over the relay owns (#173, #187); the rest are the app's. */
+export type RelayActionId = 'connectRelay' | 'setRelayPassword' | 'clearRelayPassword' | 'pairRelayDevice' | 'disconnectRelay';
 
-/** The actions remote control over the relay owns (#173); the rest are the app's. */
-export function isRelayActionId(id: SettingActionId): id is 'connectRelay' | 'pairRelayDevice' | 'disconnectRelay' {
-  return id === 'connectRelay' || id === 'pairRelayDevice' || id === 'disconnectRelay';
+const RELAY_ACTION_IDS: RelayActionId[] = ['connectRelay', 'setRelayPassword', 'clearRelayPassword', 'pairRelayDevice', 'disconnectRelay'];
+
+export const SETTING_ACTION_IDS: SettingActionId[] = ['connectDiscord', 'testRemote', 'disconnectDiscord', ...RELAY_ACTION_IDS];
+
+export function isRelayActionId(id: SettingActionId): id is RelayActionId {
+  return (RELAY_ACTION_IDS as string[]).includes(id);
 }
 
 export function isSettingActionId(value: unknown): value is SettingActionId {
