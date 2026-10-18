@@ -32,8 +32,12 @@ class Hub {
   leave(m: Member): void {
     this.members.get(m.topic)?.delete(m);
   }
-  deliver(from: Member, event: string, payload: unknown): void {
-    for (const m of this.members.get(from.topic) ?? []) if (m !== from) m.fire(event, JSON.parse(JSON.stringify(payload)));
+  /** Over REST (`httpSend`) the sender's own channel hears it too: it did not come from its socket. */
+  deliver(from: Member, event: string, payload: unknown, toSelf = false): void {
+    for (const m of this.members.get(from.topic) ?? []) if (toSelf || m !== from) m.fire(event, JSON.parse(JSON.stringify(payload)));
+  }
+  first(topic: string): Member {
+    return [...(this.members.get(topic) ?? [])][0];
   }
   topics(): string[] {
     return [...this.members].filter(([, s]) => s.size > 0).map(([t]) => t);
@@ -42,6 +46,9 @@ class Hub {
 
 class Member implements RelayChannel {
   private listeners = new Map<string, ((p: unknown) => void)[]>();
+  /** A dead socket that nobody noticed: it hears nothing, and says nothing. */
+  deaf = false;
+  onLost?: (reason: string) => void;
   constructor(
     private hub: Hub,
     readonly topic: string,
@@ -49,10 +56,14 @@ class Member implements RelayChannel {
   async send(event: string, payload: unknown): Promise<void> {
     this.hub.deliver(this, event, payload);
   }
+  async httpSend(event: string, payload: unknown): Promise<void> {
+    this.hub.deliver(this, event, payload, true);
+  }
   on(event: string, listener: (p: unknown) => void): void {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
   }
   fire(event: string, payload: unknown): void {
+    if (this.deaf) return;
     for (const l of this.listeners.get(event) ?? []) l(payload);
   }
   async leave(): Promise<void> {
@@ -63,7 +74,11 @@ class Member implements RelayChannel {
 function network(hub: Hub, beats: string[] = []): RelayNetwork {
   return {
     uid: UID,
-    join: async (topic) => hub.join(topic),
+    join: async (topic, opts) => {
+      const m = hub.join(topic);
+      m.onLost = opts?.onLost;
+      return m;
+    },
     heartbeat: async (id, build) => void beats.push(`${id}:${build}`),
     dispose: () => undefined,
   };
@@ -289,5 +304,93 @@ describe('relay link', () => {
     expect(assets.map((a) => (a as { name: string }).name)).toEqual(['workbench.js', 'workbench.css']);
     expect(assets.at(-1)).toMatchObject({ last: true });
     link.dispose();
+  });
+});
+
+describe('relay lobby self-check (#186)', () => {
+  async function linkWithProbe(hub: Hub, lost: string[], logs: string[] = []) {
+    return startRelayLink({
+      network: network(hub),
+      keyOf: () => undefined,
+      attach: () => undefined,
+      build: () => 'b1',
+      daemonId: 'd',
+      log: (l) => logs.push(l),
+      onLobbyLost: (reason) => lost.push(reason),
+      probeTimeoutMs: 40,
+      lostGraceMs: 10,
+    });
+  }
+
+  it('hears its own probe while the lobby works', async () => {
+    const hub = new Hub();
+    const lost: string[] = [];
+    const link = await linkWithProbe(hub, lost);
+    await until(() => link.health.lastOkAt !== undefined);
+    expect(link.health).toMatchObject({ misses: 0, checking: false });
+    expect(lost).toEqual([]);
+    link.dispose();
+  });
+
+  it('reports a lobby that went deaf without a word, after two unanswered probes', async () => {
+    const hub = new Hub();
+    const lost: string[] = [];
+    const link = await linkWithProbe(hub, lost);
+    await until(() => link.health.lastOkAt !== undefined);
+    hub.first(lobbyTopic(UID)).deaf = true;
+    link.check('woke from sleep');
+    await until(() => lost.length > 0);
+    expect(lost).toEqual(['woke from sleep: probe unanswered']);
+    expect(link.health.misses).toBe(2);
+    link.dispose();
+  });
+
+  it('checks the lobby shortly after it reports an error, and leaves a working one alone', async () => {
+    const hub = new Hub();
+    const lost: string[] = [];
+    const logs: string[] = [];
+    const link = await linkWithProbe(hub, lost, logs);
+    await until(() => link.health.lastOkAt !== undefined);
+    const lobby = hub.first(lobbyTopic(UID));
+    const firstOk = link.health.lastOkAt!;
+    await tick(5);
+    // supabase-js rejoined by itself: the check passes and nothing is rebuilt.
+    lobby.onLost?.('error: socket closed: 1006');
+    await until(() => link.health.lastOkAt! > firstOk);
+    expect(lost).toEqual([]);
+    // This time it did not.
+    lobby.deaf = true;
+    lobby.onLost?.('closed');
+    await until(() => lost.length > 0);
+    expect(lost).toEqual(['lobby closed: probe unanswered']);
+    expect(logs).toContain('relay: lobby closed; checking it in a moment');
+    link.dispose();
+  });
+
+  it('is not fooled by a probe it did not send', async () => {
+    const hub = new Hub();
+    const lost: string[] = [];
+    const link = await linkWithProbe(hub, lost);
+    await until(() => link.health.lastOkAt !== undefined);
+    const lobby = hub.first(lobbyTopic(UID));
+    // Its own REST sends stop arriving; someone else's probe still does.
+    lobby.httpSend = async () => undefined;
+    const other = hub.join(lobbyTopic(UID));
+    const spam = setInterval(() => void other.send('probe', { n: 'not-yours' }), 5);
+    link.check('test');
+    await until(() => lost.length > 0);
+    clearInterval(spam);
+    expect(lost).toEqual(['test: probe unanswered']);
+    link.dispose();
+  });
+
+  it('stops probing once disposed', async () => {
+    const hub = new Hub();
+    const lost: string[] = [];
+    const link = await linkWithProbe(hub, lost);
+    hub.first(lobbyTopic(UID)).deaf = true;
+    link.dispose();
+    await tick(150);
+    expect(lost).toEqual([]);
   });
 });

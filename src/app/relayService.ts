@@ -75,11 +75,13 @@ export interface RelayService extends Disposable {
    * while remote control is on. The same tag within a minute goes once.
    */
   push(notice: HostNotice): void;
+  /** The Mac woke (#186): check the lobby now, or retry a failed sign-in now. */
+  wake(): void;
 }
 
 type State =
   | { kind: 'off'; why: string }
-  | { kind: 'connecting' }
+  | { kind: 'connecting'; why?: string }
   | { kind: 'on'; login: string; link: RelayLink; dispose: () => void }
   | { kind: 'error'; why: string };
 
@@ -91,6 +93,8 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
   let generation = 0;
   let retryMs = RETRY_FIRST_MS;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Before rebuilding a link whose lobby went deaf: none at first, doubling while new links fail their check too. */
+  let lostDelayMs = 0;
   let disposed = false;
 
   const setState = (next: State) => {
@@ -187,7 +191,18 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     if (state.kind === 'on') state.dispose();
   };
 
-  const sync = async () => {
+  /** The lobby stopped hearing itself (#186): rebuild the link, sooner the first time. */
+  const lobbyLost = (reason: string) => {
+    if (disposed || state.kind !== 'on') return;
+    stop();
+    log(`relay: reconnecting (${reason})${lostDelayMs ? ` in ${Math.round(lostDelayMs / 1000)} s` : ''}`);
+    setState({ kind: 'connecting', why: reason });
+    retryTimer = setTimeout(() => void sync(reason), lostDelayMs);
+    retryTimer.unref?.();
+    lostDelayMs = Math.min(RETRY_MAX_MS, lostDelayMs ? lostDelayMs * 2 : RETRY_FIRST_MS);
+  };
+
+  const sync = async (why?: string) => {
     if (disposed) return;
     stop();
     const mine = generation;
@@ -198,7 +213,7 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     const refreshToken = await host.secrets.get(RELAY_REFRESH_TOKEN_SECRET);
     if (mine !== generation) return;
     if (!refreshToken) return setState({ kind: 'off', why: 'Not signed in. Press “Sign in with GitHub…”.' });
-    setState({ kind: 'connecting' });
+    setState({ kind: 'connecting', why });
     try {
       const network = await connectSupabaseNetwork({
         url: s.url,
@@ -224,6 +239,9 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
         onPush,
         daemonId: daemonId(),
         log,
+        onLobbyLost: (reason) => {
+          if (mine === generation) lobbyLost(reason);
+        },
       }).catch((e) => {
         network.dispose();
         throw e;
@@ -234,7 +252,10 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
         return;
       }
       retryMs = RETRY_FIRST_MS;
-      const sub = link.onDidChange(() => changed.fire());
+      const sub = link.onDidChange(() => {
+        if (link.health.lastOkAt !== undefined) lostDelayMs = 0;
+        changed.fire();
+      });
       log(`relay: connected as ${network.login}`);
       setState({
         kind: 'on',
@@ -373,15 +394,24 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
         case 'off':
           return { ok: true, lines: [state.why] };
         case 'connecting':
-          return { ok: true, lines: ['Connecting…'] };
+          return state.why ? { ok: false, lines: [`Reconnecting (${state.why})…`] } : { ok: true, lines: ['Connecting…'] };
         case 'error':
           return { ok: false, lines: [state.why] };
         case 'on': {
           const c = state.link.counts;
+          const h = state.link.health;
+          const time = (t: number) => new Date(t).toLocaleTimeString();
+          const lobby =
+            h.misses > 0
+              ? `The lobby did not answer its last check (${time(h.lastCheckAt ?? Date.now())}); checking again.`
+              : h.lastOkAt !== undefined
+                ? `Lobby checked ${time(h.lastOkAt)}.`
+                : 'Checking the lobby…';
           return {
-            ok: true,
+            ok: h.misses === 0,
             lines: [
               `Connected as ${state.login}. Only outbound; Supabase sees ciphertext.`,
+              lobby,
               `${state.link.tabs} remote tab${state.link.tabs === 1 ? '' : 's'} open.`,
               `Since ${new Date(c.since).toLocaleTimeString()}: sent ${c.sentMessages} messages (${Math.round(c.sentBytes / 1024)} KB), received ${c.receivedMessages}.`,
             ],
@@ -392,6 +422,15 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     onDidChange: (listener) => changed.event(listener),
     build,
     push,
+    wake: () => {
+      if (disposed) return;
+      if (state.kind === 'on') return state.link.check('woke from sleep');
+      // A failed sign-in may be waiting out a long back-off: the network is likely back now.
+      if (state.kind === 'error' && retryTimer) {
+        retryMs = RETRY_FIRST_MS;
+        void sync('woke from sleep');
+      }
+    },
     dispose: () => {
       if (disposed) return;
       disposed = true;

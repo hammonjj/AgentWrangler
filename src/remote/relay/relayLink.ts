@@ -18,11 +18,13 @@ import {
   RELAY_BATCH_MS,
   RELAY_EVENT_CONNECT,
   RELAY_EVENT_FRAME,
+  RELAY_EVENT_PROBE,
   RELAY_PROTOCOL,
   RelayCodec,
   connectionTopic,
   importRelayKey,
   lobbyTopic,
+  newRelayId,
   openConnect,
   parseConnectRequest,
   parseSealedPart,
@@ -61,6 +63,28 @@ export interface RelayLinkOptions {
   /** Open tabs per device. Default 4. */
   maxTabsPerDevice?: number;
   batchMs?: number;
+  /**
+   * The lobby stopped hearing its own probe (#186): a phone's `connect` would go unheard too.
+   * The caller rebuilds the link.
+   */
+  onLobbyLost?(reason: string): void;
+  /** How often the lobby is probed. Default: five minutes. */
+  probeMs?: number;
+  /** How long a probe may take to come back. Default: 15 s. */
+  probeTimeoutMs?: number;
+  /** After the lobby reports an error, how long supabase-js gets to rejoin before a check. Default: 10 s. */
+  lostGraceMs?: number;
+}
+
+/** The lobby's last self-check. */
+export interface RelayHealth {
+  /** When a probe last came back. */
+  lastOkAt?: number;
+  /** When the last check started, and whether it is still running. */
+  lastCheckAt?: number;
+  checking: boolean;
+  /** Probes in a row that did not come back. */
+  misses: number;
 }
 
 /** What the relay sent and received since the counters last reset (the daemon's day). */
@@ -76,7 +100,10 @@ export interface RelayLink extends Disposable {
   /** Open remote tabs. */
   readonly tabs: number;
   readonly counts: RelayCounts;
+  readonly health: RelayHealth;
   readonly onDidChange: (listener: () => void) => Disposable;
+  /** Probe the lobby now (woke from sleep, say); `onLobbyLost` hears when it fails. */
+  check(reason: string): void;
   /** Close every tab of a device now (it was revoked). */
   closeDevice(deviceId: string): number;
 }
@@ -91,6 +118,8 @@ interface Tab {
 const SEEN_TTL_MS = 10 * 60 * 1000;
 /** A batch whose parts took this long for Supabase to acknowledge is logged. */
 const SLOW_SEND_MS = 1_500;
+/** Probes that must go unanswered in a row, within one check, before the lobby counts as lost. */
+const PROBE_TRIES = 2;
 
 export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink> {
   const { network, log } = opts;
@@ -115,7 +144,78 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
     }
   };
 
-  const lobby = await network.join(lobbyTopic(uid), { presence: { role: 'daemon', build: opts.build() } });
+  let lostTimer: ReturnType<typeof setTimeout> | undefined;
+  const lobby = await network.join(lobbyTopic(uid), {
+    presence: { role: 'daemon', build: opts.build() },
+    // supabase-js usually rejoins after a socket drop, so give it a moment, then check.
+    onLost: (reason) => {
+      if (disposed || lostTimer) return;
+      log(`relay: lobby ${reason}; checking it in a moment`);
+      lostTimer = setTimeout(() => {
+        lostTimer = undefined;
+        check(`lobby ${reason}`);
+      }, opts.lostGraceMs ?? 10_000);
+      lostTimer.unref?.();
+    },
+  });
+
+  // ---- the lobby's self-check (#186) ----
+  // A REST broadcast to the lobby, as a phone posts its `connect`. It does not come from the
+  // lobby's own socket, so the lobby hears it while that socket works, and not once it is dead.
+  const health: RelayHealth = { checking: false, misses: 0 };
+  const probes = new Map<string, () => void>();
+  lobby.on(RELAY_EVENT_PROBE, (payload) => {
+    count('received', payload);
+    const n = (payload as { n?: unknown } | null)?.n;
+    if (typeof n === 'string') probes.get(n)?.();
+  });
+  const probeOnce = async (): Promise<boolean> => {
+    const nonce = newRelayId();
+    const heard = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), opts.probeTimeoutMs ?? 15_000);
+      timer.unref?.();
+      probes.set(nonce, () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    try {
+      count('sent', { n: nonce });
+      await lobby.httpSend(RELAY_EVENT_PROBE, { n: nonce });
+      return await heard;
+    } catch (e) {
+      log(`relay: probe send failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    } finally {
+      probes.delete(nonce);
+    }
+  };
+  function check(reason: string): void {
+    if (disposed || health.checking) return;
+    health.checking = true;
+    health.lastCheckAt = now();
+    void (async () => {
+      let ok = false;
+      for (let i = 0; i < PROBE_TRIES && !ok && !disposed; i++) {
+        ok = await probeOnce();
+        if (!ok) health.misses++;
+        changed.fire();
+      }
+      health.checking = false;
+      if (disposed) return;
+      if (ok) {
+        health.misses = 0;
+        health.lastOkAt = now();
+      } else {
+        log(`relay: the lobby did not hear its own probe (${reason})`);
+        opts.onLobbyLost?.(`${reason}: probe unanswered`);
+      }
+      changed.fire();
+    })();
+  }
+  const probeTimer = setInterval(() => check('scheduled check'), opts.probeMs ?? 5 * 60 * 1000);
+  probeTimer.unref?.();
+  check('first check');
 
   lobby.on(RELAY_EVENT_CONNECT, (payload) => {
     count('received', payload);
@@ -232,7 +332,9 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
       return tabs.size;
     },
     counts,
+    health,
     onDidChange: (listener) => changed.event(listener),
+    check,
     closeDevice(deviceId) {
       const mine = [...tabs.values()].filter((t) => t.deviceId === deviceId);
       for (const t of mine) t.socket.close(4401, 'revoked');
@@ -243,6 +345,8 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
       disposed = true;
       clearInterval(heartbeat);
       clearInterval(daily);
+      clearInterval(probeTimer);
+      if (lostTimer) clearTimeout(lostTimer);
       for (const t of [...tabs.values()]) t.socket.close(1001, 'going away');
       void lobby.leave().catch(() => undefined);
       changed.dispose();

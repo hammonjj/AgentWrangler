@@ -60,6 +60,7 @@ describe.runIf(Boolean(url && anonKey && serviceKey))('relay through local Supab
     expect(tokens).toHaveLength(1); // rotated on sign-in, handed back to be kept
 
     const keyText = newRelayKey();
+    const lost: string[] = [];
     const link = await startRelayLink({
       network,
       keyOf: (id) => (id === 'phone' ? keyText : undefined),
@@ -70,11 +71,17 @@ describe.runIf(Boolean(url && anonKey && serviceKey))('relay through local Supab
       build: () => 'b-test',
       daemonId: randomUUID(),
       log: () => undefined,
+      onLobbyLost: (reason) => lost.push(reason),
     });
     cleanup.push(() => link.dispose());
 
     // The heartbeat row is there, under this user.
     await new Promise((r) => setTimeout(r, 500));
+    // The lobby hears its own REST probe (#186): `self: false` does not filter a broadcast that
+    // did not come from its socket.
+    for (let i = 0; i < 100 && link.health.lastOkAt === undefined; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(link.health.lastOkAt).toBeDefined();
+    expect(lost).toEqual([]);
     const beats = await admin.from('daemons').select('build').eq('user_id', uid);
     expect(beats.data).toEqual([{ build: 'b-test' }]);
 
