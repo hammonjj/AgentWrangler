@@ -57,7 +57,7 @@ export type PaneName = 'dashboard' | 'conversation' | 'preferences';
 interface WorkbenchState {
   dashboard?: unknown;
   conversation?: unknown;
-  /** Preferences keeps no state of its own (#135). */
+  /** Preferences remembers its Orchestration tab. */
   preferences?: unknown;
   /** Fraction of the width given to the table, 0–1. */
   split?: number;

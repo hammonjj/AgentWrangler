@@ -88,6 +88,22 @@ export class JsonSettings implements HostSettings {
     this.emitter.fire((k) => k === key);
   }
 
+  /**
+   * Several keys in one write of the file, and one change event for all of
+   * them: a reader never sees some of the keys changed and not the others, and
+   * a crash leaves the old document or the new one, never a mix.
+   */
+  async updateMany(entries: Record<string, unknown>): Promise<void> {
+    const keys = Object.keys(entries);
+    for (const key of keys) {
+      const value = entries[key];
+      if (value === undefined) delete this.doc[key];
+      else this.doc[key] = value;
+    }
+    write(this.file, this.doc);
+    this.emitter.fire((k) => keys.includes(k));
+  }
+
   onDidChange(listener: (affects: (key: string) => boolean) => void): Disposable {
     return this.emitter.event(listener);
   }

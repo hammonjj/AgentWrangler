@@ -23,7 +23,10 @@ import { gateLines, type ComparisonReport, type GateResult } from './orchestrati
 import type { SourceStatus } from './orchestration/sourceHealth';
 import type { LocalEndpointChange, LocalEndpointView } from './orchestration/localEndpoints';
 import type { LocalModelSummary } from './orchestration/localMetrics';
-import type { ExecutionPolicy } from './orchestration/types';
+import { EFFORT_LEVELS, type EffortLevel, type ExecutionPolicy } from './orchestration/types';
+import { PRICE_FIELDS, type PriceField, type StoredPrice } from './orchestration/modelPrices';
+import type { TierListDraftEntry, TierRename } from './orchestration/tierListSave';
+import type { OPEN_TAB_MESSAGE, OrchestrationTabTarget } from './orchestration/orchestrationTabs';
 
 export type PreferencesToHost =
   /** The window has rendered and wants the current values. */
@@ -39,8 +42,16 @@ export type PreferencesToHost =
    * rather than only in a menu.
    */
   | { type: 'action'; id: SettingActionId }
-  /** A change to one model's tier or enabled flag, from Orchestration → tier map. */
+  /** A change to one model's tier, enabled flag or one effort level, or a reset, from Orchestration → Models. */
   | { type: 'modelPolicy'; change: ModelPolicyChange }
+  /** One price field of one model, US$ per million tokens; `null` deletes it (`telemetry.prices`). */
+  | { type: 'modelPrice'; change: ModelPriceChange }
+  /**
+   * The whole tier list from Orchestration → Tiers, in one message because the
+   * loader takes it all or nothing. `'default'` deletes `orchestration.tiers`.
+   * `renames` are applied with it (`planTierListSave`).
+   */
+  | { type: 'setTierList'; tiers: TierListDraftEntry[] | 'default'; renames: TierRename[] }
   /** Add, remove, turn on or off, key, probe or qualify a local endpoint (#51). */
   | { type: 'localEndpoint'; change: LocalEndpointChange }
   /**
@@ -74,6 +85,8 @@ export interface OrchestrationPrefsView {
     /** The OS can encrypt keys; without it no key can be stored. */
     secretsAvailable: boolean;
   };
+  /** `telemetry.prices` as stored, half-filled entries included, for the price fields. */
+  prices?: Record<string, StoredPrice>;
   /** The global scope of §10.2 as stored (#40). Absent: the host has none to offer. */
   routing?: {
     mode: LauncherRoutingMode;
@@ -145,8 +158,39 @@ export function modelPolicyChange(message: unknown): ModelPolicyChange | undefin
   else if (c.enabled !== undefined) return undefined;
   if (c.reset === 'tier' || c.reset === 'enabled' || c.reset === 'all') out.reset = c.reset;
   else if (c.reset !== undefined) return undefined;
-  if (out.tier === undefined && out.enabled === undefined && out.reset === undefined) return undefined;
+  if (c.effort !== undefined) {
+    const e = c.effort as { level?: unknown; native?: unknown } | null;
+    if (!e || typeof e !== 'object' || typeof e.level !== 'string' || !(EFFORT_LEVELS as readonly string[]).includes(e.level)) return undefined;
+    if (typeof e.native !== 'string' || e.native === '') return undefined;
+    out.effort = { level: e.level as EffortLevel, native: e.native };
+  }
+  if (out.tier === undefined && out.enabled === undefined && out.reset === undefined && out.effort === undefined) return undefined;
   return out;
+}
+
+/** One price field of one model. */
+export interface ModelPriceChange {
+  /** The catalog key (`<source>:<resolved id>`); the host finds the price table's key from it. */
+  key: string;
+  field: PriceField;
+  usdPerMTok: number | null;
+}
+
+/**
+ * A `modelPrice` message's change, or nothing if it is not well formed. The
+ * value is only checked for being a number or null here: the host refuses a
+ * negative one (`priceValueError`) with a reply the field shows, and checks
+ * the key against the catalog.
+ */
+export function modelPriceChange(message: unknown): ModelPriceChange | undefined {
+  if (!message || typeof message !== 'object') return undefined;
+  const m = message as { type?: unknown; change?: unknown };
+  if (m.type !== 'modelPrice' || !m.change || typeof m.change !== 'object') return undefined;
+  const c = m.change as Record<string, unknown>;
+  if (typeof c.key !== 'string' || c.key === '') return undefined;
+  if (!(PRICE_FIELDS as readonly unknown[]).includes(c.field)) return undefined;
+  if (c.usdPerMTok !== null && typeof c.usdPerMTok !== 'number') return undefined;
+  return { key: c.key, field: c.field as PriceField, usdPerMTok: c.usdPerMTok as number | null };
 }
 
 /** A `revokeWebDevice` message's id, or nothing if it is not well formed (#137). */
@@ -207,7 +251,17 @@ export type HostToPreferences =
   /** What a local endpoint change did, shown beside the endpoints. */
   | { type: 'localEndpointResult'; ok: boolean; lines: string[] }
   /** The routing defaults the window sent were saved, or refused and why (#40). */
-  | { type: 'routingResult'; ok: boolean; errors: string[]; needsOverride?: boolean };
+  | { type: 'routingResult'; ok: boolean; errors: string[]; needsOverride?: boolean }
+  /**
+   * A model policy or price write was refused, and why; shown beside the
+   * control that sent it (`field`: `tier`, `enabled`, `effort:<level>`,
+   * `price:<field>`, `reset`). `ok` clears an earlier refusal.
+   */
+  | { type: 'orchestrationWriteResult'; key: string; field: string; ok: boolean; error?: string }
+  /** The tier list was saved, or refused and why. */
+  | { type: 'tierListResult'; ok: boolean; errors: string[] }
+  /** Open Orchestration on a tab, optionally focusing one model on the Models tab. */
+  | ({ type: typeof OPEN_TAB_MESSAGE } & OrchestrationTabTarget);
 
 /**
  * What a `set` or `reset` should actually write, or nothing.

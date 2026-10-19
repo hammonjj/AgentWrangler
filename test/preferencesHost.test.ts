@@ -85,7 +85,7 @@ function rig(opts: { decision?: 'allow' | 'deny'; backend?: Partial<PreferencesB
       onDidChange: orchChanged.event,
       setPolicy: async (change) => {
         calls.push(`policy:${change.key}`);
-        return change.key === 'known';
+        return change.key === 'known' ? { ok: true as const } : { ok: false as const, error: 'unknown model' };
       },
       localEndpoint: async (change) => {
         calls.push(`endpoint:${change.op}`);
@@ -285,7 +285,7 @@ describe('PreferencesHost: orchestration', () => {
         orchestration: {
           view: () => ({ catalog: { tiers: [], entries: [] }, sources: [] }) as never,
           onDidChange: () => ({ dispose() {} }),
-          setPolicy: async () => true,
+          setPolicy: async () => ({ ok: true as const }),
           localEndpoint: async () => { throw new Error('unreachable'); },
         },
       },
@@ -399,6 +399,8 @@ const SAMPLES: Samples<PreferencesToHost> = {
   reset: [{ type: 'reset', key: 'pollIntervalSeconds' }],
   action: [{ type: 'action', id: 'connectDiscord' }, { type: 'action', id: 'testRemote' }, { type: 'action', id: 'disconnectDiscord' }],
   modelPolicy: [{ type: 'modelPolicy', change: { key: 'known', tier: 'fast' } }],
+  modelPrice: [{ type: 'modelPrice', change: { key: 'known', field: 'input', usdPerMTok: 1 } }],
+  setTierList: [{ type: 'setTierList', tiers: 'default', renames: [] }],
   localEndpoint: [{ type: 'localEndpoint', change: { op: 'setKey', id: 'ep1' } }],
   routingPolicy: [{ type: 'routingPolicy', mode: 'manual', policy: {} }],
   revokeWebDevice: [{ type: 'revokeWebDevice', id: 'dev-a' }],

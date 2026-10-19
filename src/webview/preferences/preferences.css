@@ -171,7 +171,8 @@
    matched its own input's selector inherited the input's width. */
 #prefsApp .pf-type-boolean {
   display: grid;
-  grid-template-columns: auto 1fr;
+  /* `minmax(0, 1fr)`, not `1fr`: a long label and key must wrap, not widen the page. */
+  grid-template-columns: auto minmax(0, 1fr);
   grid-template-areas:
     'control head'
     '.       desc';

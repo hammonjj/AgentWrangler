@@ -23,9 +23,12 @@ import { runInRequest } from '../core/requestScope';
 import type { HostSettings } from '../host/hostServices';
 import type { ModelPolicyChange } from '../shared/orchestration/catalog';
 import { localEndpointChange, type LocalEndpointChange } from '../shared/orchestration/localEndpoints';
+import { tierListMessage, type TierListDraftEntry, type TierRename } from '../shared/orchestration/tierListSave';
 import {
   isSettingActionId,
   modelPolicyChange,
+  modelPriceChange,
+  type ModelPriceChange,
   revokeWebDeviceId,
   routingPolicyUpdate,
   settingUpdate,
@@ -67,7 +70,11 @@ export interface PreferencesBackend {
   orchestration?: {
     view(): OrchestrationPrefsView;
     onDidChange(listener: () => void): Disposable;
-    setPolicy(change: ModelPolicyChange): Promise<boolean>;
+    setPolicy(change: ModelPolicyChange): Promise<{ ok: true } | { ok: false; error: string }>;
+    /** One price field of one model. Absent: the Models tab cannot edit prices. */
+    setPrice?(change: ModelPriceChange): Promise<{ ok: true } | { ok: false; error: string }>;
+    /** Replace the tier list, carrying renames over as aliases. */
+    setTierList?(change: { tiers: TierListDraftEntry[] | 'default'; renames: TierRename[] }): Promise<{ ok: true } | { ok: false; errors: string[] }>;
     /** Orchestration → Local endpoints (#51). */
     localEndpoint?(change: LocalEndpointChange): Promise<{ ok: boolean; lines: string[] }>;
     /** Write the global routing defaults (#40), already checked by `routingPolicyUpdate`. */
@@ -107,6 +114,8 @@ export function preferencesRequest(m: PreferencesToHost): AccessRequest {
       // Connect and disconnect store and forget a credential; the test reaches out. All three are settings work.
       return { action: 'settings.write', resource: setting(isSettingActionId(m.id) ? `action.${m.id}` : 'action.unknown') };
     case 'modelPolicy':
+    case 'modelPrice':
+    case 'setTierList':
       return { action: 'settings.write', resource: setting('orchestration.models') };
     case 'localEndpoint':
       return { action: 'settings.write', resource: setting('orchestration.localEndpoints') };
@@ -196,12 +205,52 @@ export class PreferencesHost implements Disposable {
         backend.log('preferences: refused a model policy change');
         return;
       }
+      const field = change.effort ? `effort:${change.effort.level}` : change.reset ? 'reset' : change.tier !== undefined ? 'tier' : 'enabled';
       void backend.orchestration
         .setPolicy(change)
-        .then((ok) => {
-          if (!ok) backend.log(`preferences: refused model policy for ${change.key}`);
+        .then((r) => {
+          if (!r.ok) backend.log(`preferences: refused model policy for ${change.key}: ${r.error}`);
+          this.post({ type: 'orchestrationWriteResult', key: change.key, field, ok: r.ok, ...(r.ok ? {} : { error: r.error }) });
         })
-        .catch((err) => backend.log(`preferences: model policy failed: ${String(err)}`))
+        .catch((err) => {
+          backend.log(`preferences: model policy failed: ${String(err)}`);
+          this.post({ type: 'orchestrationWriteResult', key: change.key, field, ok: false, error: String(err) });
+        })
+        // The full state after every write, whether it landed or not.
+        .finally(() => this.pushOrchestration());
+      return;
+    }
+    if (message.type === 'setTierList') {
+      const change = tierListMessage(message);
+      const run = backend.orchestration?.setTierList;
+      if (!change || !run) {
+        backend.log('preferences: refused a tier list');
+        this.post({ type: 'tierListResult', ok: false, errors: ['The tier list could not be read.'] });
+        return;
+      }
+      void run(change)
+        .then((r) => {
+          if (!r.ok) backend.log(`preferences: refused a tier list: ${r.errors.join('; ')}`);
+          this.post({ type: 'tierListResult', ok: r.ok, errors: r.ok ? [] : r.errors });
+        })
+        .catch((err) => this.post({ type: 'tierListResult', ok: false, errors: [String(err)] }))
+        .finally(() => this.pushOrchestration());
+      return;
+    }
+    if (message.type === 'modelPrice') {
+      const change = modelPriceChange(message);
+      const run = backend.orchestration?.setPrice;
+      if (!change || !run) {
+        backend.log('preferences: refused a model price change');
+        return;
+      }
+      const field = `price:${change.field}`;
+      void run(change)
+        .then((r) => {
+          if (!r.ok) backend.log(`preferences: refused price for ${change.key}: ${r.error}`);
+          this.post({ type: 'orchestrationWriteResult', key: change.key, field, ok: r.ok, ...(r.ok ? {} : { error: r.error }) });
+        })
+        .catch((err) => this.post({ type: 'orchestrationWriteResult', key: change.key, field, ok: false, error: String(err) }))
         .finally(() => this.pushOrchestration());
       return;
     }

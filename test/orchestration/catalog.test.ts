@@ -236,13 +236,14 @@ describe('effort maps', () => {
     expect(defaultEffortMap(['max'])).toEqual({});
   });
 
-  it('accepts a declared map only where it names a real native level', () => {
+  it('accepts a declared map only where it names a real native level, laid over the default map', () => {
     const catalog = buildCatalog({
       reported: REPORTED,
       policy: { 'anthropic:claude-sonnet-5': { effort: { max: 'max', high: 'turbo' } } },
     });
     const sonnet = catalog.entries.find((e) => e.key === 'anthropic:claude-sonnet-5')!;
-    expect(sonnet.effortMap).toEqual({ max: 'max' });
+    // Only the levels that differ are stored; the rest keep their default mapping.
+    expect(sonnet.effortMap).toEqual({ low: 'low', medium: 'medium', high: 'high', max: 'max' });
     expect(sonnet.effortMapFrom).toBe('declared');
   });
 });

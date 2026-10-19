@@ -28,7 +28,8 @@ import {
   RISK_LEVELS,
   VERIFIABILITY_LEVELS,
 } from './assessment';
-import type { TierDef } from '../../shared/orchestration/catalog';
+import { canonicalTier, type TierDef } from '../../shared/orchestration/catalog';
+import { namedTiers, routeTierNames, type NamedTiers } from '../../shared/orchestration/tierRoles';
 import type { LearnedRule } from '../../shared/orchestration/routingProposals';
 import { applyLearnedRule, LEARNED_RULE_PREFIX } from './learnedRules';
 import {
@@ -41,7 +42,6 @@ import {
   type RouteRequirement,
   type RoutingReason,
   type TaskAssessment,
-  type TierName,
 } from '../../shared/orchestration/types';
 
 /**
@@ -91,21 +91,11 @@ function rank<T extends string>(levels: readonly T[], value: T): number {
 }
 
 /** The tiers the router may ask for: `reachableBy: 'route'`, weakest first (§6.3). */
-function routeTiers(tiers: readonly TierDef[]): TierName[] {
-  return tiers.filter((t) => t.reachableBy === 'route').map((t) => t.name);
-}
+const routeTiers = routeTierNames;
 
-/**
- * The three named tiers the policy is written against. The rules speak of
- * `basic`, `standard` and `expert` (§9.3); a tier list that renames or inserts
- * tiers maps onto them by position among the routable ones — weakest, second,
- * strongest — so a user's extra tier never makes a rule point at nothing.
- */
-function namedTiers(tiers: readonly TierDef[]): { basic: number; standard: number; expert: number; top: number } {
-  const n = routeTiers(tiers).length;
-  const top = Math.max(0, n - 1);
-  return { basic: 0, standard: Math.min(1, top), expert: top, top };
-}
+// The three named tiers the policy is written against (`basic`, `standard`,
+// `expert`, §9.3) map onto the list by position among the routable ones. The
+// mapping is shared (`tierRoles.ts`) so Preferences words exactly what runs here.
 
 // ---------------------------------------------------------------------------
 // Context (§9.3 "Hard needs")
@@ -163,7 +153,7 @@ interface TierState {
 interface TierRule {
   id: string;
   /** Returns the new tier, or undefined when the rule does not fire. */
-  apply(f: RuleFacts, s: TierState, t: ReturnType<typeof namedTiers>): number | undefined;
+  apply(f: RuleFacts, s: TierState, t: NamedTiers): number | undefined;
   text(f: RuleFacts, s: TierState, tierName: (i: number) => string, next: number): string;
   inputs(f: RuleFacts): Record<string, unknown>;
 }
@@ -364,7 +354,8 @@ export function routeTask(assessment: TaskAssessment, policy: RouterPolicy): Rou
   // ---- Caps (§9.3 rule 6): never exceeded ----
   let verdict: RouterResult['verdict'] = 'route';
   let needsHuman: string | undefined;
-  const capTier = policy.caps?.maxTier;
+  // A cap written with a tier's old name (alias) means that tier.
+  const capTier = policy.caps?.maxTier === undefined ? undefined : (canonicalTier(policy.tiers, policy.caps.maxTier) ?? policy.caps.maxTier);
   const capRank = capTier !== undefined ? tiers.indexOf(capTier) : -1;
   // A cap naming a tier the list does not have caps nothing it can express; it is ignored, and said so.
   let maxTier = tiers[named.top] ?? minTier;

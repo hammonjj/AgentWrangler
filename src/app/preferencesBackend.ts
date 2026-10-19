@@ -102,7 +102,9 @@ export function createPreferencesBackend(opts: PreferencesBackendOptions): Prefe
         ];
         return { dispose: () => subs.forEach((s) => s.dispose()) };
       },
-      setPolicy: (change) => app.models.setPolicy(change),
+      setPolicy: (change) => app.models.applyPolicy(change),
+      setPrice: (change) => app.models.setPrice(change),
+      setTierList: (change) => app.models.setTierList(change),
       // Can ask for an endpoint's key: the host runs this as the client that pressed the button.
       localEndpoint: (change) => app.localEndpoints.apply(change),
       // Frozen into each mission recorded after this; a started mission keeps what it had (§10.2).

@@ -680,6 +680,16 @@ new worktree and branch of the chosen folder's repository:
   recommended, what ran, and which dimensions differed. Like the turn lines, they hold metadata
   only.
 
+## Orchestration preferences
+
+`#/preferences` → Orchestration is five tabs: **Routing** (global defaults, automatic routing),
+**Models** (every model on a tier board, with enable, tier, effort and price editing),
+**Tiers** (edit the tier list; a rename is kept as an alias so pins and history keep
+resolving), **Sources & endpoints** and **Shadow report**. The tab you leave open is remembered
+by the page (the `preferences` slot of its saved state). Model, price and tier-list writes go
+through the same Preferences message path and `authorize()` gate as every other setting, and
+a refusal is shown beside the control that sent it.
+
 ## Local models (orchestration)
 
 Preferences → Orchestration → *Local endpoints* registers OpenAI-compatible servers (Ollama,

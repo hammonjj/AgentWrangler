@@ -12,9 +12,13 @@
 import type { HostToPreferences, PreferencesToHost } from '../../shared/preferences';
 import { paneApi } from '../common/paneApi';
 import { openRoute, registerPage } from '../common/shellBus';
+import { initUiPersistence } from './orchestration';
 import { mountPreferences } from './view';
 
-const pane = paneApi<never>('preferences');
+const pane = paneApi<unknown>('preferences');
+
+// Which Orchestration tab was open last time: this pane's own slot of the page's state.
+initUiPersistence({ load: () => pane.getState(), save: (state) => pane.setState(state) });
 
 registerPage('preferences', (target) => {
   const root = document.createElement('div');

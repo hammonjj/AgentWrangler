@@ -18,7 +18,8 @@
 import './preferences.css';
 import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId, SettingStatus } from '../../shared/preferences';
 import { settingGroups, SETTINGS, type SettingSpec } from '../../shared/settings';
-import { ORCHESTRATION_GROUP, onRoutingResult, renderOrchestration, setLocalEndpointResult } from './orchestration';
+import { orchestrationTabTarget } from '../../shared/orchestration/orchestrationTabs';
+import { ORCHESTRATION_GROUP, consumeWritePending, onRoutingResult, onTierListResult, onWriteResult, openOrchestrationTab, renderOrchestration, setLocalEndpointResult } from './orchestration';
 import { WEB_DEVICES_GROUP, createWebDevicesBlock, setWebDevices } from './webDevices';
 
 /** What carries this view's messages. */
@@ -622,6 +623,24 @@ function onHostMessage(message: HostToPreferences | undefined): void {
     if (orchestrationBody) renderOrchestration(orchestrationBody, orchestration, post);
     return;
   }
+  const tabTarget = orchestrationTabTarget(message);
+  if (tabTarget) {
+    // The section only exists once its switch is on; scroll to it as well as switching tab.
+    sections.get(ORCHESTRATION_GROUP)?.scrollIntoView({ block: 'start' });
+    openOrchestrationTab(tabTarget);
+    return;
+  }
+  if (message.type === 'tierListResult') {
+    onTierListResult(message.ok, message.errors);
+    if (orchestrationBody) renderOrchestration(orchestrationBody, orchestration, post);
+    return;
+  }
+  if (message.type === 'orchestrationWriteResult') {
+    // A refusal shows beside its control; the full view follows either way.
+    onWriteResult(message);
+    if (orchestrationBody && !message.ok) renderOrchestration(orchestrationBody, orchestration, post);
+    return;
+  }
   if (message.type === 'routingResult') {
     onRoutingResult(message.ok, message.errors, message.needsOverride === true);
     if (orchestrationBody) renderOrchestration(orchestrationBody, orchestration, post);
@@ -634,7 +653,9 @@ function onHostMessage(message: HostToPreferences | undefined): void {
     const active = document.activeElement;
     const editing =
       active instanceof HTMLSelectElement || (active instanceof HTMLInputElement && active.type !== 'checkbox' && active.type !== 'radio');
-    if (orchestrationBody?.contains(active) && editing) {
+    // Unless the view answers a change made here: then the row moves at once, and focus follows it.
+    const answersWrite = consumeWritePending();
+    if (orchestrationBody?.contains(active) && editing && !answersWrite) {
       orchestrationStale = true;
       return;
     }
