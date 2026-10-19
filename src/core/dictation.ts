@@ -186,6 +186,15 @@ export function recordArgs(device: string): string[] {
   ];
 }
 
+/**
+ * ffmpeg args that turn a browser's recording (webm/opus, mp4/AAC, ...) into
+ * the 16 kHz mono WAV Whisper wants (#141). `-t` is the same ceiling the
+ * host-mic recorder has, whatever the client claimed about the length.
+ */
+export function convertArgs(input: string, wav: string): string[] {
+  return ['-hide_banner', '-loglevel', 'error', '-y', '-i', input, '-t', '300', '-ar', String(SAMPLE_RATE), '-ac', '1', '-f', 'wav', wav];
+}
+
 export function transcribeArgs(model: string, wav: string): string[] {
   // `-nt` drops timestamps, `-np` drops the progress chatter; what is left on
   // stdout is the text and nothing else.
@@ -440,6 +449,35 @@ export class DictationService {
     }
   }
 
+  /**
+   * Transcribe a recording that was made elsewhere: a browser's upload (#141).
+   * `ext` names its container (`webm`, `m4a`, ...) for ffmpeg. Independent of
+   * the host-mic recording, which it neither waits for nor disturbs. Resolves
+   * with `''` for silence; throws `DictationSetupError` when a tool or the
+   * model is missing, and an `Error` when ffmpeg cannot read the audio or
+   * whisper fails.
+   */
+  async transcribeAudio(audio: Buffer, ext: string): Promise<string> {
+    const { ffmpeg } = resolveTools(this.deps.settings());
+    const input = this.tmpFile('upload', ext.replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'bin');
+    const wav = this.tmpFile('upload', 'wav');
+    try {
+      fs.writeFileSync(input, audio);
+      const proc = this.deps.spawn(ffmpeg, convertArgs(input, wav), { stdio: ['ignore', 'ignore', 'pipe'] });
+      let err = '';
+      proc.stderr?.on('data', (d: Buffer) => (err = (err + d.toString()).slice(-2000)));
+      const code = await exitOf(proc);
+      if (code !== 0) {
+        throw new Error(`ffmpeg could not read the recording (exit ${code}): ${err.trim().split('\n').slice(-2).join(' ')}`);
+      }
+      if (!fs.existsSync(wav) || fs.statSync(wav).size <= 44 + MIN_FINAL * BYTES_PER_SAMPLE) return '';
+      return cleanTranscript(await this.transcribe(wav, () => {}));
+    } finally {
+      fs.rm(input, { force: true }, () => {});
+      fs.rm(wav, { force: true }, () => {});
+    }
+  }
+
   /** Stop recording and keep nothing. Safe to call in any state. */
   cancel(): void {
     const rec = this.rec;
@@ -461,8 +499,12 @@ export class DictationService {
   }
 
   private tmpWav(tag: string): string {
+    return this.tmpFile(tag, 'wav');
+  }
+
+  private tmpFile(tag: string, ext: string): string {
     const dir = this.deps.tmpDir ?? os.tmpdir();
-    return path.join(dir, `agent-wrangler-dictation-${process.pid}-${Date.now()}-${tag}-${Math.random().toString(36).slice(2, 8)}.wav`);
+    return path.join(dir, `agent-wrangler-dictation-${process.pid}-${Date.now()}-${tag}-${Math.random().toString(36).slice(2, 8)}.${ext}`);
   }
 
   private stopPreview(rec: Recording): void {

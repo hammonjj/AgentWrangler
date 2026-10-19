@@ -9,17 +9,16 @@
  * between hosting it in an editor and hosting it in an app, and that edge is
  * `HostServices`.
  *
- * So both front ends call this. `src/extension.ts` builds a VSCode host, calls
- * `createApp`, and registers fifteen commands that call the methods it returns.
- * `src/electron/main.ts` builds an Electron host, calls `createApp`, and puts
- * the same methods in a menu.
+ * The core daemon (`src/daemon/startCore.ts`) builds a plain-Node host, calls
+ * `createApp`, and serves what it returns to browsers, `aw` and Discord.
  *
  * The one thing that cannot be built here is the surface the panes live on —
- * an editor tab versus a `BrowserWindow` — and several of these behaviours have
- * to show something on it ("take this session over, then put it in front of
- * me"). It is therefore attached afterwards, through `attachSurface`. Until it
- * is, everything still works; it simply has nowhere to display the result,
- * which is the honest description of an app whose window has been closed.
+ * the conversation pane of whichever browser asked — and several of these
+ * behaviours have to show something on it ("take this session over, then put
+ * it in front of me"). It is therefore attached afterwards, through
+ * `attachSurface`. Until it is, everything still works; it simply has nowhere
+ * to display the result, which is the honest description of a daemon with no
+ * browser open.
  */
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
@@ -40,7 +39,10 @@ import { readRolloutBlocks } from '../codex/rollout';
 import { codexUsageReader } from '../codex/usage';
 import { CodexRunnerService } from '../codex/runner';
 import { isPidAlive, readProcessEntries, readRegistry } from '../claude/registry';
-import { bootTimeMs, parentPidOf, startTimeOf } from '../core/procStart';
+import { bootTimeMs, isSameProcessAlive, parentPidOf, startTimeOf } from '../core/procStart';
+import { FileLeaseService } from '../core/leases/leaseService';
+import { LEASES_ENABLED_KEY, LEASES_RESOURCES_KEY } from '../shared/leases';
+import { leasesDir, refreshLeaseScript } from '../claude/leaseHook';
 import { sweepOrphans, sweepRefusal, type SweepResult } from '../core/session/orphanSweep';
 import { endProcess } from '../claude/runner/adopt';
 import { SessionRegistry, type SessionRecord } from '../core/session/sessionRegistry';
@@ -50,11 +52,12 @@ import { checkoutFor } from '../core/checkout';
 import { RunnerService } from '../claude/runner/runnerService';
 import type { RunnerView } from '../claude/runner/runnerView';
 import type { HostManifest } from '../shared/sessionProtocol';
+import { RETIRED_SETTING_KEYS } from '../shared/settings';
 import { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import { LaunchDefaults } from '../core/launchDefaults';
-import { createOrchestration, parseRoutingSettings, ROUTING_KEY } from '../orchestration';
-import { TaskError, type TaskAction, type TaskRoute, type TaskRunner } from '../orchestration/engine/taskRunner';
+import { createOrchestration, ORCHESTRATION_ENABLED_KEY, parseRoutingSettings, ROUTING_KEY } from '../orchestration';
+import { FinishRefused, TaskError, type TaskAction, type TaskRoute, type TaskRunner } from '../orchestration/engine/taskRunner';
 import { explainRecommendation, targetLabel } from '../orchestration/view/routeExplain';
 import { sourceStatus } from '../shared/orchestration/sourceHealth';
 import { EFFORT_LEVELS, isOrchestrationOrigin, type RouteRecommendation } from '../shared/orchestration/types';
@@ -76,6 +79,11 @@ import { comparisonReport, effectiveMode, evaluateGate, type ComparisonReport, t
 import { analyticsDetail, analyticsView, type AnalyticsSelection } from '../shared/orchestration/analyticsView';
 import { CORPUS_STATUS } from '../orchestration/policy/corpusStatus';
 import { ROUTER_VERSION } from '../orchestration/policy/router';
+import { LearnedRuleStore, learnedRulesFile } from '../orchestration/policy/learnedRuleStore';
+import { proposalVeto } from '../orchestration/policy/learnedVeto';
+import { buildDataset } from '../shared/orchestration/analytics';
+import { currentProposals, type RoutingProposalDecision } from '../shared/orchestration/proposalsView';
+import type { LearnedRule } from '../shared/orchestration/routingProposals';
 import { ASSESSOR_VERSION } from '../orchestration/policy/assessment';
 import type { Mission } from '../shared/orchestration/types';
 import { attentionCount, linkedNotices, originKeyOf } from '../shared/orchestration/delegatedState';
@@ -128,8 +136,12 @@ import { TurnStats } from '../core/turnStats';
 import { FileUsageCache } from '../core/usageCache';
 import { UsageService } from '../core/usageService';
 import { FileSuggestService } from '../core/fileSuggest';
-import { RemoteDaemonLink } from '../remote/daemon/client';
-import { DISCORD_BOT_TOKEN_KEY } from '../remote/paths';
+import { createInProcessRemoteControl, type InProcessRemoteControl } from '../remote/inProcess';
+import { DISCORD_BOT_TOKEN_KEY, accessAuditFile } from '../remote/paths';
+import { FileAuditLog } from '../remote/audit';
+import { createAccessGate, ownerContext, type AccessGate } from '../core/access';
+import { outsideRequest } from '../core/requestScope';
+import { createApprovalActions } from './approvals';
 import { doneNoticeFor, type RemoteNotice } from '../shared/remote';
 import type { PermissionModeName } from '../shared/conversation';
 import type { HostServices, WorkbenchSurface } from '../host/hostServices';
@@ -156,6 +168,15 @@ import { missionViewOf } from '../orchestration/view/missionViews';
 import type { TaskPaneSource } from '../ui/conversation/conversationHost';
 import { adoptActionFor } from '../ui/openTarget';
 import { resumeInTerminal } from '../ui/terminal';
+import { createDurableAgents } from './durableAgents';
+import { DurableAgentStore } from '../core/durableAgentStore';
+import { createJobDirectory, createScheduledJobs } from './scheduledJobs';
+import { runSessionKey } from '../shared/scheduledJobs';
+import { createPrSweep } from './prSweep';
+import { ScheduledJobStore } from '../core/scheduledJobStore';
+import type { JobDirectory } from '../ui/jobDirectory';
+import type { AgentConversations, AgentDirectory } from '../ui/agentDirectory';
+import { agentIdOfDraftKey } from '../shared/durableAgents';
 
 /** How long to let a session emit its first hook event before calling hooks broken. */
 const HOOK_HEALTH_GRACE_MS = 90_000;
@@ -230,9 +251,21 @@ export interface AgentWranglerApp {
   taskPanes?: TaskBadgeSource & TaskPaneSource;
   /** The table's Missions view (#43). Absent while orchestration is off. */
   missions?: MissionSource;
+  /** Durable agents (#179): the Agents view, and an agent's empty conversation in the pane. */
+  agents: AgentDirectory;
+  agentConversations: AgentConversations;
+  /** Scheduled jobs (#164): the daemon's scheduler and the Jobs view. */
+  jobs: JobDirectory;
   dictation: DictationService;
   files: FileSuggestService;
+  /**
+   * The raw actions. A dispatcher does not call these without passing `access`
+   * first: the pane hosts authorise each message, everything else goes through
+   * `guardSessionActions` (#123).
+   */
   actions: SessionActions;
+  /** The access gate: `authorize` plus the audit. See `core/access.ts`. */
+  access: AccessGate;
   getConfig: ConfigGetter;
 
   /**
@@ -240,20 +273,24 @@ export interface AgentWranglerApp {
    * after it has built its window. Everything that has to *show* something goes
    * through this; before it is attached those behaviours run and display
    * nothing, which is what an app with no window should do.
+   *
+   * With several clients the front end attaches `ClientRegistry.surface`
+   * (#126), which shows things in the client whose request is being handled;
+   * `host.dialogs` is scoped the same way. Nothing here passes a client along.
    */
   attachSurface(surface: WorkbenchSurface): void;
 
   // --- the behaviours commands and menus invoke ---
-  /** Start a conversation this process runs itself. No cwd: ask which folder. */
+  /** Start a conversation this app runs (Claude: in a session host). No cwd: ask which folder. */
   newConversation(cwd?: string): Promise<SessionHandle | undefined>;
   /**
-   * Live sessions, for the quit decision: `hosted` Claude ones run in session
-   * hosts and survive a quit; `local` ones (in-process Claude, and Codex
-   * threads without the background server) do not. Codex threads on the
+   * Live sessions, for the quit decision: `hosted` are the Claude ones, which
+   * all run in session hosts and survive a quit; `local` are Codex threads
+   * without the background server, which do not. Codex threads on the
    * background server are in neither: they keep running on their own terms.
    */
   sessionCounts(): { hosted: number; local: number };
-  /** Who runs this session: AW somewhere that survives a quit, AW in-process, or not AW. */
+  /** Who runs this session: AW somewhere that survives a quit, AW in its own process (Codex `--stdio`), or not AW. */
   runBy(sessionId: string): RunBy;
   /**
    * End the process running a session, with no dialog: `aw stop`. The menu's
@@ -275,13 +312,20 @@ export interface AgentWranglerApp {
    * Launches nothing. Throws `TaskError` for anything the caller should read.
    */
   delegate(req: ProposeTaskRequest): Promise<DelegateResult>;
+  /**
+   * `aw remember` / `aw forget` (#180): the durable agent whose conversation
+   * `origin` is proposes a memory update. Waits for the user's approval as a
+   * card; stores nothing. Throws when the conversation is not an agent's or
+   * the proposal is refused, with the reason for the agent to read.
+   */
+  proposeAgentMemory(origin: { provider: string; sessionId: string }, input: unknown): { agentName: string; proposalId?: string };
   /** Tasks that are not finished, newest first. Empty while orchestration is off. */
   taskList(): TaskSummary[];
   /**
-   * The app is quitting: end the sessions that cannot survive it (and hosted
-   * ones too with `includeHosted`), awaited and bounded by `withinMs`. Ended
-   * ones stay resumable (interrupted); hosted ones left running are adopted
-   * on the next start.
+   * The app is quitting. Hosted Claude sessions are left running and adopted
+   * on the next start, unless `includeHosted` (Quit and Stop All Agents),
+   * which ends them, awaited and bounded by `withinMs`. Ended ones stay
+   * resumable (interrupted).
    */
   stopAllForQuit(withinMs: number, opts?: { includeHosted?: boolean }): Promise<void>;
   /**
@@ -318,6 +362,11 @@ export interface AgentWranglerApp {
    * first and see the first scan land in it.
    */
   start(): void;
+  /**
+   * Hang up Discord when it runs in this process (the core daemon, #138),
+   * once queued writes to the mirror map are done. Nothing to do otherwise.
+   */
+  stopRemote(): Promise<void>;
   dispose(): void;
 }
 
@@ -325,6 +374,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
   const log = (msg: string) => host.log(msg);
   const dialogs = host.dialogs;
   const getConfig: ConfigGetter = () => readConfig(host.settings);
+  /** The one access gate every dispatcher passes (#123), auditing to `access.log`. */
+  const access = createAccessGate({ audit: new FileAuditLog(accessAuditFile()), log });
+  /** The app acting on its own (auto-pause): nobody's click is behind it. */
+  const daemonContext = ownerContext('daemon');
 
   /** Attached by the front end once its window exists. See `attachSurface`. */
   let surface: WorkbenchSurface | undefined;
@@ -375,19 +428,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // left running in hosts that are still alive. Nothing may classify, resume
   // or adopt a session before this is known, or AW could end or double-resume
   // its own surviving session.
-  const hostSupervisor = host.sessionHosts
-    ? new HostSupervisor({
-        runDir: host.sessionHosts.runDir,
-        fallbackRunDir: host.sessionHosts.fallbackRunDir,
-        logDir: host.sessionHosts.logDir,
-        runtime: host.sessionHosts.runtime,
-        log,
-        build: host.sessionHosts.runtime.buildId,
-        orphanIdleHours: () => host.settings.get<number>('lifecycle.orphanIdleHours', 24),
-        endpointKey: (ref) => localEndpoints.keyByRef(ref),
-      })
-    : undefined;
-  const hostScan = hostSupervisor?.scan() ?? { alive: [], dead: [], foreign: [] };
+  const hostSupervisor = new HostSupervisor({
+    runDir: host.sessionHosts.runDir,
+    fallbackRunDir: host.sessionHosts.fallbackRunDir,
+    logDir: host.sessionHosts.logDir,
+    runtime: host.sessionHosts.runtime,
+    log,
+    build: host.sessionHosts.runtime.buildId,
+    orphanIdleHours: () => host.settings.get<number>('lifecycle.orphanIdleHours', 24),
+    endpointKey: (ref) => localEndpoints.keyByRef(ref),
+  });
+  const hostScan = hostSupervisor.scan();
   // Then classify what the last run left behind (§7.3): every session that
   // was live is interrupted, except those still running in a host (including
   // one this build cannot talk to, which must not look ownerless), and those
@@ -396,6 +447,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
   // interrupted list exists, so auto-resume never picks a session whose host
   // finished, failed or crashed. The old runner registry is imported once
   // from the surface store.
+  // A conversation an older build ran in its own process (before #122 made
+  // hosts the only way) is one of the interrupted: it ended with that build,
+  // its transcript is intact, and its row offers Resume, which runs it in a host.
   const sessionRegistry = new SessionRegistry(host.sessionState, { legacy: host.workspaceState });
   const startup = sessionRegistry.startup(
     new Set(
@@ -406,10 +460,44 @@ export function createApp(host: HostServices): AgentWranglerApp {
   if (startup.interrupted.length > 0) {
     log(`${startup.interrupted.length} session(s) were interrupted by the last restart`);
   }
+
+  // ---- Exclusive resource leases (#68) ----
+  //
+  // The lease files beside the hook script are the lock; this declares the
+  // resources the hook enforces (none while `leases.enabled` is off), reaps
+  // leases whose holder is gone, and lets the scheduler hold one for an
+  // attempt. Started after the registry's startup pass, so a session the last
+  // restart interrupted gives its leases back.
+  const leases = new FileLeaseService({
+    dir: leasesDir(hookLogDir()),
+    settings: () => ({ enabled: host.settings.get<boolean>(LEASES_ENABLED_KEY, false) === true, resources: host.settings.get<unknown>(LEASES_RESOURCES_KEY, undefined) }),
+    startTimeOf,
+    alive: isSameProcessAlive,
+    sessionState: (id) => {
+      const r = sessionRegistry.get(id);
+      return r ? { state: r.state, ...(r.stateChangedAt !== undefined ? { changedAt: r.stateChangedAt } : {}) } : undefined;
+    },
+    holdAttemptLeases: () => host.settings.get<boolean>(ORCHESTRATION_ENABLED_KEY, false) === true,
+    log,
+  });
+  leases.start();
+  host.subscribe(leases);
+  host.subscribe(
+    host.settings.onDidChange((affects) => {
+      if (affects(LEASES_ENABLED_KEY) || affects(LEASES_RESOURCES_KEY)) leases.syncResources();
+    }),
+  );
   for (const m of hostScan.foreign) {
     log(`host ${m.hostId} (session ${m.sessionId}) runs a manifest version this build does not know; leaving it alone`);
   }
-  hostSupervisor?.collect(hostScan);
+  hostSupervisor.collect(hostScan);
+  // Settings that no longer do anything (`experimental.sessionHosts`, #122).
+  // Left in settings.json they would read as though they still did.
+  for (const key of RETIRED_SETTING_KEYS) {
+    if (host.settings.get<unknown>(key, undefined) === undefined) continue;
+    log(`removing the retired "${key}" setting`);
+    void host.settings.update(key, undefined);
+  }
 
   // ---- The orphan sweep (§7.3) ----
   //
@@ -424,10 +512,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
     if (running) return running;
     const sweep = sweepOrphans(sessionId, {
       entries: () => readProcessEntries(sessionsDir()),
-      heldAgentPids: () => hostSupervisor?.heldAgentPids() ?? new Set(),
+      heldAgentPids: () => hostSupervisor.heldAgentPids(),
       // The only processes it may end: agents a dead host's manifest names
       // (pid + start time, #62). Anything else is take-over, confirmed.
-      lostAgents: (id) => hostSupervisor?.lostAgents(id) ?? [],
+      lostAgents: (id) => hostSupervisor.lostAgents(id),
       isAlive: isPidAlive,
       startTimeOf,
       parentOf: parentPidOf,
@@ -458,7 +546,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     log(`host ${m.hostId} (session ${m.sessionId}) died without an exit record; sweeping for its agent`);
     void sweepSession(m.sessionId)
       .then((r) => {
-        if (r.clear) hostSupervisor?.forget(m);
+        if (r.clear) hostSupervisor.forget(m);
       })
       .catch((err) => log(`orphan sweep for ${m.sessionId} failed: ${String(err)}`));
   }
@@ -540,23 +628,20 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }),
   );
 
-  // Sessions this process runs itself, through the Agent SDK. The binary is
-  // resolved per start so changing the setting does not need a restart.
-  // `rememberModels`: what the launcher's model dropdown offers is the list the
-  // last conversation reported, since the launcher has no running CLI to ask.
+  // Claude sessions this app runs, each in a session host of its own (#122:
+  // never in this process, so a quit or a restart of the core ends none of
+  // them). The binary is resolved per start so changing the setting does not
+  // need a restart. `rememberModels`: what the launcher's model dropdown
+  // offers is the list the last conversation reported, since the launcher has
+  // no running CLI to ask. A local endpoint's key reaches a host through the
+  // supervisor's `endpointKey`.
   const runners = new RunnerService({
-    query: sdkQuery,
     binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath),
     log,
     registry: sessionRegistry,
     locate,
     rememberModels: (list) => models.remember('anthropic', list),
-    localKey: (ref) => localEndpoints.keyByRef(ref),
-    // Experimental until the Stage 4 soak: new sessions run in hosts only
-    // with the setting on. Surviving hosts are adopted either way.
-    hosts: hostSupervisor
-      ? { supervisor: hostSupervisor, enabled: () => host.settings.get<boolean>('experimental.sessionHosts', false) }
-      : undefined,
+    hosts: { supervisor: hostSupervisor },
     beforeResume,
     onHostLost: (id) => void sweepSession(id).catch((err) => log(`orphan sweep for ${id} failed: ${String(err)}`)),
   });
@@ -609,10 +694,29 @@ export function createApp(host: HostServices): AgentWranglerApp {
    * registry remembers (a resume should come back on the same model, mode and
    * effort), otherwise the current defaults.
    */
-  const claudeLaunch = (previous?: SessionRecord) => {
+  const claudeLaunch = (previous: SessionRecord | undefined, sessionId: string, opts?: { lenient?: boolean }) => {
     const launch = launchDefaults.resumed('claude', previous?.launch);
-    if (!previous || isOrchestrationOrigin(previous.origin)) return launch;
-    return { ...launch, policy: { ...launch.policy, claude: { ...launch.policy?.claude, conversationInstructions: withConversationDelegation(launch.policy?.claude?.conversationInstructions) } } };
+    if (previous && isOrchestrationOrigin(previous.origin)) return launch;
+    // A session assigned to an agent by hand may have no record, or no agent origin, of its own.
+    const fresh = agentResumeInstructions({ provider: 'claude', sessionId }, previous?.origin, opts?.lenient === true);
+    if (!previous && fresh === undefined) return launch;
+    return { ...launch, policy: { ...launch.policy, claude: { ...launch.policy?.claude, conversationInstructions: fresh ?? withConversationDelegation(launch.policy?.claude?.conversationInstructions) } } };
+  };
+  /**
+   * A durable agent's conversation resumes with the agent's instructions and
+   * memory as they are now (#180, #182), not the copy frozen in at launch.
+   * Undefined for any other session. A missing instructions file is the
+   * user's error to see when they resumed it; a resume nobody asked for (after
+   * a restart) carries on with what it was launched with, and logs why.
+   */
+  const agentResumeInstructions = (ref: { provider: string; sessionId: string }, origin: unknown, lenient: boolean): string | undefined => {
+    try {
+      return durableAgents.resumeInstructions(ref, origin);
+    } catch (error) {
+      if (!lenient) throw error;
+      log(`durable agent: resuming with the instructions it was launched with: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    }
   };
 
   // #4's startup is settled once hosts are adopted (above, synchronously) and
@@ -654,8 +758,43 @@ export function createApp(host: HostServices): AgentWranglerApp {
       repos ??= new Map((orchestration.store?.list() ?? []).map((e) => [e.id, e.repoRoot]));
       return repos.get(missionId);
     };
-    return { records: analyticsIndex.records(), tiers: models.catalog.tiers.map((t) => t.name), repoOf, selection, now: Date.now() };
+    return {
+      records: analyticsIndex.records(),
+      tiers: models.catalog.tiers.map((t) => t.name),
+      repoOf,
+      selection,
+      now: Date.now(),
+      // Routing proposals (§20, #52): the router asks for the routable tiers only, so the cohorts are measured against those.
+      proposals: {
+        rules: learnedRules.rules(),
+        rejected: learnedRules.rejected(),
+        tiers: models.catalog.tiers.filter((t) => t.reachableBy === 'route').map((t) => t.name),
+        veto: (rule: LearnedRule) => proposalVeto(rule, models.catalog.tiers),
+      },
+    };
   };
+  /** A person's click on a proposal or an accepted rule. Only a proposal the history supports right now can be accepted or rejected. */
+  const decideProposal = (id: string, decision: RoutingProposalDecision): void => {
+    if (decision === 'revoke') {
+      if (learnedRules.revoke(id)) log(`routing: revoked learned rule ${id}`);
+      return;
+    }
+    const input = analyticsInput({});
+    const ds = buildDataset({ records: input.records, tiers: input.tiers, repoOf: input.repoOf });
+    const proposal = currentProposals(ds, input.proposals, input.now).find((p) => p.id === id);
+    if (!proposal) {
+      log(`routing: proposal ${id} is no longer supported by the data`);
+      return;
+    }
+    if (decision === 'reject') {
+      learnedRules.reject(id, input.now);
+      return;
+    }
+    const accepted = learnedRules.accept(proposal, input.now);
+    log(accepted.ok ? `routing: accepted proposal ${id}` : `routing: refused ${id}: ${accepted.reasons[0]}`);
+  };
+  // What a person decided on routing proposals (§20, #52): the accepted rules the router reads, and the rejections.
+  const learnedRules = new LearnedRuleStore(learnedRulesFile(host.dataDir), undefined, log);
   const autoRouting = (): { gate: GateResult; report: ComparisonReport } => {
     const input = { records: routingEvidence.records(), tiers: models.catalog.tiers.map((t) => t.name) };
     return {
@@ -689,14 +828,18 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }
     return busy;
   };
+  /** Every live agent frozen, as Pause all and auto-pause leave it. Nothing scheduled starts then. */
+  const fleetPaused = (): boolean => {
+    if (pause.count === 0) return false;
+    const live = store.sessions.filter((s) => s.status !== 'ended' && s.pid !== undefined);
+    return live.length > 0 && live.every((s) => pause.isPaused(s.pid));
+  };
   // Behind `orchestration.enabled` (off by default): tasks (#33) and nothing else yet.
   const orchestration = createOrchestration({
     settings: host.settings,
     dataDir: host.dataDir,
     sessions,
     registry: sessionRegistry,
-    // G1: an attempt must survive `app:install`, so Claude attempts need hosts.
-    hostsEnabled: () => !!hostSupervisor && host.settings.get<boolean>('experimental.sessionHosts', false) === true,
     onTurnRecord: (listener) => turnRecords.event(listener),
     telemetry: {
       append: (record) => appendTelemetry(record),
@@ -714,6 +857,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     models: () => models.value,
     completion: { query: sdkQuery, binary: () => resolveClaudeBinary(getConfig().claudeBinaryPath) },
     // What the resolver decides against (#38): the catalog as it stands, and each source's usage window.
+    learnedRules: () => learnedRules.rules(),
     routingSnapshot: () => {
       const now = Date.now();
       return {
@@ -733,11 +877,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // "Pause now" uses the same PauseService. Usage, pause and endpoint changes step it.
     scheduling: {
       fleet: {
-        paused: () => {
-          if (pause.count === 0) return false;
-          const live = store.sessions.filter((s) => s.status !== 'ended' && s.pid !== undefined);
-          return live.length > 0 && live.every((s) => pause.isPaused(s.pid));
-        },
+        paused: () => fleetPaused(),
         pauseSession: (id) => {
           const s = store.sessions.find((x) => x.sessionId === id);
           const outcome = s ? pause.pause(s.pid) : 'gone';
@@ -752,6 +892,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
       onDidChange: (listener) => {
         const subs = [usage.onDidChange(listener), codexUsage.onDidChange(listener), pause.onDidChange(listener), localEndpoints.onDidChange(listener)];
         return { dispose: () => subs.forEach((s) => s.dispose()) };
+      },
+    },
+    // #47: a task needing an exclusive resource waits for its lease, and holds it while its attempt runs.
+    leases: {
+      service: leases,
+      agentPid: (id) => store.sessions.find((s) => s.sessionId === id)?.pid,
+      setAttemptActive: (fn) => {
+        leases.attemptActive = fn;
       },
     },
   });
@@ -797,25 +945,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
       const question = sessions.get(id)?.pendingQuestion;
       return question ? { requestId: question.requestId, questions: question.questions } : undefined;
     },
-    answer: async (id: string | undefined, requestId: string, answers: Record<string, string>) => {
-      const handle = sessions.get(id);
-      return handle ? (await handle.answer(requestId, answers)) === 'applied' : false;
-    },
     // Only Claude has plans: Codex has no plan-mode concept, and its handle
     // never reports one.
     pendingPlan: (id: string | undefined) => {
       const plan = sessions.get(id)?.pendingPlan;
       return plan ? { requestId: plan.requestId, plan: plan.plan, more: plan.more } : undefined;
     },
-    decidePlan: async (id: string | undefined, requestId: string, approve: boolean, feedback?: string) => {
-      const handle = sessions.get(id);
-      return handle ? (await handle.decidePlan(requestId, approve, feedback)) === 'applied' : false;
-    },
-    // Hosted sessions only: an in-process runner's prompt still reaches the
-    // hook file, which the row answers as for any session.
+    // Every runner is hosted, and a hosted session's permission prompt reaches
+    // the row and the remote only from here, not through the hook file.
     pendingPermission: (id: string | undefined) => {
       const handle = runners.get(id);
-      if (!handle?.hosted) return undefined;
+      if (!handle) return undefined;
       const ask = hostedPermissions(handle).at(-1);
       return ask
         ? { requestId: ask.requestId, toolName: ask.toolName, ask: { summary: ask.summary, body: ask.body, isCommand: ask.isCommand } }
@@ -844,7 +984,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // A live session host this app is not following holds it (one whose
     // manifest this build cannot read): never taken over or resumed around
     // it (§7.3). Stopping that host is offered instead.
-    const held = hostSupervisor?.heldBy(s.sessionId);
+    const held = hostSupervisor.heldBy(s.sessionId);
     if (held && !runners.owns(s.sessionId)) {
       await offerStopHost(held.manifest, displayLabel(s));
       return;
@@ -912,7 +1052,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // A session AW ran before comes back the way it was started; one from a
     // terminal gets the current defaults.
     const previous = sessionRegistry.get(s.sessionId);
-    const runner = await runners.resume({ cwd: s.cwd, resume: s.sessionId, ...claudeLaunch(previous), origin: previous?.origin });
+    const runner = await runners.resume({ cwd: s.cwd, resume: s.sessionId, ...claudeLaunch(previous, s.sessionId), origin: previous?.origin });
     surface?.showSession(runner);
     log(`adopted ${s.sessionId} into this window`);
     return runner;
@@ -944,7 +1084,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       'Stop host',
       'Leave',
     );
-    if (choice !== 'Stop host' || !hostSupervisor) return;
+    if (choice !== 'Stop host') return;
     const outcome = await hostSupervisor.stopHost(manifest);
     if (outcome === 'refused') {
       dialogs.error(`Agent Wrangler: the host holding ${label} did not stop. See the log.`);
@@ -1041,7 +1181,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (now.pid !== undefined && pause.isPaused(now.pid)) pause.resume(now.pid);
       await runners.end(runner);
       log(`closed ${now.sessionId}: ended the runner in this window`);
-    } else if (now.provider === 'claude' && hostSupervisor?.heldBy(now.sessionId)) {
+    } else if (now.provider === 'claude' && hostSupervisor.heldBy(now.sessionId)) {
       // A host this app cannot follow: stop the host, which ends its agent
       // gracefully, rather than kill the agent out from under it.
       if (now.pid !== undefined && pause.isPaused(now.pid)) pause.resume(now.pid);
@@ -1259,6 +1399,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         return;
       }
       // Scoped to Claude: a Claude plan limit must not freeze Codex sessions.
+      if (!access.admit(daemonContext, 'sessions.pauseAll')) return;
       if (setPausedAll(true, `plan usage reached ${percent}%`, 'claude')) autoPauseArmed = false;
     }),
   );
@@ -1295,6 +1436,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         codexAutoPauseArmed = decision.armed;
         return;
       }
+      if (!access.admit(daemonContext, 'sessions.pauseAll')) return;
       if (setPausedAll(true, `Codex plan usage reached ${percent}%`, 'codex')) codexAutoPauseArmed = false;
     }),
   );
@@ -1559,7 +1701,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     const startedAt = Date.now();
     let noticed = linkedNotices(tasks.list(), new Set(), { initial: true }).seen;
     host.subscribe(
-      tasks.onDidChange(() => {
+      // The app's own notices, not part of whichever request changed the mission (#126).
+      tasks.onDidChange(() => outsideRequest(() => {
         reindex();
         store.linkedWorkApplied();
         const { notices, seen } = linkedNotices(tasks.list(), noticed, { sinceMs: startedAt });
@@ -1570,10 +1713,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
           host.notify?.({
             title: n.title,
             body: n.body,
+            tag: `mission:${n.missionId}:${n.title}`,
+            ...(origin ? { sessionKey: origin.key } : {}),
             onClick: () => (origin ? surface?.show(origin.key, { preserveFocus: false }) : showMissionRequests.fire(n.missionId)),
           });
         }
-      }),
+      })),
     );
   }
 
@@ -1648,6 +1793,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
                 actions: (taskId) => tasks.actions(m.id, taskId),
                 finishDefault: m.state === 'review' ? orchestration.repoPolicies?.forFolder(m.repoRoot)?.policy.finish.default : undefined,
                 canPlan: tasks.canPlan,
+                finishing: tasks.finishingOf(m.id),
               }),
             ),
           // A3: each ask once, over the same missions the list draws (#101).
@@ -1699,12 +1845,25 @@ export function createApp(host: HostServices): AgentWranglerApp {
                 const ok = await dialogs.warn('Discard this mission’s result?', { modal: true, detail: 'Its worktrees are removed if they are clean. Its branches are kept until you delete them.' }, 'Discard');
                 if (ok !== 'Discard') return;
               }
-              const done = await tasks.finishMission(missionId, op.how);
+              let done;
+              try {
+                done = await tasks.finishMission(missionId, op.how);
+              } catch (e) {
+                // Recorded on the mission and shown beside its buttons, with the buttons back: not shown twice.
+                if (e instanceof FinishRefused) return;
+                throw e;
+              }
               const r = done.finishResult;
               if (r?.pullRequestUrl) {
                 dialogs.flash(`Pull request opened: ${r.pullRequestUrl}`, 6000);
                 if (/^https:\/\//.test(r.pullRequestUrl)) host.shell.openExternal(r.pullRequestUrl);
               } else dialogs.flash(`Mission ${op.how === 'merge-local' ? 'merged' : op.how === 'keep' ? 'kept' : 'discarded'}${r?.note ? `: ${r.note}` : ''}.`);
+              return;
+            }
+            case 'recheck-finish': {
+              const m = await tasks.recheckFinish(missionId);
+              if (m.pendingFinish?.uncertain) throw new TaskError(`Still cannot tell whether it went through: ${m.pendingFinish.uncertain.why}`);
+              dialogs.flash(m.state === 'review' ? 'It did not go through; the finish buttons are back.' : `Confirmed: ${m.finishResult?.note ?? m.finishResult?.pullRequestUrl ?? 'finished'}.`);
               return;
             }
             case 'task':
@@ -1781,6 +1940,66 @@ export function createApp(host: HostServices): AgentWranglerApp {
     // Only with orchestration on; the launcher shows its Tasks button only then.
     taskMenu: tasks ? (cwd, provider) => taskMenu(tasks, cwd, provider) : undefined,
   };
+
+  // Durable agents (#179): Agent Wrangler's own record, in its own state.
+  const durableAgents = createDurableAgents({
+    agents: new DurableAgentStore(host.globalState),
+    store,
+    sessions,
+    launchDefaults,
+    projects,
+    dialogs,
+    surface: () => surface,
+    globalDir: globalConversationDir,
+    log,
+  });
+  host.subscribe({ dispose: () => durableAgents.dispose() });
+
+  // Scheduled jobs (#164, #165): the daemon starts them at their time, as itself
+  // on the owner's behalf, through the same launch path as a new conversation.
+  const jobStore = new ScheduledJobStore(host.globalState);
+  // The PR review sweep (#168–#170): its reviewed-head ledger and any opted-in review files live in AW's own state.
+  const prSweep = createPrSweep({
+    storage: host.globalState,
+    reviewsDir: path.join(host.dataDir, 'pr-reviews'),
+    job: (id) => jobStore.get(id),
+    mayPost: (jobId) => access.admit(daemonContext, 'job.post', { kind: 'job', id: jobId }),
+    notify: (notice) => host.notify?.(notice),
+    log: (line) => log(line),
+  });
+  const scheduledJobs = createScheduledJobs({
+    prSweep,
+    jobs: jobStore,
+    sessions,
+    launchDefaults,
+    admission: (provider) => {
+      // The fullest window covers a provider at its limit too (100%), so no separate backoff.
+      const percent = maxUsagePercent((provider === 'codex' ? codexUsage : usage).usage.last);
+      return {
+        fleetPaused: fleetPaused(),
+        ...(percent !== undefined ? { windowPercent: percent } : {}),
+        autoPausePercent: getConfig().autoPausePercent,
+      };
+    },
+    mayStart: (jobId) => access.admit(daemonContext, 'session.start', { kind: 'job', id: jobId }),
+    runActive: (run) => {
+      const key = runSessionKey(run);
+      const s = key ? store.sessions.find((x) => x.key.toLowerCase() === key) : undefined;
+      return s !== undefined && (s.status === 'busy' || s.status === 'blocked');
+    },
+    notify: (notice) => host.notify?.(notice),
+    log: (line) => log(line),
+    globalDir: globalConversationDir,
+  });
+  host.subscribe({ dispose: () => scheduledJobs.dispose() });
+  // A job's session finishing its turn: the brief says it is ready (#167), a sweep records its review.
+  host.subscribe(
+    store.onDidUpdate((u) => {
+      // Every done row, not only the edge: one that asked for permission first never "became" done. Told once per run.
+      for (const s of u.upserted) if (s.status === 'done') scheduledJobs.sessionDone(s.provider, s.sessionId);
+    }),
+  );
+  const jobDirectory = createJobDirectory(jobStore, scheduledJobs, dialogs, prSweep);
 
   /**
    * "Run as task" (#33): the launcher's Tasks button. A quick pick, not a
@@ -2128,7 +2347,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
       else void reviewProposal(runner, mission.id, current.tasks[0].recommendation!, { showSession: false });
     };
     const body = route ? `Proposed: ${route}. Click to review and start it.` : 'No route recommended: click to pick one.';
-    if (host.notify) host.notify({ title: `Task proposal: ${mission.title}`, body, onClick: open });
+    if (host.notify) {
+      host.notify({
+        title: `Task proposal: ${mission.title}`,
+        body,
+        onClick: open,
+        tag: `proposal:${mission.id}`,
+        ...(from ? { sessionKey: from.key } : {}),
+      });
+    }
     dialogs.flash(`Task proposal waiting: ${mission.title} (${from ? 'in its conversation' : 'Tasks menu'})`, 6000);
     log(`task ${mission.id}: proposed through aw`);
     return {
@@ -2290,10 +2517,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (cfg.remoteAuthorizedUserIds.length === 0) bad('No authorised users, so nothing will be published at all');
       else ok(`${cfg.remoteAuthorizedUserIds.length} authorised user(s)`);
 
-      // The connection is the daemon's, not this process's (#74).
-      const status = await remoteLink?.status();
+      // The connection is this process's, in the core daemon (#138).
+      const status = remoteHere?.status();
       if (!status) {
-        bad('The background service that holds the Discord connection is not running. It starts when Discord integration is on; see logs/remote-daemon.log');
+        bad('Discord is not running in the background service yet. It starts when Discord integration is on; see logs/core-daemon.log');
       } else {
         ok(`The background service is running (pid ${status.pid}), so Discord keeps working when Agent Wrangler is closed`);
         if (!status.hasToken) bad('The background service has no bot token yet');
@@ -2333,8 +2560,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
   const disconnectDiscord = async (): Promise<{ ok: boolean; lines: string[] }> => {
     await host.secrets.delete(DISCORD_BOT_TOKEN_KEY);
-    // The daemon forgets its copy and hangs up.
-    await remoteLink?.reconfigure();
+    // Whoever holds the connection reads the Keychain again, finds nothing, and hangs up.
+    await syncRemote();
     log('remote: token removed and disconnected');
     return { ok: true, lines: ['✓  The bot token has been removed and the connection closed.'] };
   };
@@ -2375,6 +2602,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   const uninstallHooks = async (): Promise<void> => {
+    const choice = await dialogs.warn(
+      'Remove Agent Wrangler status hooks?',
+      {
+        modal: true,
+        detail:
+          `This takes Agent Wrangler's block out of ${settingsPath()}; your other hooks and settings stay. ` +
+          `Status goes back to being guessed from transcripts, for sessions started afterwards.`,
+      },
+      'Remove',
+    );
+    if (choice !== 'Remove') return;
     const res = await removeHooks();
     log(`uninstallHooks: ${res.message}`);
     if (res.ok) void dialogs.info(`Agent Wrangler: ${res.message}`);
@@ -2383,7 +2621,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
   };
 
   const adopting = new Set<string>();
-  const adoptCodexSession = async (session: AgentSession): Promise<void> => {
+  /** Take a Codex thread over here. The runner it is now driven by, or undefined when the user backed out. */
+  const adoptCodexSession = async (session: AgentSession): Promise<Awaited<ReturnType<CodexRunnerService['resume']>> | undefined> => {
     if (!session.cwd) throw new Error('Agent Wrangler: this Codex conversation has no working folder to resume.');
     if (session.status !== 'waiting' && session.status !== 'done') {
       throw new Error('Agent Wrangler: wait for the current Codex turn to finish before taking over here.');
@@ -2393,16 +2632,18 @@ export function createApp(host: HostServices): AgentWranglerApp {
     if (existing?.openElsewhere) codexRunners.drop(existing.threadId);
     else if (existing) {
       surface?.showSession(existing);
-      return;
+      return existing;
     }
     const history = session.transcriptPath
       ? await readRolloutBlocks(session.transcriptPath).catch(() => ({ blocks: [], truncated: false }))
       : { blocks: [], truncated: false };
     // A thread AW started before comes back under the rules it was started with (#71).
     const previous = sessionRegistry.get(session.sessionId);
-    const policy = !previous || isOrchestrationOrigin(previous.origin)
+    // The agent that holds the thread now speaks in it (#181), with or without a record of its own.
+    const fresh = previous && isOrchestrationOrigin(previous.origin) ? undefined : agentResumeInstructions({ provider: 'codex', sessionId: session.sessionId }, previous?.origin, false);
+    const policy = (!previous && fresh === undefined) || (previous && isOrchestrationOrigin(previous.origin))
       ? previous?.launch.policy
-      : { ...previous.launch.policy, codex: { ...previous.launch.policy?.codex, developerInstructions: withConversationDelegation(previous.launch.policy?.codex?.developerInstructions) } };
+      : { ...previous?.launch.policy, codex: { ...previous?.launch.policy?.codex, developerInstructions: fresh ?? withConversationDelegation(previous?.launch.policy?.codex?.developerInstructions) } };
     let runner: Awaited<ReturnType<CodexRunnerService['resume']>>;
     for (;;) {
       try {
@@ -2427,20 +2668,35 @@ export function createApp(host: HostServices): AgentWranglerApp {
           'Fork here',
         );
         if (choice === 'Retry') continue;
-        if (choice !== 'Fork here') return;
+        if (choice !== 'Fork here') return undefined;
         runner = await codexRunners.fork(session.sessionId, session.cwd, history.blocks, session.model, policy);
         log(`forked active Codex conversation ${session.sessionId} as ${runner.threadId}`);
+        // A fork of an agent's conversation is that conversation, carried on under a new id.
+        const owner = durableAgents.directory.ownerOf('codex', session.sessionId);
+        if (owner?.current) durableAgents.continued(owner.id, { provider: 'codex', sessionId: runner.threadId }, session.sessionId);
         break;
       }
     }
     surface?.showSession(runner);
     log(`controlling Codex conversation ${runner.threadId} here`);
+    return runner;
   };
   const actions: SessionActions = {
     async adoptAndSend(key, text, images, signal) {
       if (adopting.has(key)) throw new Error('A takeover is already pending for this session.');
       adopting.add(key);
       try {
+        const codex = store.get(key);
+        if (codex?.provider === 'codex') {
+          // A durable agent's current Codex thread resumes when typed to (#181); any other takes *Take over here*.
+          if (!durableAgents.directory.ownerOf('codex', codex.sessionId)?.current) throw new Error('Take this Codex conversation over here first; your draft is preserved.');
+          const runner = await adoptCodexSession(codex);
+          if (!runner) throw new Error('Resume cancelled; your draft is preserved.');
+          if (signal.aborted) throw new Error('Send cancelled; the conversation was resumed here but no message was sent.');
+          if (!runner.canSend) throw new Error(runner.readOnlyReason ?? 'The conversation could not be resumed; your draft is preserved.');
+          if ((await runner.send(text, images)) !== 'applied') throw new Error('The conversation did not take the message; your draft is preserved.');
+          return;
+        }
         await waitForAdoptable(store, key, signal, true);
         const s = store.get(key);
         if (!s || signal.aborted) throw new Error('Send cancelled; your draft is preserved.');
@@ -2454,6 +2710,12 @@ export function createApp(host: HostServices): AgentWranglerApp {
       } finally { adopting.delete(key); }
     },
     smartOpen(key) {
+      // A link to an agent's conversation (#179): whatever the agent continues now.
+      const agentId = agentIdOfDraftKey(key);
+      if (agentId !== undefined) {
+        durableAgents.directory.open(agentId);
+        return;
+      }
       const s = store.get(key);
       if (!s) return;
       surface?.show(s.key);
@@ -2484,7 +2746,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (!s) return;
       if (adopting.has(key)) return;
       adopting.add(key);
-      const adoption = s.provider === 'codex' ? adoptCodexSession(s) : adoptSession(s).then(() => undefined);
+      const adoption = s.provider === 'codex' ? adoptCodexSession(s).then(() => undefined) : adoptSession(s).then(() => undefined);
       void adoption.catch((e) => dialogs.error(String(e))).finally(() => adopting.delete(key));
     },
     release(key) {
@@ -2580,83 +2842,15 @@ export function createApp(host: HostServices): AgentWranglerApp {
     installHooks() {
       void installHooks();
     },
-    async decidePermission(key, behavior, opts) {
-      const s = store.get(key);
-      if (!s || s.provider !== 'claude') return 'unsupported';
-      const expected = opts?.expectedRequestId;
-      // A session in a host is answered through the host (§6.1): its ask
-      // waits for days, where the hook gives up after ~28 minutes, and since
-      // Stage 4 the hook does not wait for hosted sessions at all, so the
-      // host is the only way in (`AGENTWRANGLER_HOSTED`). The request named is
-      // answered; with none named, only a lone pending one, so the answer
-      // cannot land on the wrong prompt.
-      const hosted = runners.get(s.sessionId);
-      if (hosted?.hosted) {
-        const pending = hostedPermissions(hosted);
-        const target = expected !== undefined ? pending.find((b) => b.requestId === expected) : pending.length === 1 ? pending[0] : undefined;
-        if (target) {
-          const outcome = await hosted.decide(target.requestId, behavior);
-          if (outcome === 'applied') {
-            log(`permission ${behavior} sent to the host running ${s.name ?? s.sessionId}`);
-            return 'applied';
-          }
-          dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
-          return outcome === 'stale' ? 'stale' : 'gone';
-        }
-      }
-      // Caught here only to say the right thing: this snapshot can be a poll
-      // behind, so `HookLog.decide` re-checks against the id it read off the
-      // event stream, which is the one that actually decides.
-      if (expected !== undefined && s.permissionRequestId !== expected) {
-        dialogs.flash(`Agent Wrangler: that prompt for ${displayLabel(s)} has already been answered.`, 4000);
-        return 'stale';
-      }
-      const sent = await provider.decidePermission(s.sessionId, behavior, expected);
-      if (sent) {
-        log(`permission ${behavior} sent to ${s.name ?? s.sessionId}`);
-        if (behavior === 'always' && s.alwaysAllow) {
-          dialogs.flash(
-            `Agent Wrangler: allowed ${s.alwaysAllow.rules.join(', ')} in ${s.alwaysAllow.destination}.`,
-            5000,
-          );
-        }
-        return 'applied';
-      }
-      // The prompt was answered in Claude Code first, or the hook gave up
-      // waiting; either way there is nothing left to decide from here.
-      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that permission.`, 4000);
-      return 'gone';
-    },
-    async answerQuestion(key, requestId, answers) {
-      const s = store.get(key);
-      if (!s) return 'unsupported';
-      // `owns` rather than a try-and-see: a session running in a terminal has
-      // no question here to answer, and saying so is not the same as failing.
-      if (!runnerOwnership.owns(s.sessionId) || !runnerOwnership.answer) return 'unsupported';
-      const parked = runnerOwnership.pendingQuestion?.(s.sessionId);
-      if (parked && parked.requestId !== requestId) return 'stale';
-      const answered = await runnerOwnership.answer(s.sessionId, requestId, answers);
-      if (answered) {
-        log(`question answered for ${s.name ?? s.sessionId}`);
-        return 'applied';
-      }
-      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that question.`, 4000);
-      return 'gone';
-    },
-    async decidePlan(key, requestId, approve, feedback) {
-      const s = store.get(key);
-      if (!s) return 'unsupported';
-      if (!runnerOwnership.owns(s.sessionId) || !runnerOwnership.decidePlan) return 'unsupported';
-      const parked = runnerOwnership.pendingPlan?.(s.sessionId);
-      if (parked && parked.requestId !== requestId) return 'stale';
-      const decided = await runnerOwnership.decidePlan(s.sessionId, requestId, approve, feedback);
-      if (decided) {
-        log(`plan ${approve ? 'approved' : 'rejected'} for ${s.name ?? s.sessionId}`);
-        return 'applied';
-      }
-      dialogs.flash(`Agent Wrangler: ${displayLabel(s)} is no longer waiting on that plan.`, 4000);
-      return 'gone';
-    },
+    // Permissions, questions and plans: the one way an ask is answered from
+    // outside the agent, whichever surface or client the button is on (#132).
+    ...createApprovalActions({
+      store,
+      live: (id) => sessions.get(id),
+      decideByHook: (id, behavior, expected) => provider.decidePermission(id, behavior, expected),
+      flash: (message, timeoutMs) => dialogs.flash(message, timeoutMs),
+      log,
+    }),
   };
 
   // One microphone, so one recorder for the whole process however many panes are open.
@@ -2666,8 +2860,6 @@ export function createApp(host: HostServices): AgentWranglerApp {
       ffmpegPath: host.settings.get<string>('dictation.ffmpegPath', ''),
       whisperPath: host.settings.get<string>('dictation.whisperPath', ''),
       modelPath: host.settings.get<string>('dictation.modelPath', ''),
-      inputDevice: host.settings.get<string>('dictation.inputDevice', ':default'),
-      livePreview: host.settings.get<boolean>('dictation.livePreview', true),
     }),
   });
 
@@ -2709,74 +2901,58 @@ export function createApp(host: HostServices): AgentWranglerApp {
   );
   host.subscribe(remoteSessions);
   /**
-   * Remote control runs in the remote daemon (#74), not here.
-   *
-   * The daemon holds the Discord connection and the reconciler, and keeps both
-   * going while this app is quit, crashed or being reinstalled. This process is
-   * its best feed while it runs: it hands over the settings and the bot token
-   * (which stays in `safeStorage`; the daemon keeps it in memory), streams
-   * `remoteSessions`, and applies the presses the daemon sends back through
-   * `actions`, the same calls the dashboard's buttons make. Nothing is started
-   * until `remote.enabled` is on, so the default configuration runs no daemon.
+   * Remote control (`host.remoteInProcess`: the core daemon, #138). The core
+   * does not come and go, so Discord runs right here:
+   * `createInProcessRemoteControl` is fed `remoteSessions` and applies presses
+   * through `actions`, the same calls the dashboard's buttons make, and reads
+   * the bot token from the Keychain itself. The first sync retires the old
+   * remote daemon an Electron-era build may have left (its LaunchAgent
+   * included) and waits for it to exit before anything is built, since the
+   * two share the mirror map. Nothing is built until `remote.enabled` is on.
    *
    * The list is not offered as complete (`ready`) until the Claude provider's
    * first scan is in and adopted hosts have had a moment to catch up: until
-   * then the daemon keeps following its own feed, rather than close cards for
-   * asks this process has not seen yet.
+   * then nothing is closed for asks this process has not seen yet.
    */
   let remoteReady = false;
-  const remoteLink = host.remoteDaemon
-    ? new RemoteDaemonLink({
-        paths: host.remoteDaemon.paths,
-        build: host.sessionHosts?.runtime.buildId ?? 'dev',
-        log: (m) => log(`remote: ${m}`),
-        ensure: (why) => host.remoteDaemon!.ensure(why),
-        replaceOutdated: host.remoteDaemon.replaceOutdated,
-        configure: async () => ({
-          config: getConfig(),
-          homeDir: os.homedir(),
-          botToken: getConfig().remoteEnabled ? ((await host.secrets.get(DISCORD_BOT_TOKEN_KEY)) ?? null) : null,
-        }),
+  const inProcessRemote = host.remoteInProcess;
+  /** Discord in this process, once retired-and-enabled has built it. */
+  let remoteHere: InProcessRemoteControl | undefined;
+  let remoteDaemonRetired = false;
+  let remoteStopped = false;
+  announceRemote = (notice) => void remoteHere?.notify(notice);
+
+  /** In this process: retire the remote daemon once, then build, reconfigure or hang up. */
+  const syncRemoteHere = async (here: NonNullable<HostServices['remoteInProcess']>): Promise<void> => {
+    if (!remoteDaemonRetired) {
+      remoteDaemonRetired = true;
+      await here.retireDaemon().catch((err) => log(`remote: could not retire the remote daemon: ${String(err)}`));
+    }
+    if (remoteStopped) return;
+    if (!remoteHere) {
+      if (!getConfig().remoteEnabled) return;
+      remoteHere = createInProcessRemoteControl({
         sessions: remoteSessions,
         ready: () => remoteReady,
-        extras: () => {
-          const nicknamed: Record<string, string> = {};
-          const archived: string[] = [];
-          for (const s of store.sessions) {
-            const name = nicknames.get(s.key);
-            if (name) nicknamed[s.key] = name;
-            if (archive.isArchived(s.key)) archived.push(s.key);
-          }
-          return { archived, nicknames: nicknamed };
-        },
         actions,
-      })
-    : undefined;
-  if (remoteLink) host.subscribe(remoteLink);
-  announceRemote = (notice) => void remoteLink?.notify(notice);
+        gate: access,
+        getConfig,
+        secrets: host.secrets,
+        log: (m) => log(`remote: ${m}`),
+        makeTransport: here.makeTransport,
+        mirrorFile: here.mirrorFile,
+      });
+      log('remote: Discord runs in this process');
+    }
+    await remoteHere.sync();
+  };
 
-  /** Start following the daemon, hand it new settings, or stop it: whichever `remote.enabled` now says. */
-  let remoteWanted = false;
+  /** Build Discord, hand it new settings, or hang it up: whichever `remote.enabled` now says. */
   let remoteSyncing: Promise<void> = Promise.resolve();
   const syncRemote = (): Promise<void> => {
     remoteSyncing = remoteSyncing.then(async () => {
-      if (!remoteLink || !host.remoteDaemon) return;
-      if (getConfig().remoteEnabled) {
-        if (!remoteWanted) {
-          remoteWanted = true;
-          remoteLink.start(); // configures on connect
-        } else {
-          await remoteLink.reconfigure();
-        }
-        return;
-      }
-      if (remoteWanted) {
-        remoteWanted = false;
-        // Told first, so it closes its cards and hangs up before it is stopped.
-        await remoteLink.reconfigure();
-        await remoteLink.stop();
-      }
-      await host.remoteDaemon.remove().catch((err) => log(`remote: could not remove the daemon: ${String(err)}`));
+      if (!inProcessRemote) return;
+      await syncRemoteHere(inProcessRemote).catch((err) => log(`remote: ${String(err)}`));
     });
     return remoteSyncing;
   };
@@ -2798,13 +2974,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }),
   );
 
-  // "Needs you" notifications, with a per-session cooldown. Opt-in while the
-  // window is open; on by default while it is closed, when the menu bar and
-  // these are the only way to hear about it (Stage 6). An OS notification
-  // where the host has one: it takes no focus, where a message box does.
+  // "Needs you" notifications, with a per-session cooldown. Opt-in while a
+  // browser has the workbench open; on by default while none does, when these
+  // are the only way to hear about it (Stage 6). An OS notification where the
+  // host has one: it takes no focus, where a message box does.
   const lastToastAt = new Map<string, number>();
   host.subscribe(
-    store.onDidUpdate((u) => {
+    // The app's own notice, not part of whichever request changed the store (#126).
+    store.onDidUpdate((u) => outsideRequest(() => {
       if (u.becameWaiting.length === 0) return;
       const cfg = getConfig();
       const windowOpen = surface?.isOpen ?? false;
@@ -2820,7 +2997,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
           if (!notice) continue;
           host.notify({
             ...notice,
-            // Clicked: the user asked for it, so the window comes forward.
+            // One tag per ask (#141): the session and what it is waiting for.
+            tag: `attention:${s.key}:${s.status}`,
+            sessionKey: s.key,
+            // Clicked: the user asked for it, so the session comes forward.
             onClick: () => surface?.show(s.key, { preserveFocus: false }),
           });
           continue;
@@ -2836,7 +3016,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
           else if (choice === 'Dashboard') surface?.open();
         });
       }
-    }),
+    })),
   );
 
   /**
@@ -3070,7 +3250,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
       runner = await runners.resume({
         cwd: decision.cwd,
         resume: decision.sessionId,
-        ...claudeLaunch(candidate),
+        ...claudeLaunch(candidate, decision.sessionId, { lenient: true }),
         origin: candidate?.origin,
       });
     } catch (err) {
@@ -3097,6 +3277,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (await refreshPermissionScript(hookLogDir())) log('permission hook script updated to this version');
     } catch (err) {
       log(`could not update the permission hook script: ${String(err)}`);
+    }
+    try {
+      if (await refreshLeaseScript(hookLogDir())) log('lease hook script updated to this version');
+    } catch (err) {
+      log(`could not update the lease hook script: ${String(err)}`);
     }
     const state = await currentState(hookLogDir());
     log(`hook install state: ${state.kind}${'why' in state ? ` (${state.why})` : ''}`);
@@ -3133,18 +3318,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
     sessions,
     sessionRegistry,
     sessionCounts: () => {
-      const claude = runners.counts();
       const codex = codexKeepAlive
         ? 0
         : codexRunners.list().filter((h) => h.lifecycle !== 'ended' && h.lifecycle !== 'error').length;
-      return { hosted: claude.hosted, local: claude.local + codex };
+      return { hosted: runners.liveCount(), local: codex };
     },
     runBy: (sessionId) => {
-      const claude = runners.get(sessionId);
-      if (claude) return claude.hosted ? 'hosted' : 'app';
+      // Every Claude runner is in a session host (#122).
+      if (runners.get(sessionId)) return 'hosted';
       if (codexRunners.owns(sessionId)) return codexKeepAlive ? 'hosted' : 'app';
       // A host this app holds but is not following (Close stops it as ours).
-      if (hostSupervisor?.heldBy(sessionId)) return 'hosted';
+      if (hostSupervisor.heldBy(sessionId)) return 'hosted';
       return 'external';
     },
     async stopSession(key, opts = {}) {
@@ -3155,22 +3339,26 @@ export function createApp(host: HostServices): AgentWranglerApp {
     },
     proposeTask,
     delegate,
+    proposeAgentMemory: (origin, input) => durableAgents.propose(origin, input),
     taskList: () => (tasks ? tasks.list().filter((m) => !['completed', 'cancelled'].includes(m.state)).map(taskSummary) : []),
     async stopAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}) {
-      const { hosted, local } = runners.counts();
-      const ending = local + (opts.includeHosted ? hosted : 0);
+      // Claude sessions all run in hosts: an ordinary quit lets them go (in
+      // `dispose`) and they keep running. Only Quit and Stop All Agents ends
+      // them, with the graceful end sequence, awaited and bounded. Codex
+      // threads are left to `dispose`: with the background server that only
+      // closes the connection, and they keep running; with `--stdio` the
+      // child goes, and them with it.
+      if (!opts.includeHosted) return;
+      const ending = runners.liveCount();
       if (ending > 0) log(`quitting: ending ${ending} session(s), waiting up to ${withinMs} ms`);
-      // The Claude CLIs get the graceful end sequence, awaited and bounded;
-      // hosted ones are let go of (and keep running) unless asked to stop
-      // them too. Codex threads are left to `dispose`: with the background
-      // server that only closes the connection, and they keep running; with
-      // `--stdio` the child goes, and them with it.
-      await runners.endAllForQuit(withinMs, opts);
+      await runners.endAllForQuit(withinMs);
     },
     onSystemResume() {
-      // The Discord connection is the daemon's, which notices the sleep itself.
+      // The remote daemon notices a sleep itself; Discord in this process is told.
       log('woke from sleep: rechecking session hosts');
       runners.wakeAll();
+      remoteHere?.wake();
+      scheduledJobs.onWake();
     },
     restartCodexServer,
     runnerOwnership,
@@ -3188,7 +3376,11 @@ export function createApp(host: HostServices): AgentWranglerApp {
         const detail = analyticsDetail(analyticsInput(selection), ref);
         if (detail) surface?.showDetail(detail);
       },
-      onDidChange: (listener) => analyticsIndex.onDidChange(listener),
+      decideProposal,
+      onDidChange: (listener) => {
+        const subs = [analyticsIndex.onDidChange(listener), learnedRules.onDidChange(listener)];
+        return { dispose: () => subs.forEach((s) => s.dispose()) };
+      },
     },
     pause,
     usage,
@@ -3197,9 +3389,13 @@ export function createApp(host: HostServices): AgentWranglerApp {
     launcher,
     taskPanes,
     missions: missionSource,
+    agents: durableAgents.directory,
+    jobs: jobDirectory,
+    agentConversations: durableAgents.conversations,
     dictation,
     files,
     actions,
+    access,
     getConfig,
 
     attachSurface(next) {
@@ -3234,17 +3430,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
       void checkHookHealth();
       // Off by default, so this normally reads the setting and stops.
       void syncRemote();
-      // The list the daemon follows is complete once the Claude provider's
+      // The list Discord follows is complete once the Claude provider's
       // first scan is in, Codex threads are rejoined, and every adopted host
       // has caught up (its view has left `starting`/`connecting`, so its
-      // pending asks are known), or after 30 s at most. Until then the daemon
-      // keeps following its own feed, which already sees those hosts' asks.
+      // pending asks are known), or after 30 s at most. Until then nothing is
+      // closed for an ask this process has not seen yet.
       void Promise.all([remoteFirstScan, startupSettled]).then(async () => {
         const deadline = Date.now() + 30_000;
         const catchingUp = () => runners.list().some((r) => r.hosted && (r.lifecycle === 'starting' || r.lifecycle === 'connecting'));
         while (Date.now() < deadline && catchingUp()) await new Promise((r) => setTimeout(r, 250));
         remoteReady = true;
-        remoteLink?.pushSoon();
+        void remoteHere?.reconcile();
       });
       // After the store's first scan, so "is it running elsewhere?" has an answer.
       setTimeout(() => void resumeLastRunner().catch((err) => log(`resume failed: ${String(err)}`)), 2000);
@@ -3253,9 +3449,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
         .finally(settleStartup);
     },
 
+    async stopRemote() {
+      const here = remoteHere;
+      remoteHere = undefined;
+      remoteStopped = true; // nothing is built again on the way out
+      await here?.dispose();
+    },
+
     dispose() {
       dictation.cancel(); // never leave ffmpeg holding the microphone after the app has gone
       store.dispose();
+      void remoteHere?.dispose();
     },
   };
 }

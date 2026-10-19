@@ -1,0 +1,10 @@
+{
+  "name": "repeated-failure-climbs-the-ladder",
+  "tasks": [{ "id": "a" }],
+  "scenario": {
+    "tasks": { "a": [{ "behaviour": "fail", "signature": "s", "delayMs": 2000 }, { "behaviour": "fail", "signature": "s", "delayMs": 2000 }] },
+    "default": { "behaviour": "edit", "delayMs": 2000 }
+  },
+  "limits": { "qualityAttempts": 5 },
+  "expect": { "mission": "completed", "tasks": { "a": "done" }, "attempts": { "a": 3 } }
+}

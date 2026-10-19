@@ -6,9 +6,10 @@
  * `src/shared/sessionProtocol.ts`) into what the pane shows: blocks, the
  * composer, the pending question or plan. It builds the permission results the
  * pane's buttons mean and hands them back as raw results. It never touches the
- * SDK `Query` itself: everything goes through `ClaudeExecution`, which is
- * `ClaudeSdkSession` in-process today and a session host over a socket from
- * Stage 3 (`docs/plans/session-lifecycle-architecture.md` §5.1).
+ * SDK `Query` itself: everything goes through `ClaudeExecution`, which in the
+ * app is always a session host over a socket (#122;
+ * `docs/plans/session-lifecycle-architecture.md` §5.1), and in tests may be
+ * a `ClaudeSdkSession` in the test's own process.
  *
  * The public surface is the one the single class it replaced had (execution
  * and translation fused, before Stage 1), with the commands now async and

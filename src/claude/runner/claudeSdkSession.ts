@@ -68,6 +68,13 @@ export interface ClaudeSessionOptions {
  * The SDK options a launch policy sets, and only those: nothing here can
  * change the permission mode, `canUseTool`, or turn on
  * `allowDangerouslySkipPermissions`. Empty for no policy.
+ *
+ * A session on a local endpoint loads the repository's own settings and
+ * `CLAUDE.md`, nothing from the user's `~/.claude` (#158). User settings bring
+ * their `additionalDirectories` (other repositories, where a small model goes
+ * looking instead of its cwd), plugins, hooks and skills, and MCP servers add
+ * their tools: tens of thousands of tokens in a window of 32k to 64k. Auto
+ * memory and claude.ai connectors are switched off in its env (`localClaudeEnv`).
  */
 export function claudePolicyOptions(raw: ClaudeLaunchPolicy | undefined, model?: string): Partial<Options> {
   const policy = parseLaunchPolicy({ claude: raw })?.claude;
@@ -81,6 +88,10 @@ export function claudePolicyOptions(raw: ClaudeLaunchPolicy | undefined, model?:
   // model switch (and the migration after it) can make it: then there is none.
   if (policy.fallbackModel && policy.fallbackModel !== model) out.fallbackModel = policy.fallbackModel;
   if (policy.outputFormat) out.outputFormat = policy.outputFormat;
+  if (policy.localProvider) {
+    out.settingSources = ['project', 'local'];
+    out.strictMcpConfig = true;
+  }
   return out;
 }
 

@@ -51,10 +51,10 @@ export const RPC_AMBIGUOUS = -32005;
 /** The session exists, but not in a way that allows this (e.g. `send` to one AW does not run). */
 export const RPC_UNSUPPORTED = -32006;
 
-export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks'] as const;
+export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'agent.propose', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke'] as const;
 export type ControlMethod = (typeof CONTROL_METHODS)[number];
 /** Methods that change something. Logged by the core (method and session, never content). */
-export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate'];
+export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate', 'agent.propose'];
 /** The longest objective `task.propose` and `delegate` accept. An outcome, not a document. */
 export const MAX_TASK_OBJECTIVE_CHARS = 20_000;
 
@@ -118,8 +118,10 @@ export interface ControlStatusResult {
   startedAt: number;
   /** Sessions shown in the table (archived ones excluded), by status. */
   byStatus: Partial<Record<ControlStatus, number>>;
-  /** Sessions AW runs: in hosts (survive a quit) and in-process (do not). */
+  /** Sessions AW runs: in hosts (survive a quit; every Claude one) and as children of the app (do not; Codex `--stdio`). */
   running: { hosted: number; app: number };
+  /** Remote control over the relay (#173), as Preferences says it. Absent: no web workbench here. */
+  remote?: { ok: boolean; lines: string[] };
 }
 
 export interface ControlSessionsParams {
@@ -303,6 +305,76 @@ export interface ControlDelegateResult {
   /** For `multiple`: the plan's tasks, in the order they would run. */
   tasks?: { key: string; title: string }[];
   note?: string;
+}
+
+/**
+ * `agent.propose` (#180): a durable agent suggests a change to its memory —
+ * add an item, or forget one by id. Like `task.propose` it only proposes: the
+ * user approves it in the app, and nothing is stored until they do. The
+ * origin is self-reported and says only which agent's card it is; an agent
+ * cannot write to memory, its own or another's.
+ */
+export interface ControlAgentProposeParams {
+  origin: { provider: 'claude' | 'codex'; sessionId: string };
+  op: 'add' | 'forget';
+  /** For `add`: decision, preference, question or work. */
+  kind?: string;
+  text?: string;
+  /** For `forget`: the item's id, as the agent was shown it. */
+  itemId?: string;
+}
+
+export interface ControlAgentProposeResult {
+  /** The agent's name. */
+  agent: string;
+  /** Absent when the same proposal was already waiting, or the memory already says it. */
+  proposalId?: string;
+}
+
+/**
+ * `web.link` (#127): a single-use sign-in link for the browser workbench,
+ * good for `expiresAt - now` (two minutes). `aw web open` opens it; `aw web
+ * url` prints it. Refused with `RPC_UNSUPPORTED` when the workbench is off or
+ * not listening.
+ */
+export interface ControlWebLinkResult {
+  url: string;
+  expiresAt: number;
+}
+
+/**
+ * `web.pair` (#137): start pairing a device on the home network. `url` is
+ * the LAN listener's `/pair?code=…` link (what the QR code says); `code` is
+ * the same code for typing, eight characters. Single use, until `expiresAt`
+ * (five minutes); a new one replaces it. Refused with `RPC_UNSUPPORTED` while
+ * LAN access is not listening.
+ */
+export interface ControlWebPairResult {
+  url: string;
+  /** What the QR code carries when there is a setup page: see `PairingOfferView`. */
+  setupUrl?: string;
+  code: string;
+  expiresAt: number;
+}
+
+/** One browser device (#137). Ids and a name, never a credential. */
+export interface ControlWebDevice {
+  id: string;
+  name: string;
+  /** `loopback`: a browser on this Mac (`aw web open`). `lan`: paired over the home network. May grow. */
+  scope: string;
+  createdAt: number;
+  lastSeen: number;
+}
+
+/** `web.devices` (#137). */
+export interface ControlWebDevicesResult {
+  devices: ControlWebDevice[];
+}
+
+/** `web.devices.revoke {id}` (#137): `id` or a unique prefix of 4+ characters. Its connections close at once. */
+export interface ControlWebRevokeResult {
+  device: ControlWebDevice;
 }
 
 /**

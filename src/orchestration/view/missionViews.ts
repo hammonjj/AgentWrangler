@@ -10,6 +10,7 @@
 import { isOpenProposal, missionPhase, missionTaskCounts, originKeyOf, taskPhase } from '../../shared/orchestration/delegatedState';
 import { summariseVerification } from '../../shared/orchestration/verification';
 import { planDiffText, type MissionMetricsView, type MissionPlannerView, type MissionTaskView, type MissionView, type TaskPreviewView } from '../../shared/orchestration/missionView';
+import { localModelName } from '../../shared/modelName';
 import { formatUsd } from '../../shared/sessionUsage';
 import type { TaskViewAction } from '../../shared/orchestration/taskView';
 import type { CostBasis, ExecutionAttempt, Mission, MissionFinish, Task } from '../../shared/orchestration/types';
@@ -127,6 +128,18 @@ export interface MissionViewContext {
   finishDefault?: MissionFinish;
   /** A planner is running here (#44), so Plan again and Replan can be offered. */
   canPlan?: boolean;
+  /**
+   * The finish under way: the task runner's `finishingOf(missionId)`, which
+   * also knows one asked for in this run and not yet recorded. Absent: read
+   * from the mission's own write-ahead record.
+   */
+  finishing?: { how: MissionFinish; uncertain?: string };
+}
+
+/** The finish a mission's record says is under way, when nothing fresher is known. */
+function recordedFinishing(m: Mission): MissionView['finishing'] {
+  const p = m.pendingFinish;
+  return p ? { how: p.how, ...(p.uncertain ? { uncertain: p.uncertain.why } : {}) } : undefined;
 }
 
 /** The planner's latest run as review shows it (#44). */
@@ -135,12 +148,14 @@ export function plannerViewOf(m: Mission): MissionPlannerView | undefined {
   if (!run) return undefined;
   const cost = sum(run.rounds.map((r) => r.costUsd));
   const verb = run.kind === 'replan' ? 'Replanned' : 'Planned';
+  // The tooltip below keeps the run's raw model id; the line shows its name.
+  const modelName = localModelName(run.model) ?? run.model;
   const text =
     run.state === 'running'
-      ? `${run.kind === 'replan' ? 'Replanning' : 'Planning'} with ${run.model}…`
+      ? `${run.kind === 'replan' ? 'Replanning' : 'Planning'} with ${modelName}…`
       : run.state === 'proposed'
         ? [
-            `${verb} by ${run.model}${run.source ? ' (local)' : ''}`,
+            `${verb} by ${modelName}${run.source ? ' (local)' : ''}`,
             `${run.proposed ?? 0} ${run.kind === 'replan' ? 'new ' : ''}task${run.proposed === 1 ? '' : 's'}`,
             `${run.rounds.length} round${run.rounds.length === 1 ? '' : 's'}`,
             ...(cost !== undefined ? [formatUsd(cost)] : []),
@@ -247,6 +262,8 @@ export function missionViewOf(m: Mission, ctx: MissionViewContext): MissionView 
       : {}),
     ...(m.finish ? { finish: m.finish } : {}),
     ...(m.finishResult ? { finishResult: m.finishResult } : {}),
+    ...(m.state === 'review' && (ctx.finishing ?? recordedFinishing(m)) ? { finishing: ctx.finishing ?? recordedFinishing(m) } : {}),
+    ...(m.state === 'review' && m.finishFailure ? { finishFailure: { how: m.finishFailure.how, why: m.finishFailure.why } } : {}),
     canCancel: !['completed', 'cancelled', 'failed', 'review'].includes(m.state),
     canPause: m.planned === true && m.state === 'running',
     canResume: m.state === 'paused',

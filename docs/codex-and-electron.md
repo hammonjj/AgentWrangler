@@ -22,6 +22,12 @@ Injected environment, plugin, and AGENTS.md setup messages are skipped when sele
 
 ## Electron seam
 
+> **Superseded by [plans/browser-workbench.md](plans/browser-workbench.md) (#121).** This and
+> *Packaging hazards* below planned the VSCode-to-Electron port. Electron was retired in #142:
+> the bundles now run in a browser, reaching the core daemon through the web shim
+> (`src/webview/webshim`), and the `.app` is a Node bundle. Kept as history. The Codex sections
+> above and *Compatibility behavior* below are current.
+
 The browser bundles reach the host through `createWebviewBridge`, called in exactly one
 place: `src/webview/common/paneApi.ts`. It prefers a preload-injected `agentWranglerHost`
 and falls back to `acquireVsCodeApi`. It is centralised there because `acquireVsCodeApi`
@@ -74,6 +80,8 @@ and command registration. Ranked by what the work actually is:
 The Electron application should run one backend per OS login, with renderer windows subscribing to snapshots. Runner ownership must use leases keyed by provider and thread so the VSCode extension and desktop app cannot both control one conversation. A renderer reload only reconnects. Surviving full application exit requires a separate daemon and is intentionally a later feature.
 
 ## Packaging hazards
+
+> Superseded with the section above (#142): there is no ASAR and no Electron runtime any more.
 
 - Resolve `claude` and `codex` from explicit settings plus platform locations; a binary inside a VSCode extension is not a durable desktop dependency.
 - Keep spawned binaries and hook helpers outside ASAR. Re-test the Claude SDK ESM/CJS bundle under Electron.

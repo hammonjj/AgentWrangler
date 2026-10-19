@@ -10,6 +10,7 @@
 import { routingPolicyUpdate, type OrchestrationPrefsView } from '../../shared/preferences';
 import { POLICY_FIELDS, fieldValue, withField, type LauncherRoutingMode, type PolicyFieldSpec, type PolicyValue } from '../../shared/orchestration/executionPolicy';
 import { effectiveMode } from '../../shared/orchestration/autoRouting';
+import { BUDGET_STRATEGIES, STRATEGY_PROFILES } from '../../shared/orchestration/budgetStrategy';
 import { EFFORT_LEVELS, type ExecutionPolicy } from '../../shared/orchestration/types';
 import { harnessLabel } from '../../shared/harness';
 import { button, crossLink, el, localContext, option, tabHeader, tierLabel, type Post } from './orchCommon';
@@ -304,6 +305,8 @@ function policyControl(spec: PolicyFieldSpec, value: PolicyValue | undefined, vi
       if (typeof value === 'string' && !options.some(([v]) => v === value)) options.push([value, `${value} (not reported)`]);
       return select(options);
     }
+    case 'strategy':
+      return select(BUDGET_STRATEGIES.map((s) => [s, STRATEGY_PROFILES[s].label]));
     case 'flag': {
       const c = el('input', 'pf-check');
       c.type = 'checkbox';

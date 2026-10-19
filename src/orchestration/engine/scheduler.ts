@@ -37,8 +37,16 @@
  *   usage window at the admission threshold (85% by default, below the 98%
  *   auto-pause) is a `wait`, never a failure. `wake` says when the next timed
  *   wait ends.
+ * - **Contention (§13.4–13.5, #47).** A task whose predicted scope overlaps a
+ *   live task's in the same repository waits for it, unless both missions
+ *   allow overlap. A task whose exclusive resource another holder has leased
+ *   waits for the lease. Both are `wait`s: the engine steps again when a task
+ *   ends or a lease is released.
  */
 import type { DependencyKind, HarnessId, Millis, MissionState, ModelSourceId, TaskState } from '../../shared/orchestration/types';
+import { STRATEGY_PROFILES, admissionPercentFor, type BudgetStrategy } from '../../shared/orchestration/budgetStrategy';
+import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
+import { globsOverlap } from '../policy/globs';
 import { chooseAssignment, type AssignmentChoice, type AssignmentInput } from './assignment';
 
 // ---------------------------------------------------------------------------
@@ -117,6 +125,15 @@ export interface SchedTask {
    * and the warm sessions earlier tasks left. Absent: a new session.
    */
   assignment?: AssignmentInput;
+  /** Its predicted scope (§13.4): path globs relative to the repository, and subsystem names. */
+  scope?: { paths: string[]; subsystems: string[] };
+  /** The exclusive resources it needs (§13.5), by lease name. */
+  resources?: string[];
+  /**
+   * An exclusive resource it needs is leased by someone else (§13.5): what to
+   * say while it waits. The engine asks the lease service; this stays pure.
+   */
+  resourceWait?: string;
 }
 
 export interface SchedMission {
@@ -134,6 +151,18 @@ export interface SchedMission {
   maxWindowPercent?: number;
   /** Mission cap (§10.2): orchestrated agents running at once, across every mission. */
   maxConcurrentAgents?: number;
+  /** Budget strategy (§21, #53): paces admission and the queue. Absent: balanced. */
+  strategy?: BudgetStrategy;
+  /** Mission cap (#53): percentage points of its source's usage window the mission may use. */
+  maxWindowShare?: number;
+  /** Points of the window the mission has used so far (`windowShareUsed`); absent when not known. */
+  windowShareUsed?: number;
+  /** Mission cap (#53): estimated hosted dollars the mission may spend. */
+  maxCostUsd?: number;
+  /** What the mission's attempts have cost so far, where anything reported a cost. */
+  spentUsd?: number;
+  /** Its tasks may run beside a live task whose scope overlaps theirs (§13.4), when that task's mission allows it too. */
+  allowOverlap?: boolean;
   /** In plan order. */
   tasks: SchedTask[];
 }
@@ -153,9 +182,12 @@ export type WaitReason =
   | 'retry-delay'
   | 'backoff'
   | 'usage'
+  | 'budget'
   | 'concurrency'
   | 'endpoint-slots'
-  | 'verification';
+  | 'verification'
+  | 'overlap'
+  | 'resource';
 
 export type SchedulerAction =
   | { kind: 'start'; missionId: string; taskId: string; retryOf?: string; assignment?: AssignmentChoice }
@@ -243,12 +275,18 @@ function treeHolder(m: SchedMission): SchedTask | undefined {
   return m.tasks.find((t) => t.live) ?? m.tasks.find((t) => t.attempts > 0 && !ENDED.includes(t.state));
 }
 
+/** Prefer-local missions (§21): a start on a local endpoint goes ahead of everything else, so local capacity is used first. */
+function localFirstRank(c: Candidate): number {
+  return STRATEGY_PROFILES[c.m.strategy ?? 'balanced'].localFirst && isEndpointSource(c.t.source) ? 0 : 1;
+}
+
 /**
- * Critical path, then mission priority, then mission age, then a warm
+ * Local capacity for a prefer-local mission, then critical path, then mission priority, then mission age, then a warm
  * session over a new one (#54), then plan order; ids break any tie.
  */
 function byPriority(a: Candidate, b: Candidate): number {
   return (
+    localFirstRank(a) - localFirstRank(b) ||
     b.path - a.path ||
     b.m.priority - a.m.priority ||
     a.m.createdAt - b.m.createdAt ||
@@ -256,6 +294,56 @@ function byPriority(a: Candidate, b: Candidate): number {
     a.order - b.order ||
     (a.m.id < b.m.id ? -1 : a.m.id > b.m.id ? 1 : 0)
   );
+}
+
+/** A task with a live attempt (or admitted this step), for the overlap check. */
+interface Occupant {
+  m: SchedMission;
+  t: SchedTask;
+}
+
+/**
+ * Where two predicted scopes could meet (§13.4): the first pair of path globs
+ * that could name one file, or a subsystem both name. Undefined when they are
+ * apart, or when either scope is empty (nothing predicted, nothing to compare).
+ * Errs towards overlap, like `globsOverlap`.
+ */
+export function scopeOverlap(a: SchedTask['scope'], b: SchedTask['scope']): string | undefined {
+  if (!a || !b) return undefined;
+  for (const x of a.paths) {
+    const y = b.paths.find((p) => globsOverlap(x, p));
+    if (y !== undefined) return x === y ? x : `${x} and ${y}`;
+  }
+  const shared = a.subsystems.find((s) => b.subsystems.includes(s));
+  return shared !== undefined ? `the ${shared} subsystem` : undefined;
+}
+
+/**
+ * A live task (or one admitted this step) in the same repository that needs
+ * one of the same exclusive resources. The lease service answers for leases
+ * already taken; this keeps one step from admitting two tasks for one lease.
+ */
+function resourceRival(c: Candidate, occupants: readonly Occupant[]): { key: string; resource: string } | undefined {
+  const mine = c.t.resources ?? [];
+  if (mine.length === 0) return undefined;
+  for (const o of occupants) {
+    if (o.t.id === c.t.id || o.m.repo !== c.m.repo) continue;
+    const resource = mine.find((r) => o.t.resources?.includes(r));
+    if (resource !== undefined) return { key: o.m.id === c.m.id ? o.t.key : `${o.t.key} (another mission)`, resource };
+  }
+  return undefined;
+}
+
+/** The live task in the same repository whose scope this one's overlaps, and where. */
+function overlapWith(c: Candidate, occupants: readonly Occupant[]): { key: string; where: string } | undefined {
+  for (const o of occupants) {
+    if (o.t.id === c.t.id || o.m.repo !== c.m.repo) continue;
+    // Both missions must allow it: one that did not was never asked.
+    if (c.m.allowOverlap && o.m.allowOverlap) continue;
+    const where = scopeOverlap(c.t.scope, o.t.scope);
+    if (where !== undefined) return { key: o.m.id === c.m.id ? o.t.key : `${o.t.key} (another mission)`, where };
+  }
+  return undefined;
 }
 
 class Counter {
@@ -283,6 +371,7 @@ export function schedule(state: MissionsSnapshot, capacity: CapacitySnapshot, no
   const candidates: Candidate[] = [];
   const verifyQueue: Candidate[] = [];
   const takenSessions = new Set<string>();
+  const occupants: Occupant[] = [];
   const missions = [...state.missions].sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
 
   // What is running now, and what must stop.
@@ -295,6 +384,8 @@ export function schedule(state: MissionsSnapshot, capacity: CapacitySnapshot, no
         continue;
       }
       liveMissions.add(m.id);
+      // Verifying too: its work is not on the mission branch until it is integrated.
+      occupants.push({ m, t });
       if (a.phase === 'agent') {
         agents.add('*');
         agents.add(`repo:${m.repo}`);
@@ -365,12 +456,13 @@ export function schedule(state: MissionsSnapshot, capacity: CapacitySnapshot, no
 
   candidates.sort(byPriority);
   for (const c of candidates) {
-    const why = refusal(c, capacity, agents, liveMissions, now);
+    const why = refusal(c, capacity, agents, liveMissions, occupants, now);
     if (why) {
       out.push({ kind: 'wait', missionId: c.m.id, taskId: c.t.id, ...why });
       if (why.until !== undefined) wakes.push(why.until);
       continue;
     }
+    occupants.push({ m: c.m, t: c.t });
     agents.add('*');
     agents.add(`repo:${c.m.repo}`);
     agents.add(`harness:${c.t.harness}`);
@@ -399,6 +491,7 @@ function refusal(
   capacity: CapacitySnapshot,
   agents: Counter,
   liveMissions: ReadonlySet<string>,
+  occupants: readonly Occupant[],
   now: Millis,
 ): { reason: WaitReason; detail: string; until?: Millis } | undefined {
   const { m, t } = c;
@@ -407,20 +500,34 @@ function refusal(
   if (m.state !== 'running') return { reason: 'mission-paused', detail: 'the mission is paused; nothing new starts until it is resumed' };
   if (c.heldBy) return { reason: 'shared-tree', detail: `${c.heldBy} holds the mission worktree until it is finished` };
   if (m.sharedTree && liveMissions.has(m.id)) return { reason: 'shared-tree', detail: 'another task of this mission is using its worktree' };
+  if (t.resourceWait) return { reason: 'resource', detail: t.resourceWait };
+  const rival = resourceRival(c, occupants);
+  if (rival) return { reason: 'resource', detail: `${rival.resource} is in use by ${rival.key}` };
+  const overlap = overlapWith(c, occupants);
+  if (overlap) return { reason: 'overlap', detail: `its scope overlaps ${overlap.key}, which is running (${overlap.where})` };
   if (c.notBefore !== undefined && c.notBefore > now) return { reason: 'retry-delay', detail: 'its retry waits out a backoff', until: c.notBefore };
   const src = capacity.sources[t.source];
   if (src?.backoffUntil !== undefined && src.backoffUntil > now) {
     return { reason: 'backoff', detail: `${t.source} is rate-limited`, until: src.backoffUntil };
   }
-  const threshold = Math.min(limits.admissionPercent, m.maxWindowPercent ?? Infinity);
+  const strategy = m.strategy ?? 'balanced';
+  const threshold = admissionPercentFor(strategy, limits.admissionPercent, m.maxWindowPercent);
   if (src?.windowPercent !== undefined && src.windowPercent >= threshold) {
-    return { reason: 'usage', detail: `the ${t.source} usage window is at ${Math.round(src.windowPercent)}%; new work starts below ${threshold}%` };
+    return { reason: 'usage', detail: `the ${t.source} usage window is at ${Math.round(src.windowPercent)}%; new work starts below ${threshold}%${strategy === 'balanced' ? '' : ` (${STRATEGY_PROFILES[strategy].label})`}` };
   }
-  if (agents.get('*') >= limits.global) return { reason: 'concurrency', detail: `${limits.global} agents are running (the most at once)` };
+  if (m.maxWindowShare !== undefined && m.windowShareUsed !== undefined && m.windowShareUsed >= m.maxWindowShare) {
+    return { reason: 'budget', detail: `the mission has used ${Math.round(m.windowShareUsed)} points of the usage window; it stops starting work at ${m.maxWindowShare}` };
+  }
+  if (m.maxCostUsd !== undefined && m.spentUsd !== undefined && m.spentUsd >= m.maxCostUsd) {
+    return { reason: 'budget', detail: `the mission has spent an estimated $${m.spentUsd.toFixed(2)}; it stops starting work at $${m.maxCostUsd.toFixed(2)}` };
+  }
+  // Fastest (§21): looser concurrency, within the mission's own cap, which still binds below.
+  const bonus = STRATEGY_PROFILES[strategy].concurrencyBonus;
+  if (agents.get('*') >= limits.global + bonus) return { reason: 'concurrency', detail: `${limits.global + bonus} agents are running (the most at once)` };
   if (m.maxConcurrentAgents !== undefined && agents.get('*') >= m.maxConcurrentAgents) {
     return { reason: 'concurrency', detail: `the mission caps concurrent agents at ${m.maxConcurrentAgents}` };
   }
-  if (agents.get(`repo:${m.repo}`) >= limits.perRepo) return { reason: 'concurrency', detail: `${limits.perRepo} agents are running in this repository` };
+  if (agents.get(`repo:${m.repo}`) >= limits.perRepo + bonus) return { reason: 'concurrency', detail: `${limits.perRepo + bonus} agents are running in this repository` };
   const perHarness = limits.perHarness[t.harness];
   if (perHarness !== undefined && agents.get(`harness:${t.harness}`) >= perHarness) {
     return { reason: 'concurrency', detail: `${perHarness} ${t.harness} agents are running` };

@@ -123,6 +123,8 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
     assignedFrom: a.assignment.mode === 'reuse' || a.assignment.mode === 'fork' ? a.assignment.fromAttemptId : undefined,
     contextTokensAtStart: known(a.context?.atStart),
     repoPolicyVersion: a.repoPolicyVersion,
+    budgetStrategy: decision.strategy ?? 'balanced',
+    windowPercentAtStart: decision.windowPercent,
     ...(assessment ? { assessment: assessment.snapshot, routingConfidence: assessment.confidence } : {}),
     target: { ...target, ...(decision.requirement.effort ? { effortRequested: decision.requirement.effort } : {}) },
     ...(decision.shadow
@@ -170,6 +172,8 @@ export function attemptRecord(mission: Mission, a: ExecutionAttempt, now: Millis
   }
   if (waited > 0) record.waitedOnHumanMs = waited;
   if (a.git) record.git = { filesChanged: a.git.filesChanged, insertions: a.git.insertions, deletions: a.git.deletions, commits: a.git.commits };
+  // The fraction only (§13.4, §16): which files were outside stays on the mission, not in telemetry.
+  if (a.scope) record.scopeAccuracy = a.scope.accuracy;
   if (outcome === 'interrupted') record.partial = true;
   return prune(record);
 }

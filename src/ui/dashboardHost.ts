@@ -6,9 +6,15 @@ import type { SessionStore } from '../core/sessionStore';
 import { withHostedPermission, type HostedPermission } from '../core/sessionView';
 import type { CapabilityCatalog } from '../core/capabilityCatalog';
 import type { HostDialogs, HostSettings } from '../host/hostServices';
-import type { DashboardToHost, HostToDashboard } from '../shared/messages';
+import type { DashboardAction, DashboardToHost, HostToDashboard, SubagentStep } from '../shared/messages';
+import { archivePage, subagentPath } from '../claude/conversationArchive';
+import { subagentSteps } from '../claude/subagentSteps';
+import { transcriptPathFor } from '../claude/transcriptHistory';
+import { sessionRef, type AccessRequest, type ActionName, type BoundAccess, type ResourceRef } from '../core/access';
+import { runInRequest } from '../core/requestScope';
 import type { TaskBadge } from '../shared/orchestration/taskView';
 import type { MissionOp, MissionsSnapshot } from '../shared/orchestration/missionView';
+import { parseDecision, type RoutingProposalDecision } from '../shared/orchestration/proposalsView';
 import { parseRef, parseSelection, type AnalyticsRef, type AnalyticsSelection, type AnalyticsView } from '../shared/orchestration/analyticsView';
 import { displayTitle, GLOBAL_PROJECT_DIR, type AgentSession, type HookHealth, type ProjectDTO } from '../shared/model';
 import { checkoutRootFor } from '../core/checkout';
@@ -16,6 +22,8 @@ import { occupantsOf, occupiesCheckout, sharedCheckouts, type CheckoutEntry } fr
 import type { QuestionView } from '../shared/conversation';
 import type { UsageState } from '../shared/usage';
 import type { SessionActions } from './actions';
+import type { AgentDirectory } from './agentDirectory';
+import type { JobDirectory } from './jobDirectory';
 import type { PaneChannel } from './paneChannel';
 import { openTargetFor } from './openTarget';
 
@@ -120,6 +128,12 @@ export interface AnalyticsSource {
   view(selection: AnalyticsSelection): AnalyticsView;
   /** Open this item's breakdown and evidence in the conversation pane. */
   showDetail(selection: AnalyticsSelection, ref: AnalyticsRef): void;
+  /**
+   * A person's decision on a routing proposal or an accepted rule (#52). The
+   * only write the view makes, and only ever from a click. Accepting a
+   * proposal the corpus veto refuses does nothing.
+   */
+  decideProposal(id: string, decision: RoutingProposalDecision): void;
   /** The telemetry grew: a view on screen is stale. */
   onDidChange(listener: () => void): Disposable;
 }
@@ -152,9 +166,15 @@ export class DashboardHost {
     private settings: HostSettings,
     private dialogs: HostDialogs,
     private models: Pick<CapabilityCatalog, 'value' | 'onDidChange'>,
+    /** Who this pane's messages act as, and the gate they pass (#123). */
+    private access: BoundAccess,
     private tasks?: TaskBadgeSource,
     private missions?: MissionSource,
     private analytics?: AnalyticsSource,
+    /** Durable agents (#179). */
+    private agents?: AgentDirectory,
+    /** Scheduled jobs (#166). */
+    private jobs?: JobDirectory,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: DashboardToHost) => this.onMessage(m)),
@@ -199,6 +219,10 @@ export class DashboardHost {
       const show = this.missions.onDidRequestShow?.((missionId) => void this.webview.postMessage({ type: 'showMissions', missionId } satisfies HostToDashboard));
       if (show) this.subs.push(show);
     }
+    // An agent created, edited or linked to a new conversation changes its card and its session's row.
+    if (this.agents) this.subs.push(this.agents.onDidChange(() => this.pushSnapshot()));
+    // A job saved, turned on or off, or a run recorded.
+    if (this.jobs) this.subs.push(this.jobs.onDidChange(() => this.pushSnapshot()));
     // Only a pane showing Analytics has asked; the others are not sent a view they would discard.
     if (this.analytics) this.subs.push(this.analytics.onDidChange(() => this.pushAnalyticsSoon()));
   }
@@ -299,8 +323,9 @@ export class DashboardHost {
     const sessions = decorated.map((s) => {
       const hit = shared.get(s.key);
       const task = badges?.get(s.key);
-      if (!hit && !task) return s;
-      return { ...s, sharedCheckout: hit ?? s.sharedCheckout, task };
+      const durableAgent = this.agents?.ownerOf(s.provider, s.sessionId);
+      if (!hit && !task && !durableAgent) return s;
+      return { ...s, sharedCheckout: hit ?? s.sharedCheckout, task, ...(durableAgent ? { durableAgent } : {}) };
     });
     const projects = this.projects.value.map((p) => {
       if (p.dir === GLOBAL_PROJECT_DIR) return p;
@@ -334,20 +359,24 @@ export class DashboardHost {
       },
       projects: projects.length > 0 ? projects : undefined,
       missions: this.missions?.snapshot(),
+      agents: this.agents?.views(),
+      jobs: this.jobs?.views(),
     };
     void this.webview.postMessage(msg);
   }
 
   /** A Missions view click. A refusal comes back beside the mission it was about. */
-  private async runMission(missionId: string, op: MissionOp, provider: 'claude' | 'codex'): Promise<void> {
+  private async runMission(missionId: string, op: MissionOp, provider: 'claude' | 'codex', requestId?: string): Promise<void> {
     if (!this.missions) return;
     try {
       await this.missions.run(missionId, op, provider);
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      void this.webview.postMessage({ type: 'missionError', missionId, text } satisfies HostToDashboard);
+      void this.webview.postMessage({ type: 'missionError', missionId, text, ...(requestId ? { requestId } : {}) } satisfies HostToDashboard);
     }
-    this.pushSnapshot();
+    await this.pushSnapshotAsync().catch(() => undefined);
+    // After the snapshot: the pane drops its own pending state once the host's state shows the outcome.
+    if (requestId) void this.webview.postMessage({ type: 'missionAck', missionId, requestId } satisfies HostToDashboard);
   }
 
   private async newMission(cwd: string): Promise<void> {
@@ -361,7 +390,29 @@ export class DashboardHost {
     this.pushSnapshot();
   }
 
+  /**
+   * Every message is one request: classified, authorised (and audited when it
+   * mutates) here, before anything it asks for runs. Nothing below this line
+   * may act on a message that has not passed.
+   */
   private onMessage(m: DashboardToHost): void {
+    const req = dashboardRequest(m);
+    if (!this.access.gate.admit(this.access.context, req.action, req.resource)) {
+      // A refused agent change is still answered, so the view does not wait on it for good.
+      if (m.type === 'saveAgent' && typeof m.requestId === 'string') void this.webview.postMessage({ type: 'agentSaved', requestId: m.requestId, error: 'Not permitted.' } satisfies HostToDashboard);
+      if (m.type === 'agentMemory' || m.type === 'agentMakeCurrent' || m.type === 'assignSession') this.agentResult(m.requestId, { error: 'Not permitted.' });
+      if (m.type === 'saveJob' || m.type === 'jobEnable' || m.type === 'runJob') this.jobResult(m.requestId, { error: 'Not permitted.' });
+      if (m.type === 'previewJob' && typeof m.requestId === 'string' && typeof m.id === 'string') {
+        void this.webview.postMessage({ type: 'jobPreview', requestId: m.requestId, id: m.id, error: 'Not permitted.' } satisfies HostToDashboard);
+      }
+      return;
+    }
+    // As this pane's client: the prompts, toasts and navigation it causes go
+    // back to it, however many awaits later (#126, `requestScope.ts`).
+    runInRequest(this.access.context, () => this.dispatch(m));
+  }
+
+  private dispatch(m: DashboardToHost): void {
     switch (m.type) {
       case 'ready':
         this.pushSnapshot();
@@ -373,6 +424,9 @@ export class DashboardHost {
         break;
       case 'rowClick':
         this.actions.smartOpen(m.key);
+        break;
+      case 'subagentProgress':
+        void this.sendSubagentProgress(m.key, m.agentId);
         break;
       case 'action':
         if (m.action === 'openInTab') this.actions.openInTab(m.key);
@@ -390,13 +444,22 @@ export class DashboardHost {
         // not mid-turn: the gesture is meant to cost one click. `dismissHide`
         // is the Project tab's version — that tab has no Ended section to drop
         // the row into, so it archives too, but only once the close has really
-        // happened: a declined confirm must not hide a running agent.
+        // happened: a declined confirm must not hide a running agent. The
+        // table has already moved the row; `dismissResult` tells it whether
+        // to put it back.
         else if (m.action === 'dismiss' || m.action === 'dismissHide') {
           const hide = m.action === 'dismissHide';
           const key = m.key;
-          void this.actions.closeSession(key, { confirmOnlyIfWorking: true }).then((closed) => {
-            if (closed && hide) this.archive.set(key, true);
-          });
+          void this.actions
+            .closeSession(key, { confirmOnlyIfWorking: true })
+            .catch((error: unknown) => {
+              this.dialogs.error(`Agent Wrangler: could not close the session: ${error instanceof Error ? error.message : String(error)}`);
+              return false;
+            })
+            .then((closed) => {
+              if (closed && hide) this.archive.set(key, true);
+              void this.webview.postMessage({ type: 'dismissResult', key, ok: closed } satisfies HostToDashboard);
+            });
         }
         else if (m.action === 'pause') this.actions.pauseSession(m.key, true);
         else if (m.action === 'unpause') this.actions.pauseSession(m.key, false);
@@ -453,7 +516,7 @@ export class DashboardHost {
         break;
       case 'mission':
         if (typeof m.missionId === 'string' && m.op && typeof m.op === 'object') {
-          void this.runMission(m.missionId, m.op, m.provider === 'codex' ? 'codex' : 'claude');
+          void this.runMission(m.missionId, m.op, m.provider === 'codex' ? 'codex' : 'claude', typeof m.requestId === 'string' ? m.requestId : undefined);
         }
         break;
       case 'browseProject':
@@ -483,7 +546,108 @@ export class DashboardHost {
         if (ref) this.analytics?.showDetail(parseSelection(m.selection), ref);
         break;
       }
+      case 'analyticsProposal': {
+        const decision = parseDecision(m.decision);
+        if (decision && typeof m.id === 'string') this.analytics?.decideProposal(m.id, decision);
+        break;
+      }
+      case 'openAgent':
+        if (typeof m.id === 'string') this.agents?.open(m.id);
+        break;
+      case 'saveAgent': {
+        if (typeof m.requestId !== 'string') break;
+        const requestId = m.requestId;
+        const pending = this.agents
+          ? this.agents.save(typeof m.id === 'string' ? m.id : undefined, m.agent)
+          : Promise.resolve({ error: 'Agents are not available.' });
+        void pending.then(
+          (result) => this.webview.postMessage({ type: 'agentSaved', requestId, ...result } satisfies HostToDashboard),
+          (error: unknown) => this.webview.postMessage({ type: 'agentSaved', requestId, error: error instanceof Error ? error.message : String(error) } satisfies HostToDashboard),
+        );
+        break;
+      }
+      case 'deleteAgent':
+        if (typeof m.id === 'string') void this.agents?.remove(m.id);
+        break;
+      case 'agentNewConversation':
+        if (typeof m.id === 'string') this.agents?.startFresh(m.id);
+        break;
+      case 'agentFlag':
+        if (typeof m.id === 'string' && (m.flag === 'pinned' || m.flag === 'archived')) this.agents?.setFlag(m.id, m.flag, m.on === true);
+        break;
+      case 'agentMemory':
+        if (typeof m.id === 'string') this.agentResult(m.requestId, this.agents?.memory(m.id, m.op));
+        break;
+      case 'agentMakeCurrent':
+        if (typeof m.id === 'string' && typeof m.key === 'string') this.agentResult(m.requestId, this.agents?.makeCurrent(m.id, m.key));
+        break;
+      case 'assignSession': {
+        if (typeof m.key !== 'string') break;
+        // From the row menu, which has nowhere to show a refusal: say it here.
+        const result = this.agents?.assign(m.key, typeof m.agentId === 'string' ? m.agentId : undefined) ?? { error: 'Agents are not available.' };
+        if (result.error) this.dialogs.error(`Agent Wrangler: ${result.error}`);
+        this.agentResult(m.requestId, result);
+        break;
+      }
+      case 'saveJob':
+        this.jobResult(m.requestId, this.jobs?.save(typeof m.id === 'string' ? m.id : undefined, m.job));
+        break;
+      case 'jobEnable':
+        if (typeof m.id === 'string') this.jobResult(m.requestId, this.jobs?.setEnabled(m.id, m.on === true));
+        break;
+      case 'deleteJob':
+        if (typeof m.id === 'string') void this.jobs?.remove(m.id);
+        break;
+      case 'previewJob': {
+        if (typeof m.id !== 'string' || typeof m.requestId !== 'string') break;
+        const { id, requestId } = m;
+        const pending = this.jobs ? this.jobs.preview(id) : Promise.resolve({ error: 'Jobs are not available.' });
+        void pending.then(
+          (r) => this.webview.postMessage({ type: 'jobPreview', requestId, id, ...r } satisfies HostToDashboard),
+          (error: unknown) => this.webview.postMessage({ type: 'jobPreview', requestId, id, error: error instanceof Error ? error.message : String(error) } satisfies HostToDashboard),
+        );
+        break;
+      }
+      case 'runJob': {
+        if (typeof m.id !== 'string' || !this.jobs) {
+          this.jobResult(m.requestId, undefined);
+          break;
+        }
+        void this.jobs.runNow(m.id).then(
+          (result) => this.jobResult(m.requestId, 'error' in result ? result : {}),
+          (error: unknown) => this.jobResult(m.requestId, { error: error instanceof Error ? error.message : String(error) }),
+        );
+        break;
+      }
     }
+  }
+
+  private jobResult(requestId: unknown, result: { id?: string; error?: string } | undefined): void {
+    if (typeof requestId !== 'string') return;
+    const out = result ?? { error: 'Jobs are not available.' };
+    void this.webview.postMessage({ type: 'jobResult', requestId, ...out } satisfies HostToDashboard);
+  }
+
+  /** The newest steps of one subagent, read from its own transcript beside the parent's. */
+  private async sendSubagentProgress(key: string, agentId: string): Promise<void> {
+    const reply = (steps: SubagentStep[], error?: string): void => {
+      void this.webview.postMessage({ type: 'subagentProgress', key, agentId, steps, ...(error ? { error } : {}) } satisfies HostToDashboard);
+    };
+    const s = this.store.get(key);
+    const file = s?.provider === 'claude' ? (s.transcriptPath ?? (s.cwd && s.sessionId ? transcriptPathFor(s.sessionId, s.cwd) : undefined)) : undefined;
+    if (!file) return reply([], 'No transcript is available for this session.');
+    try {
+      const page = await archivePage(subagentPath(file, agentId), undefined, '', true);
+      reply(subagentSteps(page.blocks));
+    } catch {
+      reply([], 'Its transcript is not written yet.');
+    }
+  }
+
+  private agentResult(requestId: unknown, result: { error?: string } | undefined): void {
+    if (typeof requestId !== 'string') return;
+    const error = result ? result.error : 'Agents are not available.';
+    void this.webview.postMessage({ type: 'agentResult', requestId, ...(error ? { error } : {}) } satisfies HostToDashboard);
   }
 
   private async answerQuestion(key: string, requestId: string, answers: Record<string, string>): Promise<void> {
@@ -491,11 +655,9 @@ export class DashboardHost {
     // layer answers questions too, and a second write path is a second place
     // for "is this still the question the button was drawn from?" to be got
     // wrong — the same reason `decidePermission` is an action and not a call
-    // into `HookLog` from here.
-    const outcome = await this.actions.answerQuestion(key, requestId, answers);
-    if (outcome === 'stale' || outcome === 'gone') {
-      this.dialogs.flash('Agent Wrangler: that question has already been answered.', 4000);
-    }
+    // into `HookLog` from here. The action tells this client when it was too
+    // late (#132), so saying it here as well would say it twice.
+    await this.actions.answerQuestion(key, requestId, answers);
     this.pushSnapshot();
   }
 
@@ -517,5 +679,113 @@ export class DashboardHost {
     this.projects.add(dir);
     void this.webview.postMessage({ type: 'projectPicked', dir } satisfies HostToDashboard);
     await this.refreshProjects({ force: true });
+  }
+}
+
+/** A row button's action name. A `Record`, so a new `DashboardAction` cannot compile without one. */
+const ROW_ACTIONS: Record<DashboardAction, ActionName> = {
+  openInTab: 'session.open',
+  rename: 'session.rename',
+  resume: 'session.resume',
+  resumeHere: 'session.adopt',
+  archive: 'session.archive',
+  copyId: 'host.open',
+  close: 'session.close',
+  dismiss: 'session.close',
+  dismissHide: 'session.close',
+  pause: 'session.pause',
+  unpause: 'session.pause',
+  allow: 'session.decide',
+  deny: 'session.decide',
+  always: 'session.decide',
+};
+
+const setting = (id: string): ResourceRef => ({ kind: 'setting', id });
+/** An agent by its id: a UUID, never its name or instructions, since this is audited. */
+const agentRef = (id: unknown): ResourceRef | undefined => (typeof id === 'string' && id ? { kind: 'agent', id } : undefined);
+const jobRef = (id: unknown): ResourceRef | undefined => (typeof id === 'string' && id ? { kind: 'job', id } : undefined);
+
+/**
+ * What a table message asks to do, for `authorize`. Exhaustive: a message type
+ * added to `DashboardToHost` without a line here is a compile error, so no
+ * message can reach `dispatch` unclassified. Project folders are not passed as
+ * resources: they are paths, and resources are written to the audit log.
+ */
+export function dashboardRequest(m: DashboardToHost): AccessRequest {
+  switch (m.type) {
+    case 'ready':
+    case 'refresh':
+    case 'refreshProjects':
+    case 'analyticsQuery':
+      return { action: 'view.read' };
+    case 'rowClick':
+      return { action: 'session.open', resource: sessionRef(m.key) };
+    case 'subagentProgress':
+      return { action: 'view.read', resource: sessionRef(m.key) };
+    case 'action':
+      // An action name the webview made up is classed as the heaviest row action.
+      return { action: Object.hasOwn(ROW_ACTIONS, m.action) ? ROW_ACTIONS[m.action] : 'session.close', resource: sessionRef(m.key) };
+    case 'answerQuestion':
+      return { action: 'session.decide', resource: sessionRef(m.key) };
+    case 'openExternal':
+      return { action: 'host.open' };
+    case 'analyticsDetail':
+      return { action: 'session.open' };
+    case 'installHooks':
+      return { action: 'hooks.install' };
+    case 'setDiscordNotifications':
+      return { action: 'settings.write', resource: setting('remote.notificationsEnabled') };
+    case 'setRunnerModel':
+      return { action: 'settings.write', resource: setting(m.provider === 'openai' ? 'codexRunner.model' : 'runner.model') };
+    case 'setRunnerEffort':
+      return { action: 'settings.write', resource: setting(m.provider === 'openai' ? 'codexRunner.effort' : 'runner.effort') };
+    case 'setColumns':
+    case 'browseProject':
+    case 'removeProject':
+    case 'setProjectFavourite':
+      return { action: 'prefs.write' };
+    case 'newConversation':
+      return { action: 'session.start' };
+    case 'taskMenu':
+      return { action: 'task.act' };
+    case 'newMission':
+      return { action: 'mission.create' };
+    case 'mission':
+      return { action: 'mission.act', resource: typeof m.missionId === 'string' ? { kind: 'mission', id: m.missionId } : undefined };
+    case 'pauseAll':
+      return { action: 'sessions.pauseAll' };
+    case 'analyticsProposal':
+      return { action: 'routing.decide', resource: typeof m.id === 'string' ? { kind: 'proposal', id: m.id } : undefined };
+    // Opening an agent shows a conversation and starts nothing: the first
+    // message does, and that is a `session.start` of its own.
+    case 'openAgent':
+      return { action: 'session.open', resource: agentRef(m.id) };
+    case 'saveAgent':
+    case 'deleteAgent':
+    case 'agentNewConversation':
+    case 'agentFlag':
+    case 'agentMemory':
+    case 'agentMakeCurrent':
+      return { action: 'agent.write', resource: agentRef(m.id) };
+    // Assigning names the agent it goes to; unassigning names the session it comes off.
+    case 'assignSession':
+      return { action: 'agent.write', resource: agentRef(m.agentId) ?? (typeof m.key === 'string' ? { kind: 'session', id: m.key } : undefined) };
+    case 'saveJob':
+    case 'jobEnable':
+    case 'deleteJob':
+      return { action: 'job.write', resource: jobRef(m.id) };
+    case 'runJob':
+      return { action: 'job.run', resource: jobRef(m.id) };
+    // Reads GitHub as the user and changes nothing.
+    case 'previewJob':
+      return { action: 'view.read', resource: jobRef(m.id) };
+    default: {
+      // Compile-time: every message type is handled above. Run time: a type
+      // the webview made up is authorised as a mutation (so a refusal is
+      // audited), and then matches nothing in `dispatch`.
+      const unknown: never = m;
+      void unknown;
+      return { action: 'settings.write' };
+    }
   }
 }

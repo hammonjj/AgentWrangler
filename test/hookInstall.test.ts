@@ -19,6 +19,16 @@ import {
   type HooksConfig,
 } from '../src/claude/hookInstall';
 import { HOOK_EVENTS } from '../src/claude/hookEvents';
+import {
+  LEASE_HOOK_MODES,
+  LEASE_HOOK_TIMEOUT_SECONDS,
+  LEASE_RELEASE_TIMEOUT_SECONDS,
+  LEASE_SCRIPT_NAME,
+  leaseScript,
+  leaseScriptPath,
+  refreshLeaseScript,
+} from '../src/claude/leaseHook';
+import { MAX_WAIT_SEC } from '../src/shared/leases';
 
 const LOG_DIR = '/home/u/.claude/agentwrangler';
 
@@ -87,6 +97,27 @@ describe('mergeHooks', () => {
     const second = mergeHooks(first.hooks, LOG_DIR);
     expect(second.changed).toBe(false);
     expect(second.hooks).toEqual(first.hooks);
+  });
+
+  it('runs the lease hook beside the log on the five events it needs, and nowhere else (#68)', () => {
+    const { hooks } = mergeHooks(undefined, LOG_DIR);
+    for (const e of HOOK_EVENTS) {
+      const cmds = hooks[e][0].hooks!;
+      const mode = LEASE_HOOK_MODES[e];
+      if (!mode) {
+        expect(cmds, e).toHaveLength(1);
+        continue;
+      }
+      // The log first, unchanged; the lease hook as a second command of the same entry.
+      expect(cmds[0].command, e).toBe(hookCommandFor(LOG_DIR, e));
+      expect(cmds[1].command, e).toBe(`"${LOG_DIR}/${LEASE_SCRIPT_NAME}" ${mode}`);
+      expect(cmds[1].timeout, e).toBe(e === 'PreToolUse' ? LEASE_HOOK_TIMEOUT_SECONDS : LEASE_RELEASE_TIMEOUT_SECONDS);
+    }
+    expect(Object.keys(LEASE_HOOK_MODES).sort()).toEqual(['PermissionDenied', 'PostToolUse', 'PostToolUseFailure', 'PreToolUse', 'Stop', 'StopFailure']);
+  });
+
+  it('gives the longest lease wait room inside the hook timeout, so a wait denies before it is killed', () => {
+    expect(LEASE_HOOK_TIMEOUT_SECONDS - MAX_WAIT_SEC).toBeGreaterThanOrEqual(60);
   });
 
   it('refreshes our entry in place when the log dir moved', () => {
@@ -372,7 +403,20 @@ describe('install/uninstall against a real file', () => {
 
     const res = await installHooks(logDir, file);
     expect(res.changed).toBe(true);
-    expect(res.message).toMatch(/script updated/);
+    expect(res.message).toMatch(/scripts updated/);
+    expect((await currentState(logDir, file)).kind).toBe('installed');
+  });
+
+  it('writes the lease script beside it, and an outdated lease script is stale too (#68)', async () => {
+    await installHooks(logDir, file);
+    const script = await fsp.stat(leaseScriptPath(logDir));
+    expect(script.mode & 0o111).not.toBe(0);
+    expect(await fsp.readFile(leaseScriptPath(logDir), 'utf8')).toBe(leaseScript());
+    expect((await currentState(logDir, file)).kind).toBe('installed');
+
+    await fsp.writeFile(leaseScriptPath(logDir), '#!/bin/sh\n# Agent Wrangler lease hook, v0. old\n', 'utf8');
+    expect((await currentState(logDir, file)).kind).toBe('stale');
+    expect(await refreshLeaseScript(logDir)).toBe(true);
     expect((await currentState(logDir, file)).kind).toBe('installed');
   });
 

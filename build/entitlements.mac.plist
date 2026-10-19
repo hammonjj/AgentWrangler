@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Entitlements for the local macOS build.
+  Entitlements for the local macOS build, given to the launcher and the
+  bundled Node by scripts/package-app.ts.
 
-  The first three are what any Electron app needs: V8 compiles at runtime, and
-  the helper processes load frameworks the bundle signature does not cover.
+  Hardened runtime is off, so none of these is enforced today; they are kept
+  so that turning it on (for distribution, #57) does not break Node's JIT or
+  dictation. The first three are what any Node needs under the hardened
+  runtime: V8 compiles at runtime and loads native addons.
 
-  The last one is dictation. Recording goes through an `ffmpeg` child process
-  rather than the renderer — `webkitSpeechRecognition` was ruled out long ago
-  and fails inside any Electron-based webview, VSCode's included — and macOS
-  attributes a child's microphone use to the app that spawned it, so the
-  entitlement belongs here rather than nowhere.
+  The last one is dictation from the host's microphone. Recording goes through
+  an `ffmpeg` child process, and macOS attributes a child's microphone use to
+  the app that spawned it, so the entitlement belongs here rather than nowhere.
 -->
 <plist version="1.0">
 <dict>

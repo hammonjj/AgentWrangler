@@ -1,5 +1,9 @@
 # Electron preparation handoff
 
+> **Superseded by [browser-workbench.md](browser-workbench.md) (#121).** This hands off the
+> VSCode-to-Electron preparation. Both the VSCode extension and the Electron app are gone (#142):
+> Agent Wrangler is now a core daemon serving a web workbench to browsers. Kept as history.
+
 Status: **landed on `main`** (`6b6bea2`, 2026-09-18). The one gate still open is live use — see below.
 
 ## Current state

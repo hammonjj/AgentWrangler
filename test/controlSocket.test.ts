@@ -85,6 +85,24 @@ function fakeBackend() {
       return { task: { ...taskView }, decision: 'multiple', tasks: [{ key: 't1', title: 'One' }, { key: 't2', title: 'Two' }] };
     },
     tasks: () => [taskView],
+    proposeAgentMemory: (p) => {
+      calls.push(`agent.propose ${p.origin.provider}:${p.origin.sessionId} ${p.op} ${p.kind ?? '-'} ${p.text ?? p.itemId ?? ''}`);
+      if (p.origin.sessionId === 'stranger') throw new ControlError(RPC_UNSUPPORTED, 'This conversation does not belong to a durable agent.');
+      return { agent: 'PO', proposalId: 'p-00000001' };
+    },
+    webLink: () => {
+      calls.push('webLink');
+      return { url: 'http://127.0.0.1:1/login?code=synthetic', expiresAt: 1 };
+    },
+    webPair: () => {
+      calls.push('webPair');
+      return { url: 'https://test-mac.local:1/pair?code=ABCD2345', code: 'ABCD2345', expiresAt: 1 };
+    },
+    webDevices: () => [{ id: 'device-synthetic-1', name: 'Safari on iOS', scope: 'lan', createdAt: 1, lastSeen: 1 }],
+    webRevoke: (id) => {
+      calls.push(`webRevoke ${id}`);
+      return { device: { id: 'device-synthetic-1', name: 'Safari on iOS', scope: 'lan', createdAt: 1, lastSeen: 1 } };
+    },
   };
   return { backend, calls, origins, emit: (e: SessionViewEvent) => emit?.(e), close: (r: 'ended') => close?.(r), disposed: () => disposed };
 }
@@ -264,6 +282,30 @@ describe('control socket', () => {
     client.close();
   });
 
+  it('takes a memory proposal from an agent conversation, logs it without its text, and is a change (#180)', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    const origin = { provider: 'claude', sessionId: 'abcd-1234' };
+    expect(await client.request('agent.propose', { origin, op: 'add', kind: 'decision', text: 'secret note' })).toEqual({ agent: 'PO', proposalId: 'p-00000001' });
+    await client.request('agent.propose', { origin, op: 'forget', itemId: 'm-1a2b3c4d' });
+    expect(fake.calls).toEqual(['agent.propose claude:abcd-1234 add decision secret note', 'agent.propose claude:abcd-1234 forget - m-1a2b3c4d']);
+    expect(logs).toEqual([`control socket: agent.propose memory add by aw pid ${process.pid}`, `control socket: agent.propose memory forget by aw pid ${process.pid}`]);
+    expect(logs.join('\n')).not.toContain('secret');
+
+    // No origin, a malformed one, or an op it does not know: refused, since the origin is which agent's card it is.
+    expect(await codeOf(client.request('agent.propose', { op: 'add', text: 'x' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('agent.propose', { origin: { provider: 'claude', sessionId: '../../etc' }, op: 'add', text: 'x' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('agent.propose', { origin, op: 'write', text: 'x' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('agent.propose', { origin, op: 'add', text: 'x'.repeat(2001) }))).toBe(RPC_INVALID_PARAMS);
+    const stranger = await client.request('agent.propose', { origin: { provider: 'claude', sessionId: 'stranger' }, op: 'add', text: 'x' }).catch((e: RpcRemoteError) => e);
+    expect((stranger as RpcRemoteError).code).toBe(RPC_UNSUPPORTED);
+
+    server!.stopMutations();
+    expect(await codeOf(client.request('agent.propose', { origin, op: 'add', text: 'x' }))).toBe(RPC_UNSUPPORTED);
+    client.close();
+  });
+
   it('delegates with the same checked params, logs the repository but never the objective, and is a change (#82)', async () => {
     const fake = fakeBackend();
     await serve(fake.backend);
@@ -281,6 +323,35 @@ describe('control socket', () => {
     expect(await codeOf(client.request('delegate', { folder: 'relative/dir', objective: 'x' }))).toBe(RPC_INVALID_PARAMS);
     server!.stopMutations();
     expect(await codeOf(client.request('delegate', { folder: '/Users/test/proj', objective: 'x' }))).toBe(RPC_UNSUPPORTED);
+    client.close();
+  });
+
+  it('web.link returns the sign-in link and logs the call, never the link (#127)', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    const r = await client.request<{ url: string; expiresAt: number }>('web.link');
+    expect(r.url).toContain('/login?code=');
+    expect(fake.calls).toEqual(['webLink']);
+    expect(logs).toEqual([`control socket: web.link by aw pid ${process.pid}`]);
+    client.close();
+  });
+
+  it('web.pair, web.devices and web.devices.revoke reach the backend; the code is never logged (#137)', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    const pair = await client.request<{ url: string; code: string }>('web.pair');
+    expect(pair.code).toBe('ABCD2345');
+    const list = await client.request<{ devices: { id: string }[] }>('web.devices');
+    expect(list.devices.map((d) => d.id)).toEqual(['device-synthetic-1']);
+    await client.request('web.devices.revoke', { id: ' devi ' });
+    expect(await codeOf(client.request('web.devices.revoke', {}))).toBe(RPC_INVALID_PARAMS);
+    expect(fake.calls).toEqual(['webPair', 'webRevoke devi']);
+    expect(logs.join('\n')).not.toContain('ABCD2345');
+    expect(logs).toEqual([`control socket: web.pair by aw pid ${process.pid}`, `control socket: web.devices.revoke  devi  by aw pid ${process.pid}`]);
+    server!.stopMutations();
+    expect(await codeOf(client.request('web.pair'))).toBe(RPC_UNSUPPORTED);
     client.close();
   });
 

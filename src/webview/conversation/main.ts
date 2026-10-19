@@ -1,3 +1,4 @@
+import { createBrowserDictation, isBrowserHost } from '../common/browserDictation';
 import { renderDelegationOffer } from '../common/delegationOffer';
 import './conversation.css';
 import { fileUriToPath, fileUrisToPaths } from '../../shared/attachments';
@@ -15,7 +16,7 @@ import { decodedBytes, IMAGE_MEDIA_TYPES, MAX_IMAGE_BYTES } from '../../shared/c
 import { describeDictation, spliceDictation } from '../../shared/dictationText';
 import { renderMarkdown as mdToHtml } from '../../shared/markdown';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
-import { displayTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
+import { displayTitle, messageTimeTitle, STATUS_LABEL, type SessionDTO, type SessionStatus } from '../../shared/model';
 import { modelLabel } from '../../shared/modelName';
 import {
   assessmentChipTitle,
@@ -50,9 +51,17 @@ import {
 } from '../../shared/orchestration/delegatedLabels';
 import { usageHeaderText, usageTitle } from '../../shared/sessionUsage';
 import { resetsInText } from '../../shared/usage';
-import { paneApi } from '../common/paneApi';
+import { isRemoteHost, paneApi } from '../common/paneApi';
+import { takeComposerFocus } from '../common/composerFocus';
+import { onSwitch } from '../common/conversationSwitch';
+import { renderSideBySide } from '../common/sideBySide';
+import { uploadFile } from '../common/upload';
+import { trackTouch } from '../common/phone';
+import { CONV_NARROW_PX, isNarrowWidth } from '../../shared/phoneLayout';
+import { announceConversation } from '../common/shellBus';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { renderAnalyticsDetail } from './analyticsDetail';
+import { createMemoryStrip } from './agentMemory';
 
 // See `common/paneApi.ts`: one acquire, one message envelope and one state slot
 // per pane, so the dashboard can share this webview.
@@ -65,6 +74,7 @@ const MAX_BLOCK_NODES = 400;
 const STICK_PX = 56;
 /** Composer grows with the message up to this, then scrolls. */
 const MAX_COMPOSER_PX = 180;
+const MAX_COMPOSER_NARROW_PX = 112;
 /**
  * How much of an ask card has to be on screen for it to count as seen. An ask
  * whose first line is the last pixel of the view has not been read, and the
@@ -98,14 +108,17 @@ app.innerHTML = `
   <span id="convUsage" hidden></span>
   <span id="convRateLimit" hidden></span>
   <span id="spacer"></span>
+  <button id="findtoggle" class="hdrbtn" type="button" title="Find in conversation" aria-label="Find in conversation" aria-controls="findbar" aria-expanded="false"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false"><circle cx="6.8" cy="6.8" r="4.3" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10 10l4 4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
   <button id="release" class="hdrbtn" hidden title="Stop running this session here and resume it in a terminal">Release</button>
   <button id="pin" class="hdrbtn" title="Open this conversation in a tab of its own, which row clicks never swap away">Own tab</button>
 </div>
 <div id="taskStrip" hidden></div>
 <div id="delegated" class="delegated" hidden></div>
+<div id="agentMemory" hidden></div>
 <div id="banner" hidden></div>
 <form id="findbar"><input id="find" type="search" placeholder="Find in conversation" aria-label="Find in conversation"><button>Find</button><button type="button" id="clearfind">Clear</button></form>
-<div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div><div id="convDelegationOffer" hidden></div><div id="proposals" hidden></div></div>
+<div id="opening" hidden></div>
+<div id="scroll"><div id="searchresults" hidden></div><button id="notch" hidden>Load earlier messages</button><div id="blocks"></div><div id="convDelegationOffer" hidden></div><div id="proposals" hidden></div><div id="memoryProposals" hidden></div></div>
 <button id="jump" hidden></button>
 <button id="asknav" class="asknav" hidden></button>
 <div id="composer">
@@ -180,6 +193,22 @@ const attachBtn = document.getElementById('attach') as HTMLButtonElement;
 const attachPick = document.getElementById('attachpick') as HTMLInputElement;
 const mentionsEl = document.getElementById('mentions')!;
 const composerInput = document.getElementById('composerInput')!;
+
+// ---- the compact form (#134) ----
+// `#convApp.narrow`, from the pane's own width like the table's `#app.narrow`:
+// the divider moves, so the window's width says nothing about this pane's. A
+// class rather than a media query, and `.touch` (the primary pointer is a
+// finger) beside it; the stylesheet keys on both.
+let narrow = isNarrowWidth(app.clientWidth, CONV_NARROW_PX, false);
+app.classList.toggle('narrow', narrow);
+trackTouch(app);
+new ResizeObserver(() => {
+  const next = isNarrowWidth(app.clientWidth, CONV_NARROW_PX, narrow);
+  if (next === narrow) return;
+  narrow = next;
+  app.classList.toggle('narrow', narrow);
+  autoGrow(); // the composer's ceiling differs between the two forms
+}).observe(app);
 
 /** Block id → its node, so a patch updates in place instead of re-rendering. */
 const nodes = new Map<string, HTMLElement>();
@@ -317,9 +346,19 @@ function appendBlockCopy(el: HTMLElement, b: ConvBlock): void {
   el.prepend(sticky);
 }
 
+/**
+ * A Copy button for each code block. The `pre` is wrapped (`.codeblock`) and
+ * the button is the wrapper's, not the `pre`'s: on a desktop it floats over the
+ * block's top-right corner and shows on hover, and in the narrow or touch form
+ * it is a strip of its own above the code, so it never covers the first line
+ * (#134) and does not scroll away with a block that scrolls sideways.
+ */
 function decorateCodeBlocks(root: HTMLElement): void {
   for (const pre of Array.from(root.querySelectorAll('pre'))) {
-    if (pre.querySelector('.copy')) continue;
+    if (pre.parentElement?.classList.contains('codeblock')) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'codeblock';
+    pre.replaceWith(wrap);
     const btn = document.createElement('button');
     btn.className = 'copy';
     btn.textContent = 'Copy';
@@ -337,14 +376,8 @@ function decorateCodeBlocks(root: HTMLElement): void {
         },
       );
     });
-    pre.appendChild(btn);
+    wrap.append(btn, pre);
   }
-}
-
-function timeLabel(ts: string | undefined): string {
-  if (!ts) return '';
-  const d = new Date(ts);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function answeredLabel(state: AskState): string {
@@ -459,17 +492,30 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
           // wants syntax highlighting and side-by-side, which is a real editor.
           const open = document.createElement('button');
           open.className = 'diffopen';
-          open.textContent = 'Open in diff editor';
-          open.title = 'Show this change side by side, with syntax highlighting';
-          open.addEventListener('click', (e) => {
-            e.stopPropagation();
-            post({ type: 'openDiff', file: filePath, patch });
-          });
+          open.textContent = 'Side by side';
+          open.title = 'Show this change with the before and after next to each other';
           file.append(name, open);
           const pre = document.createElement('pre');
           pre.className = 'tdiff';
           renderDiff(pre, patch);
-          d.append(file, pre);
+          // The browser has no diff editor to hand the patch to (#146): the card
+          // swaps its own +/- block for the two-column view, and back.
+          const split = document.createElement('div');
+          split.className = 'tdiff tdiff-split';
+          split.hidden = true;
+          let drawn = false;
+          open.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const on = split.hidden;
+            if (on && !drawn) {
+              renderSideBySide(split, patch);
+              drawn = true;
+            }
+            split.hidden = !on;
+            pre.hidden = on;
+            open.textContent = on ? 'Unified' : 'Side by side';
+          });
+          d.append(file, pre, split);
         }
         if (b.result.text) {
           const pre = document.createElement('pre');
@@ -549,9 +595,16 @@ function fillNode(el: HTMLElement, b: ConvBlock): void {
     }
   }
 
-  const ts = 'ts' in b ? timeLabel(b.ts) : '';
-  if (ts) el.title = ts;
+  // The tooltip is written on hover (below), so "N ago" is current when read.
+  if ('ts' in b && b.ts) el.dataset.ts = b.ts;
 }
+
+blocksEl.addEventListener('mouseover', (e) => {
+  const blk = (e.target as Element).closest<HTMLElement>('[data-ts]');
+  if (!blk) return;
+  const title = messageTimeTitle(Date.now(), blk.dataset.ts);
+  if (title) blk.title = title;
+});
 
 /** An ask this pane cannot answer: say so instead of showing dead buttons. */
 function cannotAnswer(row: HTMLElement, what: string): void {
@@ -644,8 +697,8 @@ function questionForm(
       opts.appendChild(label);
     }
     // Claude's own question tool always offers "Other"; so does this.
-    const other = document.createElement('input');
-    other.type = 'text';
+    const other = document.createElement('textarea');
+    other.rows = 1;
     other.className = 'qother';
     other.placeholder = 'Other…';
     other.dataset.question = q.question;
@@ -677,7 +730,7 @@ function questionForm(
       )
         .filter((i) => i.checked)
         .map((i) => i.value);
-      const free = wrap.querySelector<HTMLInputElement>(`input.qother[data-question="${CSS.escape(q.question)}"]`);
+      const free = wrap.querySelector<HTMLTextAreaElement>(`textarea.qother[data-question="${CSS.escape(q.question)}"]`);
       const freeText = free?.value.trim();
       if (freeText) picked.push(freeText);
       if (picked.length > 0) collected[q.question] = picked.join(', ');
@@ -819,7 +872,32 @@ notch.addEventListener('click', () => {
   requestArchive('', first, !first && live && 'ts' in live ? live.ts : undefined);
 });
 document.getElementById('findbar')!.addEventListener('submit', (e) => { e.preventDefault(); if (findInput.value.trim()) requestArchive(findInput.value.trim()); });
-document.getElementById('clearfind')!.addEventListener('click', () => { archiveRequest = ''; searchResults.hidden = true; searchResults.replaceChildren(); searchNodes.clear(); searchBlocks.clear(); findInput.value = ''; });
+document.getElementById('clearfind')!.addEventListener('click', () => {
+  archiveRequest = ''; searchResults.hidden = true; searchResults.replaceChildren(); searchNodes.clear(); searchBlocks.clear(); findInput.value = '';
+  setFindOpen(false);
+});
+
+// In the narrow form the find bar is folded behind a search button in the
+// header (#134): a whole row above the transcript is too much of a phone to
+// spend on something used now and then. `.open` unfolds it; wide, it is always there.
+const findBar = document.getElementById('findbar')!;
+const findToggle = document.getElementById('findtoggle') as HTMLButtonElement;
+function setFindOpen(open: boolean): void {
+  findBar.classList.toggle('open', open);
+  findToggle.setAttribute('aria-expanded', String(open));
+  findToggle.classList.toggle('on', open);
+}
+findToggle.addEventListener('click', () => {
+  const open = !findBar.classList.contains('open');
+  setFindOpen(open);
+  if (open) findInput.focus();
+});
+findInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && narrow && findBar.classList.contains('open')) {
+    setFindOpen(false);
+    findToggle.focus();
+  }
+});
 
 // ---- list maintenance ----
 
@@ -1032,6 +1110,7 @@ function setPillReason(): void {
 function setMeta(session: SessionDTO): void {
   activeProvider = session.provider;
   document.getElementById('findbar')!.hidden = activeProvider !== 'claude';
+  document.getElementById('findtoggle')!.hidden = activeProvider !== 'claude';
   (notch as HTMLButtonElement).disabled = activeProvider !== 'claude';
   notch.textContent = activeProvider === 'claude' ? 'Load earlier messages' : 'Earlier messages not shown';
   ttl.textContent = displayTitle(session);
@@ -1282,6 +1361,10 @@ let assessmentOpen = false;
 let routingOpen = false;
 let policyOpen = false;
 let ladderOpen = false;
+
+// ---- the durable agent's memory (#180) ----
+
+const memoryStrip = createMemoryStrip(document.getElementById('agentMemory')!, document.getElementById('memoryProposals')!, post);
 
 // ---- task proposal cards (#81) ----
 
@@ -2129,7 +2212,10 @@ function renderTask(): void {
 
 function autoGrow(): void {
   msgEl.style.height = 'auto';
-  msgEl.style.height = `${Math.min(msgEl.scrollHeight, MAX_COMPOSER_PX)}px`;
+  // Shorter in the compact form: with a phone's keyboard up there is little
+  // left above it, and the composer must not take the transcript's last line.
+  const max = narrow ? MAX_COMPOSER_NARROW_PX : MAX_COMPOSER_PX;
+  msgEl.style.height = `${Math.min(msgEl.scrollHeight, max)}px`;
 }
 
 // ---- @ mentions ----
@@ -2273,11 +2359,42 @@ function renderAttachments(): void {
  * fires a `change`.
  */
 attachBtn.addEventListener('click', () => attachPick.click());
+if (isRemoteHost) {
+  // A remote browser can send any file: images stay inline, the rest go to the host (#139).
+  attachPick.removeAttribute('accept');
+  attachBtn.title = 'Attach a file';
+  attachBtn.setAttribute('aria-label', 'Attach a file');
+}
 attachPick.addEventListener('change', () => {
-  for (const file of Array.from(attachPick.files ?? [])) addImageFile(file);
+  addFiles(Array.from(attachPick.files ?? []));
   attachPick.value = '';
   msgEl.focus();
 });
+
+const isImageFile = (f: File): boolean => IMAGE_MEDIA_TYPES.includes(f.type as (typeof IMAGE_MEDIA_TYPES)[number]);
+
+/**
+ * Files from a picker or a drop with no paths. Images are read here, as ever.
+ * In a remote browser anything else is uploaded and then referred to by the
+ * host path the upload was answered with, which `dropPaths` turns into a
+ * mention like any other (the host refuses any other path from a remote
+ * browser: what it names is on this device, not on the host).
+ */
+function addFiles(files: File[]): void {
+  for (const f of files) {
+    if (isImageFile(f) || !isRemoteHost) addImageFile(f);
+    else void uploadAndMention(f);
+  }
+}
+
+async function uploadAndMention(file: File): Promise<void> {
+  try {
+    const uploaded = await uploadFile(file, activeSession || 'none');
+    post({ type: 'dropPaths', paths: [uploaded.path] });
+  } catch (err) {
+    note(err instanceof Error ? err.message : `Could not upload ${file.name}.`);
+  }
+}
 
 /** Read one clipboard/dropped file into the shape the wire wants. */
 function addImageFile(file: File): void {
@@ -2312,7 +2429,7 @@ msgEl.addEventListener('paste', (e: ClipboardEvent) => {
     .filter((f): f is File => f !== null);
   if (files.length === 0) return; // ordinary text paste, leave it alone
   e.preventDefault();
-  for (const f of files) addImageFile(f);
+  addFiles(files);
 });
 
 // ---- drag and drop ----
@@ -2393,7 +2510,8 @@ app.addEventListener('drop', (e: DragEvent) => {
   e.preventDefault();
   endDrag();
 
-  const paths = droppedPaths(t!);
+  // A remote browser's paths are on its own device, never the host's.
+  const paths = isRemoteHost ? [] : droppedPaths(t!);
   if (paths.length > 0) {
     // The host says what each one turns into; it comes back as `dropped`.
     post({ type: 'dropPaths', paths });
@@ -2404,6 +2522,11 @@ app.addEventListener('drop', (e: DragEvent) => {
   // No path came with the drop, so there is nothing to mention and the bytes
   // are all we have — which only helps for an image.
   const files = Array.from(t!.files);
+  if (isRemoteHost) {
+    addFiles(files);
+    msgEl.focus();
+    return;
+  }
   const images = files.filter((f) => IMAGE_MEDIA_TYPES.includes(f.type as (typeof IMAGE_MEDIA_TYPES)[number]));
   for (const f of images) addImageFile(f);
   const rest = files.length - images.length;
@@ -2593,6 +2716,12 @@ function startDictation(): void {
   // back if a tool is missing. Waiting for that first would make the button
   // feel dead for as long as it takes to find ffmpeg.
   setMicState('recording');
+  if (browserMic) {
+    // A browser records its own device's microphone (#141); no previews.
+    dict.livePreview = false;
+    browserMic.start().catch((e: unknown) => onDictationMessage({ type: 'dictation', state: 'idle', message: (e as Error).message }));
+    return;
+  }
   post({ type: 'dictate', action: 'start' });
 }
 
@@ -2600,8 +2729,31 @@ function startDictation(): void {
 function stopDictation(): void {
   if (micState !== 'recording') return;
   setMicState('transcribing');
+  if (browserMic) {
+    browserMic.stop().then(
+      // `undefined`: sent over the relay, the host answers with a `dictation` message.
+      (text) => {
+        if (text !== undefined) onDictationMessage({ type: 'dictation', state: 'idle', text });
+      },
+      (e: unknown) => onDictationMessage({ type: 'dictation', state: 'idle', message: (e as Error).message }),
+    );
+    return;
+  }
   post({ type: 'dictate', action: 'stop' });
 }
+
+/** In a browser the microphone is the browser's; in the window the host's. */
+const browserMic = isBrowserHost()
+  ? createBrowserDictation({
+      sendAudio: (audio) => post({ type: 'dictateAudio', ...audio }),
+      onLimit: () => {
+        if (micState === 'recording') {
+          flashDictation('info', 'Recording reached its limit and stopped.');
+          stopDictation();
+        }
+      },
+    })
+  : undefined;
 
 function onDictationMessage(m: Extract<HostToConversation, { type: 'dictation' }>): void {
   // A quick second click has already moved this pane on to `transcribing`; the
@@ -2642,7 +2794,8 @@ window.addEventListener('keydown', (e) => {
     resetDictationPreview();
     dict.session = '';
     setMicState('idle');
-    post({ type: 'dictate', action: 'cancel' });
+    if (browserMic) browserMic.cancel();
+    else post({ type: 'dictate', action: 'cancel' });
   }
 });
 
@@ -2775,6 +2928,45 @@ function leaveAnalyticsDetail(): void {
   analyticsDetailEl.replaceChildren();
 }
 
+// ---- opening another conversation (before the host's init arrives) ----
+
+const openingEl = document.getElementById('opening')!;
+/** Long enough for a slow relay; a click the host never answers (a cancelled picker) gives the old one back. */
+const SWITCH_TIMEOUT_MS = 20_000;
+let switching: { timer: ReturnType<typeof setTimeout>; ttl: string; meta: string; pillClass: string; pillText: string; readOnly: boolean } | undefined;
+
+onSwitch((to) => {
+  if (to.key !== undefined && to.key === activeSession) return;
+  // A second click before the first answer keeps what the first one hid.
+  if (switching) clearTimeout(switching.timer);
+  const shown = switching ?? { ttl: ttl.textContent ?? '', meta: meta.textContent ?? '', pillClass: pill.className, pillText: pill.textContent ?? '', readOnly: msgEl.readOnly };
+  switching = { ...shown, timer: setTimeout(() => endSwitch(true), SWITCH_TIMEOUT_MS) };
+  ttl.textContent = to.title;
+  meta.textContent = '';
+  pill.className = 'pill';
+  pill.textContent = 'Opening…';
+  openingEl.textContent = `Opening ${to.title}…`;
+  openingEl.hidden = false;
+  app.classList.add('switching');
+  msgEl.readOnly = true;
+});
+
+/** `restore`: no conversation came, so put the last one's header back. */
+function endSwitch(restore: boolean): void {
+  if (!switching) return;
+  clearTimeout(switching.timer);
+  if (restore) {
+    ttl.textContent = switching.ttl;
+    meta.textContent = switching.meta;
+    pill.className = switching.pillClass;
+    pill.textContent = switching.pillText;
+  }
+  msgEl.readOnly = switching.readOnly;
+  switching = undefined;
+  openingEl.hidden = true;
+  app.classList.remove('switching');
+}
+
 vscodeApi.onMessage((body) => {
   const m = body as HostToConversation;
   switch (m.type) {
@@ -2847,6 +3039,7 @@ vscodeApi.onMessage((body) => {
       showAnalyticsDetail(m.detail);
       break;
     case 'init':
+      endSwitch(false);
       leaveAnalyticsDetail();
       renderDelegationOffer(document.getElementById('convDelegationOffer')!, undefined, () => {});
       if (activeSession !== m.session.key) {
@@ -2888,6 +3081,7 @@ vscodeApi.onMessage((body) => {
       delegatedOpen = true;
       linked = m.linked ?? [];
       setProposals(m.proposals, m.delegations);
+      memoryStrip.set(m.agentMemory);
       stick = true;
       appendBlocks(m.blocks);
       // Opening a pane on a session that is already waiting lands on what it is
@@ -2897,6 +3091,10 @@ vscodeApi.onMessage((body) => {
       updateAskNav();
       // So a window reload brings this pane back on the same conversation.
       vscodeApi.setState({ key: m.session.key });
+      // And so the browser's URL names it (#133).
+      announceConversation({ key: m.session.key });
+      // "+ New" asked for the cursor to be ready to type the first prompt.
+      if (takeComposerFocus()) msgEl.focus();
       break;
     case 'append':
       appendBlocks(m.blocks);
@@ -2916,8 +3114,10 @@ vscodeApi.onMessage((body) => {
         if (draft) { drafts.delete(activeSession); drafts.set(m.session.key, draft); }
         if (dict.session === activeSession) dict.session = m.session.key;
         if (pendingSend) pendingSend = { ...pendingSend, session: m.session.key };
+        const previous = activeSession;
         activeSession = m.session.key;
         vscodeApi.setState({ key: activeSession });
+        announceConversation({ key: activeSession, previous });
       }
       setMeta(m.session);
       setStatus(m.session.status, m.caps.estimated, m.session.statusUncertain);
@@ -2935,6 +3135,16 @@ vscodeApi.onMessage((body) => {
       break;
     case 'proposals':
       setProposals(m.proposals, m.delegations);
+      break;
+    case 'agentMemory': {
+      // A proposal arriving at the end of the conversation is followed there, as a task proposal is.
+      const before = document.getElementById('memoryProposals')!.childElementCount;
+      memoryStrip.set(m.memory);
+      if (stick && (m.memory?.proposals.length ?? 0) > before) scrollToBottom();
+      break;
+    }
+    case 'agentMemoryResult':
+      memoryStrip.result(m.requestId, m.error);
       break;
     case 'composer':
       setComposer(m.composer);
@@ -3009,4 +3219,8 @@ vscodeApi.onMessage((body) => {
   }
 });
 
-post({ type: 'ready' });
+// With the conversation it last showed, so a host that has not been pointed
+// anywhere (a browser's, after a reload or a dropped connection) shows it again (#128).
+const ready = () => post({ type: 'ready', key: vscodeApi.getState()?.key });
+ready();
+vscodeApi.onReconnect(ready);

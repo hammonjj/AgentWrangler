@@ -1,5 +1,6 @@
 import esbuild from 'esbuild';
-import { cpSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const watch = process.argv.includes('--watch');
 
@@ -34,36 +35,14 @@ const watchLogger = {
 };
 
 /**
- * Electron main process and preload.
+ * Every program is plain Node, run on the app bundle's pinned Node
+ * (scripts/fetch-node.mjs, #129; keep `target` in step with its version).
+ * Electron was retired in #142.
  *
- * Two bundles because they run in two processes with different privileges: the
- * preload is what the renderer is given, so nothing but the three bridge
- * methods may be reachable from it, and bundling it with the main process would
- * put the whole application in the renderer's address space.
- *
- * `electron` is external in both — it is supplied by the runtime, the way
- * `vscode` is by the editor. The Agent SDK's `import.meta.url` workaround is
- * the same one the extension bundle needs, for the same reason.
- */
-const electronMain = {
-  entryPoints: ['src/electron/main.ts'],
-  bundle: true,
-  format: 'cjs',
-  platform: 'node',
-  target: 'node22',
-  external: ['electron'],
-  outfile: 'dist/electron/main.js',
-  sourcemap: true,
-  minify: false,
-  define: { 'import.meta.url': '__aw_import_meta_url', ...buildDefines },
-  banner: { js: "var __aw_import_meta_url = require('url').pathToFileURL(__filename).href;" },
-  plugins: [watchLogger],
-};
-
-/**
- * The session host (playbook §5, Stage 3): a plain Node program the app runs
- * detached, from a clone of its own bundle with `ELECTRON_RUN_AS_NODE=1`. It
- * owns one Claude session and outlives the app. No `electron` import at all.
+ * The session host (playbook §5, Stage 3): a program the core daemon runs
+ * detached, from a clone of its own bundle. It owns one Claude session and
+ * outlives the daemon. The Agent SDK needs the `import.meta.url` workaround
+ * in a CommonJS bundle.
  */
 const sessionHost = {
   entryPoints: ['src/sessionHost/main.ts'],
@@ -80,20 +59,18 @@ const sessionHost = {
 };
 
 /**
- * The remote daemon (#74): holds the Discord connection and outlives the app.
- * Plain Node, no `electron`; run by launchd from the session hosts' cloned
- * runtime with ELECTRON_RUN_AS_NODE.
+ * The core daemon (#130): `createApp`, the control socket and the web
+ * workbench, run by launchd from the same cloned runtime, on its bundled Node.
  */
-const remoteDaemon = {
+const coreDaemon = {
   ...sessionHost,
-  entryPoints: ['src/remoteDaemon/main.ts'],
-  outfile: 'dist/remoteDaemon/main.js',
+  entryPoints: ['src/daemon/main.ts'],
+  outfile: 'dist/daemon/main.js',
 };
 
 /**
- * The `aw` command-line client (#21). Plain Node, no `electron`: `bin/aw` runs
- * it with the installed app's own binary under ELECTRON_RUN_AS_NODE, straight
- * out of app.asar, the way session hosts run.
+ * The `aw` command-line client (#21): `bin/aw` runs it on the installed app's
+ * bundled Node, from `Contents/Resources/app/dist/cli`.
  */
 const cli = {
   entryPoints: ['src/cli/main.ts'],
@@ -108,31 +85,31 @@ const cli = {
   plugins: [watchLogger],
 };
 
-const electronPreload = {
-  entryPoints: ['src/electron/preload.ts'],
-  bundle: true,
-  format: 'cjs',
-  platform: 'node',
-  target: 'node22',
-  external: ['electron'],
-  outfile: 'dist/electron/preload.js',
-  sourcemap: true,
-  minify: false,
-  plugins: [watchLogger],
+/**
+ * The app bundle's launcher script (#142): `Contents/MacOS/Agent Wrangler`
+ * execs the bundled Node on it. Makes sure the core daemon runs, then opens
+ * the browser on a sign-in link.
+ */
+const launcher = {
+  ...cli,
+  entryPoints: ['src/launcher/main.ts'],
+  outfile: 'dist/launcher/main.js',
 };
 
-/** Browser bundles, one per webview. entryNames '[dir]' collapses
+/** Browser bundles. entryNames '[dir]' collapses
  * src/webview/dashboard/main.ts -> dist/webview/dashboard.js (+ dashboard.css).
- * The theme entry is a bare stylesheet — the 56 `--vscode-*` values VSCode
- * injects and a desktop window has to be given — and collapses the same way,
- * to dist/webview/theme.css. */
+ * The page the web server renders loads `workbench` (which imports the
+ * dashboard, conversation and preferences panes) after `webshim`; the
+ * standalone dashboard and conversation bundles are for
+ * scripts/verify-conversation-ui.ts. The theme entry is a bare stylesheet —
+ * the 56 `--vscode-*` values VSCode injects and a browser has to be given —
+ * and collapses the same way, to dist/webview/theme.css. */
 const web = {
   entryPoints: [
     'src/webview/dashboard/main.ts',
     'src/webview/conversation/main.ts',
     'src/webview/workbench/main.ts',
-    'src/webview/preferences/main.ts',
-    'src/webview/palette/main.ts',
+    'src/webview/webshim/main.ts',
     'src/webview/theme/vscodeTokens.css',
   ],
   bundle: true,
@@ -146,13 +123,52 @@ const web = {
   plugins: [watchLogger],
 };
 
-const configs = [web, electronMain, electronPreload, sessionHost, remoteDaemon, cli];
+/**
+ * The remote-control loader (#175): the static site Netlify serves, `dist/relay-site/`.
+ * One bundle (with supabase-js) plus the files in `static/`. It holds no workbench code:
+ * the Mac sends that over the relay.
+ */
+const relaySite = {
+  entryPoints: { loader: 'src/webview/relayLoader/main.ts' },
+  bundle: true,
+  format: 'iife',
+  platform: 'browser',
+  target: 'es2022',
+  outdir: 'dist/relay-site',
+  sourcemap: false,
+  minify: true,
+  plugins: [watchLogger],
+};
+
+const configs = [web, relaySite, sessionHost, coreDaemon, cli, launcher];
+
+rmSync('dist/relay-site', { recursive: true, force: true });
+cpSync('src/webview/relayLoader/static', 'dist/relay-site', { recursive: true });
+writeRelayProject();
 
 /**
- * Qualification stage 2's scratch-repo fixtures (plan §19.6), which the main
- * process copies into a temp dir per run. Plain files, not bundled: they are
- * the repos an agent works in. `createApp` finds them at
- * `dist/qualification-fixtures`, beside `dist/electron`.
+ * The loader's `project.json` (#187): which Supabase project a device with nothing stored
+ * signs in to. Taken from this Mac's own settings (`remote.relay.url`, `remote.relay.anonKey`,
+ * both public values) so it is never committed. Absent when they are not set.
+ */
+function writeRelayProject() {
+  const file = join(process.env.HOME ?? '', 'Library/Application Support/Agent Wrangler/settings.json');
+  if (!existsSync(file)) return;
+  try {
+    const s = JSON.parse(readFileSync(file, 'utf8'));
+    const url = String(s['remote.relay.url'] ?? '').trim().replace(/\/+$/, '');
+    const anonKey = String(s['remote.relay.anonKey'] ?? '').trim();
+    if (url && anonKey) writeFileSync('dist/relay-site/project.json', `${JSON.stringify({ url, anonKey })}\n`);
+  } catch {
+    // An unreadable settings file leaves the site without one, as on another machine.
+  }
+}
+
+/**
+ * Qualification stage 2's scratch-repo fixtures (plan §19.6), which the core
+ * copies into a temp dir per run. Plain files, not bundled: they are the repos
+ * an agent works in. `createApp` finds them at `dist/qualification-fixtures`,
+ * beside `dist/daemon`.
  */
 rmSync('dist/qualification-fixtures', { recursive: true, force: true });
 cpSync('src/orchestration/local/qualification-fixtures', 'dist/qualification-fixtures', { recursive: true });

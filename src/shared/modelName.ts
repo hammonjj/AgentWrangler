@@ -40,6 +40,30 @@ export function normalizeModelId(id: string | undefined): string | undefined {
   return s.length === 0 ? undefined : s;
 }
 
+/** A filesystem path: POSIX absolute or `~/`, a Windows drive (`C:\` or `C:/`), or a UNC share. */
+const LOCAL_PATH = /^(?:\/|~[\\/]|[a-z]:[\\/]|\\\\)/i;
+
+/**
+ * The model's own name from a local filesystem path, with an optional
+ * `local:` prefix: `/Users/x/Models/Qwen3.5-4B-MLX-4bit` → `Qwen3.5-4B-MLX-4bit`.
+ *
+ * Only the last path segment is kept, and its case and variant/quantization
+ * are left alone. Anything that is not a path (hosted ids like `gpt-4o`,
+ * `anthropic/claude-sonnet-5`, `org/model` repo ids, URLs) returns undefined so
+ * the caller's normal rules apply. Two models in different directories share a
+ * label; the full path stays in the tooltip, which is what tells them apart.
+ */
+export function localModelName(id: string | undefined): string | undefined {
+  if (id === undefined) return undefined;
+  let s = id.trim();
+  if (s.toLowerCase().startsWith('local:')) s = s.slice('local:'.length).trim();
+  if (!LOCAL_PATH.test(s)) return undefined;
+  const segments = s.split(/[\\/]+/).filter((p) => p.length > 0);
+  const last = segments.at(-1);
+  // A bare `/` or `C:\` names nothing; leave it to show as itself.
+  return last === undefined || /^[a-z]:$/i.test(last) ? undefined : last;
+}
+
 /**
  * "Opus 5", "Fable 5.1", "Haiku 4.5" — family first, version after, however the
  * id happened to order them (`claude-3-5-sonnet` and `claude-sonnet-5` both
@@ -47,6 +71,8 @@ export function normalizeModelId(id: string | undefined): string | undefined {
  * new model should show up as itself, not as a blank cell.
  */
 export function modelLabel(id: string | undefined): string | undefined {
+  const local = localModelName(id);
+  if (local !== undefined) return local;
   const cleaned = normalizeModelId(id);
   if (cleaned === undefined) return undefined;
 

@@ -29,6 +29,7 @@
  */
 
 import { createWebviewBridge, type WebviewBridge } from '../../shared/webviewBridge';
+import { RECONNECT_EVENT, SHELL_PANE, type HostToShell, type ShellToHost } from '../../shared/shellProtocol';
 
 declare function acquireVsCodeApi(): WebviewBridge<WorkbenchState>;
 
@@ -43,12 +44,21 @@ declare function acquireVsCodeApi(): WebviewBridge<WorkbenchState>;
  */
 const api = createWebviewBridge<WorkbenchState>(() => acquireVsCodeApi());
 
-export type PaneName = 'dashboard' | 'conversation';
+/**
+ * This document is a browser (the shim says so), possibly on another device:
+ * a file's path in it is not a host path, so files are uploaded rather than
+ * named (#139).
+ */
+export const isRemoteHost = (globalThis as { agentWranglerHost?: { remote?: boolean } }).agentWranglerHost?.remote === true;
+
+export type PaneName = 'dashboard' | 'conversation' | 'preferences';
 
 /** What `setState` holds: a slot per pane, plus the shared split. */
 interface WorkbenchState {
   dashboard?: unknown;
   conversation?: unknown;
+  /** Preferences remembers its Orchestration tab. */
+  preferences?: unknown;
   /** Fraction of the width given to the table, 0–1. */
   split?: number;
 }
@@ -67,14 +77,37 @@ export interface PaneApi<S> {
   post(body: unknown): void;
   /** Receive this pane's messages. Anything addressed to the other pane is ignored. */
   onMessage(listener: (body: unknown) => void): void;
+  /**
+   * The connection to the host dropped and is back (a browser, #128). The
+   * host on the other end is a fresh one: send `ready` again. Never fires in
+   * the window, whose host cannot drop.
+   */
+  onReconnect(listener: () => void): void;
   getState(): S | undefined;
   setState(state: S): void;
+}
+
+/**
+ * Unique per document, so a resend after a drop can be recognised and not
+ * acted on twice (#128). Every message gets one: the host decides which are
+ * worth remembering.
+ */
+const tab = randomId();
+let commandSeq = 0;
+
+function randomId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (typeof c?.randomUUID === 'function') return c.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 export function paneApi<S>(pane: PaneName): PaneApi<S> {
   return {
     post(body) {
-      api.postMessage({ pane, body });
+      api.postMessage({ pane, body, commandId: `${tab}.${++commandSeq}` });
+    },
+    onReconnect(listener) {
+      window.addEventListener(RECONNECT_EVENT, () => listener());
     },
     onMessage(listener) {
       window.addEventListener('message', (e: MessageEvent) => {
@@ -93,6 +126,34 @@ export function paneApi<S>(pane: PaneName): PaneApi<S> {
     },
   };
 }
+
+/**
+ * The `shell` channel (#126), for the app shell (#133): prompts, toasts and
+ * navigation addressed to this document rather than to a pane.
+ *
+ * Separate from `paneApi` because its envelopes carry no `commandId`: the
+ * server never acknowledges a shell message, so one tracked for resending
+ * would be resent forever, and a prompt is cancelled host-side when its
+ * connection drops anyway. In the browser the shim delivers the host's shell
+ * messages as `message` events like any pane's.
+ */
+export const shellApi = {
+  post(body: ShellToHost): void {
+    api.postMessage({ pane: SHELL_PANE, body });
+  },
+  onMessage(listener: (body: HostToShell) => void): void {
+    window.addEventListener('message', (e: MessageEvent) => {
+      const m = e.data as { pane?: unknown; body?: unknown } | undefined;
+      if (!m || typeof m !== 'object' || m.pane !== SHELL_PANE) return;
+      if (!m.body || typeof m.body !== 'object') return;
+      listener(m.body as HostToShell);
+    });
+  },
+  /** The connection dropped and is back: whatever the host was asking is cancelled. */
+  onReconnect(listener: () => void): void {
+    window.addEventListener(RECONNECT_EVENT, () => listener());
+  },
+};
 
 /** The divider position, shared by the panes rather than owned by either. */
 export const splitState = {

@@ -349,15 +349,12 @@ describe.runIf(process.platform === 'darwin')('session host recovery, end to end
  * real probes (`ps` start time, parent pid) classify real processes the same way.
  */
 describe.runIf(process.platform === 'darwin')('orphan identity, with real processes', () => {
-  /** A Claude runner as the app wires it: hosts on, every resume swept first, history reads recorded. */
+  /** A Claude runner as the app wires it: on hosts, every resume swept first, history reads recorded. */
   function runner(sup: HostSupervisor, onHistory: () => void) {
     return new RunnerService({
-      query: () => {
-        throw new Error('hosted sessions never run in-process');
-      },
       binary: () => '/fake',
       log,
-      hosts: { supervisor: sup, enabled: () => true },
+      hosts: { supervisor: sup },
       loadHistory: async () => {
         onHistory();
         return { blocks: [], truncated: false };

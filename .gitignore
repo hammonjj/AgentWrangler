@@ -7,3 +7,5 @@ dist/
 .worktrees/
 .claude/worktrees/
 release/
+# The pinned Node runtime staged for the app bundle (scripts/fetch-node.mjs).
+.node-runtime/

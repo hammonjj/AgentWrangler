@@ -1,0 +1,34 @@
+plugins = []
+redirects = []
+
+[functions]
+
+[functions."*"]
+
+[build]
+publish = "/Users/jameshammond/Documents/GitHub/AgentWrangler"
+publishOrigin = "default"
+
+[build.environment]
+
+[build.processing]
+
+[build.processing.css]
+
+[build.processing.html]
+
+[build.processing.images]
+
+[build.processing.js]
+
+[build.services]
+
+[[headers]]
+for = "/*"
+
+[headers.values]
+Content-Security-Policy = "default-src 'none'; script-src 'self' blob:; style-src 'self' blob:; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+Referrer-Policy = "no-referrer"
+X-Content-Type-Options = "nosniff"
+Permissions-Policy = "camera=(), geolocation=(), microphone=(self)"
+Cache-Control = "no-cache"

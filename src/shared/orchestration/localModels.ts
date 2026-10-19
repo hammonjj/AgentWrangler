@@ -13,6 +13,7 @@
  * Pure and shared: the main process builds these, Preferences renders them.
  */
 
+import { localModelName } from '../modelName';
 import { UNKNOWN, known, type Known, type ModelDescriptor } from './catalog';
 import {
   DATA_LEAVES_MACHINE,
@@ -89,6 +90,8 @@ export interface LocalModelReport {
 
 /** The part of a model id worth showing: MLX lists the weights path as its id. */
 export function shortModelName(id: string): string {
+  const path = localModelName(id);
+  if (path !== undefined) return path;
   const parts = id.split('/').filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : id;
 }

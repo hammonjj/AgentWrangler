@@ -320,7 +320,9 @@ export type LocalEndpointChange =
   | { op: 'probe'; id: string }
   | { op: 'qualify'; id: string; model: string; harness?: 'codex' | 'claude-code' }
   /** Stage 2 (§19.6): scratch-repo tasks through Codex on the endpoint. */
-  | { op: 'qualifyTasks'; id: string; model: string; harness?: 'codex' | 'claude-code' };
+  | { op: 'qualifyTasks'; id: string; model: string; harness?: 'codex' | 'claude-code' }
+  /** Stop a running stage 2 for this model, whichever harness it runs through (#160). */
+  | { op: 'cancelQualifyTasks'; id: string; model: string };
 
 /** A `localEndpoint` message's change, or nothing if it is not well formed. */
 export function localEndpointChange(raw: unknown): LocalEndpointChange | undefined {
@@ -346,6 +348,8 @@ export function localEndpointChange(raw: unknown): LocalEndpointChange | undefin
       return id && typeof c.model === 'string' && c.model !== '' && (c.harness === undefined || c.harness === 'codex' || c.harness === 'claude-code')
         ? { op: c.op, id, model: c.model, ...(c.harness ? { harness: c.harness } : {}) }
         : undefined;
+    case 'cancelQualifyTasks':
+      return id && typeof c.model === 'string' && c.model !== '' ? { op: 'cancelQualifyTasks', id, model: c.model } : undefined;
     default:
       return undefined;
   }

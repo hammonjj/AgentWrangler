@@ -1,0 +1,332 @@
+/**
+ * Browser devices and their credentials (#127, plan §8).
+ *
+ * A device is a browser that exchanged a login link. It is given a 256-bit
+ * random credential, which it keeps as an `HttpOnly` cookie; this side keeps
+ * only the credential's sha256, in `<dataDir>/web-devices.json` (0600). A
+ * device is *bound to* a principal, never one itself (`core/access.ts`).
+ *
+ * Expiry slides: a device unseen for 30 days stops working. `lastSeen` is
+ * written at most once an hour per device, so an open tab does not mean a
+ * write per request.
+ *
+ * Revoking (#137) deletes the device; `onDidRevoke` tells the server, which
+ * closes that device's open connections at once. One store per process, shared
+ * by every `WebServer` it starts, so a revocation reaches whichever is running.
+ */
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { LOCAL_OWNER } from '../access';
+import { Emitter } from '../events';
+
+export const DEVICE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const LAST_SEEN_WRITE_MS = 60 * 60 * 1000;
+export const WEB_DEVICES_FILE = 'web-devices.json';
+
+/**
+ * Where a credential works (#136). A loopback credential (from `aw web open`)
+ * is never accepted on the LAN listener and a LAN one (pairing, #137) never on
+ * loopback: each listener verifies against its own scope only, and they use
+ * different cookies as well.
+ *
+ * A `relay` device (#174) has no cookie at all: it was paired for remote control and holds a
+ * symmetric key instead, which this store keeps (it must: the daemon encrypts to it). It is
+ * never accepted by either listener, and is listed and revoked like the others.
+ */
+export type DeviceScope = 'loopback' | 'lan';
+
+/** Where a stored device works: a listener's scope, or the relay. */
+export type DeviceKind = DeviceScope | 'relay';
+
+export interface WebDevice {
+  id: string;
+  /** A summary of the user agent at login ("Chrome on macOS"). For a device list, not identity. */
+  name: string;
+  createdAt: number;
+  lastSeen: number;
+  principal: string;
+  /** Where the credential works. A file from before #136 has none, which reads as loopback. */
+  scope: DeviceKind;
+}
+
+interface StoredDevice extends WebDevice {
+  /** sha256 of the credential, hex. The credential itself is never stored. */
+  credentialHash: string;
+  /** sha256 of the recovery token (LAN devices), hex. See `issueRecovery`. */
+  recoveryHash?: string;
+  /** A relay device's AES key, base64url (#174). The file is 0600, like the TLS keys beside it. */
+  relayKey?: string;
+  /** A relay device's Web Push subscription (#177): where its notices go while no page is open. */
+  push?: { endpoint: string; p256dh: string; auth: string };
+}
+
+interface DevicesFile {
+  version: 1;
+  devices: StoredDevice[];
+}
+
+function hashCredential(credential: string): Buffer {
+  return crypto.createHash('sha256').update(credential, 'utf8').digest();
+}
+
+export class WebDeviceStore {
+  private devices: StoredDevice[];
+  private readonly revoked = new Emitter<string>();
+  private readonly changed = new Emitter<void>();
+  /** A device was revoked: its id. Its connections must close now. */
+  readonly onDidRevoke = this.revoked.event;
+  /** The list changed: a device was added or revoked, or was seen. */
+  readonly onDidChange = this.changed.event;
+
+  constructor(
+    private readonly file: string,
+    private readonly now: () => number = () => Date.now(),
+    private readonly log: (line: string) => void = () => undefined,
+  ) {
+    this.devices = this.load();
+  }
+
+  /** Issue a new device and its credential. The credential is returned once and not kept. */
+  issue(name: string, id: string = crypto.randomUUID(), scope: DeviceScope = 'loopback'): { device: WebDevice; credential: string } {
+    const credential = crypto.randomBytes(32).toString('base64url');
+    const at = this.now();
+    const stored: StoredDevice = {
+      id,
+      name: name.slice(0, 80),
+      createdAt: at,
+      lastSeen: at,
+      principal: LOCAL_OWNER.id,
+      scope,
+      credentialHash: hashCredential(credential).toString('hex'),
+    };
+    this.devices = [...this.live(), stored];
+    this.save();
+    this.changed.fire();
+    return { device: publicView(stored), credential };
+  }
+
+  /**
+   * A new relay device (#174) and its key. The key goes into the pairing link, once, and stays
+   * here so the daemon can talk to the device; it has no cookie credential (a random hash that
+   * nothing will ever match stands in for one).
+   */
+  issueRelay(name: string, key: string, id: string = crypto.randomUUID()): WebDevice {
+    const at = this.now();
+    const stored: StoredDevice = {
+      id,
+      name: name.slice(0, 80),
+      createdAt: at,
+      lastSeen: at,
+      principal: LOCAL_OWNER.id,
+      scope: 'relay',
+      credentialHash: crypto.randomBytes(32).toString('hex'),
+      relayKey: key,
+    };
+    this.devices = [...this.live(), stored];
+    this.save();
+    this.changed.fire();
+    return publicView(stored);
+  }
+
+  /**
+   * A current relay device's key, and mark it seen. Undefined for an unknown, revoked, expired
+   * or non-relay device: a `connect` naming it is refused.
+   */
+  relayKeyOf(id: string): string | undefined {
+    const at = this.now();
+    const d = this.devices.find((x) => x.id === id);
+    if (!d || d.scope !== 'relay' || !d.relayKey || at - d.lastSeen > DEVICE_TTL_MS) return undefined;
+    if (at - d.lastSeen > LAST_SEEN_WRITE_MS) {
+      d.lastSeen = at;
+      this.devices = this.live();
+      this.save();
+      this.changed.fire();
+    }
+    return d.relayKey;
+  }
+
+  /** Keep, replace or (undefined) forget a relay device's push subscription (#177). */
+  setRelayPush(id: string, push: StoredDevice['push'] | undefined): void {
+    const d = this.devices.find((x) => x.id === id && x.scope === 'relay');
+    if (!d || JSON.stringify(d.push) === JSON.stringify(push)) return;
+    if (push) d.push = push;
+    else delete d.push;
+    this.save();
+  }
+
+  /** Current relay devices that can be sent a notice (#177). */
+  relayPushTargets(): { id: string; push: NonNullable<StoredDevice['push']> }[] {
+    return this.live().flatMap((d) => (d.scope === 'relay' && d.push ? [{ id: d.id, push: d.push }] : []));
+  }
+
+  /**
+   * Forget a device: its credential stops working from this call on, and
+   * `onDidRevoke` fires so its open connections are closed. Undefined when
+   * there is no such device.
+   */
+  revoke(id: string): WebDevice | undefined {
+    const found = this.devices.find((d) => d.id === id);
+    if (!found) return undefined;
+    this.devices = this.devices.filter((d) => d !== found);
+    this.save();
+    this.revoked.fire(id);
+    this.changed.fire();
+    return publicView(found);
+  }
+
+  /** Whether `id` is a current device (it may have been revoked since a check). */
+  has(id: string): boolean {
+    return this.live().some((d) => d.id === id);
+  }
+
+  /**
+   * The device a credential belongs to, if it is current and of `scope`, and
+   * mark it seen. Every stored hash is compared, in constant time each,
+   * whether or not an earlier one matched. A credential of the other scope is
+   * no credential here.
+   */
+  verify(credential: string | undefined, scope: DeviceScope): WebDevice | undefined {
+    if (typeof credential !== 'string' || credential.length === 0 || credential.length > 128) return undefined;
+    const given = hashCredential(credential);
+    const at = this.now();
+    let match: StoredDevice | undefined;
+    for (const d of this.devices) {
+      const stored = Buffer.from(d.credentialHash, 'hex');
+      if (stored.length === given.length && crypto.timingSafeEqual(stored, given) && !match) match = d;
+    }
+    if (!match || match.scope !== scope || at - match.lastSeen > DEVICE_TTL_MS) return undefined;
+    if (at - match.lastSeen > LAST_SEEN_WRITE_MS) {
+      match.lastSeen = at;
+      this.devices = this.live();
+      this.save();
+      this.changed.fire();
+    }
+    return publicView(match);
+  }
+
+  /**
+   * A recovery token for a LAN device: a second secret the page keeps in
+   * `localStorage`, for the day the browser loses the device cookie (a locked
+   * phone, a cleared cookie jar). Replaces any earlier one. Undefined for a
+   * device that is not current or not on the LAN.
+   */
+  issueRecovery(deviceId: string): string | undefined {
+    const d = this.devices.find((x) => x.id === deviceId);
+    if (!d || d.scope !== 'lan' || this.now() - d.lastSeen > DEVICE_TTL_MS) return undefined;
+    const token = crypto.randomBytes(32).toString('base64url');
+    d.recoveryHash = hashCredential(token).toString('hex');
+    this.save();
+    return token;
+  }
+
+  /**
+   * Trade a recovery token for a fresh cookie credential. The device keeps its
+   * id; its old credential stops working, as the browser lost it anyway. The
+   * token stays valid, so a response lost on the way does not strand the device.
+   * Revoking or expiring the device ends the token with it.
+   */
+  recover(token: string | undefined, scope: DeviceScope): { device: WebDevice; credential: string } | undefined {
+    if (typeof token !== 'string' || token.length === 0 || token.length > 128) return undefined;
+    const given = hashCredential(token);
+    const at = this.now();
+    let match: StoredDevice | undefined;
+    for (const d of this.devices) {
+      const stored = d.recoveryHash ? Buffer.from(d.recoveryHash, 'hex') : undefined;
+      if (stored && stored.length === given.length && crypto.timingSafeEqual(stored, given) && !match) match = d;
+    }
+    if (!match || match.scope !== scope || at - match.lastSeen > DEVICE_TTL_MS) return undefined;
+    const credential = crypto.randomBytes(32).toString('base64url');
+    match.credentialHash = hashCredential(credential).toString('hex');
+    match.lastSeen = at;
+    this.devices = this.live();
+    this.save();
+    this.changed.fire();
+    return { device: publicView(match), credential };
+  }
+
+  list(): WebDevice[] {
+    return this.live().map(publicView);
+  }
+
+  private live(): StoredDevice[] {
+    const at = this.now();
+    return this.devices.filter((d) => at - d.lastSeen <= DEVICE_TTL_MS);
+  }
+
+  private load(): StoredDevice[] {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Partial<DevicesFile>;
+      if (!Array.isArray(raw.devices)) return [];
+      return raw.devices
+        .filter(
+          (d): d is StoredDevice =>
+            !!d && typeof d.id === 'string' && typeof d.credentialHash === 'string' && /^[0-9a-f]{64}$/.test(d.credentialHash) && typeof d.lastSeen === 'number',
+        )
+        // Anything but an explicit 'lan' is loopback, the narrower of the two. A relay device
+        // must have its key, or it is nothing.
+        .filter((d) => d.scope !== 'relay' || typeof d.relayKey === 'string')
+        .map((d): StoredDevice => ({ ...d, scope: d.scope === 'lan' || d.scope === 'relay' ? d.scope : 'loopback' }));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') this.log(`web: could not read ${path.basename(this.file)}; starting with no devices`);
+      return [];
+    }
+  }
+
+  private save(): void {
+    const body: DevicesFile = { version: 1, devices: this.devices };
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+      const tmp = `${this.file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, `${JSON.stringify(body, null, 2)}\n`, { mode: 0o600 });
+      fs.renameSync(tmp, this.file);
+      fs.chmodSync(this.file, 0o600);
+    } catch (err) {
+      this.log(`web: could not save ${path.basename(this.file)}: ${String(err)}`);
+    }
+  }
+}
+
+function publicView(d: StoredDevice): WebDevice {
+  return { id: d.id, name: d.name, createdAt: d.createdAt, lastSeen: d.lastSeen, principal: d.principal, scope: d.scope };
+}
+
+/** The longest device name kept. */
+export const MAX_DEVICE_NAME = 60;
+
+/**
+ * The name a device is paired under (#137): what was typed, one line, no
+ * control characters, at most `MAX_DEVICE_NAME`; or `fallback` when that
+ * leaves nothing.
+ */
+export function cleanDeviceName(input: string | null | undefined, fallback: string): string {
+  const name = typeof input === 'string' ? input.replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, MAX_DEVICE_NAME).trim() : '';
+  return name || fallback;
+}
+
+/** "Chrome on macOS", from a user agent, for a device list. Never stored as more than this. */
+export function summarizeUserAgent(ua: string | undefined): string {
+  if (!ua) return 'Unknown browser';
+  // iOS browsers are WebKit under their own tokens (`CriOS`, `FxiOS`, `EdgiOS`).
+  const browser = /Edg\/|EdgiOS\//.test(ua)
+    ? 'Edge'
+    : /Firefox\/|FxiOS\//.test(ua)
+      ? 'Firefox'
+      : /Chrome\/|CriOS\//.test(ua)
+        ? 'Chrome'
+        : /Safari\//.test(ua)
+          ? 'Safari'
+          : 'Browser';
+  const os = /iPhone|iPad|iPod/.test(ua)
+    ? 'iOS'
+    : /Android/.test(ua)
+      ? 'Android'
+      : /Mac OS X|Macintosh/.test(ua)
+        ? 'macOS'
+        : /Windows/.test(ua)
+          ? 'Windows'
+          : /Linux/.test(ua)
+            ? 'Linux'
+            : undefined;
+  return os ? `${browser} on ${os}` : browser;
+}

@@ -129,7 +129,7 @@ export const SETTINGS: SettingSpec[] = [
     type: 'boolean',
     default: true,
     description:
-      'Run Codex conversations in a background Codex server that keeps going when Agent Wrangler quits or is reinstalled, so a running turn finishes and an approval or question is still waiting when the app comes back. Updating Codex restarts that server, which ends a running turn; Agent Wrangler only does that when nothing is running, or when you choose Agents → Restart Codex Server. Off runs Codex as a child of the app, which ends with it. Takes effect after a restart.',
+      'Run Codex conversations in a background Codex server that keeps going when Agent Wrangler’s background service stops or is reinstalled, so a running turn finishes and an approval or question is still waiting when it comes back. Updating Codex restarts that server, which ends a running turn; Agent Wrangler only does that when the service starts and nothing is running. Off runs Codex as a child of the service, which ends with it. Takes effect after a restart.',
   },
   {
     key: 'runner.confirmTakeoverOnSend',
@@ -150,25 +150,16 @@ export const SETTINGS: SettingSpec[] = [
       'After a window reload, resume the conversation this window was running. Only the most recent one, only if it was running in the last few hours, and never one something else has picked up in the meantime.',
   },
   {
-    key: 'experimental.sessionHosts',
-    label: 'Keep conversations running when Agent Wrangler quits (experimental)',
-    group: 'Conversations',
-    type: 'boolean',
-    default: false,
-    description:
-      'Run each new Claude conversation in its own small background process, so quitting, reinstalling or a crash of Agent Wrangler no longer ends it: it keeps working, and Agent Wrangler reconnects when it opens again. ⌘Q then leaves those conversations running; Quit and Stop All Agents (⌥⌘Q) ends them. Applies to conversations started after it is switched on.',
-  },
-  {
+    // Every Claude conversation runs in a session host that outlives the app
+    // (#122), so this applies to all of them: it no longer hangs off a switch.
     key: 'lifecycle.orphanIdleHours',
     label: 'End idle sessions with no Agent Wrangler connected after (hours)',
     group: 'Conversations',
     type: 'number',
     default: 24,
     minimum: 0,
-    // Drop with the setting it hangs off when session hosts become the default.
-    dependsOn: 'experimental.sessionHosts',
     description:
-      'A conversation left running in the background while Agent Wrangler is quit is ended after this many hours with nothing connected to it, but only if it is idle: never one that is working, waiting on a question or permission, or running background tasks. It can be resumed afterwards with nothing lost. Time the machine spends asleep does not count. 0 = never.',
+      'Claude conversations keep running in the background when Agent Wrangler quits. One left that way is ended after this many hours with nothing connected to it, but only if it is idle: never one that is working, waiting on a question or permission, or running background tasks. It can be resumed afterwards with nothing lost. Time the machine spends asleep does not count. 0 = never.',
   },
   {
     key: 'orchestration.enabled',
@@ -177,7 +168,7 @@ export const SETTINGS: SettingSpec[] = [
     type: 'boolean',
     default: false,
     description:
-      'Adds a Tasks button beside + New. A task is an objective and its acceptance criteria, run by one agent on the launcher’s model and effort in a new git worktree and branch beside the repository, never in the checkout you work in. It survives quitting and reinstalling Agent Wrangler, and ends with a branch and a diff for you to review. Claude tasks need Keep conversations running when Agent Wrangler quits. Takes effect after a restart.',
+      'Adds a Tasks button beside + New. A task is an objective and its acceptance criteria, run by one agent on the launcher’s model and effort in a new git worktree and branch beside the repository, never in the checkout you work in. It survives quitting and reinstalling Agent Wrangler, and ends with a branch and a diff for you to review. Takes effect after a restart.',
   },
   {
     key: 'orchestration.parallelTasks',
@@ -236,18 +227,29 @@ export const SETTINGS: SettingSpec[] = [
     label: 'Notify when an agent needs you',
     group: 'Agents and status',
     type: 'boolean',
-    default: false,
+    default: true,
     description:
-      'Show a notification when a session needs permission, is waiting on you, or is done, while the window is open.',
+      'Show a notification when a session needs permission, is waiting on you, or is done, while Agent Wrangler is open in a browser tab. On by default, so allowing notifications in a tab is all it takes.',
   },
   {
     key: 'notifyWhenWindowClosed',
-    label: 'Notify while the window is closed',
+    label: 'Notify while no tab is open',
     group: 'Agents and status',
     type: 'boolean',
     default: true,
     description:
-      'With the window closed, Agent Wrangler keeps running in the menu bar. Show a macOS notification when a session needs permission, is waiting on you, or is done; clicking it opens that session.',
+      'With no Agent Wrangler tab open, it keeps running in the background. Show a macOS notification on this Mac when a session needs permission, is waiting on you, or is done. Discord integration, when it is on, posts to Discord as well.',
+  },
+  {
+    // #68: the lease hook is installed with the status hooks either way; off,
+    // it is told about no resource and every tool call goes straight through.
+    key: 'leases.enabled',
+    label: 'One agent at a time for exclusive resources (experimental)',
+    group: 'Agents and status',
+    type: 'boolean',
+    default: false,
+    description:
+      'Make agent sessions take turns with things only one of them may use at a time, such as installing Agent Wrangler itself (npm run app:install). A session whose command needs a resource another session holds waits for it (10 minutes for the installed app, 15 unless a resource says otherwise), then is told it is in use and why. Resources are listed under "leases.resources" in settings.json; the default list has only the installed app. Needs the status hooks installed, and applies to sessions started after they are.',
   },
   {
     key: 'openAtLogin',
@@ -256,7 +258,7 @@ export const SETTINGS: SettingSpec[] = [
     type: 'boolean',
     default: false,
     description:
-      'Start Agent Wrangler in the menu bar when you log in, without opening its window. It is never restarted automatically after a quit or a crash.',
+      'Start Agent Wrangler’s background service when you log in, without opening a browser. Either way it is restarted after a crash, never after a stop.',
   },
 
   // ---- Telemetry ----
@@ -314,24 +316,6 @@ export const SETTINGS: SettingSpec[] = [
 
   // ---- Dictation ----
   {
-    key: 'dictation.livePreview',
-    label: 'Live preview while dictating',
-    group: 'Dictation',
-    type: 'boolean',
-    default: true,
-    description:
-      'Show the words being recognised beside the composer while you speak. The preview re-runs whisper.cpp on the last few seconds of audio about once a second, on this machine, so it costs CPU and may change as you talk. The text put in the composer when you stop is always a fresh transcription of the whole recording. Turn this off on a slow machine or with a large model.',
-  },
-  {
-    key: 'dictation.inputDevice',
-    label: 'Microphone',
-    group: 'Dictation',
-    type: 'string',
-    default: ":default",
-    description:
-      'Microphone for dictation, as an ffmpeg avfoundation input. \':default\' is the system input device; \':1\' picks audio device 1 (run \'ffmpeg -f avfoundation -list_devices true -i ""\' to list them).',
-  },
-  {
     key: 'dictation.modelPath',
     label: 'Whisper model',
     group: 'Dictation',
@@ -377,6 +361,73 @@ export const SETTINGS: SettingSpec[] = [
     default: "codex",
     description:
       'Codex CLI binary used for plan usage and conversations. The default discovers the newest compatible executable bundled with the OpenAI Codex extension, then falls back to PATH. Set an explicit path to override discovery.',
+  },
+
+  // ---- Browser ----
+  // On by default (plan §8): it listens on this Mac only, and nothing behind
+  // it opens without a sign-in link from `aw web open`.
+  {
+    key: 'web.enabled',
+    label: 'Open in a browser',
+    group: 'Browser',
+    type: 'boolean',
+    default: true,
+    description:
+      'Serve the workbench to browsers on this Mac, at http://127.0.0.1 on the port below. Only this Mac can reach it, and a browser needs a single-use sign-in link to get in: run "aw web open" in a terminal. Off closes the listener and every open browser tab.',
+  },
+  {
+    key: 'web.port',
+    dependsOn: 'web.enabled',
+    label: 'Port',
+    group: 'Browser',
+    type: 'number',
+    default: 7391,
+    minimum: 1024,
+    maximum: 65535,
+    description:
+      'The port the browser workbench listens on, on 127.0.0.1. Takes effect at once; open tabs reconnect to the new port only after you open the new address.',
+  },
+  // Off by default (plan §8, #136): the only setting that makes Agent
+  // Wrangler listen beyond this Mac. Not nested under web.enabled because
+  // Preferences nests one level only; it does nothing while that is off.
+  {
+    key: 'web.lan.enabled',
+    label: 'Allow devices on my home network',
+    group: 'Browser',
+    type: 'boolean',
+    default: false,
+    description:
+      'Also serve the workbench over HTTPS on this Mac’s home-network addresses, so a phone or another computer on the same network can open it. Needs "Open in a browser" on. Each device must trust Agent Wrangler’s local certificate authority once (download it from a signed-in browser on this Mac at /ca.mobileconfig) and be paired before it can sign in. Only for a network you trust; never forward this port from your router. Off, nothing listens beyond this Mac.',
+  },
+  {
+    key: 'web.lan.port',
+    dependsOn: 'web.lan.enabled',
+    label: 'HTTPS port',
+    group: 'Browser',
+    type: 'number',
+    default: 7392,
+    minimum: 1024,
+    maximum: 65535,
+    description: 'The port for home-network access. The macOS firewall, if on, must allow Agent Wrangler to accept incoming connections.',
+  },
+  {
+    key: 'web.lan.certFile',
+    dependsOn: 'web.lan.enabled',
+    label: 'Your own certificate (optional)',
+    group: 'Browser',
+    type: 'string',
+    default: '',
+    description:
+      'Path to a PEM certificate (with its chain) to use instead of the one Agent Wrangler’s local CA issues. Used only when the key below is set too.',
+  },
+  {
+    key: 'web.lan.keyFile',
+    dependsOn: 'web.lan.enabled',
+    label: 'Your own private key (optional)',
+    group: 'Browser',
+    type: 'string',
+    default: '',
+    description: 'Path to the unencrypted PEM private key for the certificate above.',
   },
 
   // ---- Experimental ----
@@ -442,6 +493,60 @@ export const SETTINGS: SettingSpec[] = [
     description:
       'Post a message when an agent finishes its task, alongside the permission prompts. It has no buttons — nothing is waiting on you — and names the agent, repository and branch, never anything it said. Auto-pause is announced the same way and is not covered by this switch: everything stopping is not optional news.',
   },
+  {
+    key: 'remote.relay.enabled',
+    label: 'Remote control over the internet',
+    group: 'Experimental',
+    type: 'boolean',
+    default: false,
+    description:
+      'Use the workbench from a phone or another computer anywhere, through your own Supabase project, without opening anything on this Mac: it only connects out. Everything sent is encrypted to a device you paired here, so Supabase relays only ciphertext. Set up the project first (docs/remote-control-setup.md), then sign in and pair a device below.',
+  },
+  {
+    key: 'remote.relay.url',
+    dependsOn: 'remote.relay.enabled',
+    label: 'Supabase project URL',
+    group: 'Experimental',
+    type: 'string',
+    default: '',
+    description: 'From your Supabase project’s Settings › API, e.g. https://abcd1234.supabase.co.',
+  },
+  {
+    key: 'remote.relay.anonKey',
+    dependsOn: 'remote.relay.enabled',
+    label: 'Supabase anon (publishable) key',
+    group: 'Experimental',
+    type: 'string',
+    default: '',
+    description:
+      'From the same page. It is a public value: it only names the project, and every table and channel needs your own sign-in. Never paste the service-role or secret key here.',
+  },
+  {
+    key: 'remote.relay.siteUrl',
+    dependsOn: 'remote.relay.enabled',
+    label: 'Remote control site',
+    group: 'Experimental',
+    type: 'string',
+    default: 'https://agentwrangler.netlify.app',
+    description: 'Where the remote control page is served. The pairing QR code opens it.',
+  },
+];
+
+/**
+ * Keys a setting once had and no longer does. Startup removes them from
+ * `settings.json`, so a stale value does not read as though it still applied.
+ * - `experimental.sessionHosts` (#122): every Claude conversation runs in a
+ *   session host; there is nothing left to switch.
+ * - `experimental.coreDaemon` (#142): the core always runs in the background
+ *   service; the Electron window it switched away from is gone.
+ * - `dictation.livePreview`, `dictation.inputDevice` (#147): they configured the
+ *   Mac-microphone recorder; dictation records in the browser now.
+ */
+export const RETIRED_SETTING_KEYS: readonly string[] = [
+  'experimental.sessionHosts',
+  'experimental.coreDaemon',
+  'dictation.livePreview',
+  'dictation.inputDevice',
 ];
 
 /** Group headings in declaration order, with no duplicates. */

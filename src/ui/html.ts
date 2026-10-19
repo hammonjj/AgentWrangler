@@ -8,12 +8,11 @@ export function getNonce(): string {
  * Shared webview HTML shell: strict CSP (no inline code), one css + one js
  * bundle from dist/webview.
  *
- * Host-neutral. VSCode rewrites local paths into `vscode-webview-resource:`
- * URIs and reports the scheme to put in the CSP; an Electron window loads the
- * same file off disk and uses `'self'`. Both differ only in those three
- * strings, so they are arguments rather than two copies of the document.
+ * Host-neutral: where the stylesheet and script are, and what the CSP allows
+ * them from, are arguments. The web server (`src/core/web/server.ts`) is the
+ * one caller today, through `renderBrowserWorkbenchHtml`.
  */
-export type BundleName = 'dashboard' | 'conversation' | 'workbench' | 'preferences' | 'palette';
+export type BundleName = 'dashboard' | 'conversation' | 'workbench' | 'preferences';
 
 /**
  * The markup each bundle finds when it loads.
@@ -30,7 +29,6 @@ const BODY: Record<BundleName, string> = {
   dashboard: '<div id="app"></div>',
   conversation: '<div id="convApp"></div>',
   preferences: '<div id="prefsApp"></div>',
-  palette: '<div id="paletteApp"></div>',
   workbench:
     '<div id="wb">' +
     '<div id="wbTable"><div id="app"></div></div>' +
@@ -53,42 +51,116 @@ export interface WebviewHtmlOptions {
    */
   cspSource: string;
   /**
-   * Stylesheets to load before the bundle's own, in order. The Electron shell
+   * Stylesheets to load before the bundle's own, in order. The browser page
    * puts the `--vscode-*` token shim here; in VSCode the host injects those
    * values itself and this is empty.
    */
   extraStylesheets?: string[];
   /**
    * A class on `<body>`, so a host can style the document it owns without the
-   * panes knowing. The Electron shell sets `aw-shell`, which is what gives the
-   * window its inset — in VSCode that space comes from the editor's own chrome
-   * around the tab, and there is no chrome in a window.
+   * panes knowing. The browser page sets `aw-shell`, which is what gives the
+   * page its inset — in VSCode that space comes from the editor's own chrome
+   * around the tab, and there is no chrome in a page.
    *
    * It also settles a specificity question: the pane bundles set `body {…}`
    * and are loaded last, so a plain `body` rule in the shell's stylesheet would
    * lose. `body.aw-shell` wins on specificity rather than on order.
    */
   bodyClass?: string;
+  /**
+   * Scripts to run before the bundle, in order, under the same nonce. The
+   * browser page puts its bridge (the web shim) here.
+   */
+  preScripts?: string[];
+  /**
+   * What `connect-src` allows. Absent, the CSP has none and `default-src
+   * 'none'` blocks every fetch and socket, which is wrong for a browser that
+   * talks over a WebSocket.
+   */
+  connectSrc?: string;
+  /**
+   * The script nonce. Absent, a fresh one. A server that also sends the CSP as
+   * a header (#127) generates it, so the header and the document agree.
+   */
+  nonce?: string;
+  /** `<meta name content>` pairs for the scripts to read (the browser's build, #128). */
+  meta?: Record<string, string>;
+  /** The viewport meta's content. Absent, the plain one every host has always had. */
+  viewport?: string;
 }
 
+/** What any other host gets: unchanged since the first webview. */
+const DEFAULT_VIEWPORT = 'width=device-width, initial-scale=1.0';
+
+/**
+ * What a phone browser gets (#134): `viewport-fit=cover` lets the page draw under
+ * the notch and the home indicator (the shell pads by `env(safe-area-inset-*)`),
+ * and `interactive-widget=resizes-content` makes Chrome on Android shrink the
+ * layout for its keyboard, as iOS's visual viewport is followed in script. No
+ * `maximum-scale`: blocking pinch-zoom is an accessibility failure, and fields
+ * are 16px so iOS has no reason to zoom on focus.
+ */
+export const BROWSER_VIEWPORT = 'width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content';
+
 export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
-  const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [], bodyClass } = opts;
-  const nonce = getNonce();
+  const { bundleName, title, cssHref, jsSrc, cspSource, extraStylesheets = [], bodyClass, preScripts = [], connectSrc } = opts;
+  const nonce = opts.nonce ?? getNonce();
+  const metas = Object.entries(opts.meta ?? {}).map(([name, content]) => `\n<meta name="${attr(name)}" content="${attr(content)}">`).join('');
   const links = [...extraStylesheets, cssHref].map((href) => `<link rel="stylesheet" href="${href}">`).join('\n');
   const bodyAttr = bodyClass ? ` class="${bodyClass}"` : '';
+  const connect = connectSrc ? ` connect-src ${connectSrc};` : '';
+  const scripts = [...preScripts, jsSrc].map((src) => `<script nonce="${nonce}" src="${src}"></script>`).join('\n');
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'; img-src ${cspSource} data:;">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'; img-src ${cspSource} data:;${connect}">
+<meta name="viewport" content="${attr(opts.viewport ?? DEFAULT_VIEWPORT)}">${metas}
 ${links}
 <title>${title}</title>
 </head>
 <body${bodyAttr}>
 ${BODY[bundleName]}
-<script nonce="${nonce}" src="${jsSrc}"></script>
+${scripts}
 </body>
 </html>`;
+}
+
+/**
+ * The workbench as a browser loads it (#127): the shim first, and every asset by the URL the server's manifest gives it (hashed,
+ * so it can be cached for good).
+ */
+export function renderBrowserWorkbenchHtml(opts: { asset: (name: string) => string; nonce: string; connectSrc: string; build: string }): string {
+  return renderWebviewHtml({
+    // What the shim compares the server's `hello` with (#128).
+    meta: { 'aw-build': opts.build },
+    viewport: BROWSER_VIEWPORT,
+    bundleName: 'workbench',
+    title: 'Agent Wrangler',
+    cssHref: opts.asset('workbench.css'),
+    jsSrc: opts.asset('workbench.js'),
+    cspSource: "'self'",
+    extraStylesheets: [opts.asset('theme.css')],
+    // `aw-web`: the workbench starts its app shell's routes and layout (#133).
+    bodyClass: 'aw-shell aw-web',
+    preScripts: [opts.asset('webshim.js')],
+    connectSrc: opts.connectSrc,
+    nonce: opts.nonce,
+  });
+}
+
+/**
+ * What the remote-control loader (#175) builds the same page from: the body markup, the body
+ * class, and the files in load order. It gets them from the daemon over the relay.
+ */
+export const RELAY_WORKBENCH_PAGE = {
+  body: BODY.workbench,
+  bodyClass: 'aw-shell aw-web',
+  styles: ['theme.css', 'workbench.css'],
+  scripts: ['webshim.js', 'workbench.js'],
+} as const;
+
+function attr(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

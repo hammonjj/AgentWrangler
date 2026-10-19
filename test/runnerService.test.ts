@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { RunnerService } from '../src/claude/runner/runnerService';
 import { SessionRegistry } from '../src/core/session/sessionRegistry';
 import type { QueryFn } from '../src/claude/runner/claudeSdkSession';
+import { inProcessHosts } from '../src/sessionHost/inProcessHosts';
 
 /**
  * A stand-in for the SDK's `query`, minimal enough to start a session and
@@ -38,57 +39,84 @@ function fakeQuery() {
   return { query, isClosed: () => closed };
 }
 
-function fakeRegistry() {
-  const remembered = new Set<string>();
-  return {
-    remember: (id: string) => remembered.add(id),
-    forget: (id: string) => remembered.delete(id),
-    wasRunning: () => false,
-    has: (id: string) => remembered.has(id),
-  };
+/** A `RunnerService` on in-process hosts: the app's code path, without a process per session. */
+function makeService(over: { query?: QueryFn; registry?: SessionRegistry; locate?: (cwd: string) => { repoRoot?: string; branch?: string } } = {}) {
+  const hosts = inProcessHosts({ query: over.query ?? fakeQuery().query });
+  const service = new RunnerService({
+    binary: () => '/fake/claude',
+    log: () => undefined,
+    registry: over.registry,
+    locate: over.locate,
+    hosts: { supervisor: hosts },
+  });
+  return { service, hosts };
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+describe('RunnerService: every Claude conversation runs in a session host (#122)', () => {
+  it('starts every session in a host, with its id chosen before the host starts', () => {
+    const { service, hosts } = makeService();
+    const a = service.start({ cwd: '/Users/test/proj-a' });
+    const b = service.start({ cwd: '/Users/test/proj-b', sessionId: 'bbbbbbbb-0000-4000-8000-000000000001' });
+
+    expect(hosts.launches).toHaveLength(2);
+    expect(hosts.launches[0]).toMatchObject({ cwd: '/Users/test/proj-a', binary: '/fake/claude' });
+    expect(hosts.launches[0].sessionId).toMatch(UUID);
+    expect(hosts.launches[0].resume).toBeFalsy();
+    expect(hosts.launches[1]).toMatchObject({ sessionId: 'bbbbbbbb-0000-4000-8000-000000000001' });
+    // The view knows the id from the start, as the registry and the pane do.
+    expect(a.sessionId).toBe(hosts.launches[0].sessionId);
+    for (const s of [a, b]) expect(s.hosted).toBe(true);
+    expect(service.liveCount()).toBe(2);
+    service.dispose();
+  });
+
+  it('resumes a conversation an older build ran in its own process, in a host', async () => {
+    // What an upgrade from a build with in-process sessions leaves behind: a
+    // record still `live`, its process gone with the old app, no host.
+    const store = memento();
+    const before = new SessionRegistry(store);
+    before.live({ sessionId: 'aaaaaaaa-0000-4000-8000-000000000001', provider: 'claude', cwd: '/Users/test/proj', launch: { model: 'opus' } });
+
+    const registry = new SessionRegistry(store);
+    const startup = registry.startup();
+    // Not lost: interrupted, so its row offers Resume (and auto-resume may pick it).
+    expect(startup.interrupted.map((r) => r.sessionId)).toEqual(['aaaaaaaa-0000-4000-8000-000000000001']);
+
+    const { service, hosts } = makeService({ registry });
+    expect(service.wasRunning('aaaaaaaa-0000-4000-8000-000000000001')).toBe(true);
+    const view = await service.resume({ cwd: '/Users/test/proj', resume: 'aaaaaaaa-0000-4000-8000-000000000001' });
+
+    expect(hosts.launches).toEqual([
+      expect.objectContaining({ cwd: '/Users/test/proj', sessionId: 'aaaaaaaa-0000-4000-8000-000000000001', resume: true }),
+    ]);
+    expect(view.hosted).toBe(true);
+    expect(registry.get('aaaaaaaa-0000-4000-8000-000000000001')?.state).toBe('live');
+    expect(service.wasRunning('aaaaaaaa-0000-4000-8000-000000000001')).toBe(false);
+    service.dispose();
+  });
+});
+
 describe('RunnerService.dispose', () => {
-  it('ends every session it is running', async () => {
-    const registry = fakeRegistry();
-    const service = new RunnerService({
-      query: fakeQuery().query,
-      binary: () => '/fake/claude',
-      log: () => undefined,
-      registry: registry as never,
-    });
+  it('lets every session go without ending it: each keeps running in its host', () => {
+    const { query, isClosed } = fakeQuery();
+    const { service } = makeService({ query });
     service.start({ cwd: '/Users/test/proj-a' });
     service.start({ cwd: '/Users/test/proj-b' });
-    expect(service.list()).toHaveLength(2);
     const sessions = service.list();
+    expect(sessions).toHaveLength(2);
 
     service.dispose();
 
-    // Each session was told to end: `ending` is set synchronously, before any
-    // await, which is exactly the observable proof dispose asked for it.
-    for (const s of sessions) expect(s.lifecycle).toBe('ending');
+    for (const s of sessions) expect(s.lifecycle).not.toBe('ending');
+    expect(isClosed()).toBe(false);
     expect(service.list()).toHaveLength(0);
   });
 
-  it('does not await the sessions it ends — it returns before they finish', async () => {
-    const { query, isClosed } = fakeQuery();
-    const service = new RunnerService({ query, binary: () => '/fake/claude', log: () => undefined });
-    service.start({ cwd: '/Users/test/proj' });
-
-    service.dispose();
-
-    // `dispose` is synchronous (`void s.end()`, never `await`). A session only
-    // reaches `ended` once its query stream closes, which nothing here has
-    // triggered yet, so if dispose had awaited that, this assertion would be
-    // trivially true instead of proving anything. It is checked immediately,
-    // with no `await` in between, precisely so a synchronous dispose is the
-    // only way it can hold.
-    expect(isClosed()).toBe(false);
-  });
-
-  it('leaves the registry alone — a lost window is exactly what the next startup should offer back', () => {
+  it('leaves the registry alone — the next start adopts the session from its host', () => {
     const registry = new SessionRegistry(memento());
-    const service = new RunnerService({ query: fakeQuery().query, binary: () => '/fake/claude', log: () => undefined, registry });
+    const { service } = makeService({ registry });
     service.start({ cwd: '/Users/test/proj', sessionId: 'abc' });
     expect(registry.get('abc')?.state).toBe('live');
 
@@ -101,13 +129,7 @@ describe('RunnerService.dispose', () => {
 describe('RunnerService and the session registry', () => {
   function make() {
     const registry = new SessionRegistry(memento());
-    const service = new RunnerService({
-      query: fakeQuery().query,
-      binary: () => '/fake/claude',
-      log: () => undefined,
-      registry,
-      locate: () => ({ repoRoot: '/Users/test/proj', branch: 'main' }),
-    });
+    const { service } = makeService({ registry, locate: () => ({ repoRoot: '/Users/test/proj', branch: 'main' }) });
     return { registry, service };
   }
 
@@ -140,11 +162,12 @@ describe('RunnerService and the session registry', () => {
     expect(registry.get('s1')?.state).toBe('stopped');
   });
 
-  it('keeps sessions live when ending them for quit, so the next start offers them back', async () => {
+  it('Quit and Stop All Agents ends every session and keeps it live, so the next start offers it back', async () => {
     const { registry, service } = make();
-    service.start({ cwd: '/Users/test/proj', sessionId: 's1' });
-    service.start({ cwd: '/Users/test/proj', sessionId: 's2' });
+    const s1 = service.start({ cwd: '/Users/test/proj', sessionId: 's1' });
+    const s2 = service.start({ cwd: '/Users/test/proj', sessionId: 's2' });
     await service.endAllForQuit(50);
+    for (const s of [s1, s2]) expect(['ending', 'ended']).toContain(s.lifecycle);
     expect(registry.get('s1')?.state).toBe('live');
     expect(registry.get('s2')?.state).toBe('live');
   });
@@ -155,7 +178,7 @@ describe('RunnerService and the session registry', () => {
     before.live({ sessionId: 's1', provider: 'claude', cwd: '/Users/test/proj' });
     const after = new SessionRegistry(store);
     after.startup();
-    const service = new RunnerService({ query: fakeQuery().query, binary: () => '/b', log: () => undefined, registry: after });
+    const { service } = makeService({ registry: after });
     expect(service.wasRunning('s1')).toBe(true);
     service.start({ cwd: '/Users/test/proj', resume: 's1' });
     expect(service.wasRunning('s1')).toBe(false);

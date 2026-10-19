@@ -1,0 +1,157 @@
+/**
+ * What the browser has to decide for itself about notifications and the
+ * microphone (#141), as pure functions so the shim's choices are tested
+ * without a browser. No Node or DOM imports: the shim and the daemon's
+ * dictation endpoint both use it.
+ */
+
+// ---- secure context ----
+
+/**
+ * The Notifications API and `getUserMedia` / `MediaRecorder` exist only in a
+ * secure context: https, or loopback over http (browsers treat `127.0.0.1`
+ * and `localhost` as secure). The LAN address over plain http is not, which
+ * is why the LAN listener is https only (#136).
+ *
+ * Returns why the page cannot use them, in words that say what to do, or
+ * undefined when it can.
+ */
+export function secureContextProblem(env: { isSecureContext: boolean; protocol: string; hostname: string }): string | undefined {
+  if (env.isSecureContext) return undefined;
+  const host = env.hostname || 'this address';
+  return env.protocol === 'http:'
+    ? `Notifications and the microphone only work over https or on this Mac itself. ${host} is plain http: pair this device over the https address instead.`
+    : 'Notifications and the microphone need a secure connection, and this page is not on one.';
+}
+
+// ---- notifications ----
+
+/** `Notification.permission`, plus the browsers that have no `Notification` at all. */
+export type NotificationState = 'granted' | 'denied' | 'default' | 'unsupported';
+
+export function isNotificationState(v: unknown): v is NotificationState {
+  return v === 'granted' || v === 'denied' || v === 'default' || v === 'unsupported';
+}
+
+/**
+ * Whether a notice becomes an OS notification in this tab: permission is
+ * granted, and the user is not already looking at the page. A visible,
+ * focused tab shows nothing; the table and the conversation say it.
+ */
+export function shouldShowNotice(s: { permission: NotificationState; hidden: boolean; focused: boolean }): boolean {
+  return s.permission === 'granted' && (s.hidden || !s.focused);
+}
+
+/** Where a browser remembers that its notification banner was dismissed (`localStorage`, per browser). */
+export const NOTIFY_BANNER_DISMISS_KEY = 'aw.notifyBanner.dismissedAt';
+/** A dismissed banner comes back after this long if permission is still undecided. */
+export const NOTIFY_BANNER_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The stored dismissal time, or undefined when there is none or it is not a time. */
+export function parseBannerDismissedAt(raw: string | null | undefined): number | undefined {
+  if (!raw) return undefined;
+  const at = Number(raw);
+  return Number.isFinite(at) && at > 0 ? at : undefined;
+}
+
+/**
+ * Whether the browser's notification banner shows (#134): while permission can
+ * still be asked, or when the page cannot have notifications at all (it then
+ * says why), unless the user dismissed it within the last 30 days. A
+ * dismissal stamped in the future (a clock moved back) counts as recent.
+ */
+export function shouldShowNotifyBanner(s: {
+  permission: NotificationState;
+  insecure: boolean;
+  dismissedAt: number | undefined;
+  now: number;
+}): boolean {
+  if (!s.insecure && s.permission !== 'default') return false;
+  if (s.dismissedAt !== undefined && s.now - s.dismissedAt < NOTIFY_BANNER_SNOOZE_MS) return false;
+  return true;
+}
+
+/**
+ * Remembers the tags of notices shown lately, so one ask that arrives twice
+ * (two events for one prompt, a resend after a reconnect) is shown once. The
+ * browser collapses same-tag notifications as well; this also stops the
+ * second one re-alerting.
+ */
+export class NoticeDeduper {
+  private readonly seen = new Map<string, number>();
+  constructor(private readonly windowMs = 10_000) {}
+
+  /** True the first time `tag` is seen inside the window. */
+  first(tag: string, now: number): boolean {
+    for (const [t, at] of this.seen) if (now - at >= this.windowMs) this.seen.delete(t);
+    if (this.seen.has(tag)) return false;
+    this.seen.set(tag, now);
+    return true;
+  }
+}
+
+// ---- dictation in the browser ----
+
+/** Preferred first. Chrome and Firefox record webm/opus; Safari (iOS too) only mp4/AAC. */
+export const RECORDER_MIME_PREFERENCE = [
+  'audio/webm;codecs=opus',
+  'audio/mp4',
+  'audio/webm',
+  'audio/ogg;codecs=opus',
+] as const;
+
+/** The first of `RECORDER_MIME_PREFERENCE` the browser's `MediaRecorder.isTypeSupported` accepts. */
+export function pickRecorderMime(isSupported: (type: string) => boolean): string | undefined {
+  for (const type of RECORDER_MIME_PREFERENCE) {
+    try {
+      if (isSupported(type)) return type;
+    } catch {
+      // A browser that throws for a type does not support it.
+    }
+  }
+  return undefined;
+}
+
+/** Audio the dictation endpoint accepts, by media type (parameters dropped), and the file extension ffmpeg reads it as. */
+const AUDIO_EXTENSIONS: Readonly<Record<string, string>> = {
+  'audio/webm': 'webm',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/m4a': 'm4a',
+  'audio/aac': 'aac',
+  'audio/ogg': 'ogg',
+  'audio/mpeg': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+};
+
+/** The extension for an upload's `Content-Type`, or undefined for anything that is not audio we take. */
+export function audioExtension(contentType: string | undefined): string | undefined {
+  if (!contentType) return undefined;
+  const base = contentType.split(';')[0]!.trim().toLowerCase();
+  return AUDIO_EXTENSIONS[base];
+}
+
+/** A recording larger than this is refused by the endpoint, and the recorder stops before it. */
+export const DICTATION_MAX_BYTES = 10 * 1024 * 1024;
+/** The same ceiling the host-mic recorder has: five minutes. */
+export const DICTATION_MAX_MS = 5 * 60 * 1000;
+/** The custom header every dictation upload carries; with `Origin`, what stops a cross-site form posting audio. */
+export const DICTATION_HEADER = 'x-aw-dictation';
+/** The recording's length as the client measured it; checked against `DICTATION_MAX_MS`. */
+export const DICTATION_DURATION_HEADER = 'x-aw-duration-ms';
+export const DICTATION_PATH = '/dictation';
+
+/**
+ * Why a recording sent as a pane message (`dictateAudio`) is refused, or undefined when it is
+ * fine. The same ceilings as `POST /dictation`; the base64 text is measured before it is decoded.
+ */
+export function dictationUploadProblem(m: { mime: string; durationMs: number; data: string }): string | undefined {
+  if (!audioExtension(m.mime)) return 'That is not audio Agent Wrangler can read.';
+  if (!(m.durationMs <= DICTATION_MAX_MS) || m.data.length > Math.ceil((DICTATION_MAX_BYTES * 4) / 3) + 4) {
+    return 'That recording is too long. Keep it under five minutes.';
+  }
+  if (m.data.length === 0) return 'The recording was empty.';
+  return undefined;
+}

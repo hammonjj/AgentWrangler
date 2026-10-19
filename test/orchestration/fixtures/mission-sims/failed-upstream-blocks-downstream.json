@@ -1,0 +1,15 @@
+{
+  "name": "failed-upstream-blocks-downstream",
+  "mode": "manual",
+  "limits": { "qualityAttempts": 2 },
+  "tasks": [
+    { "id": "a" },
+    { "id": "b", "dependsOn": [{ "task": "a", "kind": "code" }] },
+    { "id": "c" }
+  ],
+  "scenario": {
+    "tasks": { "a": [{ "behaviour": "fail", "signature": "s", "delayMs": 3000 }, { "behaviour": "fail", "signature": "s", "delayMs": 3000 }, { "behaviour": "fail", "signature": "s", "delayMs": 3000 }] },
+    "default": { "behaviour": "edit", "delayMs": 3000 }
+  },
+  "expect": { "mission": "stuck", "tasks": { "a": "needs-human", "b": "pending", "c": "done" } }
+}

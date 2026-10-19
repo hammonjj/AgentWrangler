@@ -49,7 +49,7 @@ export const DEFAULT_CONFIG: WranglerConfig = {
   stuckThresholdSeconds: 600,
   endedWindowHours: 48,
   maxEndedSessions: 50,
-  notifyOnWaiting: false,
+  notifyOnWaiting: true,
   notifyWhenWindowClosed: true,
   pollIntervalSeconds: 5,
   showUsage: true,

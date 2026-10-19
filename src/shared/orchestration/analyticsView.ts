@@ -31,6 +31,7 @@ import {
   type MetricResult,
   type NotReported,
 } from './analytics';
+import { parseProposalRef, proposalEvidenceOf, proposalsView, type ProposalRef, type ProposalsInput, type ProposalsView } from './proposalsView';
 import type { TierName } from './types';
 
 // ---------------------------------------------------------------------------
@@ -91,7 +92,8 @@ export type AnalyticsRef =
   | { kind: 'metric'; id: MetricId }
   | { kind: 'split' }
   | { kind: 'candidate'; direction: 'under' | 'over'; key: string }
-  | { kind: 'agreement'; group: 'dimension' | 'assessor' | 'scope'; key: string };
+  | { kind: 'agreement'; group: 'dimension' | 'assessor' | 'scope'; key: string }
+  | ProposalRef;
 
 export interface FilterControlView {
   field: SelectionField;
@@ -159,6 +161,8 @@ export interface AnalyticsView {
     heuristicNote: string;
     agreement: AgreementView[];
   };
+  /** Routing-policy proposals from history, and the rules accepted from them (#52). Not narrowed by the filters: a cohort is its own filter. */
+  proposals: ProposalsView;
   /** "12 tasks · 18 attempts" in the selection. */
   counts: string;
   /** Nothing recorded at all. */
@@ -171,6 +175,12 @@ export interface AnalyticsInput {
   repoOf?: (missionId: string) => string | undefined;
   selection: AnalyticsSelection;
   now: number;
+  /** Decisions on proposals, and the veto. Absent: none made, nothing vetoed. */
+  proposals?: Omit<ProposalsInput, 'tiers'> & { tiers?: readonly TierName[] };
+}
+
+function proposalsInput(input: AnalyticsInput): ProposalsInput {
+  return { rules: input.proposals?.rules ?? [], rejected: input.proposals?.rejected ?? [], tiers: input.proposals?.tiers ?? input.tiers, ...(input.proposals?.veto ? { veto: input.proposals.veto } : {}) };
 }
 
 export const HEURISTIC_LABEL = 'heuristic';
@@ -331,10 +341,10 @@ function dataset(input: AnalyticsInput): AnalyticsDataset {
 
 export function analyticsView(input: AnalyticsInput): AnalyticsView {
   const ds = dataset(input);
-  return viewOf(ds, input.selection, selectionFilter(input.selection, input.now));
+  return viewOf(ds, input.selection, selectionFilter(input.selection, input.now), proposalsView(ds, proposalsInput(input), input.now));
 }
 
-function viewOf(ds: AnalyticsDataset, selection: AnalyticsSelection, f: AnalyticsFilter): AnalyticsView {
+function viewOf(ds: AnalyticsDataset, selection: AnalyticsSelection, f: AnalyticsFilter, proposals: ProposalsView): AnalyticsView {
   const metrics = new Map(METRIC_IDS.map((id) => [id, computeMetric(ds, f, id)]));
   const split = hostedLocalSplit(ds, f);
   const cal = calibrationReport(ds, f);
@@ -391,6 +401,7 @@ function viewOf(ds: AnalyticsDataset, selection: AnalyticsSelection, f: Analytic
       heuristicNote: 'Over-routing is a guess: nobody saw the cheaper route run.',
       agreement,
     },
+    proposals,
     counts: `${plural(tasks, 'task')} · ${plural(attempts, 'attempt')}`,
     ...(ds.tasks.length === 0 ? { empty: 'No orchestrated tasks recorded yet. Metrics appear here once tasks have run.' } : {}),
   };
@@ -479,6 +490,12 @@ export function analyticsDetail(input: AnalyticsInput, ref: AnalyticsRef): Analy
   const f = selectionFilter(input.selection, input.now);
   const scope = selectionText(input.selection);
   switch (ref.kind) {
+    case 'proposal':
+    case 'rule': {
+      const p = proposalEvidenceOf(ds, proposalsInput(input), ref, input.now);
+      if (!p) return undefined;
+      return { title: p.title, subtitle: p.subtitle, facts: p.facts, breakdowns: [], ...evidence(ds, p.evidenceIds) };
+    }
     case 'metric': {
       if (!METRIC_IDS.includes(ref.id)) return undefined;
       const r = computeMetric(ds, f, ref.id);
@@ -593,6 +610,7 @@ export function parseRef(raw: unknown): AnalyticsRef | undefined {
   const r = raw as Record<string, unknown>;
   if (r.kind === 'metric' && typeof r.id === 'string' && (METRIC_IDS as readonly string[]).includes(r.id)) return { kind: 'metric', id: r.id as MetricId };
   if (r.kind === 'split') return { kind: 'split' };
+  if (r.kind === 'proposal' || r.kind === 'rule') return parseProposalRef(raw);
   if (r.kind === 'candidate' && (r.direction === 'under' || r.direction === 'over') && typeof r.key === 'string') return { kind: 'candidate', direction: r.direction, key: r.key };
   if (r.kind === 'agreement' && (r.group === 'dimension' || r.group === 'assessor' || r.group === 'scope') && typeof r.key === 'string') return { kind: 'agreement', group: r.group, key: r.key };
   return undefined;

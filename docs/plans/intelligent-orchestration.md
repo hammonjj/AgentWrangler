@@ -15,6 +15,10 @@ what this plan asks of it.
 
 ## 0. Read this first
 
+> **Runtime superseded by [browser-workbench.md](browser-workbench.md) (#121).** Where this plan
+> says "the Electron main process", the core is now the core daemon, a LaunchAgent on a pinned
+> Node (#130); Electron was retired in #142. Nothing else about orchestration changed.
+
 1. **Orchestration lives in the core, on top of #4's session layer.** It is a set of services in
    the Electron main process (the "core" of #4 §5) that launch ordinary AW-hosted sessions through
    #4's `SessionExecutor`, record them in #4's `SessionRegistry`, and observe them through
@@ -2531,7 +2535,7 @@ the policy, registry, manifest, boot line, telemetry, events and logs. Hosted se
 their ordinary environment. Local turns ignore Claude's API cost estimate and use the
 catalog's context window in the conversation display.
 
-## 20. Historical and adaptive routing (design only; not built)
+## 20. Historical and adaptive routing (proposals built by #52; automatic adjustment not built)
 
 ### 20.1 Shape: learned proposes, deterministic disposes
 
@@ -2583,6 +2587,48 @@ Pooling upward; priors; minimum counts; one-step changes; the corpus veto; propo
 cohort's recent success drops; and every accepted proposal records the data window it was based on
 so it can be re-evaluated.
 
+### 20.6 As built (#52, 2026-10-01)
+
+Proposals, acceptance and learned rules. Bounded automatic adjustment (§20.1's later step) is **not**
+built.
+
+| Piece | Where |
+|---|---|
+| Statistics, cohorts, thresholds, proposals, decisions, rule re-check | `src/shared/orchestration/routingProposals.ts` (pure) |
+| Section of the Analytics view, and each proposal's detail | `src/shared/orchestration/proposalsView.ts`, drawn by `src/webview/dashboard/analytics.ts` |
+| A rule inside the router | `src/orchestration/policy/learnedRules.ts`, read by `routeTask` as `RouterPolicy.learnedRules` |
+| Corpus veto | `src/orchestration/policy/learnedVeto.ts`, judging `src/orchestration/policy/egregious.ts` (moved out of the test helper) |
+| Accepted rules and rejections | `src/orchestration/policy/learnedRuleStore.ts`, `<dataDir>/orchestration/learned-rules.json` |
+
+- **Thresholds are §20.3's, unchanged:** downgrade needs ≥ 20 observations of the next cheaper tier
+  in the cohort, a 90% lower bound ≥ 0.80 (prior centred on 0.5, worth 4 observations), `risk ≤
+  moderate` and verifiability partial or strong. Upgrade needs ≥ 10 observations of the current tier
+  and a 90% upper bound under 0.60 (prior centred on 0.8). 23 of 25 does **not** clear the downgrade
+  bar (the lower bound is about 0.78); the issue's example is a question the data has to answer, not
+  a threshold.
+- **Cohorts:** kind × complexity bucket × verifiability bucket, pooled across repositories and, where
+  one repository alone has enough, narrowed to it. **Domain is not a cohort dimension yet:** the
+  attempt record carries only the assessment's levels, not its `domains`.
+- **A success** is first-attempt verified, no rescue (`rescueEvidence`) and no `reverted` integration
+  record, and it counts only once it has stood 14 days. A failure counts at once; a failure that is
+  not the route's fault (capacity, infrastructure) counts for nothing.
+- **A rule is data the router reads:** it fires only when the deterministic tiers land on exactly its
+  `fromTier`, moves one step, never overrides a `floor.*` rule or low confidence when lowering, and
+  needs the task's own risk ≤ moderate. Each firing is a `learned.downgrade` / `learned.upgrade`
+  reason carrying the counts and interval.
+- **The veto** routes every assessment a cohort can contain (all breadth, ambiguity, risk, the
+  cohort's complexity and verifiability levels, both confidence extremes) through the rule and
+  refuses it if any result is on the egregious list. The app cannot read the corpus fixtures (they
+  run in `npm test`), so the same list is judged over a superset; `routingProposals.test.ts` also
+  routes every corpus card through a rule. The store re-checks on load, so a hand-edited rule the
+  veto refuses is never applied.
+- **Decisions:** Accept makes a rule and clears a rejection; Reject snoozes the proposal 30 days;
+  Revoke removes the rule and the deterministic policy applies again. A proposal not decided lapses
+  after 30 days and returns only if the data still supports it. An accepted rule is re-checked against
+  the last 90 days and flagged *Review* if its route now passes first time too rarely.
+- **Telemetry:** nothing new is written; proposals are computed from existing records, and the
+  decisions live in the store above. Writing decision records to the telemetry log is a follow-up.
+
 ---
 
 ## 21. Budget-aware routing (design; mostly deferred)
@@ -2609,9 +2655,41 @@ existing Budget cards). Codex has its own plan windows. Budget policy is therefo
 units: "keep this mission under 15% of the 5-hour window" and, for API-key users, "under $N". The
 MVP ships caps and admission thresholds (Phase 9); the strategies above are Future work (#53).
 
+**As built (#53, 2026-10-04).** The gate in the issue (analytics from #49, plus evidence that caps and
+admission are not enough) was not confirmed; the work was built on James's instruction to close the epic,
+and every strategy other than `balanced` is opt-in (`preferences.strategy`, global, repository, mission or
+task), so the default behaviour is unchanged.
+
+- **Profiles** (`shared/orchestration/budgetStrategy.ts`): data only, holding no tier, so nothing a
+  strategy does can route below `minTier`. The router never reads one.
+- **Resolver ranking** (`policy/resolver.ts`), all after the user's preferred harness and source and after
+  the unattended-fit key: *maximum quality* widens the pool to the highest routable tier within the cap
+  (never an escalation-only tier, never a pinned model's); *lowest cost* ranks the cheapest price first;
+  *fastest* ranks measured `outTokPerSec` first (an unmeasured model after a measured one; the catalog
+  has no throughput until telemetry fills it, so until then it ties and falls through to price);
+  *prefer local* ranks local first (it also covers `preferLocal`).
+- **Admission** (`engine/scheduler.ts`): lowest cost scales the admission threshold by 0.8 (85% → 68%),
+  and a mission's own `maxUsageWindowPercent` can only lower it further; fastest adds one agent to the
+  global and per-repository limits, never past the mission's own `maxConcurrentAgents`; prefer local
+  starts a local endpoint's task ahead of the queue.
+- **Budgets**: `caps.maxWindowSharePercent` holds a mission once the source's window has moved that many
+  points since the mission's first decision (a window that reset counts as 0); `caps.maxEstimatedCostUsd`
+  now also holds a mission, not only a task, once its attempts' reported cost reaches it (a `budget`
+  wait). Unknown share or spend never blocks. Both are cross-mission pacing against the fullest of the
+  5-hour and 7-day windows the source reports.
+- **Telemetry**: every `RoutingDecision` carries `strategy` and `windowPercent`; the `attempt` record has
+  `budgetStrategy` and `windowPercentAtStart`, so a mission's window share is the change across its
+  attempts.
+- **Editors**: Preferences → Orchestration and the policy picker offer the strategy and the share cap.
+- **Tests**: `test/orchestration/budgetStrategy.test.ts` (ranking tables per strategy, a property check
+  over strategy × required tier × cap × window state that the tier is never below `minTier` and fallbacks
+  keep the tier, scheduler tables and a 5-hour-window simulation).
+- **Not built**: a direct start by the user (`holdRefusal`) uses the standard threshold, not the
+  strategy's; throughput is not measured yet.
+
 ---
 
-## 22. Session specialization and hierarchical orchestration (22.1 built by #54; 22.2 deferred)
+## 22. Session specialization and hierarchical orchestration (22.1 built by #54; 22.2 deferred by #55)
 
 ### 22.1 Specialization
 
@@ -2730,6 +2808,68 @@ subagents. AW treats that as opaque inside an attempt, and `modelUsage` attribut
 own hierarchy is planner → tasks. A lead agent that supervises workers and replans continuously is
 deferred behind a gate: only if telemetry shows that missions fail because plans cannot adapt, and
 that replanning by the user (§11.4) is the bottleneck.
+
+**Decision (2026-10-02, #102, parent #111): accountable ownership stays with the delegating
+conversation; no permanent supervisor is added.** `docs/plans/delegation-ownership-contract.md`
+finalizes the result-handback and closeout contract the status contract (§16's `status-contract.md`
+§15) left for #102: any ordinary conversation that delegates keeps accountable ownership of the
+outcome (no new "orchestrator mode"); a meaningful result automatically triggers a bounded,
+event-triggered follow-up turn in that same origin session — reusing the `reuse`/`continue`
+resume capability of §22.1, not a new standing process — rather than keeping a lead agent alive to
+poll or supervise; and GitHub issue closeout is permitted only behind deterministic,
+evidence-gated conditions the contract document states in full, with worker authority unchanged.
+Implementation is #114 (ownership/result domain and store) through #118 (live journey
+validation); see the contract document for the full comparison of approaches and the lifecycle
+transitions it is built on. Product questions 2, 3, 5, 6 and 7 were settled on 2026-10-02 (contract
+§10): AW summarizes and checks evidence deterministically while review requests, closeout comments
+and next-task proposals run as the bounded follow-up turn; merge/PR stays a user click; a merged
+but unverified or unclosed result shows as a persistent to-do card in the origin and in Missions;
+several missions keep the headline chip plus "+N", with a per-mission "Stop tracking" and no
+transfer between conversations; the four-condition closeout gate stands as written; and an
+unreachable origin raises one deduplicated notification, then relies on the Missions card.
+
+**Decision (2026-10-02, #55): defer. The gate is not met, and the data points away from it.** A
+lead agent that supervises workers and replans continuously is not built. Neither is a planner
+upgrade on its account: the evidence shows neither static plans nor the planner limiting missions.
+
+Evidence: every mission and telemetry record on the development machine, 2026-09-27 to
+2026-10-02 (counts only; no content was read).
+
+| Question | What the records show |
+|---|---|
+| How many missions, how big | 38 missions (26 completed, 11 cancelled, 1 draft). 36 have one task, 2 have three. |
+| How often plans needed replanning | 23 planning runs, all `kind: plan`, all proposed in one round. **0 replans**: the explicit Replan (§11.4) exists and was never used. |
+| Did the planner's plans need fixing | 21 of 23 plans were `single`. Both multi-task plans were approved with **0 edits** and all six of their tasks ended `done` (4 on the first attempt, 2 on the second). |
+| Did any task fail as too large | 0 `context` failures, 0 `split-task` proposals across 31 escalations. |
+| Where missions stalled | 31 escalations over 10 missions: 21 `infra` (19 API errors), 7 `stuck` (wall clock), 2 `lost` (local server), 1 `quality-new`. The 11 `needs-human` stops are 7 infra, 2 lost, 2 stuck. |
+| Why missions were cancelled | 10 by the user, 1 discarded. 5 never started an attempt. The 3 with 3–6 attempts were repeated infra failures, not plan failures. |
+| What replanning cost | Nothing, because there was none. For scale: a planning run took a median 5.3 minutes, and the 23 runs cost $56 together (about $2.40 each, API-equivalent estimate). A supervisor that re-plans continuously would pay something like that at every checkpoint. |
+| Where acceptance happened | 24 of 26 done tasks were accepted by the user, 2 by verification. Only 1 task passed verification on its first attempt. |
+
+What this says:
+
+- **Static plans are not the bottleneck.** Work is overwhelmingly single-task (the planner
+  follows §11.3's "one task is the default"), and the multi-task plans ran as approved. A lead
+  agent supervises a graph; there is hardly a graph to supervise.
+- **The bottlenecks are elsewhere.** Provider and infrastructure failures, wall-clock stalls,
+  and acceptance that depends on the user rather than verification. A supervising agent fixes
+  none of these: an API error stops a lead agent as readily as a worker, and it would add one more
+  long-lived session that can fail the same way.
+- **Compared with improving the planner and replanning:** no record shows that either needs
+  improving yet. The cheaper levers for the observed failures are retry and escalation (§15),
+  verification coverage (§14) and, for handback, #102's event-triggered follow-up turn, which
+  already gives the delegating conversation the "react to a result" step without a standing
+  supervisor.
+- **Inside a session, hierarchy stays the harness's.** Claude Code subagents and workflows and
+  Codex subagents remain opaque inside an attempt, as above.
+
+**Revisit when**, over at least 20 planned multi-task missions, either: at least 1 in 5 used a
+replan or got a `split-task` / context-overflow escalation; or the time between a task failing
+and a user replan or retry is a large share (say over a quarter) of mission wall clock. Both are
+computable from existing records (`plan` with `kind: replan`, `escalation`, `task-final`,
+`attempt`). If that happens, the first thing to try is a replan *proposed* automatically by
+escalation and reviewed as today (§11.4); a standing lead agent comes after that. It would be an attempt like any other: routed,
+bounded and recorded, with no new authority.
 
 ---
 
@@ -3125,6 +3265,21 @@ under a real `RunnerService` (`createSimulatedExecutors`). In a real host, `fake
 `SimulatedCompletion` is the real `ClaudeStructuredCompletion` over a scripted `query`, so
 validation and the retry are exercised as well. The fake clock and the seeded mission generator
 arrive with the scheduler (#45).
+
+**As built (#48).** `test/orchestration/missionSim.ts` runs a whole mission, a dependency graph
+plus a `SimScenario` of scripted attempts, on a fake clock against the real `schedule`,
+`decideEscalation`, `attemptRecord` and `escalationRecord`, and checks the invariants at every step:
+no start before `code` dependencies are integrated and `order` ones done, no start on a rate-limited
+source or before a retry's backoff, one live attempt per task, one task at a time in a shared tree,
+every concurrency limit, attempts within `hardMaxAttempts` and `caps.maxAttempts`, no launching step
+past the quality, tier, effort or harness limit, caps or a pin, one taken step (and an event) per
+failed attempt, and a complete, unique telemetry record for every attempt and decision. Overlapping
+`scope.paths` are not checked: the scheduler does not hold them back yet (§13.4). A lost attempt's
+one auto-resume is a continuation, so no attempt cap applies to it (§23.3).
+`generateSpec(seed)` makes a random mission; `missionSimulation.test.ts` runs 1000 of them (well
+under a second) and the named scenarios in `test/orchestration/fixtures/mission-sims/*.json`. A
+failure names its seed; `AW_SIM_SEED=<n>` reruns it alone. No bug has been found yet, so there are
+no regression scenarios beyond the hand-written ones; add each one as a JSON file when one is.
 
 This is what answers "can we test orchestration without spending API credits" (yes) and "can we
 simulate provider failures" (yes, all of them in the brief's list).
@@ -3758,7 +3913,7 @@ integration proving accepted handoffs preserve origin, omit harness pins and wai
 | Historical routing suggestions | ~1,000 attempts, or enough in the cohorts that matter (§20.4) | #52 |
 | Budget strategies | P9 and P10 done; evidence that caps are not enough | #53 |
 | Session reuse | P9 done; evidence that start-up context is a significant cost | #54 |
-| Hierarchical orchestration | evidence that static plans are the bottleneck (§22.2) | #55 |
+| Hierarchical orchestration | evidence that static plans are the bottleneck (§22.2); decided 2026-10-02: deferred, gate not met, revisit trigger in §22.2 | #55 |
 
 ---
 
@@ -3930,7 +4085,7 @@ subagent by whoever runs the issue.
 | **Adaptive routing** | cohort statistics; proposals; the acceptance UI; bounded automatic adjustment | telemetry with assessment snapshots and outcomes from P1/P3; shadow data from P5; the corpus veto |
 | **Budget optimisation** | strategies (§21); usage-window-aware scheduling across missions | budget-blind router; resolver ranking hook; admission control (P9) |
 | **Specialization** | `reuse` and `fork` assignments; warm-session ranking | `AgentAssignment` separate from `RoutingDecision`; `continue` mode already exists |
-| **Hierarchical orchestration** | a lead agent that supervises and replans | the planner is an attempt; replanning is a plan diff |
+| **Hierarchical orchestration** (deferred by #55, §22.2) | a lead agent that supervises and replans | the planner is an attempt; replanning is a plan diff |
 | **Phase-split routes** | one task planned on one tier and executed on another (Claude Code's `opusplan`, Aider's architect/editor) | `RouteRequirement` is a value object that can gain a `planning` part; the `plan-first` gate already marks candidates |
 
 ---

@@ -483,6 +483,9 @@ only the rows in §13.2.
 
 ## 15. Left for #102 (not in #101)
 
+Finalized by `docs/plans/delegation-ownership-contract.md` (#102, 2026-10-02). Summary of what
+that document settles, kept here for a reader who only has this file open:
+
 - Handback: delivering a structured result to the origin as a new turn or card, when the origin
   is idle, busy, ended or archived, idempotently.
 - Ownership: whether the origin becomes an accountable orchestrator, and transferring or ending

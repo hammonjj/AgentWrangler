@@ -306,6 +306,12 @@ export function missionPhase(m: Mission): MissionPhaseView {
     case 'paused':
       return view('paused', `paused · ${ofDone}`, 'Paused', m.stateReason ?? 'Paused: nothing new starts');
     case 'review':
+      // A finish under way is activity, not a question for the user; one whose outcome could not be read back is.
+      if (m.pendingFinish?.uncertain) return view('needs-you', 'finish outcome unknown', 'Check finish', m.pendingFinish.uncertain.why);
+      if (m.pendingFinish) {
+        const doing = m.pendingFinish.how === 'merge-local' ? 'merging' : m.pendingFinish.how === 'pull-request' ? 'opening a pull request' : 'finishing';
+        return view('verifying', doing, doing === 'merging' ? 'Merging…' : 'Finishing…', 'A finish is under way; its outcome is recorded when it ends');
+      }
       return view('ready-for-review', 'ready to merge', 'Ready to merge', m.stateReason ?? 'Every task is done; pick how to finish');
     case 'finishing':
       return view('verifying', `verifying · ${ofDone}`, 'Verifying', 'Checking the mission result');

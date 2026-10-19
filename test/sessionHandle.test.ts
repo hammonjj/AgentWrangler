@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { QueryFn } from '../src/claude/runner/claudeSdkSession';
 import { Emitter } from '../src/core/events';
-import { createLocalClaudeHandle } from '../src/core/session/localClaudeHandle';
+import { createLocalClaudeHandle } from './support/localClaudeHandle';
 import { SessionExecutors } from '../src/core/session/sessionExecutors';
 import type { SessionHandle, SessionViewEvent, SessionViewSnapshot } from '../src/core/session/sessionHandle';
 import { CodexRunnerService } from '../src/codex/runner';

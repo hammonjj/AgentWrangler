@@ -316,3 +316,46 @@ Created 2026-09-24 as #68, #69 and #70.
 
 #47 (overlapping tasks and exclusive resources) consumes issue 1's `acquire` / `bind` and does
 not build its own service.
+
+## As built (#68, #47)
+
+Where the implementation differs from the design above, or settles something it left open:
+
+- **One hook entry per event.** The installer recognises AW's block as one entry per event, so
+  `lease-hook.sh pre|post|stop` is a second command inside that entry, beside the log append.
+  The commands of an entry run side by side. Its `PreToolUse` timeout is a fixed 1800 s, and
+  `waitSec` is capped at 1700 s so every wait denies before the hook is killed.
+- **Reading the payload.** `/usr/bin/plutil -extract … raw` decodes `tool_input.command`
+  exactly. A `sed` capture would get escaped quotes wrong, and they matter to a pattern like
+  `quit app "Agent Wrangler"`. `holder.json` is read with a `sed` per field, anchored on `{`
+  or `,` before the key.
+- **Qualifier.** The first 12 hex characters of `md5` (`md5 -qs` in the hook, `crypto` in the
+  core) of `git rev-parse --path-format=absolute --git-common-dir`, or of the cwd.
+- **`resources.tsv`** has a seventh column, the label, so the deny message needs no other file.
+  Empty while `leases.enabled` is off: that is the hook's fast path.
+- **No attempt id in the agent's environment.** A Claude attempt's session id is assigned before
+  launch, so the scheduler's lease names the attempt and that session from the start. The
+  agent's own matching calls are then re-entrant, and it never waits on its own lease. A Codex
+  thread gets its id at `thread/start`; `bind` adds it then.
+- **Orchestration lease names.** `acquire('unity-editor:Game', …)` uses the declared
+  `unity-editor` resource's key and `keyBy` when there is one. Otherwise it uses a per-repository
+  lease named after the slug of the whole name.
+- **Restarts.** Orchestration tells the reaper which attempts still run (`attemptActive`). While
+  orchestration is on but has not recovered yet, an attempt's lease is kept rather than judged by
+  the last core's pid. Recovery rebinds each running attempt's leases: to its agent's pid when the
+  core knows it, otherwise to the new core's pid. Each reaper pass touches the `holder.json` of
+  every attempt lease it keeps. While that file is under 10 minutes old, the hook does not judge
+  the lease by its pid, which may belong to a core that is restarting (a Codex attempt has no
+  agent pid to bind). After that, the pid rule applies again, so a core that never comes back
+  frees the lease.
+- **Calls that never ran.** `PreToolUse` takes the lease before the permission prompt. A
+  refused prompt fires `PermissionDenied`, which runs the hook's `post` mode. An interrupted call
+  fires nothing, so `Stop`/`StopFailure` release every `command` lease the session holds,
+  whatever `uses/` still lists. Once a turn has stopped, none of its calls is running.
+- **One deadline per call.** A call that needs several leases waits at most its longest
+  `waitSec` in all, not one wait per lease.
+- **Registry ends** release a session's lease only if they were recorded after the lease was
+  taken. A session resumed outside AW keeps its old `stopped` record.
+- **Scheduler.** A lease held elsewhere is a `wait` (`reason: 'resource'`), as are two tasks that
+  would take the same lease in one step. `launch` acquires atomically all the same. A lease taken
+  since the scheduler looked raises `LeaseWait`: the task keeps waiting and nothing fails.

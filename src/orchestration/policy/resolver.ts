@@ -28,6 +28,7 @@ import {
 } from '../../shared/orchestration/catalog';
 import type { SourceStatus } from '../../shared/orchestration/sourceHealth';
 import { harnessLabel } from '../../shared/harness';
+import { STRATEGY_PROFILES, strategyOf } from '../../shared/orchestration/budgetStrategy';
 import { isEndpointSource } from '../../shared/orchestration/localEndpoints';
 import type {
   ExecutionTarget,
@@ -234,21 +235,36 @@ function hardFilter(
 /** Rank keys within one tier (§9.4 step 4): preferences, unattended fit, effort support, price, then catalog order. */
 function compare(a: Considered, b: Considered, req: RouteRequirement, policy: ResolverPolicy): number {
   const prefer = policy.preferences ?? req.prefer;
+  const strategy = strategyOf(prefer);
+  const price = (c: Considered) => {
+    const p = c.entry.descriptor.price;
+    return p ? p.inPerMTok + p.outPerMTok : Number.MAX_SAFE_INTEGER;
+  };
+  const effortFirst = (c: Considered) => (c.entry.effortMap ? 0 : 1);
+  // Measured output speed, faster first; a model nobody has measured goes after one that was.
+  const slowness = (c: Considered) => {
+    const t = c.entry.descriptor.throughput;
+    return isKnown(t) ? -t.value.outTokPerSec : Number.MAX_SAFE_INTEGER;
+  };
   const keys: ((c: Considered) => number)[] = [
     (c) => (prefer?.harness && c.target.harness === prefer.harness ? 0 : 1),
     (c) => (prefer?.source && c.entry.descriptor.source === prefer.source ? 0 : 1),
-    (c) => (prefer?.preferLocal || prefer?.strategy === 'prefer-local' ? (c.entry.descriptor.location === 'local' ? 0 : 1) : 0),
+    (c) => (STRATEGY_PROFILES[strategy].localFirst ? (c.entry.descriptor.location === 'local' ? 0 : 1) : 0),
     // An attempt runs unattended. Through Claude Code, a model without `auto`
     // (Haiku) asks the user about every edit, so a same-tier model that does
     // not goes first.
     (c) => (c.target.harness === 'claude-code' && autoModeUnavailable(c.entry) ? 1 : 0),
     (c) => (c.entry.descriptor.location === 'local' ? 0 : 1),
+    // Strategy keys (§21), after the user's own preferences and what an unattended run needs:
+    // maximum quality ties to the model that can be asked to think harder, lowest cost to the
+    // cheapest route, fastest to the one measured quickest. All within one tier: none of them
+    // can change which tier is chosen below `minTier`.
+    (c) => (strategy === 'max-quality' ? effortFirst(c) : 0),
+    (c) => (strategy === 'lowest-cost' ? price(c) : 0),
+    (c) => (strategy === 'fastest' ? slowness(c) : 0),
     // A soft preference only (§6.4): a model that can be asked to think harder, when harder is wanted.
-    (c) => (req.effort === 'high' || req.effort === 'max' ? (c.entry.effortMap ? 0 : 1) : 0),
-    (c) => {
-      const p = c.entry.descriptor.price;
-      return p ? p.inPerMTok + p.outPerMTok : Number.MAX_SAFE_INTEGER;
-    },
+    (c) => (req.effort === 'high' || req.effort === 'max' ? effortFirst(c) : 0),
+    price,
     (c) => c.order,
   ];
   for (const k of keys) {
@@ -287,6 +303,7 @@ export function resolveRoute(req: RouteRequirement, snap: ResolverSnapshot, poli
   }
 
   const pinnedModel = policy.pins?.model;
+  const strategy = strategyOf(policy.preferences ?? req.prefer);
   const atMin = pinnedModel ? passing : passing.filter((c) => c.tierRank === lo);
   let pool = atMin;
   let note: string | undefined;
@@ -301,6 +318,16 @@ export function resolveRoute(req: RouteRequirement, snap: ResolverSnapshot, poli
       pool = higher.filter((c) => c.tierRank === t);
       const blockers = all.filter((c) => c.tierRank === lo && c.rejected).map((c) => c.rejected!);
       note = `Upgraded to ${tiers[t].name}: no ${req.minTier} model is available${blockers.length > 0 ? ` (${blockers.join('; ')})` : ''}.`;
+    }
+  }
+  // Maximum quality (§21): the highest tier within the cap that is routable and available. It
+  // widens the pool upward only: every tier in `passing` is already at or above `minTier`
+  // (or the pin's own choice), so it never goes below the requirement.
+  if (strategy === 'max-quality' && !pinnedModel && pool.length > 0) {
+    const top = passing.filter((c) => c.tierRank >= lo && (hi < 0 || c.tierRank <= hi)).reduce((m, c) => Math.max(m, c.tierRank), pool[0].tierRank);
+    if (top > pool[0].tierRank) {
+      pool = passing.filter((c) => c.tierRank === top);
+      note = `Maximum quality: ${tiers[top].name}, the highest tier within the caps; the work needs ${req.minTier}.`;
     }
   }
   pool.sort((a, b) => compare(a, b, req, policy));

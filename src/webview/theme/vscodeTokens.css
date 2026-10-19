@@ -1,11 +1,11 @@
 /*
- * The 56 `--vscode-*` custom properties the panes read, for a host that is not VSCode.
+ * The 56 `--vscode-*` custom properties the panes read.
  *
- * VSCode injects them into every webview, so the pane stylesheets simply use them; a
- * plain Electron BrowserWindow injects nothing and all 56 fall back to nothing, which
- * is what "renders unstyled" means. This file supplies them in Dark Modern and Light
- * Modern values, leaving `dashboard.css`, `conversation.css` and `workbench.css`
- * exactly as the extension ships them, so the same markup renders in both hosts.
+ * The panes were written as VSCode webviews, where VSCode injects these into every
+ * webview, so the pane stylesheets simply use them. A browser page injects nothing and
+ * all 56 would fall back to nothing, which is what "renders unstyled" means. This file
+ * supplies them in Dark Modern and Light Modern values, so `dashboard.css`,
+ * `conversation.css` and `workbench.css` keep their variable names unchanged.
  */
 
 /* ---- dark (the default: this is a developer tool) ---- */
@@ -344,6 +344,72 @@ body.aw-shell #wbConv {
   pointer-events: none;
 }
 
+/* The plain file / diff / command modal a browser gets for the former host-local actions (#140). */
+.aw-hv-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+}
+.aw-hv {
+  display: flex;
+  flex-direction: column;
+  width: min(900px, 94vw);
+  max-height: 88vh;
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background);
+  color: var(--vscode-foreground);
+  box-shadow: 0 4px 16px var(--vscode-widget-shadow);
+  font-size: var(--vscode-font-size);
+}
+.aw-hv-head { padding: 8px 12px; border-bottom: 1px solid var(--vscode-widget-border); }
+.aw-hv-title { font-weight: 600; overflow-wrap: anywhere; }
+.aw-hv-body { padding: 10px 12px; overflow: auto; min-height: 0; }
+.aw-hv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--vscode-widget-border);
+}
+.aw-hv-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.aw-hv-note { margin: 6px 0; opacity: 0.8; overflow-wrap: anywhere; }
+.aw-hv-path { margin: 0 0 8px; font-family: var(--vscode-editor-font-family, monospace); overflow-wrap: anywhere; user-select: all; }
+.aw-hv-command {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px;
+  border: 1px solid var(--vscode-widget-border);
+  background: var(--vscode-input-background, transparent);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+.aw-hv-text {
+  margin: 0;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--vscode-editor-font-size, 12px);
+  white-space: pre;
+}
+.aw-hv-line { display: block; }
+.aw-hv-add { background: rgba(60, 160, 60, 0.22); }
+.aw-hv-del { background: rgba(200, 60, 60, 0.22); }
+.aw-hv-hunk { color: var(--vscode-textLink-foreground, inherit); }
+.aw-hv-meta { opacity: 0.7; font-weight: 600; }
+
 .aw-toast {
   max-width: 460px;
   padding: 6px 10px;
@@ -362,3 +428,171 @@ body.aw-shell #wbConv {
   85% { opacity: 1; }
   100% { opacity: 0; }
 }
+
+/* The browser's one-line banner (#141): "Enable notifications", or why they
+   cannot work here. Built by the web shim. */
+#awBanner {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(460px, calc(100vw - 24px));
+  padding: 6px 10px;
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background);
+  color: var(--vscode-foreground);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+  font-size: var(--vscode-font-size);
+}
+
+#awBanner[hidden] {
+  display: none;
+}
+
+/* The browser's overlay dock (#133): the banner and the toasts in one column
+   instead of two fixed corners that overlap on a narrow screen. The banner sits
+   at the bottom, toasts above it. Declared after both rules above, and
+   more specific, so a toast or banner outside the dock (the window's) is unchanged. */
+#awDock {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: stretch;
+  gap: 6px;
+  pointer-events: none;
+}
+#awDock > #awBanner {
+  position: static;
+  align-self: flex-start;
+  pointer-events: auto;
+}
+#awDock > #awToasts {
+  position: static;
+  align-self: flex-end;
+  max-width: 100%;
+}
+
+#awBanner button {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  font: inherit;
+  cursor: pointer;
+}
+/* The banner's × (#134): quiet, square, last on the line. */
+#awBanner .aw-banner-close {
+  padding: 0 6px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-size: 1.25em;
+  line-height: 1;
+}
+#awBanner .aw-banner-close:hover {
+  color: var(--vscode-foreground);
+}
+#awBanner .aw-banner-text {
+  min-width: 0;
+}
+#awBanner .aw-banner-short {
+  display: none;
+}
+
+/* ---- the folder browser (#139, `common/folderBrowser.ts`) ----
+   A view that any modal host can mount, and the plain overlay the shim uses
+   when there is no modal host. Everything in it is a path on the host. */
+
+.aw-fb-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.aw-fb {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-sizing: border-box;
+  width: min(560px, 100%);
+  max-height: min(640px, 100%);
+  padding: 12px;
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background);
+  color: var(--vscode-foreground);
+  font-size: var(--vscode-font-size);
+}
+
+.aw-fb-title { font-weight: 600; }
+.aw-fb-hint { color: var(--vscode-descriptionForeground); font-size: 0.92em; }
+.aw-fb-bar { display: flex; align-items: center; gap: 8px; }
+/* Right-to-left only so a long path is cut at its start (the ellipsis goes on
+   the left and the folder you are in stays in view). The path itself is an
+   isolated left-to-right run (`bdi`), or the bidi algorithm moves its leading
+   `/` to the far end (#134). */
+.aw-fb-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.aw-fb-path > bdi { direction: ltr; unicode-bidi: isolate; }
+.aw-fb-toggle { white-space: nowrap; color: var(--vscode-descriptionForeground); }
+.aw-fb-list { flex: 1; min-height: 120px; overflow-y: auto; border: 1px solid var(--vscode-widget-border); border-radius: 4px; }
+.aw-fb-heading { padding: 4px 8px; color: var(--vscode-descriptionForeground); font-size: 0.85em; text-transform: uppercase; }
+.aw-fb-empty { padding: 8px; color: var(--vscode-descriptionForeground); }
+.aw-fb-status { min-height: 1.2em; color: var(--vscode-descriptionForeground); }
+.aw-fb-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.aw-fb-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.aw-fb-row:hover { background: var(--vscode-list-hoverBackground); }
+.aw-fb-detail { color: var(--vscode-descriptionForeground); font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.aw-fb-dir .aw-fb-name::before { content: "\1F4C1  "; }
+
+.aw-fb button { font: inherit; }
+.aw-fb-choose { background: var(--vscode-button-background); color: var(--vscode-button-foreground, #fff); border: none; border-radius: 3px; padding: 4px 12px; cursor: pointer; }
+.aw-fb-choose:disabled { opacity: 0.5; cursor: default; }
+.aw-fb-cancel, .aw-fb-up { background: transparent; color: inherit; border: 1px solid var(--vscode-widget-border); border-radius: 3px; padding: 4px 12px; cursor: pointer; }
+.aw-fb-up:disabled { opacity: 0.5; cursor: default; }
+
+/* The side-by-side diff (#146): `common/sideBySide.ts`. Two columns of line number and text. */
+.aw-sbs {
+  border-collapse: collapse;
+  width: 100%;
+  table-layout: fixed;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--vscode-editor-font-size, 12px);
+}
+.aw-sbs td { padding: 0 6px; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
+.aw-sbs .aw-sbs-n { width: 3.5em; text-align: right; opacity: 0.55; user-select: none; }
+.aw-sbs .aw-sbs-t { width: 50%; }
+.aw-sbs .aw-sbs-n:nth-child(3), .aw-sbs .aw-sbs-t:nth-child(4) { border-left: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35)); }
+.aw-sbs .aw-sbs-add { background: rgba(60, 160, 60, 0.22); }
+.aw-sbs .aw-sbs-del { background: rgba(200, 60, 60, 0.22); }
+.aw-sbs .aw-sbs-empty { background: rgba(128, 128, 128, 0.08); }
+.aw-sbs .aw-sbs-hunk { color: var(--vscode-textLink-foreground, inherit); background: rgba(128, 128, 128, 0.12); }
+.aw-sbs .aw-sbs-meta { opacity: 0.7; font-weight: 600; }
+.aw-hv-views { display: flex; gap: 6px; margin: 0 0 6px; }

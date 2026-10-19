@@ -17,6 +17,7 @@ import type {
   RouteRecommendation,
   TaskAssessment,
 } from '../../shared/orchestration/types';
+import type { LearnedRule } from '../../shared/orchestration/routingProposals';
 import { resolveRoute, type ResolverSnapshot } from './resolver';
 import { ROUTER_VERSION, routeTask } from './router';
 
@@ -26,11 +27,13 @@ export function recommendRoute(
   policy: ExecutionPolicy,
   snapshot: ResolverSnapshot,
   at: Millis = snapshot.now,
+  learned?: { rules: readonly LearnedRule[]; repository?: string },
 ): RouteRecommendation {
   const routed = routeTask(assessment, {
     tiers: snapshot.catalog.tiers,
     caps: policy.caps,
     preferences: policy.preferences,
+    ...(learned && learned.rules.length > 0 ? { learnedRules: learned.rules, ...(learned.repository ? { repository: learned.repository } : {}) } : {}),
   });
   // A pinned effort is the user's, not the rules' (§10.2): it replaces what
   // the rules asked for, and says so. It was checked against the effort cap

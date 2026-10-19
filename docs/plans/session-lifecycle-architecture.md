@@ -1,5 +1,13 @@
 # Agent Wrangler session lifecycle: architecture and migration playbook
 
+> **Partly superseded by [browser-workbench.md](browser-workbench.md) (#121).** This playbook
+> keeps the core in Electron main (§5, Stage 6) and gates a UI/core split behind Stage 7. That
+> gate was opened: the core now runs in a LaunchAgent daemon on a pinned Node (#130), and
+> Electron was retired in #142, so wherever this document says "Electron main", "the app
+> quits" or "the window", read "the core daemon" and "a browser tab". The session hosts, their
+> protocol (§9), the recovery model (§8) and the security model (§12) are still current, minus
+> the in-process path, which #122 removed.
+
 Status: proposed 2026-09-23; Stage 0 done and the architecture confirmed at CP0 on 2026-09-24
 (§15.1). Stage 1 onwards is not built yet.
 Scope: how AW launches, owns, loses and recovers the agent sessions it runs, and how to change
@@ -1535,6 +1543,18 @@ Review checkpoint: CP2 (Opus Extra High) freezes protocol v1 + manifest v1 befor
   - **Not done here:** the §16 manual rows and the gating acceptance test (James's, during the
     soak); M3 (logout); CP3; the default flip and removing the setting; staggering the replay of
     several busy hosts at startup (§15.2 open item).
+- **Outcome (2026-10-03, #122): the flip and the removal, in one step.** The browser workbench
+  (`browser-workbench.md` §4) makes the core a daemon that restarts on every update, so an
+  in-process conversation could not be allowed to exist. `experimental.sessionHosts` and the
+  in-process path are gone: `RunnerService` starts every session through `spawnHostedClaude`,
+  `HostServices.sessionHosts` is required, and orchestration's G1 refusal (Claude attempts need
+  hosts) has nothing left to refuse. A stale value is removed from `settings.json` at startup
+  (`RETIRED_SETTING_KEYS`). An in-process conversation from the build before is cut off by that
+  build's quit, classified `interrupted` (`app-restart`) at the next start, and resumes in a
+  host. `lifecycle.orphanIdleHours` no longer hangs off the switch. Tests drive `RunnerService`
+  over `inProcessHosts` (`src/sessionHost/inProcessHosts.ts`), a `HostSupervisor` stand-in whose
+  sessions run in the test's process and read as hosted, so they take the app's code path. CP3
+  and the manual rows were not run first.
 
 ```text
 Recommended model: Opus
@@ -1695,6 +1715,12 @@ When to escalate: App Nap / power / dock-hide interactions misbehave → Opus Hi
     list, and it applies presses through `SessionActions`), and the daemon follows its own
     feed (Claude provider + passive clients of every live host) otherwise.
   The rest of the core stays in Electron main; this gate stays open for it.
+- **Decided 2026-10-02 (#120): go, for the whole core.** A front end that is not Electron
+  arrived: a browser workbench, including phones on the LAN. The core moves to a LaunchAgent
+  daemon and Electron is retired. Secrets move to the Keychain, the single-instance lock
+  becomes launchd's label plus a socket probe, and no leader lease is needed (one core, and the
+  remote daemon folds into it). The pane hosts are served over a WebSocket rather than
+  `run/core.sock`. See `browser-workbench.md`, which supersedes this stage.
 - **Gate.** Proceed only if a front end that is not Electron must orchestrate while the app is
   **fully quit**, or if launch-at-login without an Electron process becomes a requirement.
 - **If proceeding:**

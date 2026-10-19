@@ -530,6 +530,10 @@ If recovery replays from a checkpoint (e.g., after a host restart):
 
 **Core restart (Electron app quits and relaunches):**
 
+> Superseded by [browser-workbench.md](browser-workbench.md) (#121): the core is the core
+> daemon now (#130, #142), so this is a daemon stop and start. The steps are unchanged.
+
+
 1. On startup, `SessionRegistry.startup()` recovers all open sessions.
 2. `recovery.ts` rebuilds each session's state from SeqLog and transcript.
 3. For each registry record with `origin.kind = 'orchestration'`, find its assignment.
@@ -581,6 +585,14 @@ from orphaning the parent in mid-thought.
 ## 6. Open dependencies on #102 and #104
 
 ### 6.1 #102: Ownership and handback contract
+
+Finalized by `docs/plans/delegation-ownership-contract.md` (#102, 2026-10-02). That document's
+ownership model is at the *mission/origin-conversation* level (who the origin is accountable for,
+and when a result is handed back to it); this section's table is at the *assignment/attempt*
+level (parent-core vs. child-session mutation boundaries) and is a different, narrower scope that
+#102 does not re-litigate — the two are complementary, not overlapping: §7 of the contract
+document is explicit that none of its closeout or follow-up machinery runs inside an attempt's
+worktree or session, which is exactly the boundary this table already draws.
 
 **What this doc needs from #102:**
 
@@ -692,7 +704,11 @@ interface ExecutionAttempt {
 ```
 
 These fields are empty until #102 and #104 define what goes in them. Assignment creation (§7)
-and storage (§23) leave room for them.
+and storage (§23) leave room for them. #102's own new types (`DelegationOutcome`,
+`FollowUpObligation`, `CloseoutState`) live at the mission level, not inside `ExecutionAttempt`;
+they do not fill the `handoff`/`findings` fields sketched above, which remain #104's (eligibility
+and collision evidence) and a narrower #102 follow-up (parent/child mutation races within one
+attempt) if that scope is still wanted once #114-#118 ship.
 
 ---
 

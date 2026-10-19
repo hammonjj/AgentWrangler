@@ -5,7 +5,6 @@ import {
   ORCHESTRATION_TABS,
   orchestrationTabTarget,
 } from '../../src/shared/orchestration/orchestrationTabs';
-import { claimRendererState, claimedRendererState } from '../../src/electron/rendererState';
 
 describe('Orchestration tabs', () => {
   it('are the five sections in order, with short labels for a narrow pane', () => {
@@ -27,18 +26,5 @@ describe('Orchestration tabs', () => {
     expect(orchestrationTabTarget({ type: OPEN_TAB_MESSAGE, tab: 'models', focusModelKey: 3 })).toBeUndefined();
     expect(orchestrationTabTarget({ type: 'orchestration', tab: 'models' })).toBeUndefined();
     expect(orchestrationTabTarget(null)).toBeUndefined();
-  });
-});
-
-describe('renderer state claims', () => {
-  it('serves a claimed renderer from its own store until released', () => {
-    let saved: unknown = { orchestrationTab: 'tiers' };
-    const claim = claimRendererState(41, { get: () => saved, set: (v) => (saved = v) });
-    expect(claimedRendererState(41)?.get()).toEqual({ orchestrationTab: 'tiers' });
-    claimedRendererState(41)?.set({ orchestrationTab: 'report' });
-    expect(saved).toEqual({ orchestrationTab: 'report' });
-    expect(claimedRendererState(42)).toBeUndefined();
-    claim.dispose();
-    expect(claimedRendererState(41)).toBeUndefined();
   });
 });

@@ -114,3 +114,872 @@ body {
 #wb.dragging #wbConv {
   pointer-events: none;
 }
+
+/*
+ * ---- the browser app shell (#133) ----
+ *
+ * `aw-app` is on <body> only in a browser (`workbench/shell.ts`): a bar of
+ * routes above the panes, and a page for the routes that are not panes. These
+ * rules may use the viewport — the shell owns the window — but the panes inside
+ * still size off themselves.
+ */
+
+body.aw-app {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Beats the theme's `body.aw-shell #wb { height: 100% }` by coming later. */
+body.aw-app #wb {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+
+#awBar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-height: 28px;
+}
+
+#awBar .aw-bar-title {
+  margin: 0;
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+#awBar .aw-bar-title:focus,
+#awPage h2:focus,
+#convApp #ttl:focus {
+  outline: none;
+}
+#awBar .aw-bar-title:focus-visible,
+#awPage h2:focus-visible,
+#convApp #ttl:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+#awBar .aw-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-left: auto;
+}
+
+#awBar .aw-nav a,
+#awBar .aw-bar-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 2px 9px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-decoration: none;
+}
+
+#awBar .aw-bar-back {
+  border-color: var(--vscode-button-border, transparent);
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, inherit);
+  cursor: pointer;
+}
+
+#awBar .aw-nav a:hover,
+#awBar .aw-bar-back:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+#awBar .aw-nav a[aria-current='page'] {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+#awBar .aw-nav a:focus-visible,
+#awBar .aw-bar-back:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* The Actions menu (#146): what the native window's menu carried. */
+#awBar .aw-actions {
+  position: relative;
+}
+#awBar .aw-actions > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 2px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  list-style: none;
+}
+#awBar .aw-actions > summary::-webkit-details-marker {
+  display: none;
+}
+#awBar .aw-actions > summary:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+#awBar .aw-actions > summary:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+#awBar .aw-actions-list {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+}
+#awBar .aw-actions-item {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+#awBar .aw-actions-item:hover,
+#awBar .aw-actions-item:focus-visible {
+  background: var(--vscode-list-hoverBackground);
+  outline: none;
+}
+@media (pointer: coarse) {
+  #awBar .aw-actions > summary,
+  #awBar .aw-actions-item {
+    min-height: 44px;
+  }
+}
+
+/* One pane at a time, below the breakpoint. `!important` because the divider
+   writes the table's width into its own style, which would otherwise win. */
+body.aw-surface-table #wbSplit,
+body.aw-surface-table #wbConv,
+body.aw-surface-analytics #wbSplit,
+body.aw-surface-analytics #wbConv,
+body.aw-surface-conversation #wbTable,
+body.aw-surface-conversation #wbSplit,
+body.aw-surface-page #wb {
+  display: none;
+}
+body.aw-surface-table #wbTable,
+body.aw-surface-analytics #wbTable {
+  flex: 1 1 auto !important;
+}
+body.aw-surface-conversation #wbConv {
+  border-left: none;
+}
+
+#awPage {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+}
+
+#awPage h2 {
+  margin: 0 0 10px;
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+#awPage .aw-page-note {
+  margin: 0 0 8px;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.4;
+}
+
+#awPage a {
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+}
+
+/* ---- in-page modals (#133): the browser's palette and dialogs ---- */
+
+.aw-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 12vh 12px 12px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.aw-modal {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(560px, 100%);
+  max-height: 76vh;
+  padding: 14px 16px;
+  border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  background: var(--vscode-editorWidget-background);
+  color: var(--vscode-foreground);
+  box-shadow: 0 4px 18px var(--vscode-widget-shadow);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+}
+
+.aw-modal * {
+  box-sizing: border-box;
+}
+
+.aw-modal.aw-modal-warn {
+  border-top: 3px solid var(--vscode-editorWarning-foreground, #cca700);
+}
+.aw-modal.aw-modal-error {
+  border-top: 3px solid var(--vscode-errorForeground);
+}
+
+.aw-modal .aw-modal-title {
+  margin: 0 0 6px;
+  font-size: 1.05em;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.aw-modal .aw-modal-detail,
+.aw-modal .aw-modal-prompt {
+  margin: 0 0 8px;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.aw-modal .aw-modal-field {
+  flex: 0 0 auto;
+  width: 100%;
+  min-height: 28px;
+  padding: 5px 8px;
+  border: 1px solid var(--vscode-input-border, var(--vscode-dropdown-border));
+  border-radius: 4px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  font-family: inherit;
+  font-size: inherit;
+}
+.aw-modal .aw-modal-field::placeholder {
+  color: var(--vscode-descriptionForeground);
+}
+.aw-modal .aw-modal-field:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  border-color: var(--vscode-focusBorder);
+}
+.aw-modal .aw-modal-field[aria-invalid='true'] {
+  border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+}
+
+/* Why Enter was refused: the one thing in the dialog that must not be missed. */
+.aw-modal .aw-modal-error {
+  margin: 6px 0 0;
+  padding: 4px 8px;
+  border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+  border-radius: 3px;
+  background: var(--vscode-inputValidation-errorBackground, transparent);
+  color: var(--vscode-foreground);
+}
+
+.aw-modal .aw-modal-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.aw-modal .aw-modal-row {
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.aw-modal .aw-modal-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+/* The highlighted row is the one Enter takes: the stronger mark of the two. */
+.aw-modal .aw-modal-row.on {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+.aw-modal .aw-modal-rowtop {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.aw-modal .aw-modal-label {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aw-modal .aw-modal-desc,
+.aw-modal .aw-modal-rowdetail {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.9em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aw-modal .aw-modal-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.aw-modal .aw-modal-row.on .aw-modal-desc,
+.aw-modal .aw-modal-row.on .aw-modal-rowdetail {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.aw-modal .aw-modal-empty {
+  margin: 10px 2px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.aw-modal .aw-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.aw-modal .aw-modal-btn {
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 4px;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-button-secondaryForeground, inherit);
+  font: inherit;
+  cursor: pointer;
+}
+.aw-modal .aw-modal-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.3));
+}
+.aw-modal .aw-modal-btn.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+.aw-modal .aw-modal-btn.primary:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+.aw-modal .aw-modal-btn:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+/* A host view (file, diff, command: #140) drawn in the modal host: its own
+   `aw-hv-*` parts supply the body and buttons, this frames them. */
+.aw-modal.aw-modal-view {
+  width: min(900px, 100%);
+  padding: 0;
+}
+.aw-modal.aw-modal-view .aw-modal-title {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--vscode-widget-border);
+}
+
+/* The folder browser (#139) is its own panel; the modal is only its frame. */
+.aw-modal.aw-modal-folder {
+  width: min(560px, 100%);
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+#awPage .aw-page-button {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 4px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  text-decoration: none;
+}
+#awPage .aw-connect-progress {
+  margin: 0 0 12px;
+  color: var(--vscode-descriptionForeground);
+}
+#awPage .aw-connect-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 720px;
+}
+#awPage .aw-connect-step {
+  padding: 12px 14px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+}
+#awPage .aw-connect-step.is-done {
+  opacity: 0.6;
+}
+#awPage .aw-connect-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+#awPage .aw-connect-num {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  font-size: 0.9em;
+}
+#awPage .aw-connect-title {
+  margin: 0;
+  font-size: 1em;
+  font-weight: 600;
+}
+#awPage .aw-connect-text {
+  margin: 0 0 6px;
+  line-height: 1.4;
+}
+#awPage .aw-connect-platform {
+  margin: 10px 0 4px;
+  font-size: 0.95em;
+  font-weight: 600;
+}
+#awPage .aw-connect-sub {
+  margin: 0 0 8px;
+  padding-left: 22px;
+  line-height: 1.45;
+}
+#awPage .aw-connect-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+#awPage button.aw-page-button {
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+#awPage button.aw-page-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+#awPage .aw-pair-status {
+  margin: 0 0 8px;
+  color: var(--vscode-errorForeground);
+}
+#awPage .aw-pair-status:empty {
+  display: none;
+}
+#awPage .aw-pair-panel {
+  margin: 8px 0 12px;
+  padding: 12px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 6px;
+  animation: aw-pair-open 0.2s ease-out;
+}
+#awPage .aw-pair-panel[hidden] {
+  display: none;
+}
+#awPage .aw-pair-qr {
+  display: block;
+  width: min(240px, 100%);
+  height: auto;
+  margin: 0 0 8px;
+  border-radius: 4px;
+  image-rendering: pixelated;
+}
+#awPage .aw-pair-address {
+  display: block;
+  margin: 0 0 8px;
+  word-break: break-all;
+}
+#awPage .aw-pair-code {
+  margin: 0 0 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 1.6em;
+  letter-spacing: 0.15em;
+}
+@keyframes aw-pair-open {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #awPage .aw-pair-panel {
+    animation: none;
+  }
+}
+#awPage .aw-connect-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+}
+#awPage .aw-page-button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+/*
+ * ---- phones (#134) ----
+ *
+ * Scoped to `body.aw-web`, which the page the web server renders always has.
+ * This is the shell, so it may ask about the viewport and the pointer; the
+ * panes key off their own `.narrow` and `.touch` classes instead.
+ */
+
+/*
+ * The app fills the *visible* viewport. `viewport-fit=cover` (the page's meta)
+ * lets the page draw under the notch and the home indicator, and the safe-area
+ * insets keep the content out of them. iOS Safari does not resize the layout
+ * viewport for its keyboard, so `common/phone.ts` writes the visual viewport's
+ * top and height into `--aw-vv-top` / `--aw-vv-h`; without them (no JS yet, no
+ * `visualViewport`) `100dvh` is the next best thing. `body.aw-web` beats the
+ * theme's `body.aw-shell` padding by loading after it.
+ */
+body.aw-web {
+  position: fixed;
+  top: var(--aw-vv-top, 0px);
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 100vh;
+  height: var(--aw-vv-h, 100dvh);
+  padding-top: max(10px, env(safe-area-inset-top));
+  padding-right: max(12px, env(safe-area-inset-right));
+  /* `--aw-dock-h`: the notification banner's height plus a gap while it shows
+     (`common/overlayDock.ts`), so the banner sits below the app, never on it. */
+  padding-bottom: calc(max(12px, env(safe-area-inset-bottom)) + var(--aw-dock-h, 0px));
+  padding-left: max(12px, env(safe-area-inset-left));
+  /* Taps respond at once (no double-tap-to-zoom wait) and the page behind a
+     scrolling list does not rubber-band. */
+  touch-action: manipulation;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  /* A visible but quiet flash on tap, instead of the default grey box. */
+  -webkit-tap-highlight-color: rgba(128, 128, 128, 0.22);
+}
+/* The keyboard covers the home indicator: its inset is not needed above it. */
+body.aw-web.aw-kbd {
+  padding-bottom: 6px;
+}
+/* The divider is dragged, not tapped: it keeps its own touch handling. */
+body.aw-web #wbSplit {
+  touch-action: none;
+}
+
+/* Toasts and the notification banner stay out from under the home indicator,
+   and move to the top of what is visible while the keyboard is up. */
+body.aw-web #awDock {
+  left: max(12px, env(safe-area-inset-left));
+  right: max(12px, env(safe-area-inset-right));
+  bottom: max(12px, env(safe-area-inset-bottom));
+}
+body.aw-web.aw-kbd #awDock {
+  bottom: auto;
+  top: calc(var(--aw-vv-top, 0px) + 8px);
+  flex-direction: column;
+}
+body.aw-web #awBanner {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+/* With the keyboard up there is no room for it, and the page's reserve for it
+   (`--aw-dock-h`) drops to 0 with it. */
+body.aw-web.aw-kbd #awBanner {
+  display: none;
+}
+body.aw-web .aw-toast {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* Nothing in a modal may be wider than the screen or taller than what the
+   keyboard leaves. */
+body.aw-web .aw-modal-layer {
+  padding-top: max(12px, 8dvh);
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+body.aw-web .aw-modal {
+  max-height: 76vh;
+  max-height: 84dvh;
+}
+body.aw-web .aw-hv {
+  max-height: 88vh;
+  max-height: 88dvh;
+  max-width: 100%;
+}
+body.aw-web .aw-hv-body {
+  overflow-wrap: anywhere;
+}
+body.aw-web .aw-hv-text {
+  overflow-x: auto;
+}
+body.aw-web .aw-fb {
+  max-height: 92vh;
+  max-height: 92dvh;
+}
+
+@media (max-width: 799px) {
+  /* One pane at a time: the page's own frame gives the screen back. */
+  body.aw-web {
+    padding-top: max(6px, env(safe-area-inset-top));
+    padding-right: max(8px, env(safe-area-inset-right));
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--aw-dock-h, 0px));
+    gap: 6px;
+  }
+  /* The notification banner: one line, the short wording, a small button and
+     the ×. The full width of the screen, so its height is the same everywhere. */
+  body.aw-web #awDock {
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
+    bottom: max(8px, env(safe-area-inset-bottom));
+  }
+  body.aw-web #awDock > #awBanner {
+    align-self: stretch;
+    gap: 6px;
+    padding: 2px 2px 2px 10px;
+  }
+  body.aw-web #awBanner .aw-banner-text {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Why notifications cannot work here is worth two lines, not one cut short. */
+  body.aw-web #awBanner .aw-banner-why {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    white-space: normal;
+    font-size: 0.92em;
+  }
+  body.aw-web #awBanner .aw-banner-long {
+    display: none;
+  }
+  body.aw-web #awBanner .aw-banner-short {
+    display: inline;
+  }
+  body.aw-web.aw-kbd {
+    padding-bottom: 4px;
+  }
+  /* The routes are one row that scrolls sideways inside the bar, under the
+     back button and heading, rather than wrapping into a block of its own. */
+  #awBar {
+    gap: 4px 8px;
+  }
+  #awBar .aw-bar-title {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #awBar .aw-nav {
+    flex: 1 0 100%;
+    flex-wrap: nowrap;
+    margin-left: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  #awBar .aw-nav::-webkit-scrollbar {
+    display: none;
+  }
+  #awBar .aw-nav a {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  /* Back, heading and Actions share the first row; the routes are the second.
+     Actions used to wrap onto a row of its own after the full-width nav. */
+  #awBar .aw-bar-back {
+    order: 0;
+  }
+  #awBar .aw-bar-title {
+    order: 1;
+  }
+  #awBar .aw-actions {
+    order: 2;
+    margin-left: auto;
+  }
+  #awBar .aw-nav {
+    order: 3;
+  }
+  /* The heading takes focus on every route change; a ring on a page title the
+     user did not tab to is noise on a phone. */
+  #awBar .aw-bar-title:focus-visible {
+    outline: none;
+  }
+  #awPage {
+    padding: 10px 10px;
+  }
+  .aw-modal {
+    padding: 12px;
+  }
+}
+
+/* The launcher is the table's, but sits beside #wb rather than inside #wbTable:
+   with the table out of sight it must go too, or it fills a phone's screen above
+   the conversation. */
+body.aw-surface-conversation #bar,
+body.aw-surface-page #bar,
+body.aw-surface-analytics #bar,
+body.aw-surface-analytics #usage {
+  display: none;
+}
+
+@media (max-width: 799px) {
+  /* A single pane has its Back button; the route links would be a second row
+     of chrome above a conversation. They are on the table's screen. */
+  body.aw-surface-conversation #awBar .aw-nav,
+  body.aw-surface-page #awBar .aw-nav {
+    display: none;
+  }
+}
+
+/* On a phone the bar, launcher, usage cards and tab strip stacked above the
+   table fill the screen, and with only #app scrolling the rows never come into
+   view. Below the breakpoint the table screen scrolls as one page instead: the
+   body is the scroller and nothing is pinned. The desktop layout is unchanged. */
+@media (max-width: 799px) {
+  body.aw-web.aw-surface-table,
+  body.aw-web.aw-surface-analytics {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  body.aw-web.aw-surface-table > *,
+  body.aw-web.aw-surface-analytics > * {
+    flex-shrink: 0;
+  }
+  /* #wb is a column item of the body: its height is its content. */
+  body.aw-web.aw-surface-table #wb,
+  body.aw-web.aw-surface-analytics #wb {
+    flex: 0 0 auto;
+    height: auto;
+    overflow: visible;
+  }
+  /* #wbTable is a row item of #wb, so `flex` sizes its width: it must keep
+     filling the screen. With `flex-basis: auto` it took its content's width,
+     which the usage grid makes unbounded, and the pane never went `.narrow`. */
+  body.aw-web.aw-surface-table #wbTable,
+  body.aw-web.aw-surface-analytics #wbTable {
+    height: auto;
+    overflow: visible;
+  }
+  body.aw-web.aw-surface-table #wbTable > #app,
+  body.aw-web.aw-surface-analytics #wbTable > #app {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+  body.aw-web.aw-surface-table #app .tabletabs,
+  body.aw-web.aw-surface-table #app thead th,
+  body.aw-web.aw-surface-analytics #app .tabletabs,
+  body.aw-web.aw-surface-analytics #app thead th {
+    position: static;
+  }
+}
+
+/* Finger-sized targets in the shell's own controls. */
+@media (pointer: coarse) {
+  #awBar .aw-nav a,
+  #awBar .aw-bar-back {
+    min-height: 44px;
+    padding: 4px 12px;
+  }
+  #awPage .aw-page-button {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 16px;
+  }
+  .aw-modal .aw-modal-btn,
+  .aw-modal .aw-modal-field,
+  .aw-modal .aw-modal-row {
+    min-height: 44px;
+  }
+  /* 16px stops iOS zooming the page when a field is focused. */
+  .aw-modal .aw-modal-field,
+  .aw-hv-command {
+    font-size: 16px;
+  }
+  .aw-modal .aw-modal-row {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .aw-hv-btn,
+  .aw-fb-choose,
+  .aw-fb-cancel,
+  .aw-fb-up,
+  #awBanner button {
+    min-height: 44px;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  #awBanner .aw-banner-enable {
+    min-height: 40px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  #awBanner .aw-banner-close {
+    min-width: 40px;
+    min-height: 40px;
+    padding: 0;
+  }
+  .aw-fb-row {
+    min-height: 48px;
+    justify-content: center;
+  }
+  .aw-fb-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+  }
+  .aw-fb-toggle input {
+    width: 22px;
+    height: 22px;
+  }
+}

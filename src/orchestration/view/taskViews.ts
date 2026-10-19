@@ -27,6 +27,7 @@ import {
 import { REVIEW, stageLine, summariseVerification, verificationBadge } from '../../shared/orchestration/verification';
 import { PROVENANCE_LABEL } from '../policy/assessment';
 import { changesRoute, pendingEscalation } from '../policy/escalation';
+import { outOfScopeText } from '../engine/contention';
 import { explainDecision } from './routeExplain';
 import type {
   AssessmentRowView,
@@ -129,7 +130,8 @@ export function verificationViewOf(
     title: badge.title,
     verdict: summary.verdict,
     baseIsRed: summary.baseIsRed || undefined,
-    stages: results.map(stageLine),
+    // Most of what it wrote was outside what its task predicted (§13.4): said beside the checks, for review.
+    stages: [...results.map(stageLine), ...(a?.flags.outOfScope && a.scope ? [`⚠ Scope: ${outOfScopeText(a.scope)}`] : [])],
     // The log of whatever went wrong, or of the last stage that wrote one:
     // the thing a user clicking "open log" is looking for is the failure.
     logPath:

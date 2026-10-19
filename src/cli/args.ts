@@ -20,7 +20,27 @@ export type Command =
    * current directory. `harness` undefined: let the resolver choose.
    */
   | { kind: 'delegate' | 'task'; objective: string | undefined; criteria: string[]; folder: string | undefined; harness: 'claude' | 'codex' | undefined; json: boolean }
-  | { kind: 'tasks'; json: boolean };
+  | { kind: 'tasks'; json: boolean }
+  /**
+   * A durable agent proposes a memory update for its user to approve (#180):
+   * `remember` adds an item (`text` undefined: read stdin), `forget` removes
+   * one by id. Only from inside an agent's conversation, which is the origin.
+   */
+  | { kind: 'remember'; text: string | undefined; memoryKind: string | undefined; json: boolean }
+  | { kind: 'forget'; itemId: string; json: boolean }
+  /** `open`: sign this Mac's default browser in. `url`: print the single-use link instead (#127). */
+  | { kind: 'web'; action: 'open' | 'url' }
+  /** Start pairing a device on the home network: a QR code and a code, for five minutes (#137). */
+  | { kind: 'webPair' }
+  /** The browser devices, or revoke one (`id`: an id or a unique prefix) (#137). */
+  | { kind: 'webDevices'; json: boolean }
+  | { kind: 'webRevoke'; id: string }
+  /**
+   * The core daemon (#130). `start` installs or starts it; `stop` signals it
+   * (`all`: hosted conversations end too, as ⌥⌘Q); `status` reads its manifest
+   * and probes its socket. None of them need the control socket to answer.
+   */
+  | { kind: 'daemon'; action: 'start' | 'stop' | 'status'; all: boolean; json: boolean };
 
 export const USAGE = `aw — Agent Wrangler from a terminal
 
@@ -40,9 +60,24 @@ Usage:
       --claude | --codex    which agent to prefer (default: let routing choose)
   aw task <objective…>      shortcut: always one task, no planner (same options as delegate)
   aw tasks                  tasks that are not finished
+  aw remember <text…>       from inside a durable agent's conversation: propose a memory note;
+                            stored only once the user approves it in the app ("-" reads stdin)
+      --kind <kind>         decision (default), preference, question or work
+  aw forget <id>            from inside a durable agent's conversation: propose removing a note
+  aw web open               open the workbench in your default browser, signed in
+  aw web url                print a single-use sign-in link instead (good once, for 2 minutes)
+  aw web pair               pair a phone or tablet on your home network: shows a QR code to
+                            scan and a code to type (good once, for 5 minutes)
+  aw web devices            the browsers that can sign in, on this Mac and paired
+  aw web devices revoke <id>  sign one out for good; its open tabs disconnect at once
+  aw daemon start           start the background service that runs Agent Wrangler, or move it
+                            onto this build (opening the app does the same)
+  aw daemon stop [--all]    stop it; conversations in session hosts keep running
+                            (--all: end them too)
+  aw daemon status          whether it is running: pid, build, uptime
 
 <id> is a session id, a unique prefix of one (4+ characters), or a key like claude:<id>.
---json prints the raw result for status, sessions, session, projects, delegate, task and tasks.
+--json prints the raw result for status, sessions, session, projects, delegate, task, tasks and web devices.
 `;
 
 export function parseArgs(argv: readonly string[]): Command | { error: string } {
@@ -50,6 +85,7 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
   if (argv[0] === 'send') return parseSend(argv.slice(1));
   // First too: its options take values, and the objective is free text.
   if (argv[0] === 'task' || argv[0] === 'delegate') return parseHandoff(argv[0], argv.slice(1));
+  if (argv[0] === 'remember') return parseRemember(argv.slice(1));
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const words = argv.filter((a) => !a.startsWith('--') || a === '--');
   if (flags.has('--help') || argv.includes('-h')) return { kind: 'help' };
@@ -93,6 +129,43 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
       return allowed('--json') ?? { kind: 'projects', json };
     case 'tasks':
       return allowed('--json') ?? { kind: 'tasks', json };
+    case 'forget': {
+      const bad = allowed('--json');
+      if (bad) return bad;
+      if (!rest[0]) return { error: 'aw forget: which note? Give its id, like m-1a2b3c4d.' };
+      if (rest.length > 1) return { error: `aw forget: unexpected "${rest[1]}"` };
+      return { kind: 'forget', itemId: rest[0], json };
+    }
+    case 'web': {
+      const [action, ...more] = rest;
+      if (action === 'devices') {
+        const [sub, id, ...extra] = more;
+        if (sub === undefined) return allowed('--json') ?? { kind: 'webDevices', json };
+        if (sub !== 'revoke') return { error: `aw web devices: unexpected "${sub}" (aw web devices, aw web devices revoke <id>)` };
+        const bad = allowed();
+        if (bad) return bad;
+        if (!id) return { error: 'aw web devices revoke: which device? Give its id (aw web devices lists them).' };
+        if (extra.length > 0) return { error: `aw web devices revoke: unexpected "${extra[0]}"` };
+        return { kind: 'webRevoke', id };
+      }
+      const bad = allowed();
+      if (bad) return bad;
+      if (action !== 'open' && action !== 'url' && action !== 'pair') {
+        return { error: 'aw web: open, url, pair or devices? (aw web open, aw web url, aw web pair, aw web devices)' };
+      }
+      if (more.length > 0) return { error: `aw web ${action}: unexpected "${more[0]}"` };
+      return action === 'pair' ? { kind: 'webPair' } : { kind: 'web', action };
+    }
+    case 'daemon': {
+      const [action, ...more] = rest;
+      if (action !== 'start' && action !== 'stop' && action !== 'status') {
+        return { error: 'aw daemon: start, stop or status? (aw daemon start, aw daemon stop [--all], aw daemon status)' };
+      }
+      const bad = action === 'stop' ? allowed('--all') : action === 'status' ? allowed('--json') : allowed();
+      if (bad) return bad;
+      if (more.length > 0) return { error: `aw daemon ${action}: unexpected "${more[0]}"` };
+      return { kind: 'daemon', action, all: flags.has('--all'), json };
+    }
     default:
       return { error: `aw: no command "${name}". Run aw help.` };
   }
@@ -107,6 +180,39 @@ function parseSend(tail: readonly string[]): Command | { error: string } {
   const text = words.join(' ');
   if (text.trim().length === 0) return { error: 'aw send: the message is empty.' };
   return { kind: 'send', ref, text };
+}
+
+/** `aw remember [--kind <kind>] [--json] <text…>`. `--` ends the options. */
+function parseRemember(tail: readonly string[]): Command | { error: string } {
+  const words: string[] = [];
+  let memoryKind: string | undefined;
+  let json = false;
+  for (let i = 0; i < tail.length; i++) {
+    const a = tail[i];
+    if (a === '--') {
+      words.push(...tail.slice(i + 1));
+      break;
+    }
+    if (a === '--kind') {
+      const value = tail[i + 1];
+      if (value === undefined || value.startsWith('--')) return { error: 'aw remember: --kind needs a value: decision, preference, question or work.' };
+      memoryKind = value;
+      i++;
+      continue;
+    }
+    if (a === '--json') {
+      json = true;
+      continue;
+    }
+    if (a === '--help' || a === '-h') return { kind: 'help' };
+    if (a.startsWith('--')) return { error: `aw remember: unknown option ${a}` };
+    words.push(a);
+  }
+  if (words.length === 0) return { error: 'aw remember: what should be remembered? Give one short line, or "-" to read it from stdin.' };
+  if (words.length === 1 && words[0] === '-') return { kind: 'remember', text: undefined, memoryKind, json };
+  const text = words.join(' ');
+  if (text.trim().length === 0) return { error: 'aw remember: the note is empty.' };
+  return { kind: 'remember', text, memoryKind, json };
 }
 
 /**
@@ -156,6 +262,23 @@ function parseHandoff(kind: 'delegate' | 'task', tail: readonly string[]): Comma
   const objective = words.join(' ');
   if (objective.trim().length === 0) return { error: `aw ${kind}: the objective is empty.` };
   return { kind, objective, ...base };
+}
+
+/**
+ * Why `aw web pair` or `aw web devices revoke` will not run in this shell, or
+ * undefined (#137). `inside` is `agentEnvironment(process.env)`. The same
+ * speed bump as `send`, `stop` and `web url`: a pairing code is the whole
+ * workbench for whoever reads it, and revoking signs a device of yours out.
+ */
+export function webRefusal(cmd: Command, inside: string | undefined): string | undefined {
+  if (!inside) return undefined;
+  if (cmd.kind === 'webPair') {
+    return `aw web pair: refused, because this shell looks like ${inside}. Pairing lets a device in as you; run it from your own terminal.`;
+  }
+  if (cmd.kind === 'webRevoke') {
+    return `aw web devices revoke: refused, because this shell looks like ${inside}. Run it from your own terminal, or use Preferences → Browser.`;
+  }
+  return undefined;
 }
 
 /** The agent a shell belongs to, for `aw delegate`'s and `aw task`'s default harness preference. */

@@ -18,6 +18,7 @@ import { codexPolicyParams, CodexRunnerService } from '../src/codex/runner';
 import { parseLaunchPolicy, type LaunchPolicy } from '../src/shared/launchPolicy';
 import { emptyHostState, type HostEvent, type HostSnapshot } from '../src/shared/sessionProtocol';
 import { localClaudeEnv } from '../src/sessionHost/env';
+import { inProcessHosts } from '../src/sessionHost/inProcessHosts';
 import { CONVERSATION_DELEGATION_INSTRUCTIONS, withConversationDelegation } from '../src/shared/conversationDelegation';
 
 const POLICY: LaunchPolicy = {
@@ -119,12 +120,29 @@ describe('claudePolicyOptions', () => {
     expect(seen).toHaveLength(2);
     const local = seen.find((x) => x.model === 'qwen').env;
     const hosted = seen.find((x) => x.model === 'sonnet').env;
-    expect(local).toMatchObject({ PATH: '/bin', ANTHROPIC_BASE_URL: provider.baseUrl, ANTHROPIC_API_KEY: 'synthetic-secret', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '65536', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '4096' });
+    expect(local).toMatchObject({ PATH: '/bin', ANTHROPIC_BASE_URL: provider.baseUrl, ANTHROPIC_API_KEY: 'synthetic-secret', CLAUDE_CODE_MAX_CONTEXT_TOKENS: '65536', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '4096', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ENABLE_CLAUDEAI_MCP_SERVERS: 'false' });
     for (const key of ['ANTHROPIC_MODEL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY']) expect(local).not.toHaveProperty(key);
     expect(hosted).toEqual(inherited);
     expect(inherited.ANTHROPIC_API_KEY).toBe('inherited-key');
     expect(process.env).toEqual(processBefore);
     expect(localClaudeEnv(inherited, provider).ANTHROPIC_API_KEY).toBe('agent-wrangler-local');
+  });
+
+  it("loads only the repository's settings and no MCP servers on a local endpoint, and leaves a hosted session alone (#158)", async () => {
+    const provider = { source: 'local:box', baseUrl: 'http://127.0.0.1:18080', model: 'qwen', contextWindow: 65536 };
+    const seen: any[] = [];
+    const query: QueryFn = ({ options }) => { seen.push(options); return (async function* () {})() as any; };
+    // A merged-in option cannot widen it again: the policy's options go last.
+    const deps = { query, binary: '/fake/claude', log: () => undefined, sdkOptions: { settingSources: ['user', 'project', 'local'] as any, strictMcpConfig: false } };
+    new ClaudeSdkSession({ cwd: '/Users/test/proj', model: 'qwen', policy: { localProvider: provider } }, deps).start();
+    new ClaudeSdkSession({ cwd: '/Users/test/proj', model: 'sonnet' }, { query, binary: '/fake/claude', log: () => undefined }).start();
+    await Promise.resolve();
+    const local = seen.find((x) => x.model === 'qwen');
+    const hosted = seen.find((x) => x.model === 'sonnet');
+    expect(local).toMatchObject({ settingSources: ['project', 'local'], strictMcpConfig: true });
+    expect(hosted).not.toHaveProperty('settingSources');
+    expect(hosted).not.toHaveProperty('strictMcpConfig');
+    expect(claudePolicyOptions({ allowedTools: ['Read'] })).not.toHaveProperty('settingSources');
   });
 
   it('appends the shared instruction only when the conversation policy requests it', () => {
@@ -230,7 +248,13 @@ describe('a resume gets the policy back', () => {
       return (async function* () {})() as any;
     };
     const registry = new SessionRegistry(memento());
-    const service = new RunnerService({ query, binary: () => '/fake/claude', log: () => undefined, registry, loadHistory: async () => ({ blocks: [], truncated: false }) });
+    const service = new RunnerService({
+      binary: () => '/fake/claude',
+      log: () => undefined,
+      registry,
+      loadHistory: async () => ({ blocks: [], truncated: false }),
+      hosts: { supervisor: inProcessHosts({ query }) },
+    });
     await service.launch({ provider: 'claude', cwd: '/Users/test/proj', sessionId: 'aaaaaaaa-0000-4000-8000-000000000001', policy: POLICY });
     expect(registry.get('aaaaaaaa-0000-4000-8000-000000000001')?.launch.policy).toEqual(POLICY);
     expect(seen[0].disallowedTools).toEqual(['Bash(git push:*)']);

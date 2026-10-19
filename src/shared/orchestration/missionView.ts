@@ -149,6 +149,14 @@ export interface MissionView {
   review?: { commits: number; insertions: number; deletions: number; finishes: MissionFinish[]; recommended?: MissionFinish };
   finish?: MissionFinish;
   finishResult?: { mergeCommit?: string; pullRequestUrl?: string; note?: string };
+  /**
+   * A finish under way, from the click until its outcome is recorded — or cut
+   * off and not yet read back (`uncertain`). Every finish button is off while
+   * it is here, whichever surface asked; the one under way says so.
+   */
+  finishing?: { how: MissionFinish; uncertain?: string };
+  /** Why the last finish did not go through, until the next one starts. The buttons are back. */
+  finishFailure?: { how: MissionFinish; why: string };
   canCancel: boolean;
   /** Mission pause (#45, §12.3): a running mission can be paused (start nothing new), or paused now (its agents too). */
   canPause: boolean;
@@ -191,6 +199,8 @@ export type MissionOp =
   | { kind: 'pause'; now?: boolean }
   | { kind: 'resume' }
   | { kind: 'finish'; how: MissionFinish }
+  /** Read a cut-off finish's outcome back from git again. */
+  | { kind: 'recheck-finish' }
   | { kind: 'task'; taskId: string; action: TaskViewAction }
   | { kind: 'open'; taskId: string }
   /** Ask the planner again (#44). The host asks what to do differently. */
@@ -298,6 +308,22 @@ export const FINISH_LABEL: Record<MissionFinish, string> = {
   'pull-request': 'Open a PR',
   keep: 'Keep',
   discard: 'Discard',
+};
+
+/** What a finish button says while its finish is under way: from the click until its outcome is recorded. */
+export const FINISH_PENDING_LABEL: Record<MissionFinish, string> = {
+  'merge-local': 'Merging…',
+  'pull-request': 'Opening PR…',
+  keep: 'Keeping…',
+  discard: 'Discarding…',
+};
+
+/** A finish as a noun, for sentences: "the merge did not go through". */
+export const FINISH_NOUN: Record<MissionFinish, string> = {
+  'merge-local': 'merge',
+  'pull-request': 'pull request',
+  keep: 'keep',
+  discard: 'discard',
 };
 
 /** What a plan-review issue level reads as. */

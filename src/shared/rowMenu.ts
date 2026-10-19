@@ -163,11 +163,14 @@ const ITEM_H = 26;
 const V_PAD = 8;
 const SEPARATOR_H = 4;
 
-export function rowMenuSize(items: RowMenuItem[]): { width: number; height: number } {
+/** A row of the menu under a finger (#134): the 44px touch target, which the stylesheet matches. */
+export const ITEM_H_TOUCH = 44;
+
+export function rowMenuSize(items: RowMenuItem[], itemHeight: number = ITEM_H): { width: number; height: number } {
   const separators = items.some((i) => i.danger) ? 1 : 0;
   return {
     width: ROW_MENU_WIDTH,
-    height: items.length * ITEM_H + V_PAD + separators * SEPARATOR_H,
+    height: items.length * itemHeight + V_PAD + separators * SEPARATOR_H,
   };
 }
 

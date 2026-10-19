@@ -3,7 +3,7 @@
  *
  * Unchanged, except for one thing: large base64 image data is dropped. The
  * core only counts images (the pane shows "1 image", never the pixels), and a
- * multi-megabyte line is a multi-second `JSON.parse` on Electron's main thread
+ * multi-megabyte line is a multi-second `JSON.parse` on the core's one thread
  * (spike S3: 2-3 s for 16 MiB). This is the "not inlining large images" choice
  * the playbook left to Stage 3 (§9.7). The transcript keeps the real image.
  *

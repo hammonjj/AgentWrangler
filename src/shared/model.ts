@@ -88,6 +88,17 @@ export interface SubagentInfo {
   agentType?: string;
   status: 'working' | 'attention' | 'done';
   lastActivityAt?: number;
+  /**
+   * Claude Code's id for the subagent's own transcript
+   * (`<session>/subagents/agent-<agentId>.jsonl`). Known once its tool result
+   * arrives, which for a background subagent is right after launch. Without it
+   * the row cannot show progress.
+   */
+  agentId?: string;
+  /** Model the subagent's own transcript shows it running on; often a lower tier than the parent's. */
+  model?: string;
+  /** Launched with `run_in_background`: it outlives the turn that started it. */
+  background?: boolean;
 }
 
 export interface AgentSession {
@@ -171,6 +182,13 @@ export interface AgentSession {
    * so clearing the nickname brings it back — see `displayTitle`.
    */
   nickname?: string;
+  /**
+   * The durable agent this conversation belongs to (#179, #181; host
+   * decorates): `current` when it is the one the agent continues, otherwise
+   * one of its earlier conversations. Absent for an unassigned session,
+   * which is most of them.
+   */
+  durableAgent?: { id: string; name: string; current: boolean };
   /**
    * Its process is stopped (SIGSTOP) and spending nothing until resumed (host
    * decorates from PauseService). A paused session keeps whatever `status` it
@@ -386,8 +404,8 @@ export const STATUS_RANK: Record<SessionStatus, number> = {
   blocked: 0,
   waiting: 1,
   stuck: 2,
-  done: 3,
-  busy: 4,
+  busy: 3,
+  done: 4,
   ended: 5,
 };
 
@@ -411,8 +429,8 @@ export function capitalize(s: string): string {
   return s.length === 0 ? s : s[0].toUpperCase() + s.slice(1);
 }
 
-/** Blocked first (an agent frozen mid-task), then waiting, stuck, done (finished,
- * worth a look), busy, ended; within a rank, most recent activity first. */
+/** Blocked first (an agent frozen mid-task), then waiting, stuck, busy, done
+ * (finished, worth a look), ended; within a rank, most recent activity first. */
 export function compareSessions(a: AgentSession, b: AgentSession): number {
   const rank = STATUS_RANK[a.status] - STATUS_RANK[b.status];
   if (rank !== 0) return rank;
@@ -431,8 +449,8 @@ export type SectionId = SessionStatus | 'paused' | 'archived';
 export const SECTION_ORDER: SectionId[] = [
   'waiting',
   'stuck',
-  'done',
   'busy',
+  'done',
   'paused',
   'ended',
   'archived',
@@ -513,6 +531,28 @@ export function formatDuration(ms: number): string {
 
 export function formatAge(nowMs: number, thenMs: number): string {
   return formatDuration(nowMs - thenMs);
+}
+
+/**
+ * A conversation block's hover text: the local date and time it arrived, then
+ * how long ago that was. Empty when `ts` is missing or not a date. The caller
+ * passes `now` so the "ago" is fresh at hover time and the function stays pure.
+ */
+export function messageTimeTitle(nowMs: number, ts: string | undefined): string {
+  if (!ts) return '';
+  const then = new Date(ts);
+  if (Number.isNaN(then.getTime())) return '';
+  const when = then.toLocaleString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const ago = nowMs - then.getTime();
+  return ago < 5_000 ? `${when} · just now` : `${when} · ${formatAge(nowMs, then.getTime())} ago`;
 }
 
 // ---- hook health (the dashboard banner) ----

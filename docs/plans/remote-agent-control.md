@@ -1,5 +1,13 @@
 # Remote Agent Control
 
+> **Partly superseded by [browser-workbench.md](browser-workbench.md) (#121).** The separate
+> remote daemon (#74) and its two feeds (the app feed from the Electron app, and its own feed
+> while the app was quit) are gone: Discord runs inside the core daemon since #138, and
+> Electron was retired in #142. The "no inbound port" stance now covers Discord only: the
+> workbench listens on loopback, and on the home network only by opt-in (plan §8). The
+> presentation-layer design, the permission flow, redaction and the security rules below are
+> still current.
+
 Answer a permission prompt from your phone, without opening a port, running a server, or building
 a second permission system.
 
@@ -497,6 +505,12 @@ files. Left alone that is five bots and five messages for one prompt.
 > does not need the lease: it is the *only* process that connects to Discord. The app no
 > longer holds a transport at all; it feeds the daemon and applies the presses it is sent.
 > See `session-lifecycle-architecture.md` Stage 7.
+>
+> **Update 2026-10-03 (#138).** With the core in the core daemon (`experimental.coreDaemon`),
+> Discord runs inside it instead (`src/remote/inProcess.ts`), and there is still no lease:
+> the core daemon retires the remote daemon (bootout, LaunchAgent removed) and waits for it to
+> exit before building its own connector, so the two never hold the bot or the mirror map at
+> once. See `browser-workbench.md` §4, "Remote daemon".
 
 Earlier drafts of this plan specified a lock file with a heartbeat, so exactly one process owned
 the Discord connection. **It is not being built**, because on 2026-09-22 it turned out to be

@@ -218,6 +218,11 @@ function renderEndpoint(
       t.title = `Runs synthetic scratch repositories through ${label} on this endpoint.`;
       actions.appendChild(t);
     }
+    if (m.tasksRunning) {
+      const c = button('Cancel', () => post({ type: 'localEndpoint', change: { op: 'cancelQualifyTasks', id: e.id, model: m.id } }), 'aw-orch-btn danger');
+      c.title = 'Ends the run in progress and starts no more. The last result stands.';
+      actions.appendChild(c);
+    }
     actions.appendChild(crossLink('Tier and qualification in Models', () => openModel(m.key)));
     block.appendChild(actions);
     card.appendChild(block);

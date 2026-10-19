@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { KeyValueStorage } from '../../src/core/archive';
 import { CapabilityCatalog, type CatalogSettings } from '../../src/core/capabilityCatalog';
-import { JsonSettings } from '../../src/electron/jsonStore';
+import { JsonSettings } from '../../src/core/jsonStore';
 import {
   buildCatalog,
   canonicalTier,

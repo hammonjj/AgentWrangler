@@ -419,6 +419,34 @@
   border-left-color: var(--vscode-errorForeground, #ed4245);
 }
 
+/* What a setting is doing now (the LAN addresses, #136): read-only, under
+   the row's description, in the description's column for a checkbox row. */
+#prefsApp .pf-status {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.1));
+  border-left: 3px solid var(--vscode-charts-green, #3ba55d);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.86em;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#prefsApp .pf-status[hidden] {
+  display: none;
+}
+
+#prefsApp .pf-status.bad {
+  border-left-color: var(--vscode-errorForeground, #ed4245);
+}
+
+#prefsApp .pf-type-boolean .pf-status {
+  grid-column: 2;
+}
+
 /*
  * Orchestration → tier map: one row per model, not per setting.
  *
@@ -715,4 +743,155 @@
   align-items: baseline;
   gap: 8px;
   margin-top: 8px;
+}
+
+/* Browser → Devices (#137). */
+#prefsApp .pf-devicelist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+#prefsApp .pf-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-panel-border, #3c3c3c);
+  border-radius: 6px;
+}
+
+#prefsApp .pf-devicetext {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+#prefsApp .pf-devicename {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#prefsApp .pf-devicemeta {
+  font-size: 0.86em;
+  opacity: 0.75;
+}
+
+#prefsApp .pf-device .pf-action {
+  flex: none;
+}
+
+/*
+ * As a route of the browser shell (#135). The shell's page (`#awPage`) gives
+ * the settings the whole window, so the sidebar and the settings scroll
+ * inside it as they do in the Preferences window, and its own heading is the
+ * page title, so the sidebar's is not repeated.
+ */
+#awPage:has(> #awPageBody > #prefsApp) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+#awPage:has(> #awPageBody > #prefsApp) > h2 {
+  padding: 10px 16px 6px;
+  margin: 0;
+}
+
+#awPage:has(> #awPageBody > #prefsApp) > #awPageBody {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#awPage #prefsApp .pf-navtitle {
+  display: none;
+}
+
+/*
+ * Narrow: a phone, or a pane that is not wide. Set from the pane's own width
+ * (`watchWidth` in view.ts), never from the viewport. One column: the
+ * sections become a row of chips above the settings, and controls get room to
+ * be touched.
+ */
+#prefsApp.narrow {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+#prefsApp.narrow .pf-nav {
+  height: auto;
+  padding: 8px 10px;
+  border-right: none;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  overflow: visible;
+}
+
+#prefsApp.narrow .pf-navlist {
+  flex-direction: row;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+#prefsApp.narrow .pf-navlink {
+  flex: none;
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+#prefsApp.narrow .pf-main {
+  padding: 4px 14px 40vh;
+}
+
+#prefsApp.narrow .pf-head {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+#prefsApp.narrow .pf-key {
+  flex: 1 1 100%;
+}
+
+/* The heading line is name and Reset, with the key under both. Reset is hidden
+   (not removed) on a row that has not changed, so left in source order it wrapped
+   onto a line of its own and left an empty gap under every setting's name. */
+#prefsApp.narrow .pf-label {
+  flex: 1 1 0;
+  min-width: 0;
+}
+#prefsApp.narrow .pf-reset {
+  order: 1;
+  min-height: 36px;
+  padding: 4px 12px;
+  /* Out of layout, not just invisible, until the row has changed: a 36px
+     button nobody can see would still make every heading line that tall. */
+  display: none;
+}
+#prefsApp.narrow .pf-row.changed .pf-reset,
+#prefsApp.narrow .pf-model.changed .pf-reset {
+  display: inline-block;
+}
+#prefsApp.narrow .pf-key {
+  order: 2;
+}
+#prefsApp.narrow .pf-input,
+#prefsApp.narrow .pf-select,
+#prefsApp.narrow .pf-action {
+  min-height: 44px;
+  /* 16px stops a phone zooming the page when a field is focused. */
+  font-size: 16px;
+}
+
+#prefsApp.narrow input.pf-input,
+#prefsApp.narrow .pf-select {
+  max-width: none;
+}
+
+#prefsApp.narrow .pf-check {
+  width: 20px;
+  height: 20px;
 }

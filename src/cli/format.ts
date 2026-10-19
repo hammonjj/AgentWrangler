@@ -10,6 +10,8 @@ import type {
   ControlStatusResult,
   ControlTaskProposeResult,
   ControlTaskView,
+  ControlWebDevice,
+  ControlWebPairResult,
   RunBy,
 } from '../core/control/protocol';
 import { STATUS_LABEL } from '../shared/model';
@@ -96,6 +98,7 @@ export function formatStatus(st: ControlStatusResult, now: number): string {
     `Agent Wrangler is running (pid ${st.appPid}, build ${st.build}, up ${ago(st.startedAt, now).replace(' ago', '')}).`,
     total === 0 ? 'No sessions in the table.' : `${total} session${total === 1 ? '' : 's'}: ${parts.join(', ')}.`,
     `Run by Agent Wrangler: ${st.running.hosted} that survive a quit, ${st.running.app} that end with it.`,
+    ...(st.remote ? [`Remote control: ${st.remote.lines.map(safe).join(' ')}`] : []),
   ].join('\n');
 }
 
@@ -272,4 +275,30 @@ export function formatOffline(view: OfflineView, now: number, width = 100, full 
     );
   }
   return out.join('\n');
+}
+
+const DEVICE_SCOPE_LABEL: Record<string, string> = { loopback: 'this Mac', lan: 'home network' };
+
+/** `aw web devices` (#137). */
+export function formatWebDevices(devices: readonly ControlWebDevice[], now: number, width = 100): string {
+  if (devices.length === 0) return 'No browser devices. Sign one in with aw web open, or pair one with aw web pair.';
+  const rows = [...devices]
+    .sort((a, b) => b.lastSeen - a.lastSeen)
+    .map((d) => [d.id.slice(0, 8), DEVICE_SCOPE_LABEL[d.scope] ?? safe(d.scope), ago(d.createdAt, now), ago(d.lastSeen, now), d.name]);
+  return `${table(['ID', 'WHERE', 'ADDED', 'LAST SEEN', 'NAME'], rows, width)}\n\nRevoke one with aw web devices revoke <id>.`;
+}
+
+/** `aw web pair`'s words around the QR code (#137). */
+export function formatWebPair(r: ControlWebPairResult, now: number): string {
+  const minutes = Math.max(1, Math.round((r.expiresAt - now) / 60_000));
+  const code = r.code.length === 8 ? `${r.code.slice(0, 4)}-${r.code.slice(4)}` : r.code;
+  return [
+    'Scan the QR code with the camera of the phone or tablet. It sets up the',
+    'certificate, then pairs the device.',
+    ...(r.setupUrl ? ['', 'No camera? Open this in its browser:', `    ${r.setupUrl}`] : [`or open ${r.url.replace(/\?.*$/, '')} on it and type the code:`]),
+    '',
+    `    ${code}`,
+    '',
+    `Good once, for ${minutes} minute${minutes === 1 ? '' : 's'}. Whoever uses it first gets in as you.`,
+  ].join('\n');
 }

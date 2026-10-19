@@ -1,0 +1,11 @@
+{
+  "name": "diamond-clean",
+  "tasks": [
+    { "id": "a" },
+    { "id": "b", "dependsOn": [{ "task": "a", "kind": "code" }] },
+    { "id": "c", "dependsOn": [{ "task": "a", "kind": "code" }] },
+    { "id": "d", "dependsOn": [{ "task": "b", "kind": "code" }, { "task": "c", "kind": "order" }] }
+  ],
+  "scenario": { "default": { "behaviour": "edit", "delayMs": 4000 } },
+  "expect": { "mission": "completed", "tasks": { "a": "done", "b": "done", "c": "done", "d": "done" }, "attempts": { "a": 1, "b": 1, "c": 1, "d": 1 } }
+}

@@ -24,16 +24,23 @@ import { imageMediaType, mentionForPath } from '../../shared/attachments';
 import type { ConversationCapabilities, ImageAttachment } from '../../shared/conversation';
 import { MAX_IMAGE_BYTES, rememberFullText } from '../../shared/conversation';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
+import { audioExtension, dictationUploadProblem } from '../../shared/webCapabilities';
 import type { Disposable } from '../../core/events';
 import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../../shared/orchestration/taskView';
 import type { AnalyticsDetail } from '../../shared/orchestration/analyticsView';
 import { displayTitle, type AgentSession, type SessionStatus } from '../../shared/model';
-import type { SessionActions } from '../actions';
+import type { PermissionDecisionOutcome, SessionActions } from '../actions';
+import { sessionRef, type AccessRequest, type BoundAccess } from '../../core/access';
+import { runInRequest } from '../../core/requestScope';
 import type { PaneChannel } from '../paneChannel';
 import { adoptActionFor } from '../openTarget';
 import { LiveSessionSource } from './runnerSource';
 import { CodexTranscriptSource } from './codexTranscriptSource';
 import type { ConversationSource } from './source';
+import { AgentDraftSource } from './agentDraftSource';
+import type { AgentConversations } from '../agentDirectory';
+import type { AgentMemoryPaneView } from '../../shared/durableAgents';
+import { agentIdOfDraftKey } from '../../shared/durableAgents';
 import { TranscriptSource } from './transcriptSource';
 
 /**
@@ -55,6 +62,13 @@ export interface ConversationHostUi {
    * simply report it.
    */
   offerDictationSetup(err: DictationSetupError): Promise<void>;
+  /**
+   * Whether a path named by a *remote* browser (a paired device) may be read
+   * as a host path: only a staged upload (#139).
+   * Absent: none may. A remote client's paths are its own filesystem's, not
+   * the host's, so they are refused before anything is `stat`ed or read.
+   */
+  allowRemotePath?(file: string): boolean;
 }
 
 /**
@@ -93,7 +107,11 @@ export interface ConversationProvider extends AgentProvider {
  * session we just started (Claude or Codex), whose id or store entry may not
  * exist yet.
  */
-type Binding = { kind: 'store'; key: string } | { kind: 'live'; handle: SessionHandle };
+type Binding =
+  | { kind: 'store'; key: string }
+  | { kind: 'live'; handle: SessionHandle }
+  /** A durable agent with nothing to continue (#179): an empty conversation until its first message. */
+  | { kind: 'agent'; agentId: string; notice?: string };
 
 export class ConversationHost {
   private subs: { dispose(): void }[] = [];
@@ -119,6 +137,8 @@ export class ConversationHost {
   private capsSeq = 0;
   /** This pane started the recording the shared `DictationService` is making. */
   private ownsDictation = false;
+  /** A `dictateAudio` upload from this pane is being transcribed. */
+  private uploadBusy = false;
   /** Drawn in place of the conversation until the next session is shown (#49). */
   private detail?: AnalyticsDetail;
 
@@ -135,7 +155,11 @@ export class ConversationHost {
     private files: FileSuggestService,
     private onTitle: (title: string) => void,
     private ui: ConversationHostUi,
+    /** Who this pane's messages act as, and the gate they pass (#123). */
+    private access: BoundAccess,
     private tasks?: TaskPaneSource,
+    /** Durable agents' empty conversations (#179). */
+    private agents?: AgentConversations,
   ) {
     this.subs.push(
       webview.onDidReceiveMessage((m: ConversationToHost) => void this.onMessage(m)),
@@ -149,7 +173,38 @@ export class ConversationHost {
     // notice. Pushed on its own so the conversation is not re-initialised under
     // the user every time a task ticks.
     if (this.tasks) this.subs.push(this.tasks.onDidChange(() => this.pushTask()));
+    // An agent's memory changing, or this conversation being assigned to one, moves the strip (#180).
+    if (this.agents) this.subs.push(this.agents.onDidChange(() => this.pushMemory()));
   }
+
+  /** The memory of the agent this conversation belongs to, if any. */
+  private agentMemory(): AgentMemoryPaneView | undefined {
+    const key = this.session?.key;
+    return key ? this.agents?.memoryFor(key) : undefined;
+  }
+
+  private lastMemory?: string;
+  private pushMemory(): void {
+    if (!this.ready) return;
+    const memory = this.agentMemory();
+    const sig = JSON.stringify(memory ?? null);
+    if (sig !== this.lastMemory) {
+      this.lastMemory = sig;
+      this.post({ type: 'agentMemory', ...(memory ? { memory } : {}) });
+    }
+    // Whether typing resumes a stopped Codex thread follows whether it is an
+    // agent's current one (#181), which *Make current* or *New conversation*
+    // changes without touching the memory.
+    const s = this.session;
+    if (s?.provider === 'codex') {
+      const resumes = this.agents?.resumesOnType('codex', s.sessionId) === true;
+      if (resumes !== this.lastResumes) {
+        this.lastResumes = resumes;
+        void this.pushSession(s);
+      }
+    }
+  }
+  private lastResumes?: boolean;
 
   /** The strip for whatever the pane is showing now, or nothing. */
   private taskView(): TaskView | undefined {
@@ -237,6 +292,14 @@ export class ConversationHost {
       if (this.leaveDetail() && this.ready) void this.sendInit();
       return;
     }
+    const agentId = agentIdOfDraftKey(key);
+    if (agentId !== undefined) {
+      const draft = this.agents?.draft(agentId);
+      if (!draft) return; // an agent deleted since the link was made
+      this.pendingKey = undefined;
+      this.bind({ kind: 'agent', agentId, ...(draft.notice ? { notice: draft.notice } : {}) }, draft.session);
+      return;
+    }
     const session = this.store.get(key);
     if (!session) {
       this.pendingKey = key;
@@ -314,7 +377,15 @@ export class ConversationHost {
 
   private swapSource(session: AgentSession): void {
     this.disposeSource();
-    const live = this.binding?.kind === 'live' ? this.binding.handle : this.sessions.get(session.sessionId);
+    const binding = this.binding;
+    if (binding?.kind === 'agent') {
+      const agents = this.agents;
+      this.source = new AgentDraftSource(session, binding.notice, (text, images) =>
+        agents ? agents.start(binding.agentId, text, images) : Promise.reject(new Error('Agents are not available.')),
+      );
+      return;
+    }
+    const live = binding?.kind === 'live' ? binding.handle : this.sessions.get(session.sessionId);
     const source: ConversationSource = live
       ? new LiveSessionSource(live)
       : session.provider === 'codex'
@@ -352,6 +423,7 @@ export class ConversationHost {
     if (!session || !source) return;
     const init = await source.init();
     if (this.source !== source) return; // swapped while we read
+    const memory = this.agentMemory();
     this.post({
       type: 'init',
       session,
@@ -364,8 +436,11 @@ export class ConversationHost {
       delegations: this.delegations(),
       ...(session.linked ? { linked: session.linked } : {}),
       ...(session.wait ? { wait: session.wait } : {}),
+      ...(memory ? { agentMemory: memory } : {}),
     });
     this.lastLinked = JSON.stringify([session.linked ?? [], session.wait ?? null]);
+    this.lastMemory = JSON.stringify(memory ?? null);
+    this.lastResumes = session.provider === 'codex' ? this.agents?.resumesOnType('codex', session.sessionId) === true : undefined;
     this.post({ type: 'delegationOffer', offer: this.suggestion.offer });
   }
 
@@ -379,7 +454,8 @@ export class ConversationHost {
       return;
     }
     const binding = this.binding;
-    if (!binding) return;
+    // An agent's empty conversation has no session to follow; its first message rebinds the pane.
+    if (!binding || binding.kind === 'agent') return;
 
     let next: AgentSession | undefined;
     if (binding.kind === 'store') {
@@ -415,6 +491,7 @@ export class ConversationHost {
     if (titleChanged) this.onTitle(displayTitle(next));
     void this.pushSession(next);
     this.pushLinked();
+    this.pushMemory();
   }
 
   private async pushSession(session: AgentSession): Promise<void> {
@@ -426,13 +503,14 @@ export class ConversationHost {
 
   private async caps(session: AgentSession): Promise<ConversationCapabilities> {
     const source = this.source;
+    if (source?.kind === 'draft') {
+      // `adoptOnSend`: the pickers stay off, since the agent's own settings decide the launch.
+      return { canSend: true, adoptOnSend: true, sendHint: 'Sending starts a new conversation with this agent.', canInterrupt: false, canAdopt: false, canResumeHere: false, canRelease: false, estimated: false };
+    }
     const live = source instanceof LiveSessionSource ? source.handle : undefined;
     const runner = live?.provider === 'claude' ? live : undefined;
     const codexRunner = live?.provider === 'codex' ? live : undefined;
     const controlled = live !== undefined;
-    const adoptOnSend = !runner && session.provider === 'claude' && !!session.cwd;
-    const canSend = (live ? live.canSend : false) || adoptOnSend;
-
     const adopt = session.provider === 'claude' ? adoptActionFor(session, runner !== undefined) : undefined;
     const canAdoptCodex =
       session.provider === 'codex' &&
@@ -440,10 +518,14 @@ export class ConversationHost {
       (!codexRunner || !!codexRunner.readOnlyReason) &&
       !!session.cwd &&
       (session.status === 'waiting' || session.status === 'done');
+    // A durable agent's current Codex thread resumes when you type, as a Claude session does (#181).
+    const codexOnSend = canAdoptCodex && !codexRunner && this.agents?.resumesOnType('codex', session.sessionId) === true;
+    const adoptOnSend = (!runner && session.provider === 'claude' && !!session.cwd) || codexOnSend;
+    const canSend = (live ? live.canSend : false) || adoptOnSend;
     return {
       canSend,
       adoptOnSend,
-      sendHint: adoptOnSend ? (session.statusIsEstimated ? 'Send asks you to confirm taking over this session.' : ['busy', 'stuck', 'blocked'].includes(session.status) ? 'Send queues this message until the session is idle, then takes over here.' : 'Send resumes this session here and ends its previous process.') : undefined,
+      sendHint: codexOnSend ? 'Send resumes this Codex conversation here.' : adoptOnSend ? (session.statusIsEstimated ? 'Send asks you to confirm taking over this session.' : ['busy', 'stuck', 'blocked'].includes(session.status) ? 'Send queues this message until the session is idle, then takes over here.' : 'Send resumes this session here and ends its previous process.') : undefined,
       canInterrupt: canSend && (source?.composer?.busy ?? false),
       canAdopt: adopt === 'adopt' || canAdoptCodex,
       canResumeHere: adopt === 'resume-here',
@@ -459,7 +541,24 @@ export class ConversationHost {
     return s?.transcriptPath ?? (s?.cwd && s.sessionId ? transcriptPathFor(s.sessionId, s.cwd) : undefined);
   }
 
+  /**
+   * Every message is one request: classified, authorised (and audited when it
+   * mutates) here, before anything it asks for runs (#123). A refused send is
+   * still answered, so the composer does not wait on it for good.
+   */
   private async onMessage(m: ConversationToHost): Promise<void> {
+    const req = conversationRequest(m, this.session?.key);
+    if (!this.access.gate.admit(this.access.context, req.action, req.resource)) {
+      if (m.type === 'send') this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Not permitted.' });
+      // So the strip's buttons do not wait on it for good.
+      if (m.type === 'agentMemory' && typeof m.requestId === 'string') this.post({ type: 'agentMemoryResult', requestId: m.requestId, error: 'Not permitted.' });
+      return;
+    }
+    // As this pane's client: what it causes goes back to it (#126, `requestScope.ts`).
+    await runInRequest(this.access.context, () => this.dispatch(m));
+  }
+
+  private async dispatch(m: ConversationToHost): Promise<void> {
     const key = this.session?.key;
     const source = this.source;
     switch (m.type) {
@@ -468,6 +567,14 @@ export class ConversationHost {
         // recording; nothing on screen could stop the microphone now.
         this.cancelDictation();
         this.ready = true;
+        // A pane that remembers a conversation gets it back, but only on a host
+        // that has not been pointed anywhere yet (a fresh browser connection):
+        // where the host was told what to show, that wins.
+        if (typeof m.key === 'string' && m.key && !this.binding && this.pendingKey === undefined) {
+          // `bind` sends the init; one not in the store yet is bound when it appears.
+          this.show(m.key);
+          return;
+        }
         await this.sendInit();
         // A reloaded pane that was showing a detail shows it again, over the conversation.
         if (this.detail) this.post({ type: 'analyticsDetail', detail: this.detail });
@@ -495,7 +602,8 @@ export class ConversationHost {
         this.pendingSend = controller;
         try {
           const session = this.session;
-          const delegated = session && !m.images?.length && await this.suggestion.intercept(m.text, session, this.tasks?.conversationDelegation, controller.signal);
+          // Not for an agent's first message: there is no session yet to tie an offer to.
+          const delegated = session && source?.kind !== 'draft' && !m.images?.length && await this.suggestion.intercept(m.text, session, this.tasks?.conversationDelegation, controller.signal);
           if (!delegated && controller.signal.aborted) throw new Error('Send cancelled; your draft was kept.');
           if (!delegated) {
             if (source?.send) await source.send(m.text, m.images);
@@ -511,21 +619,26 @@ export class ConversationHost {
       case 'interrupt':
         await source?.interrupt?.();
         return;
+      // A live session's asks are answered through `SessionActions`, never
+      // straight at its handle: the table row, Discord and every other client's
+      // card answer the same ask, and the action is where "already answered" is
+      // decided and told to the client that pressed (#132). A transcript's card
+      // goes through it too, inside `TranscriptSource`.
       case 'decide': {
+        if (source?.kind === 'runner') {
+          if (key) this.cannotAnswer(await this.actions.decidePermission(key, m.decision, { expectedRequestId: m.requestId }));
+          return;
+        }
         const sent = await source?.decide?.(m.requestId, m.decision, m.message);
         if (sent === false) this.tooLate();
         return;
       }
-      case 'answer': {
-        const sent = await source?.answer?.(m.requestId, m.answers);
-        if (sent === false) this.tooLate();
+      case 'answer':
+        if (key) this.cannotAnswer(await this.actions.answerQuestion(key, m.requestId, m.answers));
         return;
-      }
-      case 'plan': {
-        const sent = await source?.decidePlan?.(m.requestId, m.decision === 'approve', m.feedback);
-        if (sent === false) this.tooLate();
+      case 'plan':
+        if (key) this.cannotAnswer(await this.actions.decidePlan(key, m.requestId, m.decision === 'approve', m.feedback));
         return;
-      }
       case 'setPermissionMode':
         await source?.setPermissionMode?.(m.mode);
         return;
@@ -592,6 +705,9 @@ export class ConversationHost {
       case 'dictate':
         await this.dictate(m.action);
         return;
+      case 'dictateAudio':
+        await this.transcribeUpload(m);
+        return;
       case 'openDiff':
         // No diff editor here means the card's own +/- block is all there is.
         // Saying so is better than a button that swallows the click.
@@ -625,6 +741,12 @@ export class ConversationHost {
       case 'delegationAction':
         await this.delegationAction(m.missionId, m.action);
         return;
+      case 'agentMemory': {
+        if (typeof m.requestId !== 'string') return;
+        const result = typeof m.agentId === 'string' && this.agents ? this.agents.memory(m.agentId, m.op) : { error: 'Agents are not available.' };
+        this.post({ type: 'agentMemoryResult', requestId: m.requestId, ...(result.error ? { error: result.error } : {}) });
+        return;
+      }
       case 'openAttempt':
         // The same path a row click takes, so an attempt opens here rather
         // than anywhere else — a task's history must never cost a window.
@@ -674,8 +796,14 @@ export class ConversationHost {
       wanted.length = MAX_DROPPED_PATHS;
     }
 
+    // A paired device is remote: what it names is on its machine, not here.
+    const remote = this.access.context.deviceId !== undefined;
     for (const file of wanted) {
       const name = path.basename(file);
+      if (remote && !(path.isAbsolute(file) && this.ui.allowRemotePath?.(file))) {
+        notes.push(`Could not use ${name}: it is not on the host. Attach it with the paperclip to upload it.`);
+        continue;
+      }
       let stat: Awaited<ReturnType<typeof fs.stat>>;
       try {
         stat = await fs.stat(file);
@@ -708,6 +836,11 @@ export class ConversationHost {
 
   private tooLate(): void {
     this.ui.dialogs.flash('Agent Wrangler: that prompt has already been answered.', 4000);
+  }
+
+  /** `SessionActions` has already said "already answered"; only a refusal it does not report is left to say. */
+  private cannotAnswer(outcome: PermissionDecisionOutcome): void {
+    if (outcome === 'unsupported') this.ui.dialogs.flash('Agent Wrangler: that prompt cannot be answered from here.', 4000);
   }
 
   /**
@@ -776,6 +909,33 @@ export class ConversationHost {
       this.post({ type: 'dictation', state: 'idle', message: `Could not transcribe: ${(e as Error).message}` });
     } finally {
       this.ownsDictation = false;
+    }
+  }
+
+  /**
+   * Transcribe a recording the page made itself and sent as a message (#185): the path a
+   * remote-control tab takes, since it cannot reach `POST /dictation`. Answers with a
+   * `dictation` message; never sends anything to the agent.
+   */
+  private async transcribeUpload(m: Extract<ConversationToHost, { type: 'dictateAudio' }>): Promise<void> {
+    const problem = dictationUploadProblem(m);
+    if (problem) {
+      this.post({ type: 'dictation', state: 'idle', message: problem });
+      return;
+    }
+    if (this.uploadBusy) {
+      this.post({ type: 'dictation', state: 'idle', message: 'Another recording is being transcribed. Try again in a moment.' });
+      return;
+    }
+    this.uploadBusy = true;
+    try {
+      const text = await this.dictation.transcribeAudio(Buffer.from(m.data, 'base64'), audioExtension(m.mime)!);
+      this.post({ type: 'dictation', state: 'idle', text });
+    } catch (e) {
+      this.post({ type: 'dictation', state: 'idle', message: `Could not transcribe: ${(e as Error).message}` });
+      if (e instanceof DictationSetupError) await this.ui.offerDictationSetup(e);
+    } finally {
+      this.uploadBusy = false;
     }
   }
 
@@ -854,4 +1014,76 @@ function readOnlyReason(
   if (canAdoptCodex) return 'Take over this Codex conversation to type here.';
   if (session.status === 'ended') return undefined;
   return 'This session is not currently available for typing here.';
+}
+
+/**
+ * What a conversation message asks to do, for `authorize`. `key` is the
+ * session the pane is showing: most messages act on it without naming it.
+ * Exhaustive, like `dashboardRequest`: a new message type does not compile
+ * until it is classified here.
+ */
+export function conversationRequest(m: ConversationToHost, key: string | undefined): AccessRequest {
+  const mission = (id: unknown) => (typeof id === 'string' ? { kind: 'mission' as const, id } : undefined);
+  switch (m.type) {
+    case 'ready':
+    case 'requestBlockText':
+    case 'archive':
+    case 'subagent':
+    case 'fileSuggest':
+    case 'dropPaths':
+      return { action: 'view.read', resource: sessionRef(key) };
+    case 'closeDetail':
+    case 'openInTab':
+      return { action: 'session.open', resource: sessionRef(key) };
+    case 'openAttempt':
+      return { action: 'session.open', resource: sessionRef(m.sessionKey) };
+    case 'openDiff':
+    case 'openExternal':
+    case 'openFile':
+      return { action: 'host.open' };
+    case 'dictate':
+    case 'dictateAudio':
+      return { action: 'dictation.use' };
+    case 'send': {
+      // The first message to a durable agent starts its session (#179).
+      const agentId = agentIdOfDraftKey(m.sessionKey ?? key ?? '');
+      if (agentId !== undefined) return { action: 'session.start', resource: { kind: 'agent', id: agentId } };
+      return { action: 'session.send', resource: sessionRef(m.sessionKey ?? key) };
+    }
+    case 'cancelSend':
+      return { action: 'session.send', resource: sessionRef(key) };
+    case 'interrupt':
+      return { action: 'session.interrupt', resource: sessionRef(key) };
+    case 'decide':
+    case 'answer':
+    case 'plan':
+      return { action: 'session.decide', resource: sessionRef(key) };
+    case 'setPermissionMode':
+    case 'setModel':
+    case 'setEffort':
+      return { action: 'session.configure', resource: sessionRef(key) };
+    case 'adopt':
+    case 'resumeHere':
+      return { action: 'session.adopt', resource: sessionRef(key) };
+    case 'release':
+      return { action: 'session.release', resource: sessionRef(key) };
+    case 'installHooks':
+      return { action: 'hooks.install' };
+    case 'delegationOfferDecision':
+      return { action: 'task.delegate', resource: sessionRef(key) };
+    case 'taskAction':
+    case 'proposalDecision':
+      return { action: 'task.act', resource: mission(m.missionId) };
+    case 'delegationAction':
+      return { action: 'task.delegate', resource: mission(m.missionId) };
+    // Approving the agent's proposal is the user's write to the agent's record, like any other.
+    case 'agentMemory':
+      return { action: 'agent.write', resource: typeof m.agentId === 'string' && m.agentId ? { kind: 'agent', id: m.agentId } : undefined };
+    default: {
+      // See `dashboardRequest`: unreachable when typed, a mutation when made up.
+      const unknown: never = m;
+      void unknown;
+      return { action: 'settings.write' };
+    }
+  }
 }

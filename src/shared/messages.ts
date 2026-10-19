@@ -18,8 +18,20 @@ import type { LinkedWork, WaitInfo } from './orchestration/delegatedState';
 import type { MissionOp, MissionsSnapshot } from './orchestration/missionView';
 import type { AnalyticsDetail, AnalyticsRef, AnalyticsSelection, AnalyticsView } from './orchestration/analyticsView';
 import type { UsageState } from './usage';
+import type { AgentMemoryPaneView, DurableAgentInput, DurableAgentView } from './durableAgents';
+import type { MemoryOp } from './agentMemory';
+import type { JobInput, JobView } from './scheduledJobs';
+import type { SweepItem } from './prSweep';
 
 // ---- Dashboard ----
+
+/** One line of a subagent's progress: what it said or which tool it called, newest last. */
+export interface SubagentStep {
+  kind: 'say' | 'tool';
+  text: string;
+  /** Tools only: still running, finished, or failed. */
+  state?: 'running' | 'done' | 'error';
+}
 
 /**
  * `hooks` is absent until the host has checked settings.json once. `usage` is
@@ -27,6 +39,7 @@ import type { UsageState } from './usage';
  * first read lands.
  */
 export type HostToDashboard =
+  | { type: 'subagentProgress'; key: string; agentId: string; steps: SubagentStep[]; error?: string }
   | {
       type: 'snapshot';
       sessions: SessionDTO[];
@@ -68,11 +81,36 @@ export type HostToDashboard =
        * orchestration is off, and then the table has no Missions tab at all.
        */
       missions?: MissionsSnapshot;
+      /** The Agents view (#179): every durable agent, most recently used first. */
+      agents?: DurableAgentView[];
+      /** The Jobs view (#166): every scheduled job, with its run history. */
+      jobs?: JobView[];
     }
+  /** A Jobs view request was carried out, or refused (`error`, shown in the view). `id` is the saved job. */
+  | { type: 'jobResult'; requestId: string; id?: string; error?: string }
+  /** A PR sweep's preview (#168): what it would review now, or why it could not look. */
+  | { type: 'jobPreview'; requestId: string; id: string; repo?: string; items?: SweepItem[]; error?: string }
+  /** A `saveAgent` was carried out (`id`), or refused (`error`, shown in the form). */
+  | { type: 'agentSaved'; requestId: string; id?: string; error?: string; cancelled?: boolean }
+  /** An agent memory change, assignment or "make current" was carried out, or refused (`error`, shown in the Agents view). */
+  | { type: 'agentResult'; requestId: string; error?: string }
   /** Bring the Missions view up, scrolled to this mission: one was just created, or its notice was clicked. */
   | { type: 'showMissions'; missionId?: string }
   /** A Missions view action was refused or failed; shown beside the mission, not as a modal. */
-  | { type: 'missionError'; missionId: string; text: string }
+  | { type: 'missionError'; missionId: string; text: string; requestId?: string }
+  /**
+   * A Missions view request (`mission` with a `requestId`) has been answered,
+   * however it ended: the pane's pending state for it ends here. Sent after
+   * the snapshot that shows its outcome, so the button never flickers back
+   * on before the host's own state takes over.
+   */
+  | { type: 'missionAck'; missionId: string; requestId: string }
+  /**
+   * A row × (`dismiss`/`dismissHide`) has been carried out, or has not: the
+   * table moved the row on the click (`shared/pendingDismissals.ts`), and
+   * `ok: false` puts it back. The error itself is shown by the host's dialog.
+   */
+  | { type: 'dismissResult'; key: string; ok: boolean }
   /**
    * The Analytics view (#49) for the selection the pane last sent. Sent only
    * to a pane that asked (`analyticsQuery`), and again whenever the telemetry
@@ -98,7 +136,7 @@ export type HostToDashboard =
  * conversation share one webview, and their message unions overlap (`ready`,
  * `openExternal`), so every message is addressed rather than sniffed.
  */
-export type PaneName = 'dashboard' | 'conversation';
+export type PaneName = 'dashboard' | 'conversation' | 'preferences';
 
 export type DashboardAction =
   /** Open the conversation in a tab of its own that row clicks never swap away. */
@@ -135,6 +173,8 @@ export type DashboardAction =
 
 export type DashboardToHost =
   | { type: 'ready' }
+  /** A nested subagent row was opened: send the latest of its own transcript. Answered with `subagentProgress`. */
+  | { type: 'subagentProgress'; key: string; agentId: string }
   | { type: 'rowClick'; key: string }
   /**
    * `requestId` is carried by the three permission actions only: it is the
@@ -163,7 +203,7 @@ export type DashboardToHost =
    * a task's action, a finish button. `provider` is the launcher's, which is
    * the route Approve and start gives tasks without a pin of their own.
    */
-  | { type: 'mission'; missionId: string; op: MissionOp; provider?: 'claude' | 'codex' }
+  | { type: 'mission'; missionId: string; op: MissionOp; provider?: 'claude' | 'codex'; requestId?: string }
   /** The launcher's dropdowns: the default a *new* conversation starts on. */
   | { type: 'setRunnerModel'; provider: 'anthropic' | 'openai'; model: string }
   | { type: 'setRunnerEffort'; provider: 'anthropic' | 'openai'; effort: string }
@@ -184,7 +224,35 @@ export type DashboardToHost =
   /** The Analytics view is showing, or its filters changed: send the view for this selection (#49). */
   | { type: 'analyticsQuery'; selection: AnalyticsSelection }
   /** A metric, the split or a calibration row was clicked: show its detail in the conversation pane. */
-  | { type: 'analyticsDetail'; selection: AnalyticsSelection; ref: AnalyticsRef };
+  | { type: 'analyticsDetail'; selection: AnalyticsSelection; ref: AnalyticsRef }
+  /** Accept or reject a routing proposal, or revoke an accepted rule (#52). The ids come from the view the pane was sent. */
+  | { type: 'analyticsProposal'; id: string; decision: 'accept' | 'reject' | 'revoke' }
+  /** An agent row (#179): show its continuing conversation. Starts nothing; the first message does. */
+  | { type: 'openAgent'; id: string }
+  /** The agent form: create (`id` absent) or edit. Answered with `agentSaved`. */
+  | { type: 'saveAgent'; id?: string; agent: DurableAgentInput; requestId: string }
+  /** Forget an agent. Its sessions stay, unassigned. The host confirms first. */
+  | { type: 'deleteAgent'; id: string }
+  /** Keep the agent's current conversation in history; its next message starts a new one. */
+  | { type: 'agentNewConversation'; id: string }
+  /** Pin or archive an agent (#182). */
+  | { type: 'agentFlag'; id: string; flag: 'pinned' | 'archived'; on: boolean }
+  /** Remember, edit, forget, or decide a proposal (#180). Answered with `agentResult`. */
+  | { type: 'agentMemory'; id: string; op: MemoryOp; requestId: string }
+  /** Make an earlier conversation the agent's current one again (#181). Answered with `agentResult`. */
+  | { type: 'agentMakeCurrent'; id: string; key: string; requestId: string }
+  /** The Sessions row menu: give this session to an agent, or (`agentId` absent) take it off its agent (#181). */
+  | { type: 'assignSession'; key: string; agentId?: string; requestId: string }
+  /** The job form (#166): create (`id` absent) or edit. Answered with `jobResult`. */
+  | { type: 'saveJob'; id?: string; job: JobInput; requestId: string }
+  /** Turn a job on or off. Answered with `jobResult`. */
+  | { type: 'jobEnable'; id: string; on: boolean; requestId: string }
+  /** Delete a job. The host confirms first. */
+  | { type: 'deleteJob'; id: string }
+  /** Run a job now. Answered with `jobResult`. */
+  | { type: 'runJob'; id: string; requestId: string }
+  /** What a PR sweep would review now (#168). Reviews nothing. Answered with `jobPreview`. */
+  | { type: 'previewJob'; id: string; requestId: string };
 
 // ---- Conversation pane ----
 
@@ -221,7 +289,13 @@ export type HostToConversation =
       linked?: LinkedWork[];
       /** What the conversation's own row is waiting for, with source and certainty (§3). */
       wait?: WaitInfo;
+      /** The durable agent this conversation belongs to: its memory and pending proposals (#180). */
+      agentMemory?: AgentMemoryPaneView;
     }
+  /** The agent's memory or proposals changed, or the conversation stopped belonging to one (`memory` absent). */
+  | { type: 'agentMemory'; memory?: AgentMemoryPaneView }
+  /** A memory change from this pane was carried out, or refused (`error`). */
+  | { type: 'agentMemoryResult'; requestId: string; error?: string }
   | { type: 'append'; blocks: ConvBlock[] }
   /** In-place update of one block: a tool's result, a streaming reply, an ask being settled. */
   | { type: 'patch'; id: string; block: Partial<ConvBlock> }
@@ -296,7 +370,12 @@ export type HostToConversation =
   | { type: 'analyticsDetail'; detail: AnalyticsDetail };
 
 export type ConversationToHost =
-  | { type: 'ready' }
+  /**
+   * `key` is the conversation the pane last showed (its saved state). A host
+   * that is not showing anything yet shows that one, so a browser that
+   * reconnects, or reloads, gets its conversation back (#128).
+   */
+  | { type: 'ready'; key?: string }
   /** Back from an analytics detail to the conversation under it (#49). */
   | { type: 'closeDetail' }
   | { type: 'delegationOfferDecision'; offerId: string; outcome: DelegationOfferOutcome }
@@ -340,6 +419,8 @@ export type ConversationToHost =
   | { type: 'proposalDecision'; missionId: string; decision: ProposalDecision }
   /** A delegation card's button: approve the plan, plan again, run as one task, open it in Missions, cancel (#82). Only ever sent by a click. */
   | { type: 'delegationAction'; missionId: string; action: DelegationAction }
+  /** The memory strip or a memory proposal card (#180): remember, edit, forget, approve, reject. Only ever sent by a click. */
+  | { type: 'agentMemory'; agentId: string; op: MemoryOp; requestId: string }
   /**
    * A line in the strip's attempts list: show that attempt's conversation in
    * this pane. It is a session key, so it goes through the same path a row
@@ -352,6 +433,12 @@ export type ConversationToHost =
    * `cancel` throws the audio away without transcribing.
    */
   | { type: 'dictate'; action: 'start' | 'stop' | 'cancel' }
+  /**
+   * A recording made with the page's own microphone, sent over the pane socket because a
+   * remote-control tab has no `POST /dictation` (#185). `data` is the audio, base64; the host
+   * answers with a `dictation` message, as for `dictate`.
+   */
+  | { type: 'dictateAudio'; mime: string; durationMs: number; data: string }
   /** An `@` is being typed: what files in the session's folder match so far. */
   | { type: 'fileSuggest'; query: string }
   /**

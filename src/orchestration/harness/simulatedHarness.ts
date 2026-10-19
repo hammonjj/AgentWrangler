@@ -8,9 +8,9 @@
  * puts the script at the head of the prompt (`withSimDirective`), and launches
  * through the `SessionExecutors` it was given. Whatever plays the Claude side
  * of those executors reads the script back:
- * - an in-process `RunnerService` built with `simulatedQuery`
+ * - a `RunnerService` whose hosts run `simulatedQuery` in this process
  *   (`createSimulatedExecutors`), which is what vitest uses; or
- * - a `RunnerService` with session hosts on and `AW_SESSION_HOST_FAKE=1`,
+ * - a `RunnerService` on real session hosts with `AW_SESSION_HOST_FAKE=1`,
  *   whose fake agent (`fakeQuery`) plays the same script in a real, detached host.
  *
  * Either way the registry record, the handle, the turn events and the files
@@ -20,6 +20,7 @@ import { SessionExecutors } from '../../core/session/sessionExecutors';
 import type { SessionHandle } from '../../core/session/sessionHandle';
 import type { ExecutorRegistry } from '../../core/session/sessionRegistry';
 import { RunnerService } from '../../claude/runner/runnerService';
+import { inProcessHosts } from '../../sessionHost/inProcessHosts';
 import { simulatedQuery } from '../../sessionHost/simulatedAgent';
 import type { ModelChoice } from '../../shared/conversation';
 import type { HarnessId } from '../../shared/orchestration/types';
@@ -96,18 +97,19 @@ export class SimulatedHarness implements AgentHarness {
 
 /**
  * The executors a simulated harness launches through in tests: a real
- * `RunnerService` (the Claude `SessionExecutor`) whose sessions run
- * `simulatedQuery` in-process instead of the SDK. Pass a registry to see
- * the records attempts leave.
+ * `RunnerService` (the Claude `SessionExecutor`) whose hosts run
+ * `simulatedQuery` in this process (`inProcessHosts`) instead of the SDK in a
+ * detached host. Pass a registry to see the records attempts leave.
  */
 export function createSimulatedExecutors(opts: { registry?: ExecutorRegistry; log?: (msg: string) => void } = {}): {
   sessions: SessionExecutors;
   runners: RunnerService;
 } {
+  const log = opts.log ?? (() => undefined);
   const runners = new RunnerService({
-    query: simulatedQuery,
     binary: () => '/simulated/claude',
-    log: opts.log ?? (() => undefined),
+    log,
+    hosts: { supervisor: inProcessHosts({ query: simulatedQuery, log }) },
     registry: opts.registry,
     // A simulated session has no transcript on disk.
     loadHistory: async () => ({ blocks: [], truncated: false }),

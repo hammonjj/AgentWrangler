@@ -157,6 +157,8 @@ describe('addEndpoint and changes', () => {
     expect(localEndpointChange({ op: 'enable', id: 'box' })).toBeUndefined();
     expect(localEndpointChange({ op: 'remove', id: '../etc' })).toBeUndefined();
     expect(localEndpointChange({ op: 'run', id: 'box' })).toBeUndefined();
+    expect(localEndpointChange({ op: 'cancelQualifyTasks', id: 'box', model: 'm', harness: 'codex' })).toEqual({ op: 'cancelQualifyTasks', id: 'box', model: 'm' });
+    expect(localEndpointChange({ op: 'cancelQualifyTasks', id: 'box' })).toBeUndefined();
   });
 
   it('endpointIdOf reads local:<id> sources only', () => {

@@ -6,7 +6,6 @@
  * queries; and the same through a one-way import into `node:sqlite`.
  *
  *   npm run bench:analytics            # Node on PATH
- *   npm run bench:analytics -- electron  # Electron's own Node (ELECTRON_RUN_AS_NODE)
  *
  * Nothing it writes is kept: the temp directories are removed at the end, and
  * no output belongs in the repo. The fixture shapes are the test fixtures'.
@@ -212,7 +211,7 @@ async function main(): Promise<void> {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-  console.log(`node ${process.versions.node}${process.versions.electron ? ` (Electron ${process.versions.electron})` : ''}, sqlite ${process.versions.sqlite ?? '?'}, ${os.cpus()[0]?.model ?? os.arch()}, ${Math.round(os.totalmem() / 1_073_741_824)} GB`);
+  console.log(`node ${process.versions.node}, sqlite ${process.versions.sqlite ?? '?'}, ${os.cpus()[0]?.model ?? os.arch()}, ${Math.round(os.totalmem() / 1_073_741_824)} GB`);
   console.log('| Volume | Tasks | JSONL lines | Indexed | JSONL size | Index load | Dataset | All metrics + calibration + split | Filtered metrics | Heap (index / all) | SQLite import | DB size | SQLite load + parse | SQL aggregate |');
   console.log('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const r of rows) console.log(`| ${r} |`);

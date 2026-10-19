@@ -48,6 +48,8 @@ export interface TaskSpec {
   task: string;
   kind?: string;
   complexity?: string;
+  verifiability?: string;
+  risk?: string;
   assessorVersion?: string;
   harness?: 'claude-code' | 'codex';
   mode?: RoutingMode;
@@ -143,6 +145,8 @@ export function taskRecords(spec: TaskSpec): AnalyticsRecord[] {
         dimensions: {
           kind: { value: spec.kind ?? 'feature', confidence: 'high' },
           complexity: { value: spec.complexity ?? 'involved', confidence: 'medium' },
+          ...(spec.verifiability ? { verifiability: { value: spec.verifiability, confidence: 'high' } } : {}),
+          ...(spec.risk ? { risk: { value: spec.risk, confidence: 'high' } } : {}),
         },
         assessorVersion: spec.assessorVersion ?? 'asm-2',
       },

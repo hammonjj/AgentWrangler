@@ -132,10 +132,26 @@ describe('runTaskQualification', () => {
     const [l] = f.launches;
     expect(l.target).toEqual({ harness: 'codex', model: 'm', source: 'local:box', effortNative: 'none' });
     expect(l.policy?.codex).toMatchObject({ sandbox: 'workspace-write', approvalPolicy: 'on-request' });
+    expect(l.permissionMode).toBeUndefined();
     expect(l.prompt).toMatch(/^# Task: /);
     expect(l.prompt).toContain(fixtures[0].prompt);
     expect(l.prompt).toMatch(/Do not commit/);
     expect(l.origin).toMatchObject({ kind: 'orchestration', missionId: 'qualification', taskId: fixtures[0].id });
+  });
+
+  it('through Claude Code: acceptEdits, the fixture check allowed by name, and no deny over its own directory (#159)', async () => {
+    const { fixtures } = await loadFixtures(FIXTURES_DIR);
+    const f = fakeHarness(fix);
+    const harness = { ...f.harness, id: 'claude-code' as const };
+    const r = await runTaskQualification({ source: 'local:box', model: 'm', fixtures: fixtures.slice(0, 1), k: 1 }, deps(harness));
+    expect(r.runs[0].pass).toBe(true);
+    const [l] = f.launches;
+    expect(l.target.harness).toBe('claude-code');
+    expect(l.permissionMode).toBe('acceptEdits');
+    expect(l.policy?.claude?.allowedTools).toContain(`Bash(${fixtures[0].check.join(' ')}:*)`);
+    const denies = l.policy?.claude?.disallowedTools ?? [];
+    expect(denies.filter((d) => /^(Edit|Write)\(/.test(d))).toEqual([`Edit(/${l.cwd}.primary/**)`, `Write(/${l.cwd}.primary/**)`]);
+    expect(denies).toContain('Bash(git push:*)');
   });
 
   it('through CodexHarness, the thread gets the endpoint provider on top of the attempt sandbox', async () => {
@@ -315,6 +331,42 @@ describe('LocalEndpointService: stage 2', () => {
     expect(r.ok).toBe(false);
     expect(r.lines[0]).toMatch(/stopped: cancelled$/);
     expect(svc.view()[0].models[0].tasksRunning).toBeUndefined();
+  });
+
+  it('Cancel ends the run in progress, starts no more, and leaves the last result in place (#160)', async () => {
+    const store = storage();
+    const f = fakeHarness(fix);
+    const { svc } = await setUp({ responses: true, store, qualifier: taskQualifier({ ...deps(f.harness), k: 1 }) });
+    const { fixtures } = await loadFixtures(FIXTURES_DIR);
+    // A first, complete result.
+    expect((await svc.apply({ op: 'qualifyTasks', id: 'box', model: 'm' })).ok).toBe(true);
+    const before = svc.taskQualification('box', 'm');
+    expect(before).toMatchObject({ passed: fixtures.length });
+
+    // A second stage whose agent never finishes its turn: cancel it mid-run.
+    const handles: (SessionHandle & { ended: boolean })[] = [];
+    const hanging = {
+      launch: async (req: AttemptLaunch) => {
+        const h = fakeHandle(req.cwd, () => ({}));
+        // Its turn never ends: without a turnEnd the run is never finished.
+        (h as unknown as { subscribe: unknown }).subscribe = () => ({ dispose: () => undefined });
+        handles.push(h);
+        return h;
+      },
+    };
+    svc.useTaskQualifier(taskQualifier({ ...deps(hanging), k: 1 }));
+    const running = svc.apply({ op: 'qualifyTasks', id: 'box', model: 'm' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(svc.view()[0].models[0].tasksRunning).toBeDefined();
+    expect(await svc.apply({ op: 'cancelQualifyTasks', id: 'box', model: 'm' })).toEqual({ ok: true, lines: ['Cancelling: the current run is being ended.'] });
+    const r = await running;
+    expect(r).toEqual({ ok: false, lines: ['Cancelled after 0 runs. The last result stands.'] });
+    expect(handles).toHaveLength(1);
+    expect(handles[0].ended).toBe(true);
+    expect(readdirSync(tmpRoot)).toEqual([]);
+    expect(svc.taskQualification('box', 'm')).toEqual(before);
+    expect(svc.view()[0].models[0].tasksRunning).toBeUndefined();
+    expect(await svc.apply({ op: 'cancelQualifyTasks', id: 'box', model: 'm' })).toEqual({ ok: false, lines: ['Task qualification is not running.'] });
   });
 
   it('without a qualifier, says so and stores nothing', async () => {

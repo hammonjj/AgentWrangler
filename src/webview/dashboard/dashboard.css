@@ -520,7 +520,7 @@ body.resizing {
   position: sticky;
   /* The top of #app, which is the element that scrolls: the launcher bar and
      the usage strip are outside it and never move, so no offset is needed. */
-  top: 31px;
+  top: var(--aw-tabs-h, 31px);
   z-index: 2;
   text-align: left;
   padding: 5px 8px 4px;
@@ -601,6 +601,13 @@ tr.row {
 }
 tr.row:hover td {
   background: var(--vscode-list-hoverBackground);
+}
+/* Rows and section headers are tab stops (#133); the ring is drawn inside the
+   row, since the table clips anything outside it. */
+tr.row:focus-visible,
+tr.sec:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
 }
 tr.row.archived td {
   opacity: 0.55;
@@ -921,6 +928,14 @@ button.pbtn:disabled {
   background: var(--vscode-input-background);
   color: var(--vscode-input-foreground);
   font: inherit;
+  /* A long answer wraps and the box grows with it (max 8 lines), never scrolls sideways. */
+  display: block;
+  resize: none;
+  field-sizing: content;
+  min-height: 1lh;
+  max-height: 8lh;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .qnav { display: grid; grid-template-columns: auto 1fr auto; gap: 5px; margin-top: 8px; }
 
@@ -1473,6 +1488,60 @@ tr.subrow > td {
   white-space: nowrap;
 }
 
+/* A nested row that opens: like an Outlook thread, the steps drop under it. */
+.subagent-table tr.subrow-item.openable {
+  cursor: pointer;
+}
+.subagent-table tr.subrow-item.openable:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+.subagent-table .twist {
+  display: inline-block;
+  width: 1.1em;
+  color: var(--vscode-descriptionForeground);
+}
+.subagent-table .bgchip,
+.subagent-table .modelchip {
+  margin-left: 6px;
+}
+.subagent-table tbody tr.subprog {
+  display: block;
+}
+.subagent-table .subprog td {
+  display: block;
+  padding: 2px 12px 6px 30px;
+}
+.subprog-note {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+.subprog-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.subprog-steps .step {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 0;
+}
+.subprog-steps .step.say {
+  color: var(--vscode-foreground);
+}
+.subprog-steps .step.tool {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+}
+.subprog-steps .step.error {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+.subprog-steps .mark {
+  display: inline-block;
+  width: 1.2em;
+}
+
 /* Narrow layout: stack the subrow grid better. */
 #app.narrow tr.subrow > td {
   padding-left: 12px;
@@ -1594,6 +1663,41 @@ tr.subrow > td {
 body:has(#app.narrow) #usage {
   padding: 6px 5px 7px;
   gap: 5px;
+}
+/* Narrow, collapsed: short chips (name, %, a thin bar) that wrap onto more
+   lines when they do not fit, about 40px a line instead of three rows of
+   cards. A tap on the strip expands it to the cards above (`.expanded`,
+   toggled in main.ts). */
+.ushort {
+  display: none;
+}
+body:has(#app.narrow) #usage:not(.expanded, :empty) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  cursor: pointer;
+}
+body:has(#app.narrow) #usage:not(.expanded) .ucard {
+  flex: 0 0 auto;
+  padding: 4px 8px 3px;
+}
+body:has(#app.narrow) #usage:not(.expanded) .ulabel,
+body:has(#app.narrow) #usage:not(.expanded) .ureset {
+  display: none;
+}
+body:has(#app.narrow) #usage:not(.expanded) .ushort {
+  display: inline;
+  font-size: 0.8em;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+body:has(#app.narrow) #usage:not(.expanded) .ubar {
+  height: 3px;
+  margin: 3px 0 0;
+}
+body:has(#app.narrow) #usage:not(.expanded) .unote {
+  white-space: nowrap;
 }
 
 /* ---- hook status banner ---- */
@@ -2040,6 +2144,70 @@ body:has(#app.narrow) #usage {
   color: var(--vscode-descriptionForeground);
   overflow-wrap: anywhere;
 }
+/*
+ * The pending-action pattern (docs/plans/pending-actions.md): a busy or
+ * blocked button is `aria-disabled`, not `disabled`, so it keeps keyboard
+ * focus and the screen reader's place. It looks off, does not hover, and the
+ * busy one keeps full strength so "Merging…" reads clearly.
+ */
+#app .missions button[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.5;
+}
+#app .missions button[aria-disabled='true']:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryBackground);
+}
+#app .missions .primary[aria-disabled='true']:hover:not(:disabled) {
+  background: var(--vscode-button-background);
+}
+#app .missions button.busy[aria-busy='true'] {
+  opacity: 0.85;
+  cursor: progress;
+}
+#app .missions button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+/* The finish's own line under its buttons: under way, unknown, or why it failed. Its own row at any width. */
+#app .missions .mfinish {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 8px;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+  border-left: 3px solid var(--aw-busy);
+}
+#app .missions .mfinish.failed,
+#app .missions .mfinish.uncertain {
+  border-left-color: var(--aw-stuck);
+  background: var(--vscode-inputValidation-errorBackground, rgba(241, 76, 76, 0.12));
+}
+#app .missions .mfinish > span {
+  flex: 1 1 12em;
+  min-width: 0;
+}
+#app .missions .mfinish .spin {
+  flex: 0 0 auto;
+  width: 0.8em;
+  height: 0.8em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: aw-mspin 0.9s linear infinite;
+}
+@keyframes aw-mspin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #app .missions .mfinish .spin {
+    animation: none;
+  }
+}
 
 /* Plan review: a compact line per task, and one task's editor open at a time. */
 #app .missions .ptools {
@@ -2376,6 +2544,34 @@ body:has(#app.narrow) #usage {
   font-size: 0.8em;
   color: var(--vscode-descriptionForeground);
 }
+#app .analytics .an-prop {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#app .analytics .an-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#app .analytics .an-decide {
+  padding: 2px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 3px;
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, inherit);
+  cursor: pointer;
+}
+#app .analytics .an-decide[data-an-decide='accept'] {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+#app .analytics .an-review {
+  border-color: var(--aw-waiting);
+}
+#app .analytics .an-refused {
+  color: var(--aw-waiting);
+}
 #app .analytics .an-heuristic {
   padding: 0 5px;
   border: 1px solid var(--aw-waiting);
@@ -2399,4 +2595,589 @@ body:has(#app.narrow) #usage {
 }
 #app.narrow .analytics .an-splitlabel {
   flex-basis: 100%;
+}
+
+/* ======================================================================
+   Phone widths and touch (#134)
+
+   `#app.narrow` is the pane's own width; `#app.touch` is the primary pointer
+   being a finger (`common/phone.ts`). Same rule as everywhere here: the pane
+   keys off itself, not the viewport.
+   ====================================================================== */
+
+/* The row's menu is a long-press away, so a row must not start a text
+   selection or the system callout when it is held. */
+#app.touch tr.row {
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#app.touch {
+  /* The tab strip's height: the header sticks just below it. */
+  --aw-tabs-h: 49px;
+}
+#app.touch .tabletabs button {
+  min-height: 44px;
+}
+#app.touch tr.sec td {
+  padding-top: 15px;
+  padding-bottom: 12px;
+}
+/* Rows are at least a finger tall. Two lines already make a narrow row 40px. */
+#app.touch tr.row > td {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+/* The × was revealed by hovering its row. There is no hover here: it is
+   always drawn, quiet, and as big as the cell it sits in. */
+#app.touch tr.row .dismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.6;
+  width: 44px;
+  height: 44px;
+  margin: -8px -9px;
+  padding: 0;
+}
+#app.touch tr.row > td.c-act {
+  padding-left: 0;
+  padding-right: 0;
+  overflow: visible;
+}
+#app.touch button.ptoggle {
+  min-height: 44px;
+}
+#app.touch th.h-act {
+  width: 44px;
+}
+#app.touch.narrow th.h-act {
+  width: 44px;
+}
+#app.touch th.h-dot,
+#app.touch.narrow th.h-dot {
+  width: 28px;
+}
+#app.touch button.pbtn {
+  min-height: 44px;
+  padding: 6px 14px;
+  font-size: 0.95em;
+}
+/* Missions and analytics controls: finger-sized, and 16px in fields so iOS does
+   not zoom the page on focus. */
+#app.touch .missions .mnew,
+#app.touch .missions .pbtn2,
+#app.touch .missions .pactions select,
+#app.touch .analytics .an-filter select {
+  min-height: 44px;
+  font-size: 16px;
+}
+#app.touch .missions .mnew,
+#app.touch .missions .pbtn2 {
+  padding: 6px 14px;
+}
+#app.touch button.schevron,
+#app.touch button.colcfg {
+  min-width: 44px;
+  min-height: 44px;
+}
+#app.touch .rowmenu {
+  width: 220px;
+}
+#app.touch .rowmenu .rmrow {
+  min-height: 44px;
+  padding: 10px 12px;
+}
+#app.touch .colmenu .cmrow {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#app.touch .colmenu .cmrow input {
+  width: 22px;
+  height: 22px;
+}
+#app.touch .colmenu .cmreset {
+  min-height: 44px;
+}
+#app.touch .banner button.bact,
+#app.touch .banner button.bx {
+  min-height: 44px;
+  min-width: 44px;
+}
+#app.touch .c-pr .pr,
+#app.touch .chip[data-open-mission] {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* The launcher and the usage strip sit above #app, so they are keyed off it
+   with :has(), as the narrow usage strip already is. */
+body:has(#app.touch) #bar {
+  --aw-bar-h: 52px;
+  gap: 8px;
+}
+body:has(#app.touch) #bar .projbtn,
+body:has(#app.touch) #bar .newbtn,
+body:has(#app.touch) #bar .ctlbtn,
+body:has(#app.touch) #bar .launchsel {
+  height: 44px;
+}
+body:has(#app.touch) #bar .ctlbtn {
+  min-width: 44px;
+}
+body:has(#app.touch) #bar .newbtn {
+  padding: 0 14px;
+}
+/* 16px stops iOS zooming the page when a dropdown is focused. */
+body:has(#app.touch) #bar .launchsel,
+body:has(#app.touch) #bar .projbtn {
+  font-size: 16px;
+}
+/* At phone width one row cannot hold folder, two dropdowns, New, Tasks and the
+   controls (the folder's name shrank to a chevron). Two rows instead: the
+   folder with the fleet controls, then the model, effort and the start
+   buttons. `display: contents` lets the two groups' children be ordered as one. */
+body:has(#app.narrow.touch) #bar {
+  --aw-bar-h: auto;
+  height: auto;
+  flex-wrap: wrap;
+  padding: 6px;
+}
+body:has(#app.narrow.touch) #bar .launch {
+  display: contents;
+}
+/* Pinned: on a phone the page scrolls as one (workbench.css), and New has to
+   stay reachable however far down the list is. Where #app is the scroller
+   instead, #bar is not in a scroll container and this does nothing. */
+body:has(#app.narrow.touch) #bar {
+  position: sticky;
+  top: 0;
+}
+/* Row 1: where (folder) and go (New), then the fleet controls as icon buttons.
+   Row 2: what to start with (model, effort) and Tasks. Neither row can fit a
+   third dropdown: at 16px "Sonnet 5.5" needs about 7rem. */
+body:has(#app.narrow.touch) #bar .projbtn {
+  order: 1;
+  flex: 1 1 7rem;
+  max-width: none;
+}
+body:has(#app.narrow.touch) #bar .newbtn {
+  order: 2;
+  flex: 0 0 auto;
+}
+body:has(#app.narrow.touch) #bar .ctlgroup {
+  order: 3;
+  border-left: none;
+  padding-left: 0;
+}
+body:has(#app.narrow.touch) #bar .launchsel {
+  order: 4;
+  /* A share of the row, not rem: row 1 has about 56px left, so this is what
+     makes the dropdowns start row 2 instead of squeezing in beside the icons. */
+  flex: 1 1 30%;
+  max-width: none;
+  min-width: 0;
+}
+body:has(#app.narrow.touch) #bar .newbtn.taskbtn {
+  order: 5;
+}
+body:has(#app.touch) .projmenu .pmname {
+  min-height: 44px;
+}
+body:has(#app.touch) .projmenu .pmx,
+body:has(#app.touch) .projmenu .pmfav {
+  width: 44px;
+  min-height: 44px;
+  opacity: 0.7;
+}
+body:has(#app.touch) .projmenu .pmfav.on {
+  opacity: 1;
+}
+body:has(#app.touch) .projmenu .pmbrowse {
+  min-height: 44px;
+}
+
+/* ---- Agents (#179): the durable agents' directory. Sized off the pane:
+   everything wraps, and the form stacks under #app.narrow. ---- */
+.chip.dagent {
+  border-color: var(--vscode-textLink-foreground, #569cd6);
+  color: var(--vscode-textLink-foreground, #569cd6);
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chip.dagent.earlier {
+  opacity: 0.7;
+  border-style: dashed;
+}
+#app :is(.agents, .jobs) {
+  padding: 0 0 16px;
+}
+#app :is(.agents, .jobs) button {
+  font: inherit;
+  cursor: pointer;
+}
+#app :is(.agents, .jobs) button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+#app :is(.agents, .jobs) .ag-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+}
+#app :is(.agents, .jobs) .ag-hint {
+  flex: 1 1 12rem;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#app :is(.agents, .jobs) .ag-btn {
+  padding: 2px 9px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+}
+#app :is(.agents, .jobs) .ag-btn:hover:not(:disabled) {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+#app :is(.agents, .jobs) .ag-btn.primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+#app :is(.agents, .jobs) .ag-btn.primary:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+#app :is(.agents, .jobs) .ag-btn.danger {
+  color: var(--aw-stuck);
+}
+#app :is(.agents, .jobs) .ag-empty {
+  padding: 20px 14px;
+  color: var(--vscode-descriptionForeground);
+}
+#app :is(.agents, .jobs) .ag-empty .hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.9em;
+}
+#app :is(.agents, .jobs) .ag-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+#app :is(.agents, .jobs) .ag-item {
+  margin: 0 6px 8px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-left: 3px solid var(--vscode-textLink-foreground, #569cd6);
+  border-radius: 3px;
+}
+#app :is(.agents, .jobs) .ag-item.selected {
+  background: var(--vscode-list-inactiveSelectionBackground, rgba(128, 128, 128, 0.15));
+}
+#app :is(.agents, .jobs) .ag-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+}
+#app :is(.agents, .jobs) .ag-open:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+#app :is(.agents, .jobs) .ag-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+#app :is(.agents, .jobs) .ag-role,
+#app :is(.agents, .jobs) .ag-where {
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+#app :is(.agents, .jobs) .ag-role {
+  color: var(--vscode-descriptionForeground);
+}
+#app :is(.agents, .jobs) .ag-where.ag-none {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+#app :is(.agents, .jobs) .ag-where.ag-missing {
+  color: var(--aw-waiting);
+}
+#app :is(.agents, .jobs) .ag-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin-top: 2px;
+}
+#app :is(.agents, .jobs) .ag-chip {
+  padding: 0 6px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-widget-border, #555));
+  border-radius: 9px;
+  font-size: 0.78em;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+}
+#app :is(.agents, .jobs) .ag-st.st-busy { border-color: var(--aw-busy); color: var(--aw-busy); }
+#app :is(.agents, .jobs) .ag-st.st-waiting,
+#app :is(.agents, .jobs) .ag-st.st-blocked { border-color: var(--aw-waiting); color: var(--aw-waiting); }
+#app :is(.agents, .jobs) .ag-st.st-stuck { border-color: var(--aw-stuck); color: var(--aw-stuck); }
+#app :is(.agents, .jobs) .ag-st.st-done { border-color: var(--aw-done); color: var(--aw-done); }
+#app :is(.agents, .jobs) .ag-age {
+  font-size: 0.78em;
+  color: var(--vscode-descriptionForeground);
+}
+#app :is(.agents, .jobs) .ag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 8px 6px;
+}
+#app :is(.agents, .jobs) .ag-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 6px 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 3px;
+}
+#app :is(.agents, .jobs) .ag-formtitle {
+  margin: 0;
+  font-size: 1em;
+}
+#app :is(.agents, .jobs) .ag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+#app :is(.agents, .jobs) .ag-row .ag-field {
+  flex: 1 1 8rem;
+}
+#app :is(.agents, .jobs) .ag-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 0.9em;
+}
+#app :is(.agents, .jobs) .ag-field > span {
+  color: var(--vscode-descriptionForeground);
+}
+#app :is(.agents, .jobs) .ag-field input,
+#app :is(.agents, .jobs) .ag-field select,
+#app :is(.agents, .jobs) .ag-field textarea {
+  min-width: 0;
+  max-width: 100%;
+  font: inherit;
+  padding: 3px 5px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, #555));
+  border-radius: 2px;
+}
+#app :is(.agents, .jobs) .ag-field textarea {
+  resize: vertical;
+}
+#app :is(.agents, .jobs) .ag-note {
+  margin: 0;
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+}
+#app :is(.agents, .jobs) .ag-error {
+  margin: 0;
+  color: var(--aw-stuck);
+}
+#app :is(.agents, .jobs) .ag-formactions {
+  display: flex;
+  gap: 8px;
+}
+#app.narrow :is(.agents, .jobs) .ag-row {
+  flex-direction: column;
+}
+#app.touch :is(.agents, .jobs) .ag-btn {
+  min-height: 36px;
+}
+#app :is(.agents, .jobs) .ag-item.archived {
+  border-left-color: var(--vscode-descriptionForeground);
+  opacity: 0.8;
+}
+#app :is(.agents, .jobs) .ag-item.asks {
+  border-left-color: var(--aw-waiting);
+}
+#app :is(.agents, .jobs) .ag-pinned {
+  border-color: var(--vscode-textLink-foreground, #569cd6);
+  color: var(--vscode-textLink-foreground, #569cd6);
+}
+#app :is(.agents, .jobs) .ag-tab.on {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+}
+/* An agent's memory or history, under its card (#180, #181). */
+#app :is(.agents, .jobs) .ag-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px 8px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+/* A job's run history: a table under the card that slides down when opened. */
+#app .jobs .jb-history.slide {
+  transform-origin: top;
+  animation: jb-slide 0.18s ease-out;
+}
+@keyframes jb-slide {
+  from {
+    opacity: 0;
+    transform: scaleY(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #app .jobs .jb-history.slide {
+    animation: none;
+  }
+}
+#app .jobs .jb-runs {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+#app .jobs .jb-runs th {
+  text-align: left;
+  font-weight: normal;
+  opacity: 0.7;
+}
+#app .jobs .jb-runs th,
+#app .jobs .jb-runs td {
+  padding: 3px 8px 3px 0;
+  vertical-align: middle;
+}
+#app .jobs .jb-run.open {
+  cursor: pointer;
+}
+#app .jobs .jb-run.open:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+#app :is(.agents, .jobs) .ag-props,
+#app :is(.agents, .jobs) .ag-mem,
+#app :is(.agents, .jobs) .ag-histlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#app :is(.agents, .jobs) .ag-prop,
+#app :is(.agents, .jobs) .ag-memitem,
+#app :is(.agents, .jobs) .ag-hist {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 0.9em;
+}
+#app :is(.agents, .jobs) .ag-prop {
+  padding: 4px 6px;
+  border: 1px solid var(--aw-waiting);
+  border-radius: 3px;
+}
+#app :is(.agents, .jobs) .ag-proptext,
+#app :is(.agents, .jobs) .ag-memtext,
+#app :is(.agents, .jobs) .ag-histtext {
+  flex: 1 1 12rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+#app :is(.agents, .jobs) .ag-memacts {
+  display: flex;
+  gap: 4px;
+}
+#app :is(.agents, .jobs) .ag-memform {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1 1 100%;
+}
+#app :is(.agents, .jobs) .ag-memform input {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+#app :is(.agents, .jobs) .ag-memform input,
+#app :is(.agents, .jobs) .ag-memform select {
+  font: inherit;
+  padding: 2px 5px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, #555));
+  border-radius: 2px;
+}
+/* The Jobs view (#166) shares the Agents view's look above; these are its own bits. */
+#app .jobs .jb-head:hover {
+  background: transparent;
+}
+#app .jobs .jb-on {
+  border-color: var(--aw-done);
+  color: var(--aw-done);
+}
+#app .jobs .jb-reason {
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+#app .jobs .jb-note {
+  padding: 0 8px 6px;
+  font-size: 0.9em;
+}
+#app .jobs .jb-days {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0;
+  padding: 4px 6px 6px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  border-radius: 2px;
+}
+#app .jobs .jb-days legend {
+  padding: 0 4px;
+  color: var(--vscode-descriptionForeground);
+}
+#app .jobs .jb-day {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+#app.touch .jobs .jb-day input {
+  width: 20px;
+  height: 20px;
+}
+#app .jobs .jb-days {
+  min-width: 0;
+}
+/* Stacked, a row's fields take their own height, not their wide-layout basis. */
+#app.narrow :is(.agents, .jobs) .ag-row .ag-field {
+  flex: 0 0 auto;
+}
+#app .jobs .jb-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9em;
+}
+#app .jobs .jb-warn,
+#app .jobs .jb-posts {
+  color: var(--aw-waiting);
+  border-color: var(--aw-waiting);
 }

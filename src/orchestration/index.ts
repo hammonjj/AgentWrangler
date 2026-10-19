@@ -17,11 +17,12 @@ import type { TelemetryRecord, TurnRecord } from '../shared/orchestration/teleme
 import { parseRoutingSettings, ROUTING_KEY } from '../shared/orchestration/executionPolicy';
 import type { HarnessId, ModelSourceId } from '../shared/orchestration/types';
 import type { ResolverSnapshot } from './policy/resolver';
+import type { LearnedRule } from '../shared/orchestration/routingProposals';
 import { ClaudeStructuredCompletion, type CompletionQueryFn, type CompletionResult, type StructuredCompletion } from './completion/structuredCompletion';
 import { RoutedCompletion } from './completion/localCompletion';
 import type { LocalEndpointService } from './local/localEndpointService';
 import type { CapabilityCatalogView } from '../shared/orchestration/catalog';
-import { TaskRunner, type SchedulingDeps } from './engine/taskRunner';
+import { TaskRunner, type AttemptLeases, type SchedulingDeps } from './engine/taskRunner';
 import { ClaudeCodeHarness } from './harness/claudeCodeHarness';
 import { CodexHarness } from './harness/codexHarness';
 import type { AgentHarness } from './harness/types';
@@ -45,22 +46,12 @@ export const ORCHESTRATION_ENABLED_KEY = 'orchestration.enabled';
  */
 export const PARALLEL_TASKS_KEY = 'orchestration.parallelTasks';
 
-/** Why a Claude attempt cannot start with session hosts off (G1, plan §35.4). */
-export const HOSTS_REQUIRED =
-  'Running a task needs “Keep conversations running when Agent Wrangler quits” (Preferences → Conversations): an attempt has to survive a quit or a reinstall.';
-
 export interface OrchestrationDeps {
   settings: { get<T>(key: string, defaultValue: T): T };
   /** The app's data directory; missions live under `orchestration/missions/`. */
   dataDir: string;
   sessions: Pick<SessionExecutors, 'launch' | 'get' | 'list' | 'onDidChange'>;
   registry: Pick<SessionRegistry, 'all' | 'get'> & Partial<Pick<SessionRegistry, 'restoreOrigin'>>;
-  /**
-   * Whether new Claude sessions run in session hosts. An attempt must survive
-   * `app:install`, so a Claude attempt is refused while this is false (G1).
-   * Codex threads survive a quit either way. Absent: refused.
-   */
-  hostsEnabled?: () => boolean;
   /** Turn records as #27 writes them, to sum each attempt's usage. */
   onTurnRecord?: (listener: (record: TurnRecord) => void) => Disposable;
   /** Where `attempt` records go: the telemetry log. */
@@ -88,6 +79,8 @@ export interface OrchestrationDeps {
   completion?: { query: CompletionQueryFn; binary: () => string | undefined };
   /** The catalog and source health, read fresh for each recommendation (#38). Absent: no routing. */
   routingSnapshot?: () => ResolverSnapshot;
+  /** Proposals a person accepted (#52), read fresh for each recommendation. */
+  learnedRules?: () => readonly LearnedRule[];
   /**
    * The registered local endpoints (#51) and the catalog they are in. Codex
    * reaches their models through a model provider; completions go to one
@@ -108,6 +101,8 @@ export interface OrchestrationDeps {
    * window moves. Absent: default limits, never paused.
    */
   scheduling?: SchedulingDeps;
+  /** Exclusive resource leases (#47 over #68): attempts take them before they start. Absent: none. */
+  leases?: AttemptLeases;
 }
 
 /**
@@ -246,14 +241,13 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
         { record, exec: deps.exec, log },
       ),
     launchDefaults: deps.launchDefaults,
-    cannotLaunch: (harness) => (harness === 'claude-code' && deps.hostsEnabled?.() !== true ? HOSTS_REQUIRED : undefined),
     assessor,
     reviewer,
     planner,
     tierOf: deps.tierOf,
     // The global scope (§10.2), read when a mission is recorded and frozen into it.
     globalPolicy: () => parseRoutingSettings(deps.settings.get<unknown>(ROUTING_KEY, undefined)).policy,
-    ...(deps.routingSnapshot ? { routing: { snapshot: deps.routingSnapshot } } : {}),
+    ...(deps.routingSnapshot ? { routing: { snapshot: deps.routingSnapshot, ...(deps.learnedRules ? { learnedRules: deps.learnedRules } : {}) } } : {}),
     ...(local
       ? {
           local: {
@@ -272,6 +266,7 @@ export function createOrchestration(deps: OrchestrationDeps): Orchestration {
     logsDir: path.join(deps.dataDir, 'orchestration', 'logs'),
     settleMs: deps.settleMs,
     ...(deps.scheduling ? { scheduling: deps.scheduling } : {}),
+    ...(deps.leases ? { leases: deps.leases } : {}),
     parallelTasks: () => deps.settings.get<unknown>(PARALLEL_TASKS_KEY, false) === true,
     log,
   });

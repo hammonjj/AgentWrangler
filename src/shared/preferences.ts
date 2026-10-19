@@ -60,7 +60,19 @@ export type PreferencesToHost =
    * numbers in front of them (#42); only then may `auto` be set over an unmet gate.
    */
   | { type: 'routingPolicy'; mode: LauncherRoutingMode; policy: ExecutionPolicy; overrideGate?: boolean }
+  /** Revoke a browser device (#137): its credential stops working and its tabs disconnect. */
+  | { type: 'revokeWebDevice'; id: string }
   | { type: 'close' };
+
+/** One browser device in Preferences → Browser (#137). Never a credential. */
+export interface WebDeviceView {
+  id: string;
+  name: string;
+  /** `loopback`: a browser on this Mac. `lan`: paired over the home network. `relay`: paired for remote control (#174). */
+  scope: 'loopback' | 'lan' | 'relay';
+  createdAt: number;
+  lastSeen: number;
+}
 
 /** What Preferences → Orchestration shows: the catalog, each source's health, and the routing defaults. */
 export interface OrchestrationPrefsView {
@@ -181,13 +193,39 @@ export function modelPriceChange(message: unknown): ModelPriceChange | undefined
   return { key: c.key, field: c.field as PriceField, usdPerMTok: c.usdPerMTok as number | null };
 }
 
-/** The actions Preferences can invoke. A closed set: the host switches on it. */
-export type SettingActionId = 'connectDiscord' | 'testRemote' | 'disconnectDiscord';
+/** A `revokeWebDevice` message's id, or nothing if it is not well formed (#137). */
+export function revokeWebDeviceId(message: unknown): string | undefined {
+  if (!message || typeof message !== 'object') return undefined;
+  const m = message as { type?: unknown; id?: unknown };
+  if (m.type !== 'revokeWebDevice' || typeof m.id !== 'string' || m.id.length === 0 || m.id.length > 64) return undefined;
+  return m.id;
+}
 
-export const SETTING_ACTION_IDS: SettingActionId[] = ['connectDiscord', 'testRemote', 'disconnectDiscord'];
+/** The actions Preferences can invoke. A closed set: the host switches on it. */
+export type SettingActionId = 'connectDiscord' | 'testRemote' | 'disconnectDiscord' | RelayActionId;
+
+/** The actions remote control over the relay owns (#173, #187); the rest are the app's. */
+export type RelayActionId = 'connectRelay' | 'setRelayPassword' | 'clearRelayPassword' | 'pairRelayDevice' | 'disconnectRelay';
+
+const RELAY_ACTION_IDS: RelayActionId[] = ['connectRelay', 'setRelayPassword', 'clearRelayPassword', 'pairRelayDevice', 'disconnectRelay'];
+
+export const SETTING_ACTION_IDS: SettingActionId[] = ['connectDiscord', 'testRemote', 'disconnectDiscord', ...RELAY_ACTION_IDS];
+
+export function isRelayActionId(id: SettingActionId): id is RelayActionId {
+  return (RELAY_ACTION_IDS as string[]).includes(id);
+}
 
 export function isSettingActionId(value: unknown): value is SettingActionId {
   return typeof value === 'string' && (SETTING_ACTION_IDS as string[]).includes(value);
+}
+
+/**
+ * What a setting is doing right now, shown read-only under it: the addresses
+ * `web.lan.enabled` is bound to, for one (#136). Not a value and never written.
+ */
+export interface SettingStatus {
+  ok: boolean;
+  lines: string[];
 }
 
 export type HostToPreferences =
@@ -196,6 +234,10 @@ export type HostToPreferences =
       /** Every setting the app offers, keyed without the `agentWrangler.` prefix. */
       values: Record<string, string | boolean | number>;
     }
+  /** Every setting's current status, by key. A key that is absent has none. */
+  | { type: 'status'; status: Record<string, SettingStatus> }
+  /** The browser devices (#137), whole, whenever one is added, seen or revoked. */
+  | { type: 'webDevices'; devices: WebDeviceView[] }
   /**
    * What an action did, shown in the window that asked rather than in a dialog
    * over it. A check with six separate results is a thing to read next to the
@@ -224,8 +266,8 @@ export type HostToPreferences =
 /**
  * What a `set` or `reset` should actually write, or nothing.
  *
- * Separated from the window because it is the part with rules in it and the
- * window is the part with Electron in it. The rules: only a declared key, only
+ * Separated from the page because it is the part with rules in it, and the
+ * part every host must apply the same way. The rules: only a declared key, only
  * a value of that key's declared type, and `reset` writes `undefined` — which
  * removes the key, so the default keeps coming from the declaration rather than
  * being copied into the file. That last one is what makes a changed default
@@ -237,15 +279,22 @@ export type HostToPreferences =
  */
 export function settingUpdate(
   message: PreferencesToHost,
-  specFor: (key: string) => { key: string; type: 'string' | 'boolean' | 'number' } | undefined,
+  specFor: (key: string) => { key: string; type: 'string' | 'boolean' | 'number'; enum?: string[]; minimum?: number; maximum?: number } | undefined,
 ): { key: string; value: string | boolean | number | undefined } | undefined {
   if (!message || typeof message !== 'object') return undefined;
   if (message.type === 'reset') {
-    const spec = specFor(message.key);
+    const spec = typeof message.key === 'string' ? specFor(message.key) : undefined;
     return spec ? { key: spec.key, value: undefined } : undefined;
   }
   if (message.type !== 'set') return undefined;
-  const spec = specFor(message.key);
+  const spec = typeof message.key === 'string' ? specFor(message.key) : undefined;
   if (!spec || typeof message.value !== spec.type) return undefined;
+  // The page checks these too, but a browser is a client the host does not trust (#135).
+  if (typeof message.value === 'number') {
+    if (!Number.isFinite(message.value)) return undefined;
+    if (spec.minimum !== undefined && message.value < spec.minimum) return undefined;
+    if (spec.maximum !== undefined && message.value > spec.maximum) return undefined;
+  }
+  if (typeof message.value === 'string' && spec.enum && !spec.enum.includes(message.value)) return undefined;
   return { key: spec.key, value: message.value };
 }

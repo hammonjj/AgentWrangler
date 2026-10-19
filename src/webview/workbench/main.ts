@@ -23,6 +23,14 @@ import './workbench.css';
 import { splitState } from '../common/paneApi';
 import '../dashboard/main';
 import '../conversation/main';
+// Preferences as the `#/preferences` route of the browser shell (#135).
+import '../preferences/pane';
+import { startAppShell } from './shell';
+
+// The app shell (#133): modals and toasts everywhere, routes and the narrow
+// layout only in a browser — the page the web server renders says which
+// (`aw-web`), and since Electron went (#142) it is always one.
+startAppShell({ browser: document.body.classList.contains('aw-web') });
 
 /** Neither pane may be squeezed below this. Both stop being usable well before. */
 const MIN_PANE_PX = 260;

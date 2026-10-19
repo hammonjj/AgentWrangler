@@ -16,23 +16,43 @@ import {
   type ColumnId,
   type ColumnPrefs,
 } from '../../shared/columns';
-import type { DashboardAction, DashboardToHost, HostToDashboard } from '../../shared/messages';
+import type { DashboardAction, DashboardToHost, HostToDashboard, SubagentStep } from '../../shared/messages';
 import { modelLabel } from '../../shared/modelName';
 import { sortSubagents, subagentText } from '../../shared/subagents';
 import { taskChips } from '../../shared/orchestration/taskView';
 import { certaintyText, linkedChip, waitingReasonChip, waitReasonText, type RowChip } from '../../shared/orchestration/delegatedLabels';
 import type { MissionsSnapshot } from '../../shared/orchestration/missionView';
-import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, type MissionIntent } from './missions';
-import { analyticsClickRef, analyticsFilterChange, analyticsHtml } from './analytics';
+import { changeIntent, clickIntent, missionsHtml, newMissionsUiState, pendingKeyOf, type MissionIntent } from './missions';
+
+/**
+ * How long the pane alone keeps a button busy without an answer from the
+ * host (a lost message, a host reload). A finish that really is under way
+ * stays off past this on the host's word (`MissionView.finishing`).
+ */
+const PENDING_MAX_AGE_MS = 10 * 60_000;
+import { analyticsClickRef, analyticsDecision, analyticsFilterChange, analyticsHtml } from './analytics';
+import { agentsHtml, blankForm, formFor, formInput, newAgentsUiState, readForm, readMemoryForm } from './agents';
+import { createJobsController } from './jobs';
+import { modelOptionsHtml } from './modelSelect';
+import type { JobView } from '../../shared/scheduledJobs';
+import { assignableAgents, type DurableAgentView } from '../../shared/durableAgents';
+import type { MemoryOp } from '../../shared/agentMemory';
 import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestration/analyticsView';
 import { orderProjects } from '../../shared/projectOrder';
 import { paneApi } from '../common/paneApi';
-import { canPauseSession, clampMenuPosition, dismissAction, rowMenuItems, rowMenuSize } from '../../shared/rowMenu';
+import { requestComposerFocus } from '../common/composerFocus';
+import { announceSwitch } from '../common/conversationSwitch';
+import { announceAttention, announceTableView, onTableViewRequest } from '../common/shellBus';
+import { attentionTotal } from '../../shared/tabAttention';
+import { canPauseSession, clampMenuPosition, dismissAction, ITEM_H_TOUCH, rowMenuItems, rowMenuSize, type RowMenuItem } from '../../shared/rowMenu';
+import { canDismissAhead, MAX_AGE_MS, PendingDismissals } from '../../shared/pendingDismissals';
+import { onLongPress, trackTouch } from '../common/phone';
 import {
   askLine,
   capitalize,
   backgroundTasksChip,
   displayLabel,
+  displayTitle,
   etaText,
   formatAge,
   formatDuration,
@@ -60,8 +80,8 @@ import {
   type UsageWindow,
 } from '../../shared/usage';
 
-/** The table pane's views: status sections, project sections, missions (#43) and analytics (#49). */
-type TableView = 'status' | 'project' | 'missions' | 'analytics';
+/** The table pane's views: durable agents (#179), status sections, project sections, missions (#43) and analytics (#49). */
+type TableView = 'agents' | 'status' | 'project' | 'jobs' | 'missions' | 'analytics';
 
 interface WebviewState {
   collapsed?: string[];
@@ -86,7 +106,18 @@ const vscodeApi = paneApi<WebviewState>('dashboard');
 const post = (msg: DashboardToHost) => vscodeApi.post(msg);
 
 const app = document.getElementById('app')!;
+/** The host's last snapshot, before the row ×'s that have not landed yet are applied. */
+let hostSessions: SessionDTO[] = [];
+/** What the table draws: `hostSessions` with every pending × already carried out. */
 let sessions: SessionDTO[] = [];
+const dismissals = new PendingDismissals();
+
+/** Redraw from `hostSessions` after a pending × began, failed or expired. */
+function applyDismissals(): void {
+  dismissals.settle(hostSessions);
+  sessions = dismissals.apply(hostSessions);
+  render();
+}
 let hooks: HookHealth | undefined;
 let usage: UsageState | undefined;
 let codexUsage: UsageState | undefined;
@@ -141,9 +172,19 @@ function saveColumns(next: ColumnPrefs): void {
 const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 const expandedSubagents = new Set<string>(saved?.expandedSubagents ?? []);
+/** Nested rows opened to show progress, as `${sessionKey}|${subagentId}`; not saved, since the steps are not. */
+const openSubagentRows = new Set<string>();
+/** The latest steps the host sent for a nested row, by the same key. */
+const subagentProgress = new Map<string, { steps: SubagentStep[]; error?: string }>();
 let bannerDismissed = saved?.bannerDismissed;
 let project = saved?.project;
 let tableView: TableView = saved?.tableView ?? 'status';
+/** Status or Project, whichever the session table last used: where the shell's Agents route goes back to. */
+let sessionGrouping: 'status' | 'project' = tableView === 'project' ? 'project' : 'status';
+/** A snapshot has arrived, so whether Missions exists is known. */
+let snapshotSeen = false;
+/** A view the app shell asked for (#133) before the snapshot that says whether it exists. */
+let pendingView: TableView | undefined;
 /** The Missions view's data (#43). Absent while orchestration is off, and then so is its tab. */
 let missionsSnap: MissionsSnapshot | undefined;
 const missionsUi = newMissionsUiState();
@@ -154,6 +195,29 @@ let analyticsSel: AnalyticsSelection = saved?.analytics ?? {};
 let analyticsData: AnalyticsView | undefined;
 /** "More metrics" was opened; a repaint must not fold it shut again. */
 let analyticsMoreOpen = false;
+/** The Agents view (#179): the host's list, and the form being filled in. */
+let agentViews: DurableAgentView[] | undefined;
+const agentsUi = newAgentsUiState();
+/** A snapshot arrived while the agent form had focus; draw once it lets go. */
+let agentRenderDeferred = false;
+/** The Jobs view (#166): the host's list, and the view's own state. */
+let jobViews: JobView[] | undefined;
+const jobsView = createJobsController(app, (m) => post(m), () => renderJobs(true));
+/** A snapshot arrived while the job form had focus; draw once it lets go. */
+let jobRenderDeferred = false;
+
+/** Draw the Jobs view. A snapshot (`force` false) waits while a form field has focus. */
+function renderJobs(force: boolean): void {
+  if (tableView !== 'jobs') return;
+  if (!force && jobsView.typing()) {
+    jobRenderDeferred = true;
+    return;
+  }
+  jobRenderDeferred = false;
+  menuPosition = undefined;
+  rowMenu = undefined;
+  paint(`${bannerHtml()}${jobsView.html(jobViews, projects, modelCatalog)}`);
+}
 
 function queryAnalytics(): void {
   post({ type: 'analyticsQuery', selection: analyticsSel });
@@ -167,6 +231,26 @@ function sessionView(): 'status' | 'project' {
 function saveState(): void {
   vscodeApi.setState({ collapsed: [...collapsed], expandedSubagents: [...expandedSubagents], bannerDismissed, project, tableView, analytics: analyticsSel });
 }
+
+/** Tell the browser's app shell, if there is one, which view is on screen (#133). */
+function announce(user: boolean): void {
+  announceTableView({ view: tableView, user, settled: snapshotSeen, hasMissions: missionsSnap !== undefined });
+}
+
+// The app shell's routes (#133): Agents, Sessions, Missions and Analytics are
+// this pane's views. Sessions means the session table, grouped however it last was.
+onTableViewRequest((want) => {
+  const next: TableView = want === 'sessions' ? sessionGrouping : want;
+  if ((want === 'missions' || want === 'analytics') && !snapshotSeen) pendingView = want;
+  if (next === tableView) {
+    announce(false);
+    return;
+  }
+  tableView = next;
+  saveState();
+  if (tableView === 'analytics') queryAnalytics();
+  render();
+});
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -208,13 +292,17 @@ function paint(html: string): void {
   // loses the caret (and the focus ring) mid-word.
   const typing = document.activeElement;
   const focused =
-    typing instanceof HTMLInputElement && typing.classList.contains('qother')
+    typing instanceof HTMLTextAreaElement && typing.classList.contains('qother')
       ? { draft: typing.closest<HTMLElement>('.qstep')?.dataset.draft, at: typing.selectionStart }
       : undefined;
+  // A button pressed from the keyboard turns busy in the next paint; it keeps the focus (`data-fk`), so
+  // Tab order and the screen reader's place survive the "Merging…" re-render.
+  const fk = typing instanceof HTMLElement && app.contains(typing) ? typing.dataset.fk : undefined;
   app.innerHTML = html;
   applyStyles(app);
+  if (fk) app.querySelector<HTMLElement>(`[data-fk="${CSS.escape(fk)}"]`)?.focus();
   if (focused?.draft) {
-    const restored = app.querySelector<HTMLInputElement>(`.qstep[data-draft="${CSS.escape(focused.draft)}"] .qother`);
+    const restored = app.querySelector<HTMLTextAreaElement>(`.qstep[data-draft="${CSS.escape(focused.draft)}"] .qother`);
     if (restored) {
       restored.focus();
       const at = focused.at ?? restored.value.length;
@@ -273,19 +361,27 @@ function rowMenuHtml(): string {
   if (!s) return '';
 
   const items = rowMenuItems(s);
-  const menuSize = rowMenuSize(items);
+  // Durable agents (#181): give this conversation to an agent, or take it off the one that has it.
+  const agentRows = [
+    ...(s.durableAgent
+      ? [`<button class="rmrow" role="menuitem" data-row-unassign title="${esc(`It stays a session, no longer ${s.durableAgent.name}'s.`)}">${esc(`Unassign from ${s.durableAgent.name}`)}</button>`]
+      : []),
+    ...assignableAgents(agentViews ?? [], s, s.durableAgent?.id)
+      .slice(0, 5)
+      .map((a) => `<button class="rmrow" role="menuitem" data-row-assign="${esc(a.id)}" title="${esc(`Make this ${a.name}'s current conversation. Its current one moves to its history.`)}">${esc(`Assign to ${a.name}`)}</button>`),
+  ];
+  const menuSize = rowMenuSize(
+    [...items, ...agentRows.map((): RowMenuItem => ({ action: 'copyId', label: '' }))],
+    app.classList.contains('touch') ? ITEM_H_TOUCH : undefined,
+  );
   const { left, top } = clampMenuPosition(rowMenu, menuSize, {
     width: document.documentElement.clientWidth,
     height: document.documentElement.clientHeight,
   });
-  const rows = items
-    .map(
-      (i) =>
-        `<button class="rmrow${i.danger ? ' danger' : ''}" role="menuitem" data-row-action="${i.action}"${
-          i.title ? ` title="${esc(i.title)}"` : ''
-        }>${esc(i.label)}</button>`,
-    )
-    .join('');
+  const row = (i: RowMenuItem) =>
+    `<button class="rmrow${i.danger ? ' danger' : ''}" role="menuitem" data-row-action="${i.action}"${i.title ? ` title="${esc(i.title)}"` : ''}>${esc(i.label)}</button>`;
+  // The agent items sit above the danger items, which stay last.
+  const rows = [...items.filter((i) => !i.danger).map(row), ...agentRows, ...items.filter((i) => i.danger).map(row)].join('');
   return `<div class="rowmenu" data-left="${left}px" data-top="${top}px" role="menu" aria-label="Actions for ${esc(displayLabel(s))}">${rows}</div>`;
 }
 
@@ -324,6 +420,15 @@ function projectGroups(list: SessionDTO[]): string[] {
  * status underneath it (Busy, Blocked) is still on the row and would otherwise
  * read as something that is still happening.
  */
+/** The durable agent this is the conversation of (#179). Absent on an unassigned session. */
+function durableAgentChip(s: SessionDTO): string {
+  if (!s.durableAgent) return '';
+  const name = esc(s.durableAgent.name);
+  return s.durableAgent.current
+    ? `<span class="chip dagent" title="The current conversation of the agent ${name}. Open it from Agents or here: it is the same conversation.">${name}</span>`
+    : `<span class="chip dagent earlier" title="An earlier conversation of the agent ${name}, in its history.">${name} · earlier</span>`;
+}
+
 function pausedChip(s: SessionDTO): string {
   if (s.interrupted) {
     return '<span class="chip interrupted" title="Agent Wrangler was running this when it stopped. The conversation is intact: right-click → Resume here to carry on.">interrupted</span>';
@@ -512,7 +617,7 @@ function saveQuestionDraft(stepper: HTMLElement): QuestionDraft | undefined {
   draft.selected[step] = Array.from(stepper.querySelectorAll<HTMLInputElement>('input[data-qchoice]:checked')).map(
     (input) => input.value,
   );
-  draft.other[step] = stepper.querySelector<HTMLInputElement>('.qother')?.value.trim() ?? '';
+  draft.other[step] = stepper.querySelector<HTMLTextAreaElement>('.qother')?.value.trim() ?? '';
   return draft;
 }
 
@@ -533,7 +638,7 @@ function questionStepper(key: string, requestId: string, questions: import('../.
   return `<div class="qstep" data-draft="${esc(draftKey)}" data-step="${draft.step}" data-multi="${q.multiSelect === true}">
     <div class="qprogress">Question ${draft.step + 1} of ${questions.length}${q.header ? ` · ${esc(q.header)}` : ''}</div>
     <div class="qprompt">${esc(q.question)}</div>
-    <div class="qchoices">${options}<input class="qother" value="${esc(draft.other[draft.step] ?? '')}" placeholder="Other…" aria-label="Other answer"></div>
+    <div class="qchoices">${options}<textarea class="qother" rows="1" placeholder="Other…" aria-label="Other answer">${esc(draft.other[draft.step] ?? '')}</textarea></div>
     <div class="qnav">${draft.step > 0 ? '<button class="pbtn" data-qnav="back">Back</button>' : ''}<span></span><button class="pbtn allow" data-qnav="${draft.step + 1 === questions.length ? 'answer' : 'next'}">${draft.step + 1 === questions.length ? 'Answer' : 'Next'}</button></div>
   </div>`;
 }
@@ -723,21 +828,72 @@ function ageCell(s: SessionDTO): string {
   return `<td class="c-age" title="${esc(title)}" data-age-ts="${since}">${formatAge(now, since)}</td>`;
 }
 
+/** Open or close a nested row, asking the host for its steps on opening. */
+function toggleSubagentRow(el: HTMLElement): void {
+  const { saKey, saId, saAgent } = el.dataset;
+  if (!saKey || !saId || !saAgent) return;
+  const rowKey = `${saKey}|${saId}`;
+  if (openSubagentRows.has(rowKey)) openSubagentRows.delete(rowKey);
+  else {
+    openSubagentRows.add(rowKey);
+    post({ type: 'subagentProgress', key: saKey, agentId: saAgent });
+  }
+  render();
+}
+
+/** A snapshot moved on: ask again for every opened nested row whose subagent may still be working. */
+function refreshOpenSubagentRows(): void {
+  for (const s of sessions) {
+    if (!expandedSubagents.has(s.key)) continue;
+    for (const sa of s.subagentList ?? []) {
+      if (sa.agentId && sa.status === 'working' && openSubagentRows.has(`${s.key}|${sa.id}`)) {
+        post({ type: 'subagentProgress', key: s.key, agentId: sa.agentId });
+      }
+    }
+  }
+}
+
 /** Check if subagent row is expanded. */
 function subagentExpanded(key: string): boolean {
   return expandedSubagents.has(key);
 }
 
 /** Render a single subagent row in the subtable. */
-function subagentRowHtml(sa: import('../../shared/model').SubagentInfo): string {
+function subagentRowHtml(sessionKey: string, sa: import('../../shared/model').SubagentInfo): string {
   const statusDot = `<span class="dot st-${sa.status === 'working' ? 'busy' : sa.status === 'done' ? 'done' : 'blocked'}" aria-hidden="true"></span>`;
   const agentType = sa.agentType ? ` (${esc(sa.agentType)})` : '';
   const statusWord = sa.status === 'working' ? 'working' : sa.status === 'done' ? 'done' : 'attention';
-  return `<tr class="subrow-item">
+  const rowKey = `${sessionKey}|${sa.id}`;
+  // Progress comes from the subagent's own transcript, so a row without its agent id has none to show.
+  const canOpen = Boolean(sa.agentId);
+  const open = canOpen && openSubagentRows.has(rowKey);
+  const twist = canOpen ? `<span class="twist" aria-hidden="true">${open ? '▾' : '▸'}</span>` : '';
+  const bg = sa.background ? '<span class="chip bgchip" title="Running in the background">bg</span>' : '';
+  const modelName = modelLabel(sa.model) ?? sa.model;
+  const modelChip = modelName ? `<span class="chip modelchip" title="Model: ${esc(sa.model!)}">${esc(modelName)}</span>` : '';
+  const item = `<tr class="subrow-item${canOpen ? ' openable' : ''}"${canOpen ? ` tabindex="0" aria-expanded="${open}" data-sa-key="${esc(sessionKey)}" data-sa-id="${esc(sa.id)}" data-sa-agent="${esc(sa.agentId!)}" title="${open ? 'Hide progress' : 'Show progress'}"` : ''}>
   <td class="c-dot">${statusDot}</td>
-  <td class="c-label"><span class="label">${esc(sa.label)}${agentType}</span></td>
+  <td class="c-label"><span class="label">${twist}${esc(sa.label)}${agentType}${bg}${modelChip}</span></td>
   <td class="c-status"><span class="status">${statusWord}</span></td>
 </tr>`;
+  return open ? item + subagentProgressRow(subagentProgress.get(rowKey)) : item;
+}
+
+/** The steps under an opened nested row: newest last, tools with a state mark. */
+function subagentProgressRow(p: { steps: SubagentStep[]; error?: string } | undefined): string {
+  let body: string;
+  if (!p) body = '<div class="subprog-note">Loading…</div>';
+  else if (p.error) body = `<div class="subprog-note">${esc(p.error)}</div>`;
+  else if (p.steps.length === 0) body = '<div class="subprog-note">Nothing yet.</div>';
+  else {
+    body = `<ol class="subprog-steps">${p.steps
+      .map((st) => {
+        const mark = st.kind === 'tool' ? (st.state === 'running' ? '…' : st.state === 'error' ? '✗' : '✓') : '';
+        return `<li class="step ${st.kind}${st.state ? ` ${st.state}` : ''}"><span class="mark" aria-hidden="true">${mark}</span>${esc(st.text)}</li>`;
+      })
+      .join('')}</ol>`;
+  }
+  return `<tr class="subprog"><td colspan="3">${body}</td></tr>`;
 }
 
 /** Render the subtable for subagents. */
@@ -746,8 +902,8 @@ function subagentSubrow(s: SessionDTO, span: number): string {
   const open = subagentExpanded(s.key);
   if (!open) return '';
   const sorted = sortSubagents(s.subagentList);
-  const rows = sorted.map((sa) => subagentRowHtml(sa)).join('');
-  return `<tr class="subrow" data-key="${esc(s.key)}">
+  const rows = sorted.map((sa) => subagentRowHtml(s.key, sa)).join('');
+  return `<tr class="subrow open" data-key="${esc(s.key)}">
   <td class="c-sub" colspan="${span}">
     <table class="subagent-table">
       <thead><tr><th class="c-dot"></th><th class="c-label">Subagent</th><th class="c-status">Status</th></tr></thead>
@@ -799,10 +955,12 @@ function rowHtml(s: SessionDTO, span: number): string {
 
   const est = s.statusIsEstimated && s.status !== 'ended' ? ' est' : '';
   const unc = s.statusUncertain ? ' unc' : '';
-  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}${unc}" data-key="${esc(s.key)}" title="${esc(rowTitle(s))}">
+  // A tab stop, opened with Enter like a click (#133): keyboard-only use has to
+  // reach a conversation. `data-fk` keeps focus on it across repaints.
+  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}${unc}" data-key="${esc(s.key)}" data-fk="row:${esc(s.key)}" tabindex="0" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title">${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${unknownChip(s)}${rateLimitChip(s)}${statusChip(s)}${delegatedChips(s)}</span></div>
+    <div class="title">${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${durableAgentChip(s)}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${unknownChip(s)}${rateLimitChip(s)}${statusChip(s)}${delegatedChips(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -884,8 +1042,10 @@ function usageCardHtml(w: UsageWindow, snap: UsageSnapshot, provider: 'Claude' |
       ? `<span class="ureset" data-resets-at="${w.resetsAtMs}"${w.id === 'session' || /(?:^|\s)5\s*hr(?:$|\s)/i.test(w.label) ? ' data-five-hour="true"' : ''}>${esc(usageResetText(w, Date.now()))}</span>`
       : '<span class="ureset"></span>';
   const label = prefix ? `${provider} · ${w.label}` : w.label;
+  // The collapsed strip on a phone: "Cl Session", not "CLAUDE · SESSION (5HR)".
+  const short = `${provider === 'Claude' ? 'Cl' : 'Cx'} ${w.label.replace(/\s*\(.*?\)/g, '').trim()}`;
   return `<div class="ucard ${sev}${w.active ? ' active' : ''}" title="${esc(usageCardTitle(w, snap, provider))}">
-  <div class="uhead"><span class="ulabel">${esc(label)}</span><span class="upct">${pct}%</span></div>
+  <div class="uhead"><span class="ulabel">${esc(label)}</span><span class="ushort">${esc(short)}</span><span class="upct">${pct}%</span></div>
   <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(w.label)}"><span class="ufill" data-w="${pct}%"></span></div>
   ${resets}
 </div>`;
@@ -899,7 +1059,7 @@ function spendCardHtml(snap: UsageSnapshot): string {
   const sev = usageSeverity(s.percent);
   const title = `Extra usage: ${spendText(s)} of credits spent this month (${pct}%). These cover you past the plan limits.`;
   return `<div class="ucard ${sev}" title="${esc(title)}">
-  <div class="uhead"><span class="ulabel">Extra usage</span><span class="upct">${pct}%</span></div>
+  <div class="uhead"><span class="ulabel">Extra usage</span><span class="ushort">Extra</span><span class="upct">${pct}%</span></div>
   <div class="ubar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Extra usage"><span class="ufill" data-w="${pct}%"></span></div>
   <span class="ureset">${esc(spendText(s))}</span>
 </div>`;
@@ -950,6 +1110,11 @@ function usageHtml(): string {
 const usageEl = document.createElement('div');
 usageEl.id = 'usage';
 app.insertAdjacentElement('beforebegin', usageEl);
+// On a phone the strip is one scrolling line of short chips until tapped
+// (`#usage.expanded`, see dashboard.css); in a wide pane the class does nothing.
+usageEl.addEventListener('click', () => {
+  if (app.classList.contains('narrow')) usageEl.classList.toggle('expanded');
+});
 
 /** The strip currently drawn, so a snapshot that changes nothing leaves the bars' transition alone. */
 let usagePainted = '';
@@ -1110,6 +1275,8 @@ type LauncherState = {
   openai: { model: string; effort: string };
 };
 let launchProvider: LaunchProvider = 'anthropic';
+/** The models the CLIs report, for every model dropdown in the pane (#183). */
+let modelCatalog: ModelChoice[] = [];
 
 function modelValue(provider: LaunchProvider, model: string): string {
   return `${provider}:${model}`;
@@ -1117,6 +1284,7 @@ function modelValue(provider: LaunchProvider, model: string): string {
 
 function renderLaunchDefaults(launcher: LauncherState): void {
   launchProvider = launcher.provider;
+  modelCatalog = launcher.models;
   tasksBtn.hidden = launcher.tasks !== true;
   const models = launcher.models;
   // The CLI's list has a default row of its own, already labelled with the
@@ -1327,7 +1495,16 @@ document.addEventListener(
   true,
 );
 
+/** A row's conversation into the pane; the pane clears for it before the host answers. */
+function openRow(key: string): void {
+  const s = sessions.find((x) => x.key === key);
+  announceSwitch({ key, title: s ? displayTitle(s) : 'conversation' });
+  post({ type: 'rowClick', key });
+}
+
 newBtn.addEventListener('click', () => {
+  requestComposerFocus();
+  announceSwitch({ title: 'New conversation' });
   post({ type: 'newConversation', cwd: currentProject(), provider: launchProvider === 'openai' ? 'codex' : 'claude' });
 });
 
@@ -1414,22 +1591,20 @@ renderControls();
 /** The table's view switcher. Missions is the third view, there only while orchestration is on (#43). */
 function tabsHtml(): string {
   const tab = (view: TableView, label: string, extra = '') =>
-    `<button role="tab" aria-selected="${tableView === view}" data-table-view="${view}"${extra}>${label}</button>`;
+    `<button role="tab" aria-selected="${tableView === view}" data-table-view="${view}" data-fk="tab:${view}"${extra}>${label}</button>`;
   // The host's count (status contract A3: each ask once, open proposals
   // included); the mission phases are the fallback for an older host.
-  const waiting = missionsSnap?.attention ?? missionsSnap?.missions.filter((m) => m.phase?.needsYou).length ?? 0;
-  const missions = missionsSnap
-    ? tab('missions', `Missions${waiting > 0 ? ` <span class="tabcount">${waiting}</span>` : ''}`, waiting > 0 ? ` title="${waiting} mission${waiting === 1 ? '' : 's'} waiting for you"` : '')
-    : '';
-  // Analytics sits beside Missions: both are orchestration's, and there only while it is on.
-  const analytics = missionsSnap ? tab('analytics', 'Analytics') : '';
-  return `<div class="tabletabs" role="tablist" aria-label="Table view">${tab('status', 'Status')}${tab('project', 'Project')}${missions}${analytics}</div>`;
+  // Agents that need you: the rows the Waiting section holds.
+  const needYou = attentionTotal(sessions);
+  const status = tab('status', `Status${needYou > 0 ? ` <span class="tabcount">${needYou}</span>` : ''}`, needYou > 0 ? ` title="${needYou} agent${needYou === 1 ? '' : 's'} waiting for you"` : '');
+  return `<div class="tabletabs" role="tablist" aria-label="Table view">${status}${tab('project', 'Project')}</div>`;
 }
 
 /** Switch to Missions, open one mission and scroll to it: the drill-down for delegated work (§10). */
 function showMission(missionId: string | undefined): void {
   if (!missionsSnap) return;
   tableView = 'missions';
+  announce(true);
   if (missionId) {
     missionsUi.collapsed.delete(missionId);
     missionsUi.expanded.add(missionId);
@@ -1455,13 +1630,33 @@ function render(): void {
 
   renderUsage();
   // Orchestration was turned off (or never on): there is no Missions view to be on.
-  if ((tableView === 'missions' || tableView === 'analytics') && !missionsSnap) tableView = 'status';
+  if ((tableView === 'missions' || tableView === 'analytics') && !missionsSnap) tableView = sessionGrouping;
+  announce(false);
+  if (tableView === 'agents') {
+    // Typing in the agent form: a snapshot must not replace the field under the caret.
+    const active = document.activeElement;
+    if ((active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement) && active.closest('.agents form')) {
+      agentRenderDeferred = true;
+      return;
+    }
+    agentRenderDeferred = false;
+    menuPosition = undefined;
+    rowMenu = undefined;
+    // Its own route (the shell's Agents link), so no session tabs above it.
+    paint(`${bannerHtml()}${agentsHtml(agentViews, agentsUi, projects, Date.now(), modelCatalog)}`);
+    return;
+  }
+  if (tableView === 'jobs') {
+    renderJobs(false);
+    return;
+  }
   if (tableView === 'analytics') {
     // A filter's dropdown is open: repainting would close it under the pointer.
     if (document.activeElement instanceof HTMLSelectElement && document.activeElement.closest('.analytics')) return;
     menuPosition = undefined;
     rowMenu = undefined;
-    paint(`${bannerHtml()}${tabsHtml()}${analyticsHtml(analyticsData)}`);
+    // Its own page (the shell's Analytics link), so no table tabs above it.
+    paint(`${bannerHtml()}${analyticsHtml(analyticsData)}`);
     if (analyticsMoreOpen) app.querySelector<HTMLDetailsElement>('.analytics .an-more')?.setAttribute('open', '');
     return;
   }
@@ -1475,7 +1670,7 @@ function render(): void {
     missionRenderDeferred = false;
     menuPosition = undefined;
     rowMenu = undefined;
-    paint(`${bannerHtml()}${tabsHtml()}${missionsHtml(missionsSnap, missionsUi, Date.now())}`);
+    paint(`${bannerHtml()}${tabsHtml()}${missionsHtml(missionsSnap, missionsUi, Date.now(), modelCatalog)}`);
     if (missionsUi.reveal) {
       app.querySelector<HTMLElement>(`[data-mission="${CSS.escape(missionsUi.reveal)}"]`)?.scrollIntoView({ block: 'nearest' });
       missionsUi.reveal = undefined;
@@ -1528,7 +1723,7 @@ function render(): void {
     const label = tableView === 'status' ? SECTION_LABEL[group as SectionId] : group;
     const styleClass = tableView === 'status' ? ` st-${group}` : ' named';
     html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${esc(collapseKey)}">
-<tr class="sec${styleClass}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(label)}<span class="count">${rows.length}</span></td></tr>`;
+<tr class="sec${styleClass}" tabindex="0" data-fk="sec:${esc(collapseKey)}" aria-expanded="${!isCollapsed}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(label)}<span class="count">${rows.length}</span></td></tr>`;
     for (const s of rows) html += rowHtml(s, span);
     html += '</tbody>';
   }
@@ -1542,6 +1737,14 @@ vscodeApi.onMessage((body) => {
     showMission(m.missionId);
     return;
   }
+  if (m.type === 'subagentProgress') {
+    const sa = sessions.find((s) => s.key === m.key)?.subagentList?.find((x) => x.agentId === m.agentId);
+    if (sa) {
+      subagentProgress.set(`${m.key}|${sa.id}`, { steps: m.steps, error: m.error });
+      render();
+    }
+    return;
+  }
   if (m.type === 'analytics') {
     analyticsData = m.view;
     if (tableView === 'analytics') render();
@@ -1549,7 +1752,12 @@ vscodeApi.onMessage((body) => {
   }
   if (m.type === 'missionError') {
     missionsUi.errors.set(m.missionId, m.text);
+    if (m.requestId) missionsUi.pending.settle(m.requestId);
     render();
+    return;
+  }
+  if (m.type === 'missionAck') {
+    if (missionsUi.pending.settle(m.requestId) !== undefined) render();
     return;
   }
   if (m.type === 'projectPicked') {
@@ -1563,9 +1771,56 @@ vscodeApi.onMessage((body) => {
     renderLauncher();
     return;
   }
+  if (m.type === 'dismissResult') {
+    if (!m.ok && dismissals.fail(m.key)) applyDismissals();
+    return;
+  }
+  if (m.type === 'agentSaved') {
+    if (agentsUi.pendingSave !== m.requestId) return;
+    agentsUi.pendingSave = undefined;
+    if (m.error) agentsUi.error = m.error;
+    else if (!m.cancelled) {
+      agentsUi.form = undefined;
+      agentsUi.error = undefined;
+    }
+    render();
+    return;
+  }
+  if (m.type === 'agentResult') {
+    // The row menu's assignments are answered by the host, which shows a refusal itself.
+    if (agentsUi.pendingAction !== m.requestId) return;
+    agentsUi.pendingAction = undefined;
+    agentsUi.panelError = m.error;
+    // The memory box that was saved is done with; a refused one, and the other box, keep what was typed.
+    if (!m.error && agentsUi.memorySubmitted === 'add') agentsUi.memoryAdd = undefined;
+    if (!m.error && agentsUi.memorySubmitted === 'edit') agentsUi.memoryEdit = undefined;
+    agentsUi.memorySubmitted = undefined;
+    render();
+    return;
+  }
+  if (m.type === 'jobResult') {
+    jobsView.result(m);
+    return;
+  }
+  if (m.type === 'jobPreview') {
+    jobsView.preview(m);
+    return;
+  }
   if (m.type === 'snapshot') {
-    sessions = m.sessions;
+    agentViews = m.agents;
+    jobViews = m.jobs;
+    hostSessions = m.sessions;
+    dismissals.settle(hostSessions);
+    sessions = dismissals.apply(hostSessions);
     missionsSnap = m.missions;
+    announceAttention(attentionTotal(sessions, missionsSnap?.attention ?? 0));
+    // A route that asked for Missions before anything said whether there are any.
+    if (!snapshotSeen && pendingView && missionsSnap) {
+      tableView = pendingView;
+      if (tableView === 'analytics') queryAnalytics();
+    }
+    snapshotSeen = true;
+    pendingView = undefined;
     if (m.projects) {
       projects = m.projects;
       renderLauncher();
@@ -1593,6 +1848,7 @@ vscodeApi.onMessage((body) => {
     renderControls();
     renderDiscord();
     render();
+    refreshOpenSubagentRows();
   }
 });
 
@@ -1733,6 +1989,10 @@ app.addEventListener('contextmenu', (e) => {
   openRowMenu(row.dataset.key!, (e as MouseEvent).clientX, (e as MouseEvent).clientY);
 });
 
+// A finger has no right-click, and iOS Safari never sends `contextmenu`: a
+// long-press on a row opens the same menu (#134).
+onLongPress(app, 'tr.row', (row, x, y) => openRowMenu(row.dataset.key!, x, y));
+
 window.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   closeMenu();
@@ -1765,8 +2025,20 @@ const measure = () => {
   }
 };
 app.classList.toggle('narrow', narrow);
+trackTouch(app);
 new ResizeObserver(measure).observe(app);
 window.addEventListener('resize', measure);
+
+// A focused row or section header answers Enter and Space as it answers a
+// click (#133): opening a conversation must not need a pointer. Only when the
+// row itself has focus — a button inside it handles its own keys.
+app.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const target = e.target as HTMLElement;
+  if (!(target instanceof HTMLTableRowElement) || !target.matches('tr.row, tr.sec, tr.subrow-item.openable')) return;
+  e.preventDefault();
+  target.click();
+});
 
 app.addEventListener('click', (e) => {
   const target = e.target as HTMLElement;
@@ -1776,9 +2048,11 @@ app.addEventListener('click', (e) => {
   // a row must dismiss and stop there, rather than also opening that session.
   if (rowMenu) {
     const item = target.closest('[data-row-action]') as HTMLElement | null;
+    const assign = target.closest<HTMLElement>('[data-row-assign],[data-row-unassign]');
     const key = rowMenu.key;
     closeRowMenu();
     if (item) post({ type: 'action', key, action: item.dataset.rowAction as DashboardAction });
+    else if (assign) post({ type: 'assignSession', key, ...(assign.dataset.rowAssign ? { agentId: assign.dataset.rowAssign } : {}), requestId: agentRequestId() });
     e.stopPropagation();
     return;
   }
@@ -1786,13 +2060,132 @@ app.addEventListener('click', (e) => {
   const viewTab = target.closest<HTMLElement>('[data-table-view]');
   if (viewTab) {
     tableView = viewTab.dataset.tableView as TableView;
+    if (tableView === 'status' || tableView === 'project') sessionGrouping = tableView;
+    // Before the repaint, which announces it again as a mere repaint: this one is a navigation.
+    announce(true);
     saveState();
     if (tableView === 'analytics') queryAnalytics();
     render();
     return;
   }
 
+  if (tableView === 'jobs' && jobsView.click(target, jobViews, currentProject())) return;
+
+  if (tableView === 'agents' && target.closest('.agents')) {
+    const button = target.closest<HTMLElement>('[data-ag]');
+    if (!button || (button instanceof HTMLButtonElement && button.disabled)) return;
+    const id = button.dataset.id;
+    const agent = id ? agentViews?.find((a) => a.id === id) : undefined;
+    switch (button.dataset.ag) {
+      case 'open':
+        if (!id) return;
+        agentsUi.selected = id;
+        requestComposerFocus();
+        post({ type: 'openAgent', id });
+        render();
+        return;
+      case 'new':
+        agentsUi.form = blankForm(currentProject());
+        agentsUi.error = undefined;
+        render();
+        app.querySelector<HTMLInputElement>('.agents [data-f="name"]')?.focus();
+        return;
+      case 'edit':
+        if (!agent) return;
+        agentsUi.form = formFor(agent);
+        agentsUi.error = undefined;
+        render();
+        app.querySelector<HTMLInputElement>('.agents [data-f="name"]')?.focus();
+        return;
+      case 'cancel':
+        agentsUi.form = undefined;
+        agentsUi.error = undefined;
+        agentsUi.pendingSave = undefined;
+        (document.activeElement as HTMLElement | null)?.blur();
+        render();
+        return;
+      case 'fresh':
+        if (id) post({ type: 'agentNewConversation', id });
+        return;
+      case 'delete':
+        if (id) post({ type: 'deleteAgent', id });
+        return;
+      case 'pin':
+        if (agent) post({ type: 'agentFlag', id: agent.id, flag: 'pinned', on: !agent.pinned });
+        return;
+      case 'archive':
+        if (agent) post({ type: 'agentFlag', id: agent.id, flag: 'archived', on: !agent.archived });
+        return;
+      case 'showarchived':
+        agentsUi.showArchived = !agentsUi.showArchived;
+        render();
+        return;
+      case 'panel': {
+        const tab = button.dataset.tab === 'history' ? 'history' : 'memory';
+        if (!id) return;
+        agentsUi.panel = agentsUi.panel?.id === id && agentsUi.panel.tab === tab ? undefined : { id, tab };
+        agentsUi.panelError = undefined;
+        agentsUi.memoryAdd = undefined;
+        agentsUi.memoryEdit = undefined;
+        render();
+        return;
+      }
+      case 'mem': {
+        // Forget, approve, reject: one click each, answered with `agentResult`.
+        const op = button.dataset.op;
+        if (!id || agentsUi.pendingAction) return;
+        const pid = button.dataset.pid;
+        const memOp: MemoryOp | undefined =
+          op === 'forget' && button.dataset.item
+            ? { op: 'forget', itemId: button.dataset.item }
+            : op === 'approve' && pid
+              ? { op: 'approve', proposalId: pid }
+              : op === 'reject' && pid
+                ? { op: 'reject', proposalId: pid }
+                : undefined;
+        if (!memOp) return;
+        agentsUi.pendingAction = agentRequestId();
+        agentsUi.panelError = undefined;
+        post({ type: 'agentMemory', id, op: memOp, requestId: agentsUi.pendingAction });
+        render();
+        return;
+      }
+      case 'memedit': {
+        const item = agent?.memory.find((i) => i.id === button.dataset.item);
+        if (!agent || !item) return;
+        agentsUi.memoryEdit = { agentId: agent.id, itemId: item.id, kind: item.kind, text: item.text };
+        agentsUi.panelError = undefined;
+        render();
+        app.querySelector<HTMLInputElement>(`.agents form[data-item="${CSS.escape(item.id)}"] [data-m="text"]`)?.focus();
+        return;
+      }
+      case 'memcancel':
+        agentsUi.memoryEdit = undefined;
+        agentsUi.panelError = undefined;
+        (document.activeElement as HTMLElement | null)?.blur();
+        render();
+        return;
+      case 'histopen':
+        // An earlier conversation is a session like any other: the row click's path opens it.
+        if (button.dataset.key) openRow(button.dataset.key);
+        return;
+      case 'makecurrent':
+        if (!id || !button.dataset.key || agentsUi.pendingAction) return;
+        agentsUi.pendingAction = agentRequestId();
+        agentsUi.panelError = undefined;
+        post({ type: 'agentMakeCurrent', id, key: button.dataset.key, requestId: agentsUi.pendingAction });
+        render();
+        return;
+    }
+    return;
+  }
+
   if (tableView === 'analytics' && target.closest('.analytics')) {
+    const decided = analyticsDecision(target);
+    if (decided) {
+      post({ type: 'analyticsProposal', ...decided });
+      return;
+    }
     const ref = analyticsClickRef(target);
     if (ref) {
       // The detail opens beside the table; mark which item it is about.
@@ -1856,6 +2249,13 @@ app.addEventListener('click', (e) => {
     }
     saveState();
     render();
+    e.stopPropagation();
+    return;
+  }
+  // A nested row opens (or closes) its progress; it never opens the conversation.
+  const saRow = target.closest<HTMLElement>('tr.subrow-item.openable');
+  if (saRow) {
+    toggleSubagentRow(saRow);
     e.stopPropagation();
     return;
   }
@@ -1945,12 +2345,22 @@ app.addEventListener('click', (e) => {
   }
   const dismissBtn = target.closest('button.dismiss') as HTMLElement | null;
   if (dismissBtn && row) {
-    post({ type: 'action', key: row.dataset.key!, action: dismissBtn.dataset.rowAction as DashboardAction });
+    const key = row.dataset.key!;
+    const action = dismissBtn.dataset.rowAction as DashboardAction;
+    post({ type: 'action', key, action });
+    // Move the row now rather than when the process is gone (`pendingDismissals.ts`).
+    const s = sessions.find((x) => x.key === key);
+    if ((action === 'dismiss' || action === 'dismissHide') && s && canDismissAhead(s)) {
+      dismissals.begin(key, action);
+      applyDismissals();
+      // A quiet machine may send no snapshot for a while; expiry must not wait for one.
+      setTimeout(applyDismissals, MAX_AGE_MS + 1000);
+    }
     e.stopPropagation();
     return;
   }
   if (row) {
-    post({ type: 'rowClick', key: row.dataset.key! });
+    openRow(row.dataset.key!);
     return;
   }
   if (secRow) {
@@ -1983,6 +2393,12 @@ setInterval(() => {
 post({ type: 'ready' });
 // Reopened on the Analytics view: it has nothing to draw until the host answers.
 if (tableView === 'analytics') queryAnalytics();
+// A browser whose connection came back is talking to a fresh host (#128):
+// introduce the pane again, and ask again for what it is showing.
+vscodeApi.onReconnect(() => {
+  post({ type: 'ready' });
+  if (tableView === 'analytics') queryAnalytics();
+});
 
 // ---- the Analytics view (#49) ----
 
@@ -2036,10 +2452,21 @@ function runMissionIntent(intent: MissionIntent): void {
       missionsUi.errors.delete(intent.missionId);
       render();
       return;
-    case 'op':
+    case 'op': {
+      // The pending-action pattern (docs/plans/pending-actions.md): a slow action's button is busy from the
+      // click, and a second press while it is in flight sends nothing. The host's answer (`missionAck`) ends it.
+      const pending = pendingKeyOf(intent.missionId, intent.op);
+      let requestId: string | undefined;
+      if (pending) {
+        missionsUi.pending.expire(Date.now(), PENDING_MAX_AGE_MS);
+        requestId = missionsUi.pending.begin(pending.key, pending.label);
+        if (!requestId) return;
+      }
       missionsUi.errors.delete(intent.missionId);
-      post({ type: 'mission', missionId: intent.missionId, op: intent.op, provider: launchProvider === 'openai' ? 'codex' : 'claude' });
+      post({ type: 'mission', missionId: intent.missionId, op: intent.op, provider: launchProvider === 'openai' ? 'codex' : 'claude', ...(requestId ? { requestId } : {}) });
+      if (requestId) render();
       return;
+    }
   }
 }
 
@@ -2051,6 +2478,92 @@ app.addEventListener('change', (event) => {
   const target = event.target as HTMLElement | null;
   const intent = target ? changeIntent(target) : undefined;
   if (intent) runMissionIntent(intent);
+});
+
+function agentRequestId(): string {
+  return `ag-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// The agent form (#179): Save is a submit, so Return in a field saves too.
+// A memory box (#180) is a form of its own: Return remembers, or saves the edit.
+app.addEventListener('submit', (event) => {
+  if (jobsView.submit(event)) return;
+  const memForm = (event.target as HTMLElement | null)?.closest<HTMLFormElement>('.agents form[data-mem-form]');
+  if (memForm) {
+    event.preventDefault();
+    const draft = readMemoryForm(memForm);
+    if (!draft || agentsUi.pendingAction) return;
+    if (draft.itemId) agentsUi.memoryEdit = draft;
+    else agentsUi.memoryAdd = draft;
+    agentsUi.memorySubmitted = draft.itemId ? 'edit' : 'add';
+    agentsUi.pendingAction = agentRequestId();
+    agentsUi.panelError = undefined;
+    post({
+      type: 'agentMemory',
+      id: draft.agentId,
+      op: draft.itemId ? { op: 'edit', itemId: draft.itemId, kind: draft.kind, text: draft.text } : { op: 'remember', kind: draft.kind, text: draft.text },
+      requestId: agentsUi.pendingAction,
+    });
+    (document.activeElement as HTMLElement | null)?.blur();
+    render();
+    return;
+  }
+  const form = (event.target as HTMLElement | null)?.closest<HTMLFormElement>('.agents form[data-ag-form]');
+  if (!form || !agentsUi.form) return;
+  event.preventDefault();
+  if (agentsUi.pendingSave) return;
+  agentsUi.form = readForm(form, agentsUi.form);
+  const requestId = agentRequestId();
+  agentsUi.pendingSave = requestId;
+  agentsUi.error = undefined;
+  post({ type: 'saveAgent', ...(agentsUi.form.id ? { id: agentsUi.form.id } : {}), agent: formInput(agentsUi.form), requestId });
+  (document.activeElement as HTMLElement | null)?.blur();
+  render();
+});
+
+// Keep what was typed in the agent form and the memory boxes, so a repaint after focus leaves draws it back.
+const keepAgentDrafts = (event: Event) => {
+  const target = event.target as HTMLElement | null;
+  const memForm = target?.closest?.<HTMLFormElement>('.agents form[data-mem-form]');
+  if (memForm) {
+    const draft = readMemoryForm(memForm);
+    if (draft?.itemId) agentsUi.memoryEdit = draft;
+    else if (draft) agentsUi.memoryAdd = draft;
+    return;
+  }
+  const form = target?.closest?.<HTMLFormElement>('.agents form[data-ag-form]');
+  if (form && agentsUi.form) {
+    const before = agentsUi.form.provider;
+    agentsUi.form = readForm(form, agentsUi.form);
+    // Another harness has other models (#183). Swapped in place: the form is not repainted while it has focus.
+    if (agentsUi.form.provider !== before) {
+      agentsUi.form = { ...agentsUi.form, model: '', effort: '' };
+      const select = form.querySelector<HTMLSelectElement>('[data-f="model"]');
+      if (select) select.innerHTML = modelOptionsHtml(modelCatalog, agentsUi.form.provider, '');
+    }
+  }
+};
+app.addEventListener('input', keepAgentDrafts);
+app.addEventListener('change', keepAgentDrafts);
+app.addEventListener('input', (event) => jobsView.input(event));
+app.addEventListener('change', (event) => jobsView.input(event));
+
+// The snapshot held back while a job field had focus is drawn once focus leaves the form.
+app.addEventListener('focusout', () => {
+  if (!jobRenderDeferred) return;
+  setTimeout(() => {
+    if (!jobsView.typing()) renderJobs(false);
+  }, 0);
+});
+
+// The snapshot held back while a field had focus is drawn once focus leaves the form.
+app.addEventListener('focusout', () => {
+  if (!agentRenderDeferred) return;
+  setTimeout(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && active.closest('.agents form')) return;
+    render();
+  }, 0);
 });
 
 // The snapshot held back while a field had focus is drawn once focus leaves the editor.

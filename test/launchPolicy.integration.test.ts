@@ -54,14 +54,11 @@ function memento() {
 
 function service(sup: HostSupervisor, registry: SessionRegistry): RunnerService {
   return new RunnerService({
-    query: () => {
-      throw new Error('hosted only');
-    },
     binary: () => '/fake',
     log,
     registry,
     loadHistory: noHistory,
-    hosts: { supervisor: sup, enabled: () => true },
+    hosts: { supervisor: sup },
   });
 }
 

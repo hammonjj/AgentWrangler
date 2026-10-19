@@ -12,6 +12,7 @@
 import * as crypto from 'node:crypto';
 import * as net from 'node:net';
 import type { Duplex } from 'node:stream';
+import { outsideRequest } from '../core/requestScope';
 
 export interface WsConnection {
   send(text: string): void;
@@ -196,7 +197,8 @@ export function websocketOver(stream: Duplex, timeoutMs = 10_000): Promise<WsCon
 /** Connect to a Unix socket and upgrade it. */
 export function connectUnixWebSocket(socketPath: string): Promise<WsConnection> {
   return new Promise<net.Socket>((resolve, reject) => {
-    const socket = net.connect(socketPath);
+    // Outlives whichever request opened it: its events are the app's own (#126).
+    const socket = outsideRequest(() => net.connect(socketPath));
     socket.once('connect', () => {
       socket.off('error', reject);
       resolve(socket);

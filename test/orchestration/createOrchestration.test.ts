@@ -51,15 +51,4 @@ describe('createOrchestration', () => {
     expect(o.tasks!.list().map((m) => m.id)).toEqual([mission().id]);
     o.dispose();
   });
-
-  it('refuses a Claude task while session hosts are off (G1)', async () => {
-    const d = deps({ 'orchestration.enabled': true }, Promise.resolve());
-    const o = createOrchestration({ ...d, hostsEnabled: () => false });
-    await o.ready;
-    await expect(
-      o.tasks!.start({ folder: d.dataDir, objective: 'x', acceptanceCriteria: [], route: { harness: 'claude-code' } }),
-    ).rejects.toThrow(/Keep conversations running/);
-    expect(o.tasks!.list()).toEqual([]);
-    o.dispose();
-  });
 });

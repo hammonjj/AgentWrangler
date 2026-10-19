@@ -152,9 +152,11 @@ export type SummaryPartial = Pick<
   /** Ids of background tasks this chunk saw end. */
   tasksClosed?: string[];
   /** Subagents launched in this chunk. */
-  subagentListOpened?: Array<{ id: string; label: string; agentType?: string }>;
-  /** Ids of subagents this chunk saw complete. */
+  subagentListOpened?: Array<{ id: string; label: string; agentType?: string; background?: boolean }>;
+  /** Ids of subagents this chunk saw complete: a tool-use id, or the agent id a task notification names. */
   subagentListClosed?: string[];
+  /** Launches whose result named the subagent's own transcript, by tool-use id. */
+  subagentListBound?: Array<{ id: string; agentId: string }>;
 };
 
 /** Cap on the reply text kept per transcript; `needsReply` only reads the tail anyway. */
@@ -221,7 +223,7 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
         if (stopped) (out.tasksClosed ??= []).push(stopped);
         if (typeof content === 'string') closeTasks(out, content);
         // Extract tool results and task-notifications to mark subagents done
-        extractSubagentCompletions(content, out);
+        extractSubagentCompletions(content, obj.toolUseResult, out);
         break;
       }
       case 'queue-operation':
@@ -275,11 +277,12 @@ function extractSubagentLaunches(content: unknown, out: SummaryPartial): void {
       if (toolName === 'Agent' || toolName === 'Task') {
         const input = block.input;
         if (input && typeof input === 'object') {
-          const id = input.subagent_id ?? input.task_id;
+          // The tool_use id is the only id a launch has; the agent id arrives with its result.
+          const id = block.id;
           if (typeof id === 'string' && id) {
-            const label = input.description ?? id.slice(0, 8);
-            const agentType = input.subagent_type;
-            (out.subagentListOpened ??= []).push({ id, label, agentType });
+            const label = typeof input.description === 'string' && input.description ? input.description : id.slice(0, 8);
+            const agentType = typeof input.subagent_type === 'string' ? input.subagent_type : undefined;
+            (out.subagentListOpened ??= []).push({ id, label, agentType, background: input.run_in_background === true });
           }
         }
       }
@@ -287,23 +290,29 @@ function extractSubagentLaunches(content: unknown, out: SummaryPartial): void {
   }
 }
 
-/** Extract tool results and task-notifications to mark subagents complete. */
-function extractSubagentCompletions(content: unknown, out: SummaryPartial): void {
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block?.type === 'tool_result') {
-        const toolUseId = block.tool_use_id;
-        if (typeof toolUseId === 'string') {
-          (out.subagentListClosed ??= []).push(toolUseId);
-        }
-      }
-    }
+/**
+ * Extract tool results to bind a subagent to its transcript and to mark a
+ * foreground one complete. A background launch's result comes straight back
+ * (`isAsync`), so it binds but stays open until its task notification.
+ */
+function extractSubagentCompletions(content: unknown, toolUseResult: unknown, out: SummaryPartial): void {
+  if (!Array.isArray(content)) return;
+  const r = toolUseResult && typeof toolUseResult === 'object' && !Array.isArray(toolUseResult) ? (toolUseResult as Record<string, unknown>) : {};
+  const agentId = typeof r.agentId === 'string' && r.agentId ? r.agentId : undefined;
+  const async = r.isAsync === true || r.status === 'async_launched';
+  for (const block of content) {
+    if (block?.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue;
+    if (agentId) (out.subagentListBound ??= []).push({ id: block.tool_use_id, agentId });
+    if (!async) (out.subagentListClosed ??= []).push(block.tool_use_id);
   }
 }
 
 function closeTasks(out: SummaryPartial, text: string): void {
   const ids = finishedTaskIdsIn(text);
-  if (ids.length > 0) (out.tasksClosed ??= []).push(...ids);
+  if (ids.length === 0) return;
+  (out.tasksClosed ??= []).push(...ids);
+  // A background subagent's task id is its agent id.
+  (out.subagentListClosed ??= []).push(...ids);
 }
 
 /**
@@ -312,8 +321,9 @@ function closeTasks(out: SummaryPartial, text: string): void {
  */
 function applySubagentChanges(
   prev: import('../shared/model').SubagentInfo[] | undefined,
-  opened: Array<{ id: string; label: string; agentType?: string }>,
+  opened: Array<{ id: string; label: string; agentType?: string; background?: boolean }>,
   closed: string[],
+  bound: Array<{ id: string; agentId: string }> = [],
 ): import('../shared/model').SubagentInfo[] | undefined {
   const map = new Map((prev ?? []).map((s) => [s.id, s]));
   const now = Date.now();
@@ -323,14 +333,23 @@ function applySubagentChanges(
       id: item.id,
       label: item.label,
       agentType: item.agentType,
+      background: item.background || undefined,
       status: 'working' as const,
       lastActivityAt: now,
     });
   }
 
-  for (const id of closed) {
-    const existing = map.get(id);
-    if (existing && existing.status === 'working') {
+  for (const b of bound) {
+    const existing = map.get(b.id);
+    if (existing) map.set(b.id, { ...existing, agentId: b.agentId });
+  }
+
+  // A foreground result names the tool-use id; a task notification names the agent id.
+  const byAgentId = new Map([...map.values()].filter((s) => s.agentId).map((s) => [s.agentId as string, s.id]));
+  for (const closedId of closed) {
+    const id = map.has(closedId) ? closedId : byAgentId.get(closedId);
+    const existing = id ? map.get(id) : undefined;
+    if (id && existing && existing.status === 'working') {
       map.set(id, { ...existing, status: 'done' as const, lastActivityAt: now });
     }
   }
@@ -418,7 +437,7 @@ export function mergeSummaries(
   // means "keep the old one" when the chunk saw no prompt or reply at all.
   const sawTurnBoundary = next.lastMeaningful !== undefined;
   // Apply subagent list updates
-  const subagentList = applySubagentChanges(prev?.subagentList, next.subagentListOpened ?? [], next.subagentListClosed ?? []);
+  const subagentList = applySubagentChanges(prev?.subagentList, next.subagentListOpened ?? [], next.subagentListClosed ?? [], next.subagentListBound ?? []);
   return {
     lastMeaningful: next.lastMeaningful ?? prev?.lastMeaningful,
     lastAssistantText: sawTurnBoundary ? next.lastAssistantText : prev?.lastAssistantText,

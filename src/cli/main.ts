@@ -21,16 +21,38 @@ import {
   type ControlSubscribeResult,
   type ControlSessionRef,
   type ControlDelegateResult,
+  type ControlAgentProposeParams,
+  type ControlAgentProposeResult,
   type ControlTaskProposeParams,
   type ControlTaskProposeResult,
   type ControlTasksResult,
+  type ControlWebLinkResult,
+  type ControlWebDevicesResult,
+  type ControlWebPairResult,
+  type ControlWebRevokeResult,
 } from '../core/control/protocol';
+import { encodeQr, qrToTerminal } from '../core/web/qr';
+import { execFile } from 'node:child_process';
 import * as path from 'node:path';
-import { agentEnvironment, originOf, parseArgs, USAGE, type Command } from './args';
+import { agentEnvironment, originOf, parseArgs, webRefusal, USAGE, type Command } from './args';
 import { ATTACH_BACKLOG, AttachRenderer } from './attach';
 import { ControlClient } from './client';
-import { formatDelegation, formatOffline, formatProjects, formatProposal, formatSession, formatSessions, formatStatus, formatTasks } from './format';
+import {
+  formatDelegation,
+  formatOffline,
+  formatProjects,
+  formatProposal,
+  formatSession,
+  formatSessions,
+  formatStatus,
+  formatTasks,
+  formatWebDevices,
+  formatWebPair,
+  safe,
+} from './format';
 import { readOfflineView } from './offline';
+import { runDaemonCommand } from './daemon';
+import { coreDaemonAgentFor } from '../node/coreDaemonAgent';
 
 declare const AW_BUILD_ID: string | undefined;
 const BUILD_ID = typeof AW_BUILD_ID === 'string' ? AW_BUILD_ID : 'dev';
@@ -61,18 +83,54 @@ async function run(argv: string[]): Promise<number> {
       return 3;
     }
   }
+  // The same speed bump: a printed sign-in link is the whole workbench, every
+  // session's controls included. `aw web open` hands it to the browser instead.
+  if (cmd.kind === 'web' && cmd.action === 'url') {
+    const inside = agentEnvironment(process.env);
+    if (inside) {
+      process.stderr.write(`aw web url: refused, because this shell looks like ${inside}. Run it from your own terminal, or use aw web open.\n`);
+      return 3;
+    }
+  }
+  // Pairing prints a code that lets a device in as you, and revoking signs
+  // one of yours out: neither is for an agent to do (#137).
+  const refusal = webRefusal(cmd, agentEnvironment(process.env));
+  if (refusal) {
+    process.stderr.write(`${refusal}\n`);
+    return 3;
+  }
 
   const dirs = defaultRunDirs();
+  // Before connecting: the daemon commands work whether or not anything answers.
+  if (cmd.kind === 'daemon') return daemonCommand(cmd, dirs);
   const client = await ControlClient.connect(dirs, { build: BUILD_ID });
   if (!client) return offline(cmd, dirs.userDataDir, dirs.runDir);
   if (client.hello.build !== BUILD_ID && BUILD_ID !== 'dev') {
-    process.stderr.write(`note: the running app is build ${client.hello.build} and this aw is ${BUILD_ID}; restart the app to match.\n`);
+    process.stderr.write(`note: the running core is build ${client.hello.build} and this aw is ${BUILD_ID}; run aw daemon start to move it onto this build.\n`);
   }
   try {
     return await online(cmd, client);
   } finally {
     if (cmd.kind !== 'attach') client.close();
   }
+}
+
+/**
+ * `aw daemon …` (#130). The daemon runs from the same bundle (or checkout) as
+ * this `aw`, so `aw daemon start` from a newer install is also the update.
+ */
+function daemonCommand(cmd: Extract<Command, { kind: 'daemon' }>, dirs: ReturnType<typeof defaultRunDirs>): Promise<number> {
+  // Quiet: the runtime clone and launchctl log progress, which a terminal does not need.
+  const log = (m: string) => {
+    if (process.env.AW_DEBUG) process.stderr.write(`${m}\n`);
+  };
+  const agent = coreDaemonAgentFor(__dirname, dirs, log);
+  return runDaemonCommand(cmd, agent, {
+    out: (t) => process.stdout.write(t),
+    err: (t) => process.stderr.write(t),
+    env: process.env,
+    now: Date.now,
+  });
 }
 
 /** The app is quit: read what can be read, refuse the rest. */
@@ -183,6 +241,60 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
       print(r, () => formatTasks(r.tasks, now), cmd.json);
       return 0;
     }
+    case 'remember':
+    case 'forget': {
+      const origin = originOf(process.env);
+      if (!origin) {
+        process.stderr.write(`aw ${cmd.kind}: run this inside a durable agent's conversation. To change an agent's memory yourself, use Agents in the app.\n`);
+        return 2;
+      }
+      const text = cmd.kind === 'remember' ? (cmd.text ?? (await readStdin())) : undefined;
+      if (cmd.kind === 'remember' && !text?.trim()) {
+        process.stderr.write('aw remember: the note is empty.\n');
+        return 2;
+      }
+      const params: ControlAgentProposeParams =
+        cmd.kind === 'remember'
+          ? { origin, op: 'add', text: text!, ...(cmd.memoryKind ? { kind: cmd.memoryKind } : {}) }
+          : { origin, op: 'forget', itemId: cmd.itemId };
+      const r = await client.request<ControlAgentProposeResult>('agent.propose', params);
+      print(
+        r,
+        () =>
+          r.proposalId
+            ? `Proposed to ${safe(r.agent)}'s user. Nothing is stored until they approve it in Agent Wrangler; carry on without waiting.`
+            : `Nothing new: ${safe(r.agent)}'s memory already says that, or the same proposal is waiting.`,
+        cmd.json,
+      );
+      return 0;
+    }
+    case 'web': {
+      const r = await client.request<ControlWebLinkResult>('web.link');
+      if (cmd.action === 'url') {
+        process.stdout.write(`${r.url}\n`);
+        process.stderr.write('Good once, for 2 minutes. Anyone who opens it first is signed in as you.\n');
+        return 0;
+      }
+      await openInBrowser(r.url);
+      process.stdout.write('Opened Agent Wrangler in your browser.\n');
+      return 0;
+    }
+    case 'webPair': {
+      const r = await client.request<ControlWebPairResult>('web.pair');
+      process.stdout.write(qrToTerminal(encodeQr(r.setupUrl ?? r.url, 'M'), { ansi: process.stdout.isTTY === true }));
+      process.stdout.write(`\n${formatWebPair(r, Date.now())}\n`);
+      return 0;
+    }
+    case 'webDevices': {
+      const r = await client.request<ControlWebDevicesResult>('web.devices');
+      print(r, () => formatWebDevices(r.devices, now, width()), cmd.json);
+      return 0;
+    }
+    case 'webRevoke': {
+      const r = await client.request<ControlWebRevokeResult>('web.devices.revoke', { id: cmd.id });
+      process.stdout.write(`Revoked ${safe(r.device.name)} (${r.device.id.slice(0, 8)}). Its open tabs have been disconnected.\n`);
+      return 0;
+    }
     default:
       return 2;
   }
@@ -238,6 +350,13 @@ function attach(ref: string, client: ControlClient): Promise<number> {
         reject(err);
       },
     );
+  });
+}
+
+/** The default browser, by macOS's `open`. The link is an argument, never through a shell. */
+function openInBrowser(url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('open', [url], (err) => (err ? reject(new Error(`could not open the browser: ${err.message}`)) : resolve()));
   });
 }
 

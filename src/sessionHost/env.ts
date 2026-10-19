@@ -1,12 +1,13 @@
 /**
  * The environment `claude` runs with, built explicitly by the host.
  *
- * The host itself runs with `ELECTRON_RUN_AS_NODE=1` (that is how an Electron
- * binary runs a plain Node script), and inherits the LaunchServices variables
- * the app was started with. Left alone, all of it reaches `claude` and every
- * Bash or npm command it runs: an `electron` launched from a tool would then
- * behave as Node, and the tool would claim to be Agent Wrangler (spike S2,
- * playbook §11.6). Pure, so the rule is testable.
+ * A host inherits whatever the core was started with: the LaunchServices
+ * variables, Agent Wrangler's own `AW_*`, and, when `aw daemon start` ran in
+ * an Electron-based editor's terminal, `ELECTRON_RUN_AS_NODE=1` (hosts before
+ * #129 ran on Electron that way, too). Left alone, all of it reaches `claude`
+ * and every Bash or npm command it runs: an `electron` launched from a tool
+ * would then behave as Node, and the tool would claim to be Agent Wrangler
+ * (spike S2, playbook §11.6). Pure, so the rule is testable.
  */
 
 const STRIPPED_EXACT = new Set(['__CFBundleIdentifier', 'XPC_SERVICE_NAME']);
@@ -46,5 +47,8 @@ export function localClaudeEnv(base: Record<string, string | undefined>, provide
   out.ANTHROPIC_API_KEY = key || 'agent-wrangler-local';
   out.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(provider.contextWindow);
   if (provider.maxOutputTokens) out.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(provider.maxOutputTokens);
+  // Nothing of the user's in a small window (#158): no auto memory, no claude.ai connectors' tools.
+  out.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
+  out.ENABLE_CLAUDEAI_MCP_SERVERS = 'false';
   return out;
 }

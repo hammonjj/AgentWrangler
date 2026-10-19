@@ -1,0 +1,9 @@
+{
+  "name": "rate-limit-waits-then-succeeds",
+  "tasks": [{ "id": "a" }],
+  "scenario": {
+    "tasks": { "a": [{ "behaviour": "rate-limit", "retryAfterSec": 120, "delayMs": 2000 }] },
+    "default": { "behaviour": "edit", "delayMs": 2000 }
+  },
+  "expect": { "mission": "completed", "tasks": { "a": "done" }, "attempts": { "a": 2 } }
+}

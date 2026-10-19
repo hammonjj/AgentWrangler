@@ -104,6 +104,12 @@ export interface RouteCaps {
   maxEstimatedCostUsd?: number;
   /** Stop starting work when a usage window reaches this percentage. */
   maxUsageWindowPercent?: number;
+  /**
+   * Stop starting work for a mission once it has used this many percentage
+   * points of its source's usage window (#53): "keep this mission under 15% of
+   * the 5-hour window". Measured from the window when the mission first ran.
+   */
+  maxWindowSharePercent?: number;
   location?: 'local-only' | 'hosted-only';
 }
 
@@ -210,6 +216,44 @@ export interface TaskIntegration {
 /** How a mission ended up being finished (§13.3). */
 export type MissionFinish = 'merge-local' | 'pull-request' | 'keep' | 'discard';
 
+/**
+ * A finish the user started, recorded before anything outside AW's own
+ * records is touched (write-ahead, as `pendingMerge`) and cleared once its
+ * outcome is recorded. While it is there the mission's finish buttons are
+ * off, whatever surface asks. Present after a restart, or after a fault
+ * between the side effect and the record of it: the outcome is then read
+ * back from git (or `gh`) before anything is re-enabled.
+ */
+export interface PendingFinish {
+  /** One per finish that got through; a replay of the same request joins it. */
+  id: string;
+  how: MissionFinish;
+  at: Millis;
+  /** The result branch being merged or pushed. */
+  branch: string;
+  /**
+   * Its tip when the finish began: what "merged" is judged by, since a merge
+   * that went through tidies the branch itself away.
+   */
+  branchTip?: string;
+  /** For a merge: the base branch, and its tip when the finish began. */
+  into?: string;
+  baseTip?: string;
+  /**
+   * Set when the outcome could not be read back (git or `gh` would not
+   * answer). The buttons stay off until a check settles it one way or the
+   * other: re-enabling on a guess could merge twice.
+   */
+  uncertain?: { why: string; at: Millis };
+}
+
+/** The last finish that did not go through: shown with the buttons until the next one starts. */
+export interface FinishFailure {
+  how: MissionFinish;
+  why: string;
+  at: Millis;
+}
+
 export interface Mission {
   id: string;
   /** Schema version of this record (`MISSION_SCHEMA_VERSION`). */
@@ -273,6 +317,10 @@ export interface Mission {
   finish?: MissionFinish;
   /** What finishing left behind: the merge commit, or the pull request's address (#43). */
   finishResult?: { mergeCommit?: string; pullRequestUrl?: string; note?: string };
+  /** A finish under way (or cut off, and not yet reconciled). */
+  pendingFinish?: PendingFinish;
+  /** Why the last finish did not go through. Cleared when the next one starts. */
+  finishFailure?: FinishFailure;
   /**
    * The route a planned mission's tasks run on unless a task pins its own
    * (#43): the launcher's model and effort when the user pressed Approve and
@@ -642,6 +690,10 @@ export interface RoutingDecision {
    * later change does not reach it.
    */
   policyRevision?: number;
+  /** The budget strategy in force when this was decided (#53). Absent on older decisions: balanced. */
+  strategy?: NonNullable<RoutePreferences['strategy']>;
+  /** The fullest usage window of the target's source when decided, in percent (#53). Absent when not known. */
+  windowPercent?: number;
   decidedBy: 'router' | 'user';
   decidedAt: Millis;
 }
@@ -749,6 +801,23 @@ export interface AttemptFlags {
   staleBase?: boolean;
   /** Its session's host stopped answering; the host still holds it, so it is not interrupted (§23.3). */
   hostUnreachable?: boolean;
+  /** It changed files well outside its task's predicted scope (§13.4); review says so. */
+  outOfScope?: boolean;
+}
+
+/**
+ * How the files an attempt changed compare with its task's predicted scope
+ * (§13.4, #47). Measured when it finishes; absent when nothing was predicted
+ * or nothing changed.
+ */
+export interface AttemptScopeCheck {
+  /** Fraction of changed files inside the predicted scope (the `attempt` record's `scopeAccuracy`). */
+  accuracy: number;
+  changed: number;
+  /** Changed files outside it, the first few. */
+  outside: string[];
+  /** How many were outside, all of them. */
+  outsideCount: number;
 }
 
 /** One try at a task. Persisted as `launching` before the session is launched; never reopened (§7.2). */
@@ -773,6 +842,14 @@ export interface ExecutionAttempt {
   endedAt?: Millis;
   outcome?: AttemptOutcome;
   git?: AttemptGitStats;
+  /** Changed files against the predicted scope (§13.4). */
+  scope?: AttemptScopeCheck;
+  /**
+   * Exclusive resource leases held for it (§13.5, #47), by their qualified
+   * keys: taken before launch, bound to its session, released when it ends.
+   * On disk so a restarted core rebinds or releases them.
+   */
+  leases?: string[];
   verification: VerificationResult[];
   usage?: UsageSummary;
   /** Context size at the start and at the last request (#54). */
