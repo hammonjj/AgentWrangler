@@ -22,9 +22,20 @@ import type { RelayItem } from '../../shared/relay';
 
 type MessageListener = (data: Buffer, isBinary: boolean) => void;
 
+/** A traced item (#190) in a batch: what the click waiting on it saw of the queue. */
+export interface TracedItem {
+  cid: string;
+  /** How long it sat before its batch was taken. */
+  queuedMs: number;
+  /** Items ahead of it when it was queued. */
+  queueDepth: number;
+  /** A batch was in flight when it was queued. */
+  behindBatch: boolean;
+}
+
 export interface RelaySocketOptions {
-  /** Send one batch; resolves once it is handed to the relay. */
-  send(items: RelayItem[]): Promise<void>;
+  /** Send one batch; resolves once it is handed to the relay. `traced` is what a click is waiting on in it. */
+  send(items: RelayItem[], traced: TracedItem[]): Promise<void>;
   /** The socket ended, either way: leave the channel. */
   onEnd(): void;
   batchMs: number;
@@ -38,6 +49,7 @@ export class RelaySocket implements ClientSocket {
   private queuedBytes = 0;
   private flightBytes = 0;
   private sending = false;
+  private traced: { cid: string; at: number; depth: number; behind: boolean }[] = [];
   /** When the last batch's send settled. */
   private settledAt = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -57,6 +69,13 @@ export class RelaySocket implements ClientSocket {
 
   send(data: string): void {
     if (this.state !== this.OPEN) return;
+    this.push({ k: 'data', line: data }, data.length);
+  }
+
+  /** `send`, remembering when it was queued so its batch can say how long it waited. */
+  sendTraced(data: string, cid: string): void {
+    if (this.state !== this.OPEN) return;
+    this.traced.push({ cid, at: Date.now(), depth: this.queue.length, behind: this.sending });
     this.push({ k: 'data', line: data }, data.length);
   }
 
@@ -148,8 +167,11 @@ export class RelaySocket implements ClientSocket {
     this.queue = [];
     this.queuedBytes = 0;
     this.sending = true;
+    const at = Date.now();
+    const traced = this.traced.map((t) => ({ cid: t.cid, queuedMs: at - t.at, queueDepth: t.depth, behindBatch: t.behind }));
+    this.traced = [];
     this.opts
-      .send(batch)
+      .send(batch, traced)
       .catch(() => this.end())
       .finally(() => {
         this.sending = false;

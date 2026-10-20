@@ -50,6 +50,7 @@ import {
 } from '../../shared/webCapabilities';
 import { formatRoute } from '../../shared/appRoutes';
 import { REAUTH_STORAGE_KEY, REAUTH_TOKEN_PATH } from '../../shared/webReauth';
+import { ClickTrace } from '../common/clickTrace';
 import { openUrlHere, showHostView } from '../common/hostView';
 import { overlayDock, reserveDockSpace } from '../common/overlayDock';
 
@@ -130,6 +131,7 @@ function connect(): void {
     if (socket !== ws) return;
     socket = undefined;
     live = false;
+    clickTrace.reset();
     if (!opened) failedOpens++;
     scheduleReconnect();
   });
@@ -249,10 +251,30 @@ function onFrame(data: string): void {
     // are the app shell's, delivered as pane traffic is.
     if (onShell(body)) return;
   }
+  clickTrace.received(message);
   // Same delivery as the preload: a `message` event on the window, which is
   // what `paneApi.onMessage` listens for. Same-origin target, not `*`.
   window.postMessage(message, location.origin);
 }
+
+/** How many times this tab has reconnected: part of the reconnect rate #190 reports. */
+let reconnectCount = 0;
+window.addEventListener(RECONNECT_EVENT, () => {
+  reconnectCount++;
+});
+
+/** Times a row click from the click to the first content (#190); the numbers go to the daemon. */
+const clickTrace = new ClickTrace({
+  now: () => performance.now(),
+  // A task, then a frame, then a task: after the pane has handled the message and painted it.
+  afterPaint: (run) => setTimeout(() => requestAnimationFrame(() => setTimeout(run, 0)), 0),
+  afterIdle: (run) => {
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(() => run(), { timeout: 500 });
+    else setTimeout(run, 0);
+  },
+  report: (report) => sendShell({ type: 'trace', ...report }),
+  reconnects: () => reconnectCount,
+});
 
 function sendShell(body: ShellToHost): void {
   // Not kept for a resend: a prompt is cancelled server-side when its socket drops.
@@ -439,7 +461,8 @@ else window.addEventListener('DOMContentLoaded', renderBanner, { once: true });
 
 const host: Bridge = {
   remote: true,
-  postMessage(message) {
+  postMessage(original) {
+    const message = clickTrace.stamp(original);
     const line = JSON.stringify(message);
     const m = message as { commandId?: unknown; body?: { type?: unknown } } | null;
     // Every pane envelope has an id (`paneApi`); kept until acknowledged, so a

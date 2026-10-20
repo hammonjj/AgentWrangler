@@ -30,6 +30,8 @@ import { ownerContext, type RequestContext } from '../access';
 import type { ClientRegistry } from '../clients';
 import type { HostShell } from '../../host/hostServices';
 import { CommandResults } from './commandResults';
+import type { InteractionTracer } from './interactionTrace';
+import { parseTraceId } from '../../shared/trace';
 import { createShellChannel, type ShellConversation } from './shellChannel';
 import { SHELL_PANE, WIRE_PROTOCOL, isCommandId, parseShellToHost, type AppActionName, type HostToShell } from '../../shared/shellProtocol';
 
@@ -43,6 +45,8 @@ export interface ClientSocket {
   readonly readyState: number;
   readonly OPEN: number;
   send(data: string): void;
+  /** `send`, for a message a traced click is waiting on (#190): the relay times its batch. */
+  sendTraced?(data: string, cid: string): void;
   ping(): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
@@ -105,6 +109,8 @@ export interface BrowserConnectionsOptions {
   /** Shared by every connection, so a resend on a new one is recognised. */
   results?: CommandResults;
   limits?: Partial<ConnectionLimits>;
+  /** Times a row click end to end (#190). Absent: nothing is traced. */
+  tracer?: InteractionTracer;
 }
 
 export interface BrowserConnections extends Disposable {
@@ -146,14 +152,19 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
     // toasts and navigation back to it (#126), never identity (#123).
     const connectionId = `web-${++connectionSeq}`;
 
-    const sendNow = (envelope: unknown): boolean => {
+    const tracer = opts.tracer;
+    const transportKind = device.deviceScope === 'relay' ? 'relay' : 'lan';
+
+    const sendNow = (envelope: unknown, cid?: string): boolean => {
       if (!open) return false;
       if (ws.bufferedAmount > limits.maxBufferedBytes) {
         log(`web: closing ${connectionId}: ${ws.bufferedAmount} bytes unsent`);
         close(1013, 'backpressure');
         return false;
       }
-      ws.send(JSON.stringify(envelope));
+      const line = JSON.stringify(envelope);
+      if (cid && ws.sendTraced) ws.sendTraced(line, cid);
+      else ws.send(line);
       return true;
     };
 
@@ -173,6 +184,19 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
           }
           // In order: whatever the table is told next may assume the snapshot before it.
           snapshots.flush();
+        }
+        if (tracer) {
+          const pane = m?.pane;
+          const type = m?.body?.type;
+          if (pane === SHELL_PANE && type === 'navigate') tracer.navigated(connectionId);
+          else if (pane === 'conversation' && type === 'init') {
+            // The reply a waiting click is for: it carries the click's id back to the page.
+            const cid = tracer.awaiting(connectionId);
+            if (cid) {
+              tracer.initQueued(connectionId);
+              return sendNow({ ...(msg as object), cid }, cid);
+            }
+          }
         }
         return sendNow(msg);
       },
@@ -228,6 +252,10 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
         snapshots.setHidden(m.hidden);
         return;
       }
+      if (m.type === 'trace') {
+        tracer?.complete(connectionId, m);
+        return;
+      }
       shell.receive(body);
     };
 
@@ -241,8 +269,10 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
         return close(1007, 'not JSON');
       }
       if (!msg || typeof msg !== 'object') return;
-      const m = msg as { pane?: unknown; body?: unknown; commandId?: unknown };
+      const m = msg as { pane?: unknown; body?: unknown; commandId?: unknown; cid?: unknown };
       if (m.pane === SHELL_PANE) return onShell(m.body);
+      const cid = tracer ? parseTraceId(m.cid) : undefined;
+      if (cid && tracer) tracer.begin(connectionId, cid, transportKind);
       if (isCommandId(m.commandId)) {
         ack(m.commandId);
         if (typeof m.pane === 'string' && opts.isMutating(m.pane, m.body)) {
@@ -271,6 +301,7 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       open = false;
       if (ping) clearInterval(ping);
       if (ackTimer) clearImmediate(ackTimer);
+      tracer?.end(connectionId);
       snapshots.dispose();
       if (code !== undefined && ws.readyState === ws.OPEN) ws.close(code, reason);
       else ws.terminate();

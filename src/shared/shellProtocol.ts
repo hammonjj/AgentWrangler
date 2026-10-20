@@ -11,6 +11,8 @@
  * No Node or DOM imports: the server and the browser shim both use it.
  */
 
+import { parseTraceReport, type TraceReport } from './trace';
+
 export const SHELL_PANE = 'shell';
 
 /** A question a client is asked. Everything here is serialisable. */
@@ -136,11 +138,17 @@ export type ShellToHost =
   /** The client's half of the handshake (#128): what it was loaded as. */
   | { type: 'hello'; protocol: number; build: string }
   /** The tab was hidden or shown: a hidden one gets the table less often (#128). */
-  | { type: 'visibility'; hidden: boolean };
+  | { type: 'visibility'; hidden: boolean }
+  /** What a row click cost in this tab, once the conversation rendered (#190). Ids and numbers only. */
+  | ({ type: 'trace' } & TraceReport);
 
 /** A shell message as it arrives off the wire, checked. */
 export function parseShellToHost(body: unknown): ShellToHost | undefined {
   if (!body || typeof body !== 'object') return undefined;
+  if ((body as { type?: unknown }).type === 'trace') {
+    const report = parseTraceReport(body);
+    return report ? { type: 'trace', ...report } : undefined;
+  }
   const m = body as { type?: unknown; id?: unknown; value?: unknown; protocol?: unknown; build?: unknown; hidden?: unknown };
   if (m.type === 'hello') {
     if (typeof m.protocol !== 'number' || typeof m.build !== 'string') return undefined;
