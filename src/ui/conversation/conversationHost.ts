@@ -10,6 +10,7 @@ import { DelegationSuggestion, type ConversationDelegation } from './delegationS
 import * as fs from 'node:fs/promises';
 import { archivePage, archivedTool, subagentPath } from '../../claude/conversationArchive';
 import { transcriptPathFor } from '../../claude/transcriptHistory';
+import { RELAY_INIT_BLOCKS, recentWindow } from './initWindow';
 import * as path from 'node:path';
 import { projectNameFor } from '../../core/checkout';
 import type { HostDialogs } from '../../host/hostServices';
@@ -424,11 +425,17 @@ export class ConversationHost {
     const init = await source.init();
     if (this.source !== source) return; // swapped while we read
     const memory = this.agentMemory();
+    // A remote tab opens on a small recent window, the rest paged in on demand (#192). Only
+    // Claude sessions can page (`archive`); a Codex thread is sent whole.
+    const window =
+      session.provider === 'claude' && this.access.context.deviceScope === 'relay'
+        ? recentWindow(init.blocks, RELAY_INIT_BLOCKS)
+        : { blocks: init.blocks, trimmed: false };
     this.post({
       type: 'init',
       session,
-      blocks: init.blocks,
-      truncated: init.truncated,
+      blocks: window.blocks,
+      truncated: init.truncated || window.trimmed,
       caps: await this.caps(session),
       composer: source.composer,
       task: this.taskView(),
