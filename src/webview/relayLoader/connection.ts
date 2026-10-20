@@ -20,17 +20,19 @@ import {
   newRelayId,
   parseSealedPart,
   sealConnect,
+  silenceVerdict,
   type RelayItem,
 } from '../../shared/relay';
 
 /** How long the daemon has to answer a connect before the Mac counts as unreachable. */
 const OPEN_TIMEOUT_MS = 12_000;
 /**
- * The daemon pings every 30 s, so this long without a frame means it has dropped this tab or
- * cannot reach it. Nothing else would say so: the channel stays subscribed from this end, and
- * a tab that went on sending into it would wait for acks and updates that never come.
+ * The daemon pings every `RELAY_PING_MS`; `RELAY_SILENCE_MS` (three periods) without a frame
+ * means it has dropped this tab or cannot reach it. Nothing else would say so: the channel stays
+ * subscribed from this end, and a tab that went on sending into it would wait for acks and
+ * updates that never come. Before giving up the tab pings the daemon itself (#189), so a throttled
+ * timer or a sleep is not taken for a dead Mac.
  */
-const SILENCE_MS = 90_000;
 const SILENCE_CHECK_MS = 15_000;
 
 export interface RelayDevice {
@@ -54,8 +56,17 @@ export class RelayConnection {
   private closeListeners: ((reason: string) => void)[] = [];
   private lastHeard = Date.now();
   private silenceTimer: ReturnType<typeof setInterval> | undefined;
+  /** When this tab last pinged a silent daemon, until something is heard. */
+  private probedAt: number | undefined;
   private readonly checkSilence = () => {
-    if (Date.now() - this.lastHeard > SILENCE_MS) this.end('silent');
+    if (this.closed) return;
+    const now = Date.now();
+    const verdict = silenceVerdict(now, this.lastHeard, this.probedAt);
+    if (verdict === 'dead') this.end('silent');
+    else if (verdict === 'probe') {
+      this.probedAt = now;
+      this.send({ k: 'ping' }, true);
+    }
   };
   /** Items that arrived before the socket listened (the hello, while assets load). */
   private held: RelayItem[] = [];

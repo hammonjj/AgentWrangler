@@ -14,6 +14,7 @@
 import { ownerContext, type RequestContext } from '../../core/access';
 import { Emitter, type Disposable } from '../../core/events';
 import type { ClientSocket } from '../../core/web/browserConnections';
+import type { InteractionTracer } from '../../core/web/interactionTrace';
 import {
   RELAY_BATCH_MS,
   RELAY_EVENT_CONNECT,
@@ -68,6 +69,8 @@ export interface RelayLinkOptions {
   /** Open tabs per device. Default 4. */
   maxTabsPerDevice?: number;
   batchMs?: number;
+  /** Told how each traced batch went (#190). */
+  tracer?: Pick<InteractionTracer, 'relayBatch'>;
   /**
    * The lobby stopped hearing its own probe (#186): a phone's `connect` would go unheard too.
    * The caller rebuilds the link.
@@ -136,6 +139,12 @@ export interface RelayCounts {
   sentBytes: number;
   receivedMessages: number;
   receivedBytes: number;
+  /** Batches sent, and the time spent sealing them and handing them to Supabase (#190). */
+  batches: number;
+  sealMs: number;
+  sendMs: number;
+  /** Tabs opened: a tab that reconnects opens a new one, so this is the reconnect count too. */
+  tabsOpened: number;
   since: number;
 }
 
@@ -174,9 +183,13 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
   const seen = new Map<string, number>();
   const changed = new Emitter<void>();
   let disposed = false;
-  const counts: RelayCounts = { sentMessages: 0, sentBytes: 0, receivedMessages: 0, receivedBytes: 0, since: now() };
+  const fresh = (): RelayCounts => ({
+    sentMessages: 0, sentBytes: 0, receivedMessages: 0, receivedBytes: 0, batches: 0, sealMs: 0, sendMs: 0, tabsOpened: 0, since: now(),
+  });
+  const counts: RelayCounts = fresh();
 
-  const count = (dir: 'sent' | 'received', payload: unknown) => {
+  /** Count one payload and say how many bytes it was. */
+  const count = (dir: 'sent' | 'received', payload: unknown): number => {
     const bytes = JSON.stringify(payload).length;
     if (dir === 'sent') {
       counts.sentMessages++;
@@ -185,6 +198,7 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
       counts.receivedMessages++;
       counts.receivedBytes += bytes;
     }
+    return bytes;
   };
 
   let lostTimer: ReturnType<typeof setTimeout> | undefined;
@@ -293,16 +307,34 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
     let ended = false;
     const socket = new RelaySocket({
       batchMs,
-      send: async (items) => {
+      send: async (items, traced) => {
         const started = now();
         const parts = await codec.seal(items);
+        const sealed = now();
+        let bytes = 0;
         for (const part of parts) {
-          count('sent', part);
+          bytes += count('sent', part);
           await channel.send(RELAY_EVENT_FRAME, part);
         }
+        const finished = now();
         // Everything behind this batch waited as long: the clue when a remote tab feels slow.
-        const took = now() - started;
+        const took = finished - started;
         if (took >= SLOW_SEND_MS) log(`relay: a batch of ${items.length} items in ${parts.length} parts took ${took} ms to send`);
+        counts.batches++;
+        counts.sealMs += sealed - started;
+        counts.sendMs += finished - sealed;
+        for (const t of traced) {
+          opts.tracer?.relayBatch(t.cid, {
+            items: items.length,
+            queueDepth: t.queueDepth,
+            behindBatch: t.behindBatch,
+            queuedMs: t.queuedMs,
+            sealMs: sealed - started,
+            sendMs: finished - sealed,
+            parts: parts.length,
+            bytes,
+          });
+        }
       },
       onEnd: () => {
         if (ended) return;
@@ -340,6 +372,7 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
     const vapid = opts.vapidKey?.();
     socket.sendFirst({ k: 'open', build: opts.build(), protocol: RELAY_PROTOCOL, ...(vapid ? { vapid } : {}) });
     opts.attach(socket, ownerContext('browser', { deviceId: req.d, deviceScope: 'relay' }));
+    counts.tabsOpened++;
     log(`relay: tab opened for device ${req.d.slice(0, 8)} (${tabs.size} open)`);
     changed.fire();
   }
@@ -399,10 +432,11 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
   // A daily line, so drift toward the free tier's quota shows in the log first.
   const daily = setInterval(() => {
     log(
-      `relay: last 24 h sent ${counts.sentMessages} messages (${Math.round(counts.sentBytes / 1024)} KB), ` +
-        `received ${counts.receivedMessages} (${Math.round(counts.receivedBytes / 1024)} KB)`,
+      `relay: last 24 h sent ${counts.sentMessages} messages (${Math.round(counts.sentBytes / 1024)} KB) in ${counts.batches} batches ` +
+        `(seal ${counts.sealMs} ms, send+ack ${counts.sendMs} ms), received ${counts.receivedMessages} (${Math.round(counts.receivedBytes / 1024)} KB), ` +
+        `${counts.tabsOpened} tabs opened`,
     );
-    Object.assign(counts, { sentMessages: 0, sentBytes: 0, receivedMessages: 0, receivedBytes: 0, since: now() });
+    Object.assign(counts, fresh());
   }, 24 * 60 * 60 * 1000);
   daily.unref?.();
 

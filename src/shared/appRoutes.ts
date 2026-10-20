@@ -171,6 +171,20 @@ export function surfaceFor(route: AppRoute, layout: ShellLayout, tableView?: Tab
 }
 
 /**
+ * Whether the table's pane is on screen for a surface. The conversation and the shell's own
+ * pages hide it, and a table nobody can see is not sent snapshots (#191).
+ */
+export function tableShownOn(surface: ShellSurface): boolean {
+  return surface !== 'conversation' && surface !== 'page';
+}
+
+/** `tableShownOn` for the surface a page's body classes (`aw-surface-*`, set by the shell) name; shown when none does. */
+export function tableShownForClasses(classes: { contains(name: string): boolean }): boolean {
+  for (const s of ['conversation', 'page'] as const) if (classes.contains(`aw-surface-${s}`)) return false;
+  return true;
+}
+
+/**
  * Where the shell's Back button goes from a route that hides the table:
  * the table view last used, or Preferences from a page under it.
  */

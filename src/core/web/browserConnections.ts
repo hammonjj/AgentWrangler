@@ -24,12 +24,15 @@
  * client, so prompts, toasts and navigation its own clicks cause come back to
  * it (#126). Run by the core daemon.
  */
+import { createHash } from 'node:crypto';
 import type { RawData } from 'ws';
 import { Emitter, type Disposable } from '../events';
 import { ownerContext, type RequestContext } from '../access';
 import type { ClientRegistry } from '../clients';
 import type { HostShell } from '../../host/hostServices';
 import { CommandResults } from './commandResults';
+import type { InteractionTracer } from './interactionTrace';
+import { parseTraceId } from '../../shared/trace';
 import { createShellChannel, type ShellConversation } from './shellChannel';
 import { SHELL_PANE, WIRE_PROTOCOL, isCommandId, parseShellToHost, type AppActionName, type HostToShell } from '../../shared/shellProtocol';
 
@@ -43,11 +46,47 @@ export interface ClientSocket {
   readonly readyState: number;
   readonly OPEN: number;
   send(data: string): void;
+  /**
+   * `send`, saying where in the queue the message goes and which click (#190) is waiting on it.
+   * A transport that queues behind a slow link (the relay) uses it so a reply to a click is not
+   * stuck behind a transcript (#193); one that does not simply has no such method.
+   */
+  sendWith?(data: string, meta: SendMeta): void;
   ping(): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
   on(event: 'message', listener: (data: RawData, isBinary: boolean) => void): unknown;
   on(event: 'pong' | 'close' | 'error', listener: () => void): unknown;
+}
+
+/**
+ * How soon a message needs to arrive, for a transport with a queue (#193). `interactive`: the
+ * answer to something a person just did. `live`: a conversation as it happens, batched. `bulk`:
+ * a whole table, a conversation's opening, a page of history, which may be overtaken.
+ */
+export type RelayLane = 'interactive' | 'live' | 'bulk';
+
+export interface SendMeta {
+  lane?: RelayLane;
+  /** Messages of one stream (a pane) are never reordered; streams may overtake each other. */
+  stream?: string;
+  /** The correlation id of the click this reply is for (#190). */
+  cid?: string;
+}
+
+const BULK_TYPES = new Set(['snapshot', 'init', 'archive', 'subagent', 'blockText', 'analyticsDetail']);
+const LIVE_TYPES = new Set(['append', 'patch', 'composer', 'session']);
+/** Anything this long is bulk whatever it is: a long line must not hold a click's reply behind it. */
+const BULK_LINE_CHARS = 32 * 1024;
+
+/** Which lane and stream an envelope belongs to. Unknown messages are interactive: small replies are the common case. */
+export function classifyEnvelope(envelope: unknown, chars: number): SendMeta {
+  const e = envelope as { pane?: unknown; body?: { type?: unknown } } | null;
+  const stream = typeof e?.pane === 'string' ? e.pane : '*';
+  const type = typeof e?.body?.type === 'string' ? e.body.type : '';
+  if (chars > BULK_LINE_CHARS || (stream !== SHELL_PANE && BULK_TYPES.has(type))) return { lane: 'bulk', stream };
+  if (stream !== SHELL_PANE && LIVE_TYPES.has(type)) return { lane: 'live', stream };
+  return { lane: 'interactive', stream };
 }
 
 /** What carries a document's pane envelopes; the pane hosts are written against it. */
@@ -105,6 +144,8 @@ export interface BrowserConnectionsOptions {
   /** Shared by every connection, so a resend on a new one is recognised. */
   results?: CommandResults;
   limits?: Partial<ConnectionLimits>;
+  /** Times a row click end to end (#190). Absent: nothing is traced. */
+  tracer?: InteractionTracer;
 }
 
 export interface BrowserConnections extends Disposable {
@@ -146,14 +187,19 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
     // toasts and navigation back to it (#126), never identity (#123).
     const connectionId = `web-${++connectionSeq}`;
 
-    const sendNow = (envelope: unknown): boolean => {
+    const tracer = opts.tracer;
+    const transportKind = device.deviceScope === 'relay' ? 'relay' : 'lan';
+
+    const sendNow = (envelope: unknown, cid?: string): boolean => {
       if (!open) return false;
       if (ws.bufferedAmount > limits.maxBufferedBytes) {
         log(`web: closing ${connectionId}: ${ws.bufferedAmount} bytes unsent`);
         close(1013, 'backpressure');
         return false;
       }
-      ws.send(JSON.stringify(envelope));
+      const line = JSON.stringify(envelope);
+      if (ws.sendWith) ws.sendWith(line, { ...classifyEnvelope(envelope, line.length), ...(cid ? { cid } : {}) });
+      else ws.send(line);
       return true;
     };
 
@@ -173,6 +219,19 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
           }
           // In order: whatever the table is told next may assume the snapshot before it.
           snapshots.flush();
+        }
+        if (tracer) {
+          const pane = m?.pane;
+          const type = m?.body?.type;
+          if (pane === SHELL_PANE && type === 'navigate') tracer.navigated(connectionId);
+          else if (pane === 'conversation' && type === 'init') {
+            // The reply a waiting click is for: it carries the click's id back to the page.
+            const cid = tracer.awaiting(connectionId);
+            if (cid) {
+              tracer.initQueued(connectionId);
+              return sendNow({ ...(msg as object), cid }, cid);
+            }
+          }
         }
         return sendNow(msg);
       },
@@ -225,7 +284,14 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
         return;
       }
       if (m.type === 'visibility') {
-        snapshots.setHidden(m.hidden);
+        // The table is out of sight when the tab is hidden, or when the pane it lives in is: a
+        // phone showing a conversation has no use for table snapshots (#191). `table` absent is
+        // an older page, which has the table wherever it has the tab.
+        snapshots.setHidden(m.hidden || m.table === false);
+        return;
+      }
+      if (m.type === 'trace') {
+        tracer?.complete(connectionId, m);
         return;
       }
       shell.receive(body);
@@ -241,8 +307,13 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
         return close(1007, 'not JSON');
       }
       if (!msg || typeof msg !== 'object') return;
-      const m = msg as { pane?: unknown; body?: unknown; commandId?: unknown };
+      const m = msg as { pane?: unknown; body?: unknown; commandId?: unknown; cid?: unknown };
       if (m.pane === SHELL_PANE) return onShell(m.body);
+      const cid = tracer ? parseTraceId(m.cid) : undefined;
+      if (cid && tracer) tracer.begin(connectionId, cid, transportKind);
+      // A pane that says `ready` has just (re)drawn from nothing: it is owed the table whatever
+      // the last one said.
+      if (m.pane === 'dashboard' && (m.body as { type?: unknown } | null)?.type === 'ready') snapshots.invalidate();
       if (isCommandId(m.commandId)) {
         ack(m.commandId);
         if (typeof m.pane === 'string' && opts.isMutating(m.pane, m.body)) {
@@ -271,6 +342,7 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       open = false;
       if (ping) clearInterval(ping);
       if (ackTimer) clearImmediate(ackTimer);
+      tracer?.end(connectionId);
       snapshots.dispose();
       if (code !== undefined && ws.readyState === ws.OPEN) ws.close(code, reason);
       else ws.terminate();
@@ -331,6 +403,10 @@ export class SnapshotCoalescer implements Disposable {
   private pending: unknown;
   private timer: NodeJS.Timeout | undefined;
   private hidden = false;
+  /** What the page was last sent, so a snapshot that says nothing new is not sent again (#191). */
+  private sentPrint: string | undefined;
+  /** Snapshots held back because they matched what was sent: the traffic this saved. */
+  skipped = 0;
 
   constructor(
     private readonly send: (envelope: unknown) => void,
@@ -348,6 +424,12 @@ export class SnapshotCoalescer implements Disposable {
     if (this.pending !== undefined) this.emit(false);
   }
 
+  /** The page has lost whatever it was showing (it re-initialised): the next snapshot is sent whatever it says. */
+  invalidate(): void {
+    this.sentPrint = undefined;
+  }
+
+  /** Hidden: the tab, or the pane the table is in. A page coming back gets the latest state at once. */
   setHidden(hidden: boolean): void {
     if (hidden === this.hidden) return;
     this.hidden = hidden;
@@ -386,8 +468,31 @@ export class SnapshotCoalescer implements Disposable {
     this.pending = undefined;
     if (envelope === undefined) return;
     this.last = this.now();
+    const print = snapshotFingerprint(envelope);
+    if (print !== undefined && print === this.sentPrint) {
+      this.skipped++;
+      return;
+    }
+    this.sentPrint = print;
     this.send(delayed ? restamp(envelope) : envelope);
   }
+}
+
+/**
+ * Fields that change with the clock or the build of a snapshot rather than with what the table
+ * shows. The page ages rows against its own clock, so `nowMs` is not needed to keep them right.
+ */
+const VOLATILE_SNAPSHOT_FIELDS: readonly string[] = ['nowMs'];
+
+/**
+ * A digest of what a snapshot says, ignoring `VOLATILE_SNAPSHOT_FIELDS`. Equal digests mean the
+ * page already shows this table. Undefined for anything that is not an object (always sent).
+ */
+export function snapshotFingerprint(envelope: unknown): string | undefined {
+  const body = (envelope as { body?: unknown } | null)?.body;
+  if (!body || typeof body !== 'object') return undefined;
+  const json = JSON.stringify(body, (key, value) => (VOLATILE_SNAPSHOT_FIELDS.includes(key) ? undefined : value));
+  return createHash('sha1').update(json).digest('base64');
 }
 
 /**

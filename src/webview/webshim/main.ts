@@ -48,8 +48,9 @@ import {
   shouldShowNotifyBanner,
   type NotificationState,
 } from '../../shared/webCapabilities';
-import { formatRoute } from '../../shared/appRoutes';
+import { formatRoute, tableShownForClasses } from '../../shared/appRoutes';
 import { REAUTH_STORAGE_KEY, REAUTH_TOKEN_PATH } from '../../shared/webReauth';
+import { ClickTrace } from '../common/clickTrace';
 import { openUrlHere, showHostView } from '../common/hostView';
 import { overlayDock, reserveDockSpace } from '../common/overlayDock';
 
@@ -130,6 +131,7 @@ function connect(): void {
     if (socket !== ws) return;
     socket = undefined;
     live = false;
+    clickTrace.reset();
     if (!opened) failedOpens++;
     scheduleReconnect();
   });
@@ -173,12 +175,37 @@ window.addEventListener('online', reconnectNow);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) reconnectNow();
   if (live) {
-    sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden } });
+    sendVisibility();
     // The permission may have been changed in the browser's settings meanwhile.
     reportNotifications();
     renderBanner();
   }
 });
+
+/** What the daemon was last told, so a class change that moves nothing says nothing. */
+let lastVisibility: string | undefined;
+
+/**
+ * Tell the daemon whether this tab is hidden and whether the table's pane is on screen (#191):
+ * a phone showing a conversation, or a Preferences page, has no use for table snapshots.
+ */
+function sendVisibility(): void {
+  if (!live) return;
+  const table = document.body ? tableShownForClasses(document.body.classList) : true;
+  const key = `${document.hidden}|${table}`;
+  if (key === lastVisibility) return;
+  lastVisibility = key;
+  sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden, table } });
+}
+
+// The shell moves between surfaces by changing `aw-surface-*` on the body.
+if (typeof MutationObserver === 'function') {
+  const watch = () => {
+    if (document.body) new MutationObserver(sendVisibility).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  };
+  if (document.body) watch();
+  else window.addEventListener('DOMContentLoaded', watch, { once: true });
+}
 
 function sendRaw(envelope: unknown): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(envelope));
@@ -212,7 +239,8 @@ function onHello(protocol: number, build: string): void {
   live = true;
   attempt = 0;
   keepRecoveryToken();
-  sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden } });
+  lastVisibility = undefined;
+  sendVisibility();
   reportNotifications();
   // What was not acknowledged before the drop. A pane's old `ready` is
   // dropped: each pane sends a new one now, ahead of anything resent, so the
@@ -249,10 +277,30 @@ function onFrame(data: string): void {
     // are the app shell's, delivered as pane traffic is.
     if (onShell(body)) return;
   }
+  clickTrace.received(message);
   // Same delivery as the preload: a `message` event on the window, which is
   // what `paneApi.onMessage` listens for. Same-origin target, not `*`.
   window.postMessage(message, location.origin);
 }
+
+/** How many times this tab has reconnected: part of the reconnect rate #190 reports. */
+let reconnectCount = 0;
+window.addEventListener(RECONNECT_EVENT, () => {
+  reconnectCount++;
+});
+
+/** Times a row click from the click to the first content (#190); the numbers go to the daemon. */
+const clickTrace = new ClickTrace({
+  now: () => performance.now(),
+  // A task, then a frame, then a task: after the pane has handled the message and painted it.
+  afterPaint: (run) => setTimeout(() => requestAnimationFrame(() => setTimeout(run, 0)), 0),
+  afterIdle: (run) => {
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(() => run(), { timeout: 500 });
+    else setTimeout(run, 0);
+  },
+  report: (report) => sendShell({ type: 'trace', ...report }),
+  reconnects: () => reconnectCount,
+});
 
 function sendShell(body: ShellToHost): void {
   // Not kept for a resend: a prompt is cancelled server-side when its socket drops.
@@ -439,7 +487,8 @@ else window.addEventListener('DOMContentLoaded', renderBanner, { once: true });
 
 const host: Bridge = {
   remote: true,
-  postMessage(message) {
+  postMessage(original) {
+    const message = clickTrace.stamp(original);
     const line = JSON.stringify(message);
     const m = message as { commandId?: unknown; body?: { type?: unknown } } | null;
     // Every pane envelope has an id (`paneApi`); kept until acknowledged, so a

@@ -43,6 +43,8 @@ import { createWebFiles } from './webFiles';
 import type { ConversationHostUi } from '../ui/conversation/conversationHost';
 import { renderBrowserWorkbenchHtml } from '../ui/html';
 import { isMutatingPaneMessage } from '../ui/paneMutations';
+import { RELAY_PING_MS } from '../shared/relay';
+import { InteractionTracer } from '../core/web/interactionTrace';
 
 export interface BrowserClientsOptions {
   app: AgentWranglerApp;
@@ -61,18 +63,21 @@ export interface BrowserClientsOptions {
   preferences?: PreferencesBackend;
   /** Connection limits other than the defaults (the relay's, #173). */
   limits?: Partial<ConnectionLimits>;
+  /** Times a row click end to end, for LAN and relay tabs alike (#190). */
+  tracer?: InteractionTracer;
 }
 
 /**
  * A remote tab over the relay (#173; plan §4): the table at most every 5 s and not at all while
- * hidden (it gets one on coming back), and a ping every two minutes rather than every 30 s.
- * Every frame is a billed Supabase message.
+ * hidden (it gets one on coming back), and a ping every `RELAY_PING_MS` rather than every 30 s.
+ * Every frame is a billed Supabase message. The tab's silence timeout is a multiple of the ping
+ * period (`RELAY_SILENCE_MS`), so a quiet link is never mistaken for a dead one (#189).
  */
 export const RELAY_CONNECTION_LIMITS: Partial<ConnectionLimits> = {
   maxBufferedBytes: 4 * 1024 * 1024,
   snapshotIntervalMs: 5_000,
   hiddenSnapshotIntervalMs: 24 * 60 * 60 * 1000,
-  pingIntervalMs: 120_000,
+  pingIntervalMs: RELAY_PING_MS,
 };
 
 export interface BrowserClients extends Disposable {
@@ -92,6 +97,7 @@ export function createBrowserClients(opts: BrowserClientsOptions): BrowserClient
     ...(opts.hostShell ? { hostShell: opts.hostShell } : {}),
     isMutating: isMutatingPaneMessage,
     ...(opts.limits ? { limits: opts.limits } : {}),
+    ...(opts.tracer ? { tracer: opts.tracer } : {}),
     appAction: (action, context) => {
       // The same gate every mutating action passes (#123); a refusal is audited and does nothing.
       const name = action === 'restartCodex' ? 'codex.restart' : 'hooks.remove';
@@ -192,9 +198,13 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     relay: () => relay,
   });
 
+  // One for every tab, LAN or relay, so their numbers sit side by side in the log (#190).
+  const tracer = new InteractionTracer({ log });
+
   // Remote tabs (#173): their own connections, with the relay's limits. Nothing host-local:
   // no "Open on this Mac", no host paths, no folder browsing.
   const relayClients = createBrowserClients({
+    tracer,
     app,
     host,
     ui: { ...ui, allowRemotePath: () => false },
@@ -208,6 +218,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
   relay = startRelayService({
     host,
     devices,
+    tracer,
     webviewDir: opts.webviewDir,
     attach: (socket, context) => relayClients.attach(socket, context),
     closeDevice: (id) => void relayClients.closeDevice(id),
@@ -247,6 +258,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
     files.start();
     const extra = opts.extend?.({ files });
     const browsers = createBrowserClients({
+      tracer,
       app,
       host,
       ui: { ...ui, allowRemotePath: (p) => files.isStaged(p) },

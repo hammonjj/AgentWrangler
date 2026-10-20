@@ -41,6 +41,7 @@ import {
 import type { RelayActionId, SettingStatus } from '../shared/preferences';
 import { RELAY_PASSWORD_MIN, deriveRelayPassword, newRelayKey, relayPairingLink } from '../shared/relay';
 import { RELAY_WORKBENCH_PAGE } from '../ui/html';
+import type { InteractionTracer } from '../core/web/interactionTrace';
 
 export const RELAY_SETTING_KEYS = ['remote.relay.enabled', 'remote.relay.url', 'remote.relay.anonKey', 'remote.relay.siteUrl'] as const;
 export const RELAY_PAIR_PATH = '/remote/pair';
@@ -53,6 +54,8 @@ const RETRY_MAX_MS = 60 * 60 * 1000;
 export interface RelayServiceOptions {
   host: HostServices;
   devices: WebDeviceStore;
+  /** Told how each traced batch went (#190). */
+  tracer?: InteractionTracer;
   /** `dist/webview`: the files a remote tab's page is made of. */
   webviewDir: string;
   /** Hand a remote tab to its own `browserConnections`. */
@@ -245,6 +248,7 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
         onPush,
         daemonId: daemonId(),
         log,
+        ...(opts.tracer ? { tracer: opts.tracer } : {}),
         onLobbyLost: (reason) => {
           if (mine === generation) lobbyLost(reason);
         },

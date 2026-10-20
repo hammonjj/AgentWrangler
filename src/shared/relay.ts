@@ -37,6 +37,32 @@ export const RELAY_CONNECT_WINDOW_MS = 2 * 60 * 1000;
 /** A batch, reassembled, may not inflate past this: a bound on what a peer can make us hold. */
 export const RELAY_MAX_BATCH_BYTES = 16 * 1024 * 1024;
 
+/**
+ * The daemon pings a remote tab this often (each ping and its pong is a billed message). A tab
+ * that misses one pong is dropped at the next ping, so a dead peer is found within two periods.
+ */
+export const RELAY_PING_MS = 60_000;
+/**
+ * A tab hearing nothing for this long (three ping periods: two missed pings, plus jitter) asks
+ * the daemon directly before it gives up, so a timer throttled by a hidden window or a sleep
+ * does not read as a dead Mac.
+ */
+export const RELAY_SILENCE_MS = 3 * RELAY_PING_MS;
+/** After a silent tab pings, how long the daemon has to answer before the tab ends. */
+export const RELAY_SILENCE_PROBE_MS = 15_000;
+
+export type SilenceVerdict = 'ok' | 'probe' | 'dead';
+
+/**
+ * The tab's liveness rule, pure so it can be tested on a fake clock: quiet for `RELAY_SILENCE_MS`
+ * means send one probe; still nothing `RELAY_SILENCE_PROBE_MS` after it means dead. Anything
+ * heard resets both (`lastHeard` moves past `probedAt`).
+ */
+export function silenceVerdict(now: number, lastHeard: number, probedAt: number | undefined): SilenceVerdict {
+  if (probedAt !== undefined && probedAt >= lastHeard) return now - probedAt > RELAY_SILENCE_PROBE_MS ? 'dead' : 'ok';
+  return now - lastHeard > RELAY_SILENCE_MS ? 'probe' : 'ok';
+}
+
 export function lobbyTopic(uid: string): string {
   return `aw:${uid}:lobby`;
 }

@@ -20,7 +20,7 @@ vi.mock('../src/remote/relay/relayLink', async (importOriginal) => ({
     const listeners: (() => void)[] = [];
     const link = {
       tabs: 0,
-      counts: { sentMessages: 0, sentBytes: 0, receivedMessages: 0, receivedBytes: 0, since: 0 },
+      counts: { sentMessages: 0, sentBytes: 0, receivedMessages: 0, receivedBytes: 0, batches: 0, sealMs: 0, sendMs: 0, tabsOpened: 0, since: 0 },
       health: { checking: false, misses: 0 } as RelayHealth,
       checks: [] as string[],
       check(reason: string) {
