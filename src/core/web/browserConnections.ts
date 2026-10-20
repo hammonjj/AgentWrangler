@@ -46,13 +46,47 @@ export interface ClientSocket {
   readonly readyState: number;
   readonly OPEN: number;
   send(data: string): void;
-  /** `send`, for a message a traced click is waiting on (#190): the relay times its batch. */
-  sendTraced?(data: string, cid: string): void;
+  /**
+   * `send`, saying where in the queue the message goes and which click (#190) is waiting on it.
+   * A transport that queues behind a slow link (the relay) uses it so a reply to a click is not
+   * stuck behind a transcript (#193); one that does not simply has no such method.
+   */
+  sendWith?(data: string, meta: SendMeta): void;
   ping(): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
   on(event: 'message', listener: (data: RawData, isBinary: boolean) => void): unknown;
   on(event: 'pong' | 'close' | 'error', listener: () => void): unknown;
+}
+
+/**
+ * How soon a message needs to arrive, for a transport with a queue (#193). `interactive`: the
+ * answer to something a person just did. `live`: a conversation as it happens, batched. `bulk`:
+ * a whole table, a conversation's opening, a page of history, which may be overtaken.
+ */
+export type RelayLane = 'interactive' | 'live' | 'bulk';
+
+export interface SendMeta {
+  lane?: RelayLane;
+  /** Messages of one stream (a pane) are never reordered; streams may overtake each other. */
+  stream?: string;
+  /** The correlation id of the click this reply is for (#190). */
+  cid?: string;
+}
+
+const BULK_TYPES = new Set(['snapshot', 'init', 'archive', 'subagent', 'blockText', 'analyticsDetail']);
+const LIVE_TYPES = new Set(['append', 'patch', 'composer', 'session']);
+/** Anything this long is bulk whatever it is: a long line must not hold a click's reply behind it. */
+const BULK_LINE_CHARS = 32 * 1024;
+
+/** Which lane and stream an envelope belongs to. Unknown messages are interactive: small replies are the common case. */
+export function classifyEnvelope(envelope: unknown, chars: number): SendMeta {
+  const e = envelope as { pane?: unknown; body?: { type?: unknown } } | null;
+  const stream = typeof e?.pane === 'string' ? e.pane : '*';
+  const type = typeof e?.body?.type === 'string' ? e.body.type : '';
+  if (chars > BULK_LINE_CHARS || (stream !== SHELL_PANE && BULK_TYPES.has(type))) return { lane: 'bulk', stream };
+  if (stream !== SHELL_PANE && LIVE_TYPES.has(type)) return { lane: 'live', stream };
+  return { lane: 'interactive', stream };
 }
 
 /** What carries a document's pane envelopes; the pane hosts are written against it. */
@@ -164,7 +198,7 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
         return false;
       }
       const line = JSON.stringify(envelope);
-      if (cid && ws.sendTraced) ws.sendTraced(line, cid);
+      if (ws.sendWith) ws.sendWith(line, { ...classifyEnvelope(envelope, line.length), ...(cid ? { cid } : {}) });
       else ws.send(line);
       return true;
     };

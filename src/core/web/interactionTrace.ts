@@ -32,8 +32,6 @@ export interface RelayBatchStats {
   parts: number;
   /** Sealed bytes on the wire for the batch. */
   bytes: number;
-  /** Parts the relay had to send again. */
-  retries: number;
 }
 
 export interface TraceEntry {
@@ -222,7 +220,7 @@ export function formatEntry(e: TraceEntry): string {
   stages.push(`render ${e.renderMs}`);
   parts.push(`(${stages.join(', ')})`);
   if (e.relay) {
-    parts.push(`batch ${e.relay.items} items, ${e.relay.parts} parts, ${Math.round(e.relay.bytes / 1024)} KB, depth ${e.relay.queueDepth}, retries ${e.relay.retries}`);
+    parts.push(`batch ${e.relay.items} items, ${e.relay.parts} parts, ${Math.round(e.relay.bytes / 1024)} KB, depth ${e.relay.queueDepth}`);
   }
   if (e.reconnects > 0) parts.push(`reconnects ${e.reconnects}`);
   return parts.join(' ');

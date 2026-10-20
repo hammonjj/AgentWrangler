@@ -15,9 +15,24 @@
  *   still closes a connection whose phone stopped reading.
  *
  * Only one batch is in flight at a time: the next is sent when the previous one's send
- * settles, which keeps the parts of one batch together and in sequence.
+ * settles, which keeps the parts of one batch together and in sequence (the codec refuses a part
+ * that is not the next, and takes a batch's parts as contiguous). A queue that is one first-in
+ * first-out line would make a click's reply wait behind a whole transcript, so (#193) the queue
+ * has three lanes and the next batch is chosen from them:
+ *
+ * - `interactive`: replies to a command, prompts, navigation, acks, pongs. Sent at once, in a
+ *   batch of their own, without waiting out the batch window.
+ * - `live`: what a conversation streams as it happens (appends, patches). Batched by the window.
+ * - `bulk`: a table snapshot, a conversation's opening, an archive page, assets. Cut into
+ *   batches of at most `bulkBatchBytes`, each of which can be overtaken.
+ *
+ * What may not be overtaken is order within a *stream* (a pane): a table message that follows a
+ * snapshot is sent after it, and a conversation's patch after its opening. An item with no
+ * stream is ordered against everything, which is how `open`, `close` and anything unclassified
+ * keep the order they always had. The worst a click waits for is the one batch already in
+ * flight, and that is bounded by `bulkBatchBytes` and what one line is allowed to be.
  */
-import type { ClientSocket } from '../../core/web/browserConnections';
+import type { ClientSocket, RelayLane, SendMeta } from '../../core/web/browserConnections';
 import type { RelayItem } from '../../shared/relay';
 
 type MessageListener = (data: Buffer, isBinary: boolean) => void;
@@ -33,23 +48,48 @@ export interface TracedItem {
   behindBatch: boolean;
 }
 
+/** What a batch was, for the diagnostics and the stress tests. */
+export interface BatchInfo {
+  lane: RelayLane | 'mixed';
+  bytes: number;
+}
+
 export interface RelaySocketOptions {
   /** Send one batch; resolves once it is handed to the relay. `traced` is what a click is waiting on in it. */
-  send(items: RelayItem[], traced: TracedItem[]): Promise<void>;
+  send(items: RelayItem[], traced: TracedItem[], info: BatchInfo): Promise<void>;
   /** The socket ended, either way: leave the channel. */
   onEnd(): void;
   batchMs: number;
+  /** A bulk batch ends once it holds this many bytes (one item may pass it). Default 192 KB. */
+  bulkBatchBytes?: number;
+}
+
+/** After this many batches in a row that were not bulk, a waiting bulk batch goes next. */
+const BULK_EVERY = 8;
+const DEFAULT_BULK_BATCH_BYTES = 192 * 1024;
+/** Live and interactive items are small; one batch of them holds at most this much. */
+const LIVE_BATCH_BYTES = 192 * 1024;
+
+interface Entry {
+  item: RelayItem;
+  bytes: number;
+  lane: RelayLane;
+  /** `*`: ordered against every other item. */
+  stream: string;
+  traced?: { cid: string; at: number; depth: number; behind: boolean };
 }
 
 export class RelaySocket implements ClientSocket {
   readonly OPEN = 1;
   readonly CLOSED = 3;
   private state = 1;
-  private queue: RelayItem[] = [];
+  private queue: Entry[] = [];
   private queuedBytes = 0;
   private flightBytes = 0;
   private sending = false;
-  private traced: { cid: string; at: number; depth: number; behind: boolean }[] = [];
+  /** Closing: whatever is queued goes in one last batch, close last. */
+  private closing = false;
+  private notBulk = 0;
   /** When the last batch's send settled. */
   private settledAt = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -68,25 +108,26 @@ export class RelaySocket implements ClientSocket {
   }
 
   send(data: string): void {
-    if (this.state !== this.OPEN) return;
-    this.push({ k: 'data', line: data }, data.length);
+    this.sendWith(data, {});
   }
 
-  /** `send`, remembering when it was queued so its batch can say how long it waited. */
-  sendTraced(data: string, cid: string): void {
+  /** `send`, with where in the queue it goes (`SendMeta`) and, for a traced click, its id. */
+  sendWith(data: string, meta: SendMeta): void {
     if (this.state !== this.OPEN) return;
-    this.traced.push({ cid, at: Date.now(), depth: this.queue.length, behind: this.sending });
-    this.push({ k: 'data', line: data }, data.length);
+    const entry: Entry = { item: { k: 'data', line: data }, bytes: data.length, lane: meta.lane ?? 'live', stream: meta.stream ?? '*' };
+    if (meta.cid) entry.traced = { cid: meta.cid, at: Date.now(), depth: this.queue.length, behind: this.sending };
+    this.push(entry);
   }
 
   ping(): void {
     if (this.state !== this.OPEN) return;
-    this.push({ k: 'ping' }, 8);
+    this.push({ item: { k: 'ping' }, bytes: 8, lane: 'interactive', stream: 'ctl' });
   }
 
   close(code?: number, reason?: string): void {
     if (this.state !== this.OPEN) return;
-    this.push({ k: 'close', ...(code !== undefined ? { code } : {}), ...(reason ? { reason } : {}) }, 16);
+    this.push({ item: { k: 'close', ...(code !== undefined ? { code } : {}), ...(reason ? { reason } : {}) }, bytes: 16, lane: 'interactive', stream: '*' });
+    this.closing = true;
     this.flushNow();
     this.end();
   }
@@ -117,7 +158,7 @@ export class RelaySocket implements ClientSocket {
     for (const item of items) {
       if (this.state !== this.OPEN) return;
       if (item.k === 'data') for (const l of [...this.messageListeners]) l(Buffer.from(item.line, 'utf8'), false);
-      else if (item.k === 'ping') this.push({ k: 'pong' }, 8);
+      else if (item.k === 'ping') this.push({ item: { k: 'pong' }, bytes: 8, lane: 'interactive', stream: 'ctl' });
       else if (item.k === 'pong') for (const l of [...this.pongListeners]) l();
       else if (item.k === 'close') this.end();
     }
@@ -125,54 +166,109 @@ export class RelaySocket implements ClientSocket {
 
   /** Put an item first in line (the `open` that must precede everything the connection says). */
   sendFirst(item: RelayItem): void {
-    this.queue.unshift(item);
+    this.queue.unshift({ item, bytes: 64, lane: 'interactive', stream: '*' });
     this.queuedBytes += 64;
     this.schedule();
   }
 
-  /** Queue items the connection does not produce itself (assets). */
+  /** Queue items the connection does not produce itself (assets): bulk, ordered only among themselves. */
   sendItems(items: RelayItem[], bytes: number): void {
     if (this.state !== this.OPEN) return;
-    this.queue.push(...items);
-    this.queuedBytes += bytes;
-    this.schedule();
+    const each = Math.ceil(bytes / Math.max(1, items.length));
+    for (const item of items) this.push({ item, bytes: each, lane: 'bulk', stream: 'assets' });
   }
 
-  private push(item: RelayItem, bytes: number): void {
-    this.queue.push(item);
-    this.queuedBytes += bytes;
+  private push(entry: Entry): void {
+    this.queue.push(entry);
+    this.queuedBytes += entry.bytes;
     this.schedule();
   }
 
   /**
    * A link that has been quiet for `batchMs` sends on the next turn (so what one turn queues is
    * still one batch): waiting out the window there only delayed the answer to a click. Right
-   * after a batch, it waits the window out, which is what caps a stream of patches.
+   * after a batch, it waits the window out, which is what caps a stream of patches. Only `live`
+   * items are held to the window: an interactive reply goes when the batch in flight is done, and
+   * bulk is already cut into batches, so it goes back to back.
    */
   private schedule(): void {
     if (this.timer || this.sending) return;
-    const wait = Math.max(0, this.opts.batchMs - (Date.now() - this.settledAt));
+    const urgent = this.queue.some((e) => e.lane !== 'live');
+    const wait = urgent ? 0 : Math.max(0, this.opts.batchMs - (Date.now() - this.settledAt));
     this.timer = setTimeout(() => {
       this.timer = undefined;
       this.flushNow();
     }, wait);
   }
 
+  /**
+   * The next batch: interactive and live items first, in queue order, each only once nothing
+   * earlier in its stream is left behind; bulk when there is nothing else, or every `BULK_EVERY`th
+   * batch so a busy link cannot starve it.
+   */
+  private take(): { entries: Entry[]; lane: RelayLane | 'mixed' } {
+    if (this.closing) return { entries: this.queue.splice(0), lane: 'mixed' };
+    const bulkWaiting = this.queue.some((e) => e.lane === 'bulk');
+    const bulkTurn = bulkWaiting && this.notBulk >= BULK_EVERY;
+    const first = bulkTurn ? this.pick(['bulk'], this.opts.bulkBatchBytes ?? DEFAULT_BULK_BATCH_BYTES) : this.pick(['interactive', 'live'], LIVE_BATCH_BYTES);
+    if (first.length > 0) {
+      this.notBulk = bulkTurn ? 0 : this.notBulk + 1;
+      return { entries: first, lane: bulkTurn ? 'bulk' : first.every((e) => e.lane === 'interactive') ? 'interactive' : 'live' };
+    }
+    const bulk = this.pick(['bulk'], this.opts.bulkBatchBytes ?? DEFAULT_BULK_BATCH_BYTES);
+    this.notBulk = 0;
+    return { entries: bulk, lane: 'bulk' };
+  }
+
+  /** Remove and return the entries of these lanes that are free to go, stopping at `cap` bytes (one is always taken). */
+  private pick(lanes: RelayLane[], cap: number): Entry[] {
+    const out: Entry[] = [];
+    const taken = new Set<Entry>();
+    const blocked = new Set<string>();
+    let blockedAll = false;
+    let left = 0;
+    let bytes = 0;
+    for (const e of this.queue) {
+      const free = e.stream === '*' ? left === 0 : !blockedAll && !blocked.has(e.stream);
+      if (free && lanes.includes(e.lane) && (out.length === 0 || bytes + e.bytes <= cap)) {
+        out.push(e);
+        taken.add(e);
+        bytes += e.bytes;
+        continue;
+      }
+      left++;
+      blocked.add(e.stream);
+      if (e.stream === '*') blockedAll = true;
+    }
+    if (out.length > 0) this.queue = this.queue.filter((e) => !taken.has(e));
+    return out;
+  }
+
   private flushNow(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     if (this.sending || this.queue.length === 0) return;
-    const batch = this.queue;
-    this.flightBytes = this.queuedBytes;
-    this.queue = [];
-    this.queuedBytes = 0;
+    const { entries, lane } = this.take();
+    if (entries.length === 0) return;
+    const bytes = entries.reduce((n, e) => n + e.bytes, 0);
+    this.queuedBytes = Math.max(0, this.queuedBytes - bytes);
+    this.flightBytes = bytes;
     this.sending = true;
     const at = Date.now();
-    const traced = this.traced.map((t) => ({ cid: t.cid, queuedMs: at - t.at, queueDepth: t.depth, behindBatch: t.behind }));
-    this.traced = [];
+    const traced = entries.flatMap((e) => (e.traced ? [{ cid: e.traced.cid, queuedMs: at - e.traced.at, queueDepth: e.traced.depth, behindBatch: e.traced.behind }] : []));
     this.opts
-      .send(batch, traced)
-      .catch(() => this.end())
+      .send(
+        entries.map((e) => e.item),
+        traced,
+        { lane, bytes },
+      )
+      .catch(() => {
+        // A part that failed leaves the sequence broken: nothing queued behind it can be opened
+        // by the tab, so none of it is sent. The tab reconnects and resends its unacknowledged commands.
+        this.queue = [];
+        this.queuedBytes = 0;
+        this.end();
+      })
       .finally(() => {
         this.sending = false;
         this.settledAt = Date.now();

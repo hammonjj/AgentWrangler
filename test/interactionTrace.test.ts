@@ -118,7 +118,7 @@ describe('InteractionTracer (the daemon)', () => {
     at(120);
     tracer.initQueued('c1');
     expect(tracer.awaiting('c1')).toBeUndefined();
-    tracer.relayBatch('cid0000001', { items: 3, queueDepth: 2, behindBatch: true, queuedMs: 250, sealMs: 30, sendMs: 80, parts: 2, bytes: 200_000, retries: 0 });
+    tracer.relayBatch('cid0000001', { items: 3, queueDepth: 2, behindBatch: true, queuedMs: 250, sealMs: 30, sendMs: 80, parts: 2, bytes: 200_000 });
     const entry = tracer.complete('c1', report('cid0000001'))!;
     expect(entry).toMatchObject({ transport: 'relay', smartOpenMs: 20, initMs: 100, recvMs: 500, renderMs: 40, residualMs: 500 - 20 - 100 - 250 - 30 - 80 });
     expect(lines[0]).toContain('cid0000001 relay click→recv 500 ms');
@@ -132,7 +132,7 @@ describe('InteractionTracer (the daemon)', () => {
     tracer.initQueued('c1');
     const entry = tracer.complete('c1', report('cid0000002'))!;
     expect(entry.relay).toBeUndefined();
-    tracer.relayBatch('cid0000002', { items: 1, queueDepth: 0, behindBatch: false, queuedMs: 5, sealMs: 5, sendMs: 5, parts: 1, bytes: 10, retries: 0 });
+    tracer.relayBatch('cid0000002', { items: 1, queueDepth: 0, behindBatch: false, queuedMs: 5, sealMs: 5, sendMs: 5, parts: 1, bytes: 10 });
     expect(tracer.recent()[0].relay?.parts).toBe(1);
   });
 
@@ -177,8 +177,8 @@ describe('through browserConnections', () => {
       bufferedAmount: 0,
       out,
       send: (d: string) => void out.push(d),
-      sendTraced: (d: string, cid: string) => {
-        traced.push({ cid });
+      sendWith: (d: string, meta: { cid?: string }) => {
+        if (meta.cid) traced.push({ cid: meta.cid });
         out.push(d);
       },
       ping() {},
@@ -255,7 +255,7 @@ describe('RelaySocket traced batches', () => {
     socket.send('first');
     await tick(10);
     socket.send('ahead');
-    socket.sendTraced('mine', 'cid0000020');
+    socket.sendWith('mine', { cid: 'cid0000020' });
     release();
     await tick(10);
     release();

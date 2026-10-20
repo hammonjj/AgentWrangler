@@ -394,3 +394,50 @@ describe('relay lobby self-check (#186)', () => {
     expect(lost).toEqual([]);
   });
 });
+
+describe('relay link under a large transfer (#193)', () => {
+  it('answers a click ahead of the rest of a transcript, with every part still in sequence', async () => {
+    const hub = new Hub();
+    const key = newRelayKey();
+    const slow = (net: RelayNetwork): RelayNetwork => ({
+      ...net,
+      join: async (topic, opts) => {
+        const ch = await net.join(topic, opts);
+        // Each part takes 40 ms to be acknowledged, as over a real link.
+        const send = ch.send.bind(ch);
+        ch.send = async (event, payload) => {
+          await tick(40);
+          await send(event, payload);
+        };
+        return ch;
+      },
+    });
+    const bulk = Array.from({ length: 60 }, (_, i) => `${i}:${Array.from({ length: 4000 }, (_, j) => ((i * 7919 + j * 104729) % 9973).toString(36)).join('')}`);
+    const link = await startRelayLink({
+      network: slow(network(hub)),
+      keyOf: (id) => (id === 'dev1' ? key : undefined),
+      attach: (socket) => {
+        for (const line of bulk) socket.sendWith?.(JSON.stringify({ pane: 'conversation', body: { type: 'init', line } }), { lane: 'bulk', stream: 'conversation' });
+        socket.on('message', () => socket.sendWith?.('REPLY', { lane: 'interactive', stream: 'shell' }));
+      },
+      build: () => 'b1',
+      daemonId: 'daemon-1',
+      log: () => undefined,
+      batchMs: 5,
+    });
+    const tab = await browser(hub, 'dev1', key);
+    await until(() => tab.received.length >= 3);
+    await tab.send([{ k: 'data', line: 'click' }]);
+    await until(() => tab.received.length >= 1 + bulk.length + 1);
+    const at = (pred: (i: RelayItem) => boolean) => tab.received.findIndex(pred);
+    const reply = at((i) => i.k === 'data' && i.line === 'REPLY');
+    const last = at((i) => i.k === 'data' && i.line.includes(`"line":"${bulk.length - 1}:`));
+    expect(reply).toBeGreaterThan(0);
+    expect(last).toBeGreaterThan(reply);
+    // Nothing refused, nothing lost, nothing twice, bulk in order.
+    expect(tab.received.some((i) => i.k === 'close')).toBe(false);
+    const order = tab.received.flatMap((i) => (i.k === 'data' && i.line.includes('"type":"init"') ? [Number(JSON.parse(i.line).body.line.split(':')[0])] : []));
+    expect(order).toEqual(bulk.map((_, i) => i));
+    link.dispose();
+  });
+});

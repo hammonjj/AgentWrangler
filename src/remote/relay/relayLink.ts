@@ -333,7 +333,6 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
             sendMs: finished - sealed,
             parts: parts.length,
             bytes,
-            retries: 0,
           });
         }
       },
