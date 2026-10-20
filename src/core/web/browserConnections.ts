@@ -24,6 +24,7 @@
  * client, so prompts, toasts and navigation its own clicks cause come back to
  * it (#126). Run by the core daemon.
  */
+import { createHash } from 'node:crypto';
 import type { RawData } from 'ws';
 import { Emitter, type Disposable } from '../events';
 import { ownerContext, type RequestContext } from '../access';
@@ -249,7 +250,10 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
         return;
       }
       if (m.type === 'visibility') {
-        snapshots.setHidden(m.hidden);
+        // The table is out of sight when the tab is hidden, or when the pane it lives in is: a
+        // phone showing a conversation has no use for table snapshots (#191). `table` absent is
+        // an older page, which has the table wherever it has the tab.
+        snapshots.setHidden(m.hidden || m.table === false);
         return;
       }
       if (m.type === 'trace') {
@@ -273,6 +277,9 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       if (m.pane === SHELL_PANE) return onShell(m.body);
       const cid = tracer ? parseTraceId(m.cid) : undefined;
       if (cid && tracer) tracer.begin(connectionId, cid, transportKind);
+      // A pane that says `ready` has just (re)drawn from nothing: it is owed the table whatever
+      // the last one said.
+      if (m.pane === 'dashboard' && (m.body as { type?: unknown } | null)?.type === 'ready') snapshots.invalidate();
       if (isCommandId(m.commandId)) {
         ack(m.commandId);
         if (typeof m.pane === 'string' && opts.isMutating(m.pane, m.body)) {
@@ -362,6 +369,10 @@ export class SnapshotCoalescer implements Disposable {
   private pending: unknown;
   private timer: NodeJS.Timeout | undefined;
   private hidden = false;
+  /** What the page was last sent, so a snapshot that says nothing new is not sent again (#191). */
+  private sentPrint: string | undefined;
+  /** Snapshots held back because they matched what was sent: the traffic this saved. */
+  skipped = 0;
 
   constructor(
     private readonly send: (envelope: unknown) => void,
@@ -379,6 +390,12 @@ export class SnapshotCoalescer implements Disposable {
     if (this.pending !== undefined) this.emit(false);
   }
 
+  /** The page has lost whatever it was showing (it re-initialised): the next snapshot is sent whatever it says. */
+  invalidate(): void {
+    this.sentPrint = undefined;
+  }
+
+  /** Hidden: the tab, or the pane the table is in. A page coming back gets the latest state at once. */
   setHidden(hidden: boolean): void {
     if (hidden === this.hidden) return;
     this.hidden = hidden;
@@ -417,8 +434,31 @@ export class SnapshotCoalescer implements Disposable {
     this.pending = undefined;
     if (envelope === undefined) return;
     this.last = this.now();
+    const print = snapshotFingerprint(envelope);
+    if (print !== undefined && print === this.sentPrint) {
+      this.skipped++;
+      return;
+    }
+    this.sentPrint = print;
     this.send(delayed ? restamp(envelope) : envelope);
   }
+}
+
+/**
+ * Fields that change with the clock or the build of a snapshot rather than with what the table
+ * shows. The page ages rows against its own clock, so `nowMs` is not needed to keep them right.
+ */
+const VOLATILE_SNAPSHOT_FIELDS: readonly string[] = ['nowMs'];
+
+/**
+ * A digest of what a snapshot says, ignoring `VOLATILE_SNAPSHOT_FIELDS`. Equal digests mean the
+ * page already shows this table. Undefined for anything that is not an object (always sent).
+ */
+export function snapshotFingerprint(envelope: unknown): string | undefined {
+  const body = (envelope as { body?: unknown } | null)?.body;
+  if (!body || typeof body !== 'object') return undefined;
+  const json = JSON.stringify(body, (key, value) => (VOLATILE_SNAPSHOT_FIELDS.includes(key) ? undefined : value));
+  return createHash('sha1').update(json).digest('base64');
 }
 
 /**

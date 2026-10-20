@@ -138,7 +138,7 @@ export type ShellToHost =
   /** The client's half of the handshake (#128): what it was loaded as. */
   | { type: 'hello'; protocol: number; build: string }
   /** The tab was hidden or shown: a hidden one gets the table less often (#128). */
-  | { type: 'visibility'; hidden: boolean }
+  | { type: 'visibility'; hidden: boolean; /** The table's pane is on screen (#191). Absent from an older page. */ table?: boolean }
   /** What a row click cost in this tab, once the conversation rendered (#190). Ids and numbers only. */
   | ({ type: 'trace' } & TraceReport);
 
@@ -154,7 +154,11 @@ export function parseShellToHost(body: unknown): ShellToHost | undefined {
     if (typeof m.protocol !== 'number' || typeof m.build !== 'string') return undefined;
     return { type: 'hello', protocol: m.protocol, build: m.build };
   }
-  if (m.type === 'visibility') return typeof m.hidden === 'boolean' ? { type: 'visibility', hidden: m.hidden } : undefined;
+  if (m.type === 'visibility') {
+    if (typeof m.hidden !== 'boolean') return undefined;
+    const table = (body as { table?: unknown }).table;
+    return { type: 'visibility', hidden: m.hidden, ...(typeof table === 'boolean' ? { table } : {}) };
+  }
   if (m.type === 'notifications') {
     const p = (body as { permission?: unknown }).permission;
     return p === 'granted' || p === 'denied' || p === 'default' || p === 'unsupported' ? { type: 'notifications', permission: p } : undefined;

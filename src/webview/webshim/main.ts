@@ -48,7 +48,7 @@ import {
   shouldShowNotifyBanner,
   type NotificationState,
 } from '../../shared/webCapabilities';
-import { formatRoute } from '../../shared/appRoutes';
+import { formatRoute, tableShownForClasses } from '../../shared/appRoutes';
 import { REAUTH_STORAGE_KEY, REAUTH_TOKEN_PATH } from '../../shared/webReauth';
 import { ClickTrace } from '../common/clickTrace';
 import { openUrlHere, showHostView } from '../common/hostView';
@@ -175,12 +175,37 @@ window.addEventListener('online', reconnectNow);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) reconnectNow();
   if (live) {
-    sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden } });
+    sendVisibility();
     // The permission may have been changed in the browser's settings meanwhile.
     reportNotifications();
     renderBanner();
   }
 });
+
+/** What the daemon was last told, so a class change that moves nothing says nothing. */
+let lastVisibility: string | undefined;
+
+/**
+ * Tell the daemon whether this tab is hidden and whether the table's pane is on screen (#191):
+ * a phone showing a conversation, or a Preferences page, has no use for table snapshots.
+ */
+function sendVisibility(): void {
+  if (!live) return;
+  const table = document.body ? tableShownForClasses(document.body.classList) : true;
+  const key = `${document.hidden}|${table}`;
+  if (key === lastVisibility) return;
+  lastVisibility = key;
+  sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden, table } });
+}
+
+// The shell moves between surfaces by changing `aw-surface-*` on the body.
+if (typeof MutationObserver === 'function') {
+  const watch = () => {
+    if (document.body) new MutationObserver(sendVisibility).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  };
+  if (document.body) watch();
+  else window.addEventListener('DOMContentLoaded', watch, { once: true });
+}
 
 function sendRaw(envelope: unknown): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(envelope));
@@ -214,7 +239,8 @@ function onHello(protocol: number, build: string): void {
   live = true;
   attempt = 0;
   keepRecoveryToken();
-  sendRaw({ pane: SHELL_PANE, body: { type: 'visibility', hidden: document.hidden } });
+  lastVisibility = undefined;
+  sendVisibility();
   reportNotifications();
   // What was not acknowledged before the drop. A pane's old `ready` is
   // dropped: each pane sends a new one now, ahead of anything resent, so the

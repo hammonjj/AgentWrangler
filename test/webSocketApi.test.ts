@@ -436,7 +436,9 @@ describe('snapshot coalescing', () => {
   });
 
   it('a held snapshot goes out before any other table message (order kept)', async () => {
-    rig = await startRig({ limits: { snapshotIntervalMs: 60_000 } });
+    // Each snapshot differs: an identical one is not sent again (#191).
+    let version = 0;
+    rig = await startRig({ limits: { snapshotIntervalMs: 60_000 }, snapshot: () => ({ sessions: [{ key: KEY, version: ++version }] }) });
     const c = await new Client(rig).open();
     c.post('dashboard', { type: 'ready' });
     await until(() => c.of('dashboard', 'snapshot').length === 1, 'first snapshot');
