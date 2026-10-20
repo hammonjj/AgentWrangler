@@ -87,6 +87,24 @@ describe('a click during a large transfer', () => {
     expect(t.log.find((b) => b.lines.includes('REPLY'))!.at - queuedAt).toBeLessThanOrEqual(10);
   });
 
+  it('does not hold a reply to a window timer that a live item set earlier', async () => {
+    const t = rig({ batchMs: 5_000 });
+    t.put('first', { lane: 'live', stream: 'conversation' });
+    await vi.advanceTimersByTimeAsync(ACK_MS + 10);
+    // A live item now waits out most of the window...
+    t.put('streamed', { lane: 'live', stream: 'conversation' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(t.lines()).toEqual(['first']);
+    // ...and a reply that arrives meanwhile goes at once, without it.
+    const queuedAt = Date.now();
+    t.put('REPLY', { lane: 'interactive', stream: 'shell' });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(t.log.find((b) => b.lines.includes('REPLY'))!.at - queuedAt).toBeLessThanOrEqual(10);
+    // The live item, small and already due, rides in the same batch, in the order it was queued.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(t.lines()).toEqual(['first', 'streamed', 'REPLY']);
+  });
+
   it('bounds the batches bulk is cut into', async () => {
     const t = rig({ bulkBatchBytes: 250 * 1024 });
     for (let i = 0; i < 10; i++) t.put(`${BULK_LINE}:${i}`, { lane: 'bulk', stream: 'conversation' });

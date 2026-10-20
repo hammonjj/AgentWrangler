@@ -93,6 +93,8 @@ export class RelaySocket implements ClientSocket {
   /** When the last batch's send settled. */
   private settledAt = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /** The pending timer was set for an item that does not wait the window. */
+  private timerUrgent = false;
   private readonly messageListeners: MessageListener[] = [];
   private readonly pongListeners: (() => void)[] = [];
   private readonly closeListeners: (() => void)[] = [];
@@ -192,8 +194,14 @@ export class RelaySocket implements ClientSocket {
    * bulk is already cut into batches, so it goes back to back.
    */
   private schedule(): void {
-    if (this.timer || this.sending) return;
+    if (this.sending) return;
     const urgent = this.queue.some((e) => e.lane !== 'live');
+    // A reply that arrives while a live batch is waiting out the window does not wait with it.
+    if (this.timer) {
+      if (!urgent || this.timerUrgent) return;
+      clearTimeout(this.timer);
+    }
+    this.timerUrgent = urgent;
     const wait = urgent ? 0 : Math.max(0, this.opts.batchMs - (Date.now() - this.settledAt));
     this.timer = setTimeout(() => {
       this.timer = undefined;

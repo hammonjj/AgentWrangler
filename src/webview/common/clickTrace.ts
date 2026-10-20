@@ -19,6 +19,8 @@ export interface ClickTraceEnv {
   afterIdle(run: () => void): void;
   report(report: TraceReport): void;
   reconnects(): number;
+  /** For ids a test can repeat. Default `Math.random`. */
+  random?: () => number;
 }
 
 export class ClickTrace {
@@ -30,7 +32,7 @@ export class ClickTrace {
   stamp<T>(message: T): T {
     const m = message as { pane?: unknown; body?: { type?: unknown } } | null;
     if (m?.pane !== 'dashboard' || m.body?.type !== 'rowClick') return message;
-    const cid = newTraceId();
+    const cid = newTraceId(this.env.random);
     this.current = { cid, startedAt: this.env.now() };
     return { ...message, cid };
   }
