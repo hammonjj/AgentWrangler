@@ -243,8 +243,11 @@ per GB, and 2 per 10,000 requests. Netlify Functions are not used.
 
 | Cost | Guardrail |
 |---|---|
-| Table snapshot (~85 KB JSON, up to 1/s over LAN) | Over the relay: at most every **5 s** while visible, **none** while hidden (the tab gets one on becoming visible), and skipped when unchanged apart from the clock. |
-| Frame count | All envelopes due in a **250 ms** window go in one frame per direction. A busy viewer sends at most about 4 frames/s. |
+| Table snapshot (~85 KB JSON, up to 1/s over LAN) | Over the relay: at most every **5 s** while visible, **none** while hidden (the tab gets one on becoming visible), and skipped when unchanged apart from the clock, and held while the table's pane is off screen (#191). |
+| Frame count | All envelopes due in a **250 ms** window go in one frame per direction. A busy viewer sends at most about 4 frames/s. Since #193 a reply to a click or approval is not held to the window or behind a transcript: it is `interactive` and goes when the batch in flight settles; snapshots, a conversation's opening and history pages are `bulk`, cut into batches of at most 192 KB, with per-pane order kept. |
+| Conversation open | A remote tab opens on the last 60 blocks and pages older ones in on demand (#192). |
+| Liveness | The daemon pings every 60 s; a tab that hears nothing for three periods pings back and gives the daemon 15 s before it ends (#189). |
+| Diagnostics | One `trace:` log line per row click, with stage timings, and a daily summary (#190). See `docs/relay-benchmark.md`. |
 | Bytes | Every frame is deflate-compressed (`CompressionStream` / `zlib`) before encryption. JSON compresses about 5–10×. |
 | Idle cost | Nothing streams with no tab connected. The daemon's lobby join and Presence are cheap; the lobby probe is about 2 × 288 messages a day. |
 | Asset download | Cached per build in IndexedDB; about 200 KB compressed per device per daemon rebuild. |
