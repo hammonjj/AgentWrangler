@@ -140,7 +140,9 @@ export type ShellToHost =
   /** The tab was hidden or shown: a hidden one gets the table less often (#128). */
   | { type: 'visibility'; hidden: boolean; /** The table's pane is on screen (#191). Absent from an older page. */ table?: boolean }
   /** What a row click cost in this tab, once the conversation rendered (#190). Ids and numbers only. */
-  | ({ type: 'trace' } & TraceReport);
+  | ({ type: 'trace' } & TraceReport)
+  /** The tab is back after its previous socket closed: why it closed, and how long it was down. For the log only. */
+  | { type: 'reconnected'; reason: string; downMs: number };
 
 /** A shell message as it arrives off the wire, checked. */
 export function parseShellToHost(body: unknown): ShellToHost | undefined {
@@ -158,6 +160,12 @@ export function parseShellToHost(body: unknown): ShellToHost | undefined {
     if (typeof m.hidden !== 'boolean') return undefined;
     const table = (body as { table?: unknown }).table;
     return { type: 'visibility', hidden: m.hidden, ...(typeof table === 'boolean' ? { table } : {}) };
+  }
+  if (m.type === 'reconnected') {
+    const { reason, downMs } = body as { reason?: unknown; downMs?: unknown };
+    if (typeof reason !== 'string' || typeof downMs !== 'number' || !Number.isFinite(downMs) || downMs < 0) return undefined;
+    // It goes to the log: printable text only, and short.
+    return { type: 'reconnected', reason: reason.replace(/[^\x20-\x7e]/g, '?').slice(0, 120), downMs: Math.round(downMs) };
   }
   if (m.type === 'notifications') {
     const p = (body as { permission?: unknown }).permission;

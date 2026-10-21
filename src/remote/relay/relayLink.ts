@@ -37,7 +37,7 @@ import {
   type RelayItem,
 } from '../../shared/relay';
 import type { RelayChannel, RelayNetwork } from './network';
-import { RelaySocket } from './virtualSocket';
+import { RelaySocket, type TracedItem } from './virtualSocket';
 
 /** A workbench file, for the loader (#175). */
 export interface RelayAsset {
@@ -82,6 +82,13 @@ export interface RelayLinkOptions {
   probeTimeoutMs?: number;
   /** After the lobby reports an error, how long supabase-js gets to rejoin before a check. Default: 10 s. */
   lostGraceMs?: number;
+  /**
+   * A tab dropped because a send failed was not told. Its `close` is tried again this often
+   * (default 5 s), up to `tellTries` times (default 24, two minutes), so the tab reconnects as
+   * soon as the link is back instead of waiting out its silence timeout.
+   */
+  tellRetryMs?: number;
+  tellTries?: number;
   /** Password enrollment (#187). Absent: `enroll` requests are ignored. */
   enroll?: {
     /** The enrollment key, or undefined while password sign-in is off. */
@@ -305,47 +312,95 @@ export async function startRelayLink(opts: RelayLinkOptions): Promise<RelayLink>
     const channel = await network.join(topic);
     const codec = new RelayCodec(key, req.d, topic, 'd2b');
     let ended = false;
+    /** Batches being handed to Supabase: the channel is not left under one. */
+    let inFlight = 0;
+    /** Telling a dropped tab it is gone (`tellGone`): the channel is kept until that is done. */
+    let telling = false;
+    let left = false;
+    const leaveIfIdle = () => {
+      if (left || telling || inFlight > 0) return;
+      left = true;
+      void channel.leave().catch(() => undefined);
+    };
+    // After the close item has gone: leaving drops anything still queued on the channel.
+    const leaveSoon = () => setTimeout(leaveIfIdle, 1_000).unref?.();
+    /**
+     * A send failed, so the tab was dropped without a word and only its silence check would find
+     * out. Keep trying its `close` while the link recovers. If the failed batch never arrived the
+     * tab refuses this one as out of sequence, which ends it just the same.
+     */
+    const tellGone = async () => {
+      if (telling || left || disposed) return;
+      telling = true;
+      const tries = opts.tellTries ?? 24;
+      let told = 0;
+      for (let i = 1; i <= tries && !disposed; i++) {
+        try {
+          for (const part of await codec.seal([{ k: 'close', code: 4408, reason: 'dropped' }])) {
+            count('sent', part);
+            await channel.send(RELAY_EVENT_FRAME, part);
+          }
+          told = i;
+          break;
+        } catch {
+          await new Promise<void>((r) => setTimeout(r, opts.tellRetryMs ?? 5_000).unref?.());
+        }
+      }
+      log(told ? `relay: told a dropped tab to reconnect (try ${told})` : 'relay: could not tell a dropped tab to reconnect');
+      telling = false;
+      leaveIfIdle();
+    };
     const socket = new RelaySocket({
       batchMs,
       send: async (items, traced) => {
-        const started = now();
-        const parts = await codec.seal(items);
-        const sealed = now();
-        let bytes = 0;
-        for (const part of parts) {
-          bytes += count('sent', part);
-          await channel.send(RELAY_EVENT_FRAME, part);
-        }
-        const finished = now();
-        // Everything behind this batch waited as long: the clue when a remote tab feels slow.
-        const took = finished - started;
-        if (took >= SLOW_SEND_MS) log(`relay: a batch of ${items.length} items in ${parts.length} parts took ${took} ms to send`);
-        counts.batches++;
-        counts.sealMs += sealed - started;
-        counts.sendMs += finished - sealed;
-        for (const t of traced) {
-          opts.tracer?.relayBatch(t.cid, {
-            items: items.length,
-            queueDepth: t.queueDepth,
-            behindBatch: t.behindBatch,
-            queuedMs: t.queuedMs,
-            sealMs: sealed - started,
-            sendMs: finished - sealed,
-            parts: parts.length,
-            bytes,
-          });
+        inFlight++;
+        try {
+          await sendBatch(items, traced);
+        } finally {
+          inFlight--;
+          if (ended) leaveSoon();
         }
       },
-      onEnd: () => {
+      onEnd: (why) => {
         if (ended) return;
         ended = true;
         tabs.delete(req.t);
-        // After the close item has gone: leaving drops anything still queued on the channel.
-        setTimeout(() => void channel.leave().catch(() => undefined), 1_000).unref?.();
-        log(`relay: tab closed (${tabs.size} open)`);
+        if (why === 'send-failed') void tellGone();
+        else leaveSoon();
+        log(`relay: tab closed${why === 'send-failed' ? ' (a send failed)' : ''} (${tabs.size} open)`);
         changed.fire();
       },
+      onUndelivered: () => void tellGone(),
     });
+    async function sendBatch(items: RelayItem[], traced: TracedItem[]): Promise<void> {
+      const started = now();
+      const parts = await codec.seal(items);
+      const sealed = now();
+      let bytes = 0;
+      for (const part of parts) {
+        bytes += count('sent', part);
+        await channel.send(RELAY_EVENT_FRAME, part);
+      }
+      const finished = now();
+      // Everything behind this batch waited as long: the clue when a remote tab feels slow.
+      const took = finished - started;
+      if (took >= SLOW_SEND_MS) log(`relay: a batch of ${items.length} items in ${parts.length} parts took ${took} ms to send`);
+      counts.batches++;
+      counts.sealMs += sealed - started;
+      counts.sendMs += finished - sealed;
+      for (const t of traced) {
+        opts.tracer?.relayBatch(t.cid, {
+          items: items.length,
+          queueDepth: t.queueDepth,
+          behindBatch: t.behindBatch,
+          queuedMs: t.queuedMs,
+          sealMs: sealed - started,
+          sendMs: finished - sealed,
+          parts: parts.length,
+          bytes,
+        });
+      }
+    }
 
     // In order, one part at a time: the codec refuses anything out of sequence.
     let inbound = Promise.resolve();

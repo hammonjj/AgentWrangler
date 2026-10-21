@@ -36,6 +36,9 @@ class Hub {
   deliver(from: Member, event: string, payload: unknown, toSelf = false): void {
     for (const m of this.members.get(from.topic) ?? []) if (toSelf || m !== from) m.fire(event, JSON.parse(JSON.stringify(payload)));
   }
+  of(topic: string): Member[] {
+    return [...(this.members.get(topic) ?? [])];
+  }
   first(topic: string): Member {
     return [...(this.members.get(topic) ?? [])][0];
   }
@@ -48,12 +51,15 @@ class Member implements RelayChannel {
   private listeners = new Map<string, ((p: unknown) => void)[]>();
   /** A dead socket that nobody noticed: it hears nothing, and says nothing. */
   deaf = false;
+  /** A socket that is down and knows it: every send fails. */
+  failing = false;
   onLost?: (reason: string) => void;
   constructor(
     private hub: Hub,
     readonly topic: string,
   ) {}
   async send(event: string, payload: unknown): Promise<void> {
+    if (this.failing) throw new Error('broadcast timed out');
     this.hub.deliver(this, event, payload);
   }
   async httpSend(event: string, payload: unknown): Promise<void> {
@@ -231,6 +237,39 @@ describe('relay link', () => {
     await tab.channel.send(RELAY_EVENT_FRAME, { s: 1, n: 'AAAAAAAAAAAAAAAA', c: 'AAAA' });
     await until(() => link.tabs === 0);
     expect(link.tabs).toBe(0);
+    link.dispose();
+  });
+
+  it('tells a tab dropped by a failed send to reconnect once the link works again', async () => {
+    const hub = new Hub();
+    const key = newRelayKey();
+    const lines: string[] = [];
+    const link = await startRelayLink({
+      network: network(hub),
+      keyOf: () => key,
+      attach: echoAttach([]),
+      build: () => 'b1',
+      daemonId: 'd',
+      log: (l) => lines.push(l),
+      batchMs: 5,
+      tellRetryMs: 20,
+    });
+    const tab = await browser(hub, 'dev1', key);
+    await until(() => link.tabs === 1 && tab.received.some((i) => i.k === 'open'));
+    // The daemon's end of the tab's channel: down, so the echo cannot be sent.
+    const daemonSide = hub.of(tab.topic).find((m) => m !== tab.channel)!;
+    daemonSide.failing = true;
+    await tab.send([{ k: 'data', line: 'hi' }]);
+    await until(() => link.tabs === 0);
+    expect(link.tabs).toBe(0);
+    expect(tab.received.some((i) => i.k === 'close')).toBe(false);
+    // Back up: the close goes through, and the channel is left after it.
+    daemonSide.failing = false;
+    await until(() => tab.received.some((i) => i.k === 'close'));
+    expect(tab.received.at(-1)).toMatchObject({ k: 'close' });
+    expect(lines.some((l) => l.includes('told a dropped tab to reconnect'))).toBe(true);
+    await until(() => !hub.of(tab.topic).includes(daemonSide));
+    expect(hub.of(tab.topic)).not.toContain(daemonSide);
     link.dispose();
   });
 

@@ -58,9 +58,36 @@ export type SilenceVerdict = 'ok' | 'probe' | 'dead';
  * means send one probe; still nothing `RELAY_SILENCE_PROBE_MS` after it means dead. Anything
  * heard resets both (`lastHeard` moves past `probedAt`).
  */
-export function silenceVerdict(now: number, lastHeard: number, probedAt: number | undefined): SilenceVerdict {
-  if (probedAt !== undefined && probedAt >= lastHeard) return now - probedAt > RELAY_SILENCE_PROBE_MS ? 'dead' : 'ok';
+export function silenceVerdict(
+  now: number,
+  lastHeard: number,
+  probedAt: number | undefined,
+  probeWindowMs: number = RELAY_SILENCE_PROBE_MS,
+): SilenceVerdict {
+  if (probedAt !== undefined && probedAt >= lastHeard) return now - probedAt > probeWindowMs ? 'dead' : 'ok';
   return now - lastHeard > RELAY_SILENCE_MS ? 'probe' : 'ok';
+}
+
+/**
+ * The tab owns liveness when the user comes back to it. The daemon's pings are slow on purpose
+ * (each is billed), so they cannot tell a tab that has just been shown, focused or unfrozen
+ * whether the link survived the wait. Instead the tab asks: quiet for longer than this when the
+ * user returns means one probe, answered within `RELAY_RESUME_PROBE_MS` or the tab reconnects.
+ */
+export const RELAY_RESUME_QUIET_MS = 15_000;
+/**
+ * How long a probe sent because the user is looking gets. A live link answers in a few hundred
+ * milliseconds; a wrong "dead" costs one reconnect, a wrong "alive" costs the user a frozen page.
+ */
+export const RELAY_RESUME_PROBE_MS = 5_000;
+
+/**
+ * Whether a tab the user just returned to (or whose own Supabase channel reported an error)
+ * should probe now. A probe already out is not repeated: its window is shortened instead.
+ */
+export function shouldProbeOnResume(now: number, lastHeard: number, probedAt: number | undefined, suspect = false): boolean {
+  if (probedAt !== undefined && probedAt >= lastHeard) return false;
+  return suspect || now - lastHeard > RELAY_RESUME_QUIET_MS;
 }
 
 export function lobbyTopic(uid: string): string {

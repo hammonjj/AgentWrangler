@@ -8,10 +8,14 @@ import { ClientRegistry } from '../src/core/clients';
 import { createBrowserConnections } from '../src/core/web/browserConnections';
 import { RELAY_CONNECTION_LIMITS } from '../src/app/webWorkbench';
 import { RelaySocket } from '../src/remote/relay/virtualSocket';
+import { parseShellToHost } from '../src/shared/shellProtocol';
 import {
   RELAY_PING_MS,
+  RELAY_RESUME_PROBE_MS,
+  RELAY_RESUME_QUIET_MS,
   RELAY_SILENCE_MS,
   RELAY_SILENCE_PROBE_MS,
+  shouldProbeOnResume,
   silenceVerdict,
   type RelayItem,
 } from '../src/shared/relay';
@@ -40,6 +44,47 @@ describe('silenceVerdict', () => {
     const slept = 10 * RELAY_SILENCE_MS;
     expect(silenceVerdict(slept, 0, undefined)).toBe('probe');
     expect(silenceVerdict(slept + 1_000, 0, slept)).toBe('ok');
+  });
+});
+
+describe('shouldProbeOnResume', () => {
+  it('probes a tab the user returns to once it has been quiet a while', () => {
+    expect(shouldProbeOnResume(RELAY_RESUME_QUIET_MS, 0, undefined)).toBe(false);
+    expect(shouldProbeOnResume(RELAY_RESUME_QUIET_MS + 1, 0, undefined)).toBe(true);
+  });
+
+  it('probes at once when the channel itself reported an error', () => {
+    expect(shouldProbeOnResume(1_000, 0, undefined, true)).toBe(true);
+  });
+
+  it('does not send a second probe while one is out', () => {
+    expect(shouldProbeOnResume(RELAY_SILENCE_MS * 2, 0, RELAY_SILENCE_MS, true)).toBe(false);
+  });
+
+  it('gives a probe sent on return a short window, and still ends a tab that gets no answer', () => {
+    expect(RELAY_RESUME_PROBE_MS).toBeLessThan(RELAY_SILENCE_PROBE_MS);
+    const probedAt = 100_000;
+    expect(silenceVerdict(probedAt + RELAY_RESUME_PROBE_MS, 0, probedAt, RELAY_RESUME_PROBE_MS)).toBe('ok');
+    expect(silenceVerdict(probedAt + RELAY_RESUME_PROBE_MS + 1, 0, probedAt, RELAY_RESUME_PROBE_MS)).toBe('dead');
+  });
+});
+
+describe('a tab reporting why it reconnected', () => {
+  it('is accepted with a printable, bounded reason', () => {
+    expect(parseShellToHost({ type: 'reconnected', reason: 'resumed: no answer (quiet 312 s)', downMs: 5400.4 })).toEqual({
+      type: 'reconnected',
+      reason: 'resumed: no answer (quiet 312 s)',
+      downMs: 5400,
+    });
+    const odd = parseShellToHost({ type: 'reconnected', reason: `a\nb${'x'.repeat(200)}`, downMs: 1 });
+    expect(odd).toMatchObject({ type: 'reconnected', reason: expect.stringMatching(/^a\?bx+$/) });
+    expect((odd as { reason: string }).reason.length).toBe(120);
+  });
+
+  it('is refused without a reason or with a bad duration', () => {
+    expect(parseShellToHost({ type: 'reconnected', downMs: 1 })).toBeUndefined();
+    expect(parseShellToHost({ type: 'reconnected', reason: 'x', downMs: -1 })).toBeUndefined();
+    expect(parseShellToHost({ type: 'reconnected', reason: 'x', downMs: Infinity })).toBeUndefined();
   });
 });
 

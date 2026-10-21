@@ -106,6 +106,40 @@ describe('a relay tab in browserConnections', () => {
     expect(t.conns.size).toBe(0);
   });
 
+  it('says a failed send ended it, so the link can tell the tab once it works again', async () => {
+    const ends: string[] = [];
+    let undelivered = 0;
+    const s = new RelaySocket({
+      batchMs: 1,
+      send: async () => {
+        throw new Error('timed out');
+      },
+      onEnd: (why) => void ends.push(why),
+      onUndelivered: () => void undelivered++,
+    });
+    s.send('x');
+    await tick();
+    expect(ends).toEqual(['send-failed']);
+    expect(undelivered).toBe(0);
+  });
+
+  it('reports a close whose own batch failed as undelivered', async () => {
+    const ends: string[] = [];
+    let undelivered = 0;
+    const s = new RelaySocket({
+      batchMs: 1,
+      send: async () => {
+        throw new Error('timed out');
+      },
+      onEnd: (why) => void ends.push(why),
+      onUndelivered: () => void undelivered++,
+    });
+    s.close(4408, 'dropped');
+    await tick();
+    expect(ends).toEqual(['closed']);
+    expect(undelivered).toBe(1);
+  });
+
   it('tells the tab when it drops it, since the tab cannot see the channel go', async () => {
     const t = setup();
     await tick();
