@@ -68,6 +68,11 @@ deploying, or password sign-in on a new device says "Not set up".
 - Turn on 2FA for the Netlify account: whoever can deploy the loader can run code on a page
   that holds a device key (plan §5).
 
+## When a remote tab is slow or hangs
+
+See `docs/relay-troubleshooting.md`: which front end is which, the log lines that explain a
+reconnect, and what was found the first time.
+
 ## Local testing
 
 `npx supabase start` runs the same schema in Docker (`supabase/config.toml`), and
