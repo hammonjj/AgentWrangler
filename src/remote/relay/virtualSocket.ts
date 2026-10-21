@@ -57,8 +57,13 @@ export interface BatchInfo {
 export interface RelaySocketOptions {
   /** Send one batch; resolves once it is handed to the relay. `traced` is what a click is waiting on in it. */
   send(items: RelayItem[], traced: TracedItem[], info: BatchInfo): Promise<void>;
-  /** The socket ended, either way: leave the channel. */
-  onEnd(): void;
+  /**
+   * The socket ended, either way: leave the channel. `send-failed`: a batch could not be sent, so
+   * the tab was not told, and will not know until its own checks find the silence.
+   */
+  onEnd(why: 'closed' | 'send-failed'): void;
+  /** After `onEnd('closed')`: the batch carrying the `close` failed, so the tab was not told after all. */
+  onUndelivered?(): void;
   batchMs: number;
   /** A bulk batch ends once it holds this many bytes (one item may pass it). Default 192 KB. */
   bulkBatchBytes?: number;
@@ -275,7 +280,9 @@ export class RelaySocket implements ClientSocket {
         // by the tab, so none of it is sent. The tab reconnects and resends its unacknowledged commands.
         this.queue = [];
         this.queuedBytes = 0;
-        this.end();
+        // Already ended by a close whose last batch this was: the `close` did not reach the tab either.
+        if (this.state !== this.OPEN) this.opts.onUndelivered?.();
+        else this.end('send-failed');
       })
       .finally(() => {
         this.sending = false;
@@ -285,12 +292,12 @@ export class RelaySocket implements ClientSocket {
       });
   }
 
-  private end(): void {
+  private end(why: 'closed' | 'send-failed' = 'closed'): void {
     if (this.state !== this.OPEN) return;
     this.state = this.CLOSED;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     for (const l of [...this.closeListeners]) l();
-    this.opts.onEnd();
+    this.opts.onEnd(why);
   }
 }

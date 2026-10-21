@@ -12,6 +12,8 @@
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js';
 import {
   RELAY_BATCH_MS,
+  RELAY_RESUME_PROBE_MS,
+  RELAY_SILENCE_PROBE_MS,
   RELAY_EVENT_CONNECT,
   RELAY_EVENT_FRAME,
   RelayCodec,
@@ -20,6 +22,7 @@ import {
   newRelayId,
   parseSealedPart,
   sealConnect,
+  shouldProbeOnResume,
   silenceVerdict,
   type RelayItem,
 } from '../../shared/relay';
@@ -58,15 +61,28 @@ export class RelayConnection {
   private silenceTimer: ReturnType<typeof setInterval> | undefined;
   /** When this tab last pinged a silent daemon, until something is heard. */
   private probedAt: number | undefined;
+  /** How long the probe out has to be answered: shorter when the user is looking. */
+  private probeWindowMs = RELAY_SILENCE_PROBE_MS;
+  /** Checks the probe out at the end of its window, since a hidden tab's interval may not. */
+  private probeTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Why the probe out was sent: part of the reason the tab gives if it goes unanswered. */
+  private probeWhy = 'silent';
   private readonly checkSilence = () => {
     if (this.closed) return;
     const now = Date.now();
-    const verdict = silenceVerdict(now, this.lastHeard, this.probedAt);
-    if (verdict === 'dead') this.end('silent');
-    else if (verdict === 'probe') {
-      this.probedAt = now;
-      this.send({ k: 'ping' }, true);
-    }
+    const verdict = silenceVerdict(now, this.lastHeard, this.probedAt, this.probeWindowMs);
+    if (verdict === 'dead') this.end(`${this.probeWhy}: no answer (quiet ${Math.round((now - this.lastHeard) / 1000)} s)`);
+    else if (verdict === 'probe') this.probe(now, RELAY_SILENCE_PROBE_MS, 'silent');
+  };
+  /** The user is back (shown, focused, unfrozen, online again): find out now whether the link lived. */
+  private readonly onReturn = () => {
+    if (document.visibilityState === 'hidden') return;
+    this.resume(false, 'resumed');
+  };
+  private readonly onVisibility = () => {
+    // Throttled timers may have missed a deadline: check it before anything else.
+    this.checkSilence();
+    this.onReturn();
   };
   /** Items that arrived before the socket listened (the hello, while assets load). */
   private held: RelayItem[] = [];
@@ -103,25 +119,77 @@ export class RelayConnection {
       this.lastHeard = Date.now();
       this.receive(m.payload);
     });
-    await new Promise<void>((resolve, reject) => {
+    // Settled by `open`, or rejected by an end; awaited only once the connect has gone out.
+    opened.catch(() => undefined);
+    let subscribed = false;
+    const joined = new Promise<void>((resolve, reject) => {
       channel.subscribe((status, err) => {
-        if (status === 'SUBSCRIBED') resolve();
-        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          reject(new Error(err?.message?.includes('nauthorized') ? 'not-owner' : 'relay-unreachable'));
+        if (status === 'SUBSCRIBED') {
+          subscribed = true;
+          resolve();
+        } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          // Later, this is our own Supabase socket failing (a sleep, a frozen page, the network).
+          // supabase-js rejoins by itself, but what was broadcast meanwhile is gone, and the daemon
+          // may have dropped this tab: ask it rather than wait out the silence timeout.
+          if (subscribed) this.resume(true, `channel ${status === 'TIMED_OUT' ? 'timed out' : 'error'}`);
+          else reject(new Error(err?.message?.includes('nauthorized') ? 'not-owner' : 'relay-unreachable'));
         } else if (status === 'CLOSED' && !this.closed) this.end('closed');
       });
     });
-    // Over REST: the lobby is the daemon's to sit on; a device only posts its request there.
-    const lobby = this.client.channel(lobbyTopic(this.uid), { config: { private: true } });
-    const r = await lobby.httpSend(RELAY_EVENT_CONNECT, await sealConnect(this.device.key, this.device.deviceId, this.uid, id, Date.now()));
-    void this.client.removeChannel(lobby);
-    if (!r.success) throw new Error(r.status === 401 || r.status === 403 ? 'not-owner' : 'relay-unreachable');
-    // A hidden window's timers are throttled to about one a minute, so it is checked again the
-    // moment it is looked at.
+    try {
+      await joined;
+      // Over REST: the lobby is the daemon's to sit on; a device only posts its request there.
+      const lobby = this.client.channel(lobbyTopic(this.uid), { config: { private: true } });
+      const r = await lobby.httpSend(RELAY_EVENT_CONNECT, await sealConnect(this.device.key, this.device.deviceId, this.uid, id, Date.now()));
+      void this.client.removeChannel(lobby);
+      if (!r.success) throw new Error(r.status === 401 || r.status === 403 ? 'not-owner' : 'relay-unreachable');
+    } catch (e) {
+      // Not left subscribed to a channel nobody will answer on.
+      this.end(e instanceof Error ? e.message : String(e));
+      throw e;
+    }
+    // A hidden window's timers are throttled to about one a minute, and a frozen one's do not run
+    // at all, so the link is checked the moment the user is back.
     this.lastHeard = Date.now();
     this.silenceTimer = setInterval(this.checkSilence, SILENCE_CHECK_MS);
-    document.addEventListener('visibilitychange', this.checkSilence);
+    document.addEventListener('visibilitychange', this.onVisibility);
+    document.addEventListener('resume', this.onReturn);
+    window.addEventListener('focus', this.onReturn);
+    window.addEventListener('pageshow', this.onReturn);
+    window.addEventListener('online', this.onReturn);
     return opened;
+  }
+
+  /**
+   * Probe now if the link has been quiet long enough to be in doubt, or at once when `suspect`
+   * (the channel reported an error). A probe already out gets the short window instead.
+   */
+  resume(suspect: boolean, why: string): void {
+    if (this.closed || !this.codec) return;
+    const now = Date.now();
+    if (shouldProbeOnResume(now, this.lastHeard, this.probedAt, suspect)) {
+      this.probe(now, RELAY_RESUME_PROBE_MS, why);
+    } else if (this.probedAt !== undefined && this.probedAt >= this.lastHeard && this.probeWindowMs > RELAY_RESUME_PROBE_MS) {
+      // A slow probe is already out: the user should not wait its full window.
+      this.probeWindowMs = Math.max(RELAY_RESUME_PROBE_MS, now - this.probedAt + 1_000);
+      this.armProbeTimer(this.probedAt + this.probeWindowMs - now);
+    }
+  }
+
+  private probe(now: number, windowMs: number, why: string): void {
+    this.probedAt = now;
+    this.probeWindowMs = windowMs;
+    this.probeWhy = why;
+    this.send({ k: 'ping' }, true);
+    this.armProbeTimer(windowMs);
+  }
+
+  private armProbeTimer(ms: number): void {
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = undefined;
+      this.checkSilence();
+    }, Math.max(0, ms) + 50);
   }
 
   /** The socket's items. What came before it listened is delivered first. */
@@ -221,7 +289,12 @@ export class RelayConnection {
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
     if (this.silenceTimer) clearInterval(this.silenceTimer);
-    document.removeEventListener('visibilitychange', this.checkSilence);
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    document.removeEventListener('visibilitychange', this.onVisibility);
+    document.removeEventListener('resume', this.onReturn);
+    window.removeEventListener('focus', this.onReturn);
+    window.removeEventListener('pageshow', this.onReturn);
+    window.removeEventListener('online', this.onReturn);
     if (this.channel) void this.client.removeChannel(this.channel);
     for (const l of [...this.closeListeners]) l(reason);
   }

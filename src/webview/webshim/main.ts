@@ -113,6 +113,8 @@ let connectedBefore = false;
 let attempt = 0;
 let failedOpens = 0;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
+/** Why the last live socket closed, and when: reported on the next handshake. */
+let lastDrop: { reason: string; at: number } | undefined;
 
 function connect(): void {
   retryTimer = undefined;
@@ -127,8 +129,10 @@ function connect(): void {
   ws.addEventListener('message', (event) => {
     if (socket === ws) onFrame(String(event.data));
   });
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (event: CloseEvent) => {
     if (socket !== ws) return;
+    // Told to the daemon once this tab is back, so its log says why tabs drop.
+    if (live) lastDrop = { reason: (event.reason || `code ${event.code ?? 'none'}`).slice(0, 120), at: Date.now() };
     socket = undefined;
     live = false;
     clickTrace.reset();
@@ -254,6 +258,10 @@ function onHello(protocol: number, build: string): void {
     return false;
   });
   if (reconnecting) window.dispatchEvent(new Event(RECONNECT_EVENT));
+  if (lastDrop) {
+    sendShell({ type: 'reconnected', reason: lastDrop.reason, downMs: Math.max(0, Date.now() - lastDrop.at) });
+    lastDrop = undefined;
+  }
   for (const [id, u] of resend) if (unacked.has(id) && socket) socket.send(u.line);
 }
 

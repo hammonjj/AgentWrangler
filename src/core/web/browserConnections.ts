@@ -294,6 +294,10 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
         tracer?.complete(connectionId, m);
         return;
       }
+      if (m.type === 'reconnected') {
+        log(`web: ${connectionId} (${transportKind}) is a tab back after its last socket closed (${m.reason}), down ${(m.downMs / 1000).toFixed(1)} s`);
+        return;
+      }
       shell.receive(body);
     };
 
