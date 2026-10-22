@@ -439,6 +439,15 @@ describe.skipIf(!HAS_OPENSSL)('the LAN listener (https on 127.0.0.1, LAN-style n
     expect((await loop('/', { host: `${LAN_NAME}:${loopPort}` })).status).toBe(421);
   });
 
+  it('serves the install manifest on the LAN without a device cookie (#162), behind the Host check', async () => {
+    const r = await lan('/manifest.webmanifest');
+    expect(r.status).toBe(200);
+    expect(JSON.parse(r.body)).toMatchObject({ start_url: '/', display: 'standalone' });
+    expect((await lan('/manifest.webmanifest', { headers: { host: `evil.example:${lanPort}` } })).status).toBe(421);
+    // The page itself still needs pairing.
+    expect((await lan('/')).status).toBe(401);
+  });
+
   it('Origin on the LAN is https://<host>', async () => {
     expect((await lan('/', { method: 'POST', headers: { origin: `http://${LAN_NAME}:${lanPort}` } })).status).toBe(403);
     expect((await lan('/', { method: 'POST', headers: { origin: `https://${LAN_NAME}:${lanPort}` } })).status).toBe(405);
