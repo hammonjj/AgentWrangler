@@ -69,7 +69,7 @@ export function startDaemonClients(opts: DaemonClientsOptions): DaemonClients {
     ? startWebWorkbench({
         app,
         host,
-        ui: workbenchUi(host),
+        ui: workbenchUi(host, log),
         clients: registry,
         log,
         hostShell: macShell,

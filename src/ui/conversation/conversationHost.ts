@@ -70,7 +70,15 @@ export interface ConversationHostUi {
    * the host's, so they are refused before anything is `stat`ed or read.
    */
   allowRemotePath?(file: string): boolean;
+  /**
+   * The daemon log, for what goes wrong between a pane and its host that the
+   * pane cannot see (#196). Session keys only, never what was typed.
+   */
+  log?(line: string): void;
 }
+
+/** How long a key asked for may wait on the store before the wait is logged (#196). */
+const PENDING_KEY_LOG_MS = 30_000;
 
 /**
  * The task strip above the conversation (#34), behind an interface so the pane
@@ -121,6 +129,9 @@ export class ConversationHost {
   private binding?: Binding;
   /** A key asked for before the store knew it; bound on the next update. */
   private pendingKey?: string;
+  /** When `pendingKey` was asked for, and the timer that logs a long wait for it. */
+  private pendingSince = 0;
+  private pendingTimer?: ReturnType<typeof setTimeout>;
   private session?: AgentSession;
   /**
    * Every key the current binding has been known by. One conversation can have
@@ -297,17 +308,45 @@ export class ConversationHost {
     if (agentId !== undefined) {
       const draft = this.agents?.draft(agentId);
       if (!draft) return; // an agent deleted since the link was made
-      this.pendingKey = undefined;
+      this.clearPending();
       this.bind({ kind: 'agent', agentId, ...(draft.notice ? { notice: draft.notice } : {}) }, draft.session);
       return;
     }
     const session = this.store.get(key);
     if (!session) {
-      this.pendingKey = key;
+      this.waitFor(key);
       return;
     }
-    this.pendingKey = undefined;
+    this.clearPending();
     this.bind({ kind: 'store', key }, session);
+  }
+
+  /**
+   * Remember a key the store does not know yet. Logged, with a second line if it is still
+   * unknown after `PENDING_KEY_LOG_MS`: a pane left waiting on a key that never comes shows
+   * its old conversation and has every send refused (#196).
+   */
+  private waitFor(key: string): void {
+    if (this.pendingKey === key) return;
+    this.clearPending();
+    this.pendingKey = key;
+    this.pendingSince = Date.now();
+    this.log(`asked for ${key}, which the store does not have; waiting for it`);
+    this.pendingTimer = setTimeout(() => {
+      this.pendingTimer = undefined;
+      if (this.pendingKey === key) this.log(`still waiting for ${key} after ${Math.round(PENDING_KEY_LOG_MS / 1000)} s; it has not appeared`);
+    }, PENDING_KEY_LOG_MS);
+    this.pendingTimer.unref?.();
+  }
+
+  private clearPending(): void {
+    if (this.pendingTimer) clearTimeout(this.pendingTimer);
+    this.pendingTimer = undefined;
+    this.pendingKey = undefined;
+  }
+
+  private log(text: string): void {
+    this.ui.log?.(`conversation: ${this.access.context.connectionId ?? 'pane'} ${text}`);
   }
 
   /** Point the pane at a session we are running, possibly before it has an id or a store entry. */
@@ -339,6 +378,7 @@ export class ConversationHost {
 
   dispose(): void {
     this.pendingSend?.abort();
+    this.clearPending();
     // A pane closed mid-recording must not leave the microphone open, or a
     // transcription running for a composer that no longer exists.
     this.cancelDictation();
@@ -351,6 +391,7 @@ export class ConversationHost {
 
   private bind(binding: Binding, session: AgentSession): void {
     this.detail = undefined;
+    this.clearPending();
     if (this.session?.sessionId !== session.sessionId || this.session?.provider !== session.provider) this.pendingSend?.abort();
     this.archiveText.clear();
     this.subagentFiles.clear();
@@ -456,7 +497,9 @@ export class ConversationHost {
       const waiting = this.store.get(this.pendingKey);
       if (!waiting) return; // still not scanned, or gone for good
       const key = this.pendingKey;
-      this.pendingKey = undefined;
+      const waited = Date.now() - this.pendingSince;
+      this.clearPending();
+      this.log(`bound ${key} after waiting ${(waited / 1000).toFixed(1)} s for it`);
       this.bind({ kind: 'store', key }, waiting);
       return;
     }
@@ -603,21 +646,36 @@ export class ConversationHost {
         // `pending` to real, and Claude Code issues a new one on resume and
         // after a compaction — so every key this binding has worn counts as
         // this conversation. `bind` (a real switch) is what forgets them.
-        if (m.sessionKey && m.sessionKey !== key && !this.boundKeys.has(m.sessionKey)) { this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Conversation changed; your draft was not sent.' }); return; }
+        if (m.sessionKey && m.sessionKey !== key && !this.boundKeys.has(m.sessionKey)) {
+          // A host bound to nothing (a fresh connection whose `ready` named a key the store did
+          // not have yet) has no other conversation the draft could reach, so it binds the one
+          // the pane names, if it can, rather than refuse every send until the PWA restarts (#196).
+          if (!this.binding) this.show(m.sessionKey);
+          if (this.session?.key !== m.sessionKey) {
+            const bound = key ?? (this.pendingKey !== undefined ? `nothing (waiting for ${this.pendingKey})` : 'nothing');
+            this.log(`refused a send for ${m.sessionKey}: this pane's host is bound to ${bound}`);
+            this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Conversation changed; your draft was not sent.' });
+            return;
+          }
+          this.log(`was bound to nothing; bound ${m.sessionKey} for a send from its pane`);
+        }
         if (this.pendingSend) { this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: 'Another send is pending.' }); return; }
         const controller = new AbortController();
         this.pendingSend = controller;
+        // Read again: the guard above may just have bound the conversation.
+        const sendKey = this.session?.key;
+        const sendSource = this.source;
         try {
           const session = this.session;
           // Not for an agent's first message: there is no session yet to tie an offer to.
-          const delegated = session && source?.kind !== 'draft' && !m.images?.length && await this.suggestion.intercept(m.text, session, this.tasks?.conversationDelegation, controller.signal);
+          const delegated = session && sendSource?.kind !== 'draft' && !m.images?.length && await this.suggestion.intercept(m.text, session, this.tasks?.conversationDelegation, controller.signal);
           if (!delegated && controller.signal.aborted) throw new Error('Send cancelled; your draft was kept.');
           if (!delegated) {
-            if (source?.send) await source.send(m.text, m.images);
-            else if (key) await this.actions.adoptAndSend(key, m.text, m.images, controller.signal);
+            if (sendSource?.send) await sendSource.send(m.text, m.images);
+            else if (sendKey) await this.actions.adoptAndSend(sendKey, m.text, m.images, controller.signal);
             else throw new Error('No conversation selected.');
           }
-          this.post({ type: 'sendResult', requestId: m.requestId ?? '', adopted: !delegated && source?.kind === 'transcript' });
+          this.post({ type: 'sendResult', requestId: m.requestId ?? '', adopted: !delegated && sendSource?.kind === 'transcript' });
         } catch (error) {
           this.post({ type: 'sendResult', requestId: m.requestId ?? '', error: error instanceof Error ? error.message : String(error) });
         } finally { this.pendingSend = undefined; }
