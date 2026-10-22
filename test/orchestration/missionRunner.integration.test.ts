@@ -770,6 +770,39 @@ describe('scheduling (#45)', () => {
     expect(a1.timing?.queuedAt).toBeLessThanOrEqual(a1.createdAt - 100);
   });
 
+  it('a task waiting with a pending escalation step says so once: no scheduler hot loop', async () => {
+    // The wait text of a task with a pending step is "<step>; waiting: …". Comparing only
+    // the "waiting: …" part never matched, so every step rewrote the task and the write kicked
+    // the next step, ~100 times a second, flooding every browser until its socket closed.
+    const f = fakeFleet();
+    const logs: string[] = [];
+    const r = rig({ scheduling: f.deps, escalationLimits: { wallClockMs: 300 }, log: (msg) => logs.push(msg) });
+    r.scenario.default = { behaviour: 'timeout' };
+    const m = await r.runner.start({ folder: repo, title: 'Stuck', objective: 'Synthetic.', acceptanceCriteria: ['s'], route: ROUTE });
+    await until(() => r.runner.get(m.id)!.attempts[0]?.state === 'running', 10_000, 'attempt 1 to run');
+    // Paused before the wall clock stops attempt 1: its fresh retry then has to wait.
+    f.pausedNow = true;
+    f.fire();
+    await until(() => byKey(r.runner.get(m.id)!, 't1').escalations.at(-1)?.action === 'retry-same', 10_000, 'the stuck retry to be decided');
+    await until(() => byKey(r.runner.get(m.id)!, 't1').stateReason?.includes('every agent is paused') === true, 10_000, 'the wait to be noted');
+    const t1 = byKey(r.runner.get(m.id)!, 't1');
+    expect(t1.state).toBe('queued');
+    expect(t1.stateReason).toMatch(/^Retrying the same route .*; waiting: every agent is paused/);
+
+    // Quiet while paused: one line in the log, and no stream of saves.
+    let changes = 0;
+    const sub = r.runner.onDidChange(() => changes++);
+    await new Promise((res) => setTimeout(res, 500));
+    sub.dispose();
+    expect(logs.filter((l) => l.includes('waits (fleet-paused)'))).toHaveLength(1);
+    expect(changes).toBeLessThanOrEqual(1);
+
+    // Resumed: the retry starts.
+    f.pausedNow = false;
+    f.fire();
+    await until(() => r.runner.get(m.id)!.attempts.length === 2, 10_000, 'the retry to start');
+  });
+
   it('a usage window at the admission threshold (85%) holds new work; below it, work starts', async () => {
     const f = fakeFleet();
     let percent = 85;
