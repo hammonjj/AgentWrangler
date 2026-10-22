@@ -12,6 +12,11 @@ export type Command =
   /** `text` undefined: read it from stdin (`aw send <id> -`). */
   | { kind: 'send'; ref: string; text: string | undefined }
   | { kind: 'stop'; ref: string; force: boolean }
+  /**
+   * Set the session's nickname, or clear it (`name` ''). `ref` undefined: the
+   * conversation this shell belongs to (`originOf`).
+   */
+  | { kind: 'rename'; ref: string | undefined; name: string; json: boolean }
   | { kind: 'projects'; json: boolean }
   /**
    * `delegate` (#82) is the handoff: the planner decides one task or several.
@@ -51,6 +56,9 @@ Usage:
   aw attach <id>            follow a session Agent Wrangler runs, read-only (Ctrl-C to stop)
   aw send <id> <text…>      send a message to a session Agent Wrangler runs ("-" reads stdin)
   aw stop <id> [--force]    end the process running a session (--force: even mid-turn)
+  aw rename <name…>         name the conversation this shell belongs to, as Rename… does
+      --session <id>        another session instead (not from inside an agent's shell)
+      --clear               go back to the session's own title
   aw projects               the project folders the launcher offers
   aw delegate <objective…>  hand work to Agent Wrangler: a read-only planner decides whether
                             it is one task or several, and it waits for you to approve the
@@ -77,7 +85,7 @@ Usage:
   aw daemon status          whether it is running: pid, build, uptime
 
 <id> is a session id, a unique prefix of one (4+ characters), or a key like claude:<id>.
---json prints the raw result for status, sessions, session, projects, delegate, task, tasks and web devices.
+--json prints the raw result for status, sessions, session, projects, delegate, task, tasks, rename and web devices.
 `;
 
 export function parseArgs(argv: readonly string[]): Command | { error: string } {
@@ -86,6 +94,7 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
   // First too: its options take values, and the objective is free text.
   if (argv[0] === 'task' || argv[0] === 'delegate') return parseHandoff(argv[0], argv.slice(1));
   if (argv[0] === 'remember') return parseRemember(argv.slice(1));
+  if (argv[0] === 'rename') return parseRename(argv.slice(1));
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const words = argv.filter((a) => !a.startsWith('--') || a === '--');
   if (flags.has('--help') || argv.includes('-h')) return { kind: 'help' };
@@ -213,6 +222,43 @@ function parseRemember(tail: readonly string[]): Command | { error: string } {
   const text = words.join(' ');
   if (text.trim().length === 0) return { error: 'aw remember: the note is empty.' };
   return { kind: 'remember', text, memoryKind, json };
+}
+
+/** `aw rename [--session <id>] [--json] <name…>` or `aw rename [--session <id>] --clear`. `--` ends the options. */
+function parseRename(tail: readonly string[]): Command | { error: string } {
+  const words: string[] = [];
+  let ref: string | undefined;
+  let clear = false;
+  let json = false;
+  for (let i = 0; i < tail.length; i++) {
+    const a = tail[i];
+    if (a === '--') {
+      words.push(...tail.slice(i + 1));
+      break;
+    }
+    if (a === '--session') {
+      const value = tail[i + 1];
+      if (value === undefined || value.startsWith('--')) return { error: 'aw rename: --session needs a session id.' };
+      ref = value;
+      i++;
+      continue;
+    }
+    if (a === '--clear') {
+      clear = true;
+      continue;
+    }
+    if (a === '--json') {
+      json = true;
+      continue;
+    }
+    if (a === '--help' || a === '-h') return { kind: 'help' };
+    if (a.startsWith('--')) return { error: `aw rename: unknown option ${a}` };
+    words.push(a);
+  }
+  const name = words.join(' ').trim();
+  if (clear && name) return { error: 'aw rename: give a name or --clear, not both.' };
+  if (!clear && !name) return { error: 'aw rename: what should it be called? Give a name, or --clear to go back to its own title.' };
+  return { kind: 'rename', ref, name, json };
 }
 
 /**

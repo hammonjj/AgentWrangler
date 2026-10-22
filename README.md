@@ -953,6 +953,7 @@ take turns, with no cooperation needed from the agent: the tool call is the requ
 | `aw attach <id>` | Follow a session the app runs, read-only, until it ends or Ctrl-C. |
 | `aw send <id> <text…>` | Send a message to a session the app runs (`-` reads the text from stdin). |
 | `aw stop <id> [--force]` | End the process running a session, as the row menu's *Close session* does. A session mid-turn is left alone unless `--force`. |
+| `aw rename <name…>` / `aw rename --clear` | Give a conversation your own name, as the row menu's *Rename…* does; `--clear` brings its own title back. Without `--session <id>` it names the conversation the shell belongs to, so an agent can label itself (for example `Issue #42: Fix tray badge`); naming another session from inside an agent's shell is refused. |
 | `aw projects` | The project folders the launcher offers. |
 | `aw delegate <objective…> [--criteria "a; b"] [--folder <dir>] [--claude\|--codex]` | Hand work over. A read-only planner decides whether it is one task or several, and the app waits for you to approve the proposal or the plan (see below). `-` reads the objective from stdin. |
 | `aw task <objective…>` (same options) | Shortcut: always one task, no planner. The app assesses and routes it, then waits for you to start it. |

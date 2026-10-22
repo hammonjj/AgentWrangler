@@ -51,10 +51,10 @@ export const RPC_AMBIGUOUS = -32005;
 /** The session exists, but not in a way that allows this (e.g. `send` to one AW does not run). */
 export const RPC_UNSUPPORTED = -32006;
 
-export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'agent.propose', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke'] as const;
+export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'agent.propose', 'rename', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke'] as const;
 export type ControlMethod = (typeof CONTROL_METHODS)[number];
 /** Methods that change something. Logged by the core (method and session, never content). */
-export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate', 'agent.propose'];
+export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate', 'agent.propose', 'rename'];
 /** The longest objective `task.propose` and `delegate` accept. An outcome, not a document. */
 export const MAX_TASK_OBJECTIVE_CHARS = 20_000;
 
@@ -201,6 +201,19 @@ export interface ControlSendResult {
   outcome: ControlCommandOutcome;
   /** Why it was not applied, when there is something to say (e.g. open read-only elsewhere). */
   reason?: string;
+}
+
+/**
+ * `rename`: set the session's nickname, as the row menu's Rename… does. An
+ * empty `name` clears it, bringing back the session's own title.
+ */
+export interface ControlRenameParams extends ControlSessionParams {
+  name: string;
+}
+
+export interface ControlRenameResult {
+  /** What the table shows now: the nickname, or the session's own title once cleared. */
+  title: string;
 }
 
 export interface ControlStopParams extends ControlSessionParams {

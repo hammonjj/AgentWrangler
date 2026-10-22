@@ -446,6 +446,10 @@ describe('control backend (aw): every method is authorised before it acts', () =
       runBy: () => 'app',
       projects: { value: [] },
       stopSession: spy('stopSession', 'stopped'),
+      nicknames: {
+        set: () => calls.push('nicknames.set'),
+        get: () => 'Synthetic name',
+      },
       proposeTask: spy('proposeTask', {}),
       proposeAgentMemory: spy('proposeAgentMemory', { agentName: 'PO' }),
       delegate: spy('delegate', {}),
@@ -484,6 +488,7 @@ describe('control backend (aw): every method is authorised before it acts', () =
     subscribe: (b) => b.subscribe(KEY, 10, () => undefined, () => undefined),
     send: (b) => b.send(KEY, 'synthetic'),
     stop: (b) => b.stop(KEY, false),
+    rename: (b) => b.rename(KEY, 'Synthetic name'),
     projects: (b) => b.projects(),
     proposeTask: (b) => b.proposeTask({ objective: 'synthetic', cwd: '/Users/test/proj' } as never),
     delegate: (b) => b.delegate({ objective: 'synthetic', cwd: '/Users/test/proj' } as never),
@@ -530,5 +535,12 @@ describe('control backend (aw): every method is authorised before it acts', () =
       ['session.send', KEY],
       ['session.close', KEY],
     ]);
+  });
+
+  it('allowed, rename sets the resolved session\'s nickname and reports what the table shows', () => {
+    const r = rig('allow');
+    expect(r.backend.rename(KEY, 'Synthetic name')).toEqual({ title: 'Synthetic name' });
+    expect(r.calls).toEqual(['nicknames.set']);
+    expect(r.auth.asked.map((a) => [a.action, a.resource])).toEqual([['session.rename', KEY]]);
   });
 });

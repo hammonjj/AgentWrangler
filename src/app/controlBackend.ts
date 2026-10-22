@@ -204,6 +204,15 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       return outcome;
     },
 
+    rename(ref, name) {
+      const s = find(ref);
+      admit('session.rename', s.key);
+      app.nicknames.set(s.key, name);
+      const title = displayTitle({ title: s.title, nickname: app.nicknames.get(s.key) });
+      deps.flash?.(`aw renamed ${displayTitle(s)} to ${title}`);
+      return { title };
+    },
+
     projects: () => {
       admit('view.read');
       return app.projects.value.map((p) => ({ dir: p.dir, name: p.name, lastUsedAt: p.lastUsedAt, favourite: p.favourite, occupiedBy: p.occupiedBy }));
