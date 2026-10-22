@@ -1502,10 +1502,20 @@ function openRow(key: string): void {
   post({ type: 'rowClick', key });
 }
 
-newBtn.addEventListener('click', () => {
+function startNewConversation(): void {
   requestComposerFocus();
   announceSwitch({ title: 'New conversation' });
   post({ type: 'newConversation', cwd: currentProject(), provider: launchProvider === 'openai' ? 'codex' : 'claude' });
+}
+
+newBtn.addEventListener('click', startNewConversation);
+
+// Ctrl+N starts a conversation from anywhere on the page, the composer included.
+window.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() !== 'n' || !e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat) return;
+  if (newBtn.disabled) return;
+  e.preventDefault();
+  startNewConversation();
 });
 
 tasksBtn.addEventListener('click', () => {
