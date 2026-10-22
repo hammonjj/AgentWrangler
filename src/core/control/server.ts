@@ -30,6 +30,7 @@ import {
   type ControlHelloResult,
   type ControlMethod,
   type ControlProject,
+  type ControlRenameResult,
   type ControlSendResult,
   type ControlSession,
   type ControlSessionClosed,
@@ -81,6 +82,8 @@ export interface ControlBackend {
   ): ControlSubscription;
   send(ref: string, text: string): Promise<ControlSendResult>;
   stop(ref: string, force: boolean): Promise<StopOutcome>;
+  /** Set (or, with a blank name, clear) the session's nickname. */
+  rename(ref: string, name: string): ControlRenameResult;
   projects(): ControlProject[];
   /** A task proposal the user accepts in the app (#80). Throws `ControlError` when orchestration is off. */
   proposeTask(params: ControlTaskProposeParams): Promise<ControlTaskProposeResult>;
@@ -258,6 +261,10 @@ export class ControlServer implements Disposable {
       }
       case 'stop':
         return { outcome: await backend.stop(ref(p), p.force === true) };
+      case 'rename': {
+        if (typeof p.name !== 'string' || p.name.length > 200) throw new ControlError(RPC_INVALID_PARAMS, 'name must be a string of at most 200 characters');
+        return backend.rename(ref(p), p.name) satisfies ControlRenameResult;
+      }
       case 'projects':
         return { projects: backend.projects() };
       case 'task.propose':

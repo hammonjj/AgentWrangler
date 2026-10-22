@@ -332,6 +332,22 @@ describe('aw remember / aw forget (#180)', () => {
   });
 });
 
+describe('aw rename', () => {
+  it('takes the free words as the name, for this conversation or another', () => {
+    expect(parseArgs(['rename', 'Issue', '#7:', 'Fix', 'tray'])).toEqual({ kind: 'rename', ref: undefined, name: 'Issue #7: Fix tray', json: false });
+    expect(parseArgs(['rename', '--session', 'abcd', 'Release', 'prep', '--json'])).toEqual({ kind: 'rename', ref: 'abcd', name: 'Release prep', json: true });
+    expect(parseArgs(['rename', '--clear'])).toEqual({ kind: 'rename', ref: undefined, name: '', json: false });
+    expect(parseArgs(['rename', '--', '--clear', 'is', 'a', 'flag'])).toEqual({ kind: 'rename', ref: undefined, name: '--clear is a flag', json: false });
+  });
+
+  it('explains what is missing or wrong', () => {
+    expect(parseArgs(['rename'])).toHaveProperty('error');
+    expect(parseArgs(['rename', '--clear', 'x'])).toEqual({ error: 'aw rename: give a name or --clear, not both.' });
+    expect(parseArgs(['rename', 'x', '--session'])).toHaveProperty('error');
+    expect(parseArgs(['rename', 'x', '--force'])).toEqual({ error: 'aw rename: unknown option --force' });
+  });
+});
+
 describe('aw task (#80)', () => {
   const base = { criteria: [], folder: undefined, harness: undefined, json: false };
 

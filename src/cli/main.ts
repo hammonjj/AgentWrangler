@@ -10,6 +10,7 @@ import { defaultRunDirs } from '../core/control/paths';
 import {
   RPC_AMBIGUOUS,
   type ControlProjectsResult,
+  type ControlRenameResult,
   type ControlSendResult,
   type ControlSessionClosed,
   type ControlSessionEvent,
@@ -80,6 +81,14 @@ async function run(argv: string[]): Promise<number> {
         `aw ${cmd.kind}: refused, because this shell looks like ${inside}. ` +
           'One agent must not drive another through aw; run it from your own terminal.\n',
       );
+      return 3;
+    }
+  }
+  // An agent may name its own conversation, never another's: the same speed bump.
+  if (cmd.kind === 'rename' && cmd.ref !== undefined) {
+    const inside = agentEnvironment(process.env);
+    if (inside) {
+      process.stderr.write(`aw rename: refused, because this shell looks like ${inside}. Drop --session to name this conversation, or run it from your own terminal.\n`);
       return 3;
     }
   }
@@ -208,6 +217,17 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
       const text = (message as Record<string, string>)[r.outcome] ?? `Not stopped (${String(r.outcome)}).`;
       (r.outcome === 'stopped' ? process.stdout : process.stderr).write(`${text}\n`);
       return r.outcome === 'stopped' ? 0 : 1;
+    }
+    case 'rename': {
+      const origin = originOf(process.env);
+      const target = cmd.ref ?? (origin ? `${origin.provider}:${origin.sessionId}` : undefined);
+      if (!target) {
+        process.stderr.write('aw rename: which session? Run it inside a Claude Code or Codex conversation, or give --session <id>.\n');
+        return 2;
+      }
+      const r = await client.request<ControlRenameResult>('rename', { ref: target, name: cmd.name });
+      print(r, () => (cmd.name ? `Renamed to ${safe(r.title)}.` : `Cleared. It shows as ${safe(r.title)} again.`), cmd.json);
+      return 0;
     }
     case 'attach':
       return attach(cmd.ref, client);

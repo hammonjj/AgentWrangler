@@ -72,6 +72,10 @@ function fakeBackend() {
       calls.push(`stop ${ref} ${force}`);
       return 'working';
     },
+    rename: (ref, name) => {
+      calls.push(`rename ${ref} ${name}`);
+      return { title: name || 'Own title' };
+    },
     projects: () => [],
     proposeTask: async (p) => {
       origins.push(p.origin);
@@ -323,6 +327,21 @@ describe('control socket', () => {
     expect(await codeOf(client.request('delegate', { folder: 'relative/dir', objective: 'x' }))).toBe(RPC_INVALID_PARAMS);
     server!.stopMutations();
     expect(await codeOf(client.request('delegate', { folder: '/Users/test/proj', objective: 'x' }))).toBe(RPC_UNSUPPORTED);
+    client.close();
+  });
+
+  it('rename reaches the backend, logs the session and never the name, and is refused while quitting', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    expect(await client.request('rename', { ref: 'claude:abcd1234', name: 'Issue #7: Fix tray' })).toEqual({ title: 'Issue #7: Fix tray' });
+    expect(await client.request('rename', { ref: 'claude:abcd1234', name: '' })).toEqual({ title: 'Own title' });
+    expect(await codeOf(client.request('rename', { ref: 'claude:abcd1234' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('rename', { name: 'x' }))).toBe(RPC_INVALID_PARAMS);
+    expect(fake.calls).toEqual(['rename claude:abcd1234 Issue #7: Fix tray', 'rename claude:abcd1234 ']);
+    expect(logs.join('\n')).not.toContain('Fix tray');
+    server!.stopMutations();
+    expect(await codeOf(client.request('rename', { ref: 'claude:abcd1234', name: 'x' }))).toBe(RPC_UNSUPPORTED);
     client.close();
   });
 
