@@ -67,6 +67,7 @@ import { PAIRING_LOCKOUT_MS, PairingOffers } from './pairing';
 import { PAIR_CSS, PAIR_CSS_PATH, PAIR_PAGE_CSP, pairFormPage, pairMessagePage, pairOfferPage, pairStartPage, setupPage } from './pairPages';
 import { encodeQr, qrToSvg } from './qr';
 import { isLoopbackHost, readCookie } from './wsFrames';
+import { MAX_SOCKET_MESSAGE_BYTES } from '../../shared/wireParts';
 
 export const WEB_DEFAULT_PORT = 7391;
 /** The loopback device cookie. */
@@ -166,10 +167,11 @@ export interface WebPageInput {
 const PAGE_ASSETS = ['webshim.js', 'workbench.js', 'workbench.css', 'theme.css'];
 
 /**
- * A message from a browser is a pane message, an image or two at most:
- * anything bigger is refused (1009) rather than allocated.
+ * One message from a browser. Anything bigger is refused (1009) rather than
+ * allocated; the shim splits a longer envelope into parts under it
+ * (`shared/wireParts.ts`), which the connection joins.
  */
-const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+const MAX_MESSAGE_BYTES = MAX_SOCKET_MESSAGE_BYTES;
 
 /**
  * permessage-deflate (#128): the table snapshot is repetitive JSON. Context
