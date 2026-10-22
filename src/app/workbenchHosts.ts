@@ -91,7 +91,7 @@ export function createWorkbenchHosts(
  * clipboard — installing software on someone's behalf is not a thing this
  * should do either way.
  */
-export function workbenchUi(host: HostServices): ConversationHostUi {
+export function workbenchUi(host: HostServices, log?: (line: string) => void): ConversationHostUi {
   const offerDictationSetup = async (err: DictationSetupError): Promise<void> => {
     const command =
       err.remedy === 'download-model'
@@ -104,5 +104,5 @@ export function workbenchUi(host: HostServices): ConversationHostUi {
     );
     if (choice === 'Copy command') await host.clipboard.writeText(command);
   };
-  return { dialogs: host.dialogs, offerDictationSetup };
+  return { dialogs: host.dialogs, offerDictationSetup, ...(log ? { log } : {}) };
 }
