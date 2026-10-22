@@ -2459,11 +2459,17 @@ export class TaskRunner implements Disposable {
     const t = m?.tasks.find((x) => x.id === a.taskId);
     if (!m || !t || !['pending', 'queued', 'blocked', 'verifying'].includes(t.state)) return;
     const reason = `waiting: ${a.detail}`;
-    if (t.stateReason === reason) return;
-    this.log(`mission ${m.id}: ${t.key} waits (${a.reason}): ${a.detail}`);
     // A pending escalation step keeps its own text; the wait is added to it.
     const pending = pendingEscalation(t);
-    this.put(this.patchTask(m, t.id, (x) => ({ ...x, stateReason: pending ? `${pendingText(pending, now)}; ${reason}` : reason })));
+    const text = pending ? `${pendingText(pending, now)}; ${reason}` : reason;
+    // Compared whole. Comparing `reason` alone never matched a task with a
+    // pending step, so every scheduler step rewrote the task, and the write
+    // kicked the next step: a hot loop (one step every ~10 ms) that flooded
+    // every browser with snapshots until its socket closed on backpressure.
+    if (t.stateReason === text) return;
+    this.log(`mission ${m.id}: ${t.key} waits (${a.reason}): ${a.detail}`);
+    // Quiet: saying why a task waits frees nothing, so it schedules no step of its own.
+    this.put(this.patchTask(m, t.id, (x) => ({ ...x, stateReason: text })), { kick: false });
   }
 
   /** Carry out one of the scheduler's actions for a mission, in its queue. */
@@ -5061,14 +5067,18 @@ export class TaskRunner implements Disposable {
     return m;
   }
 
-  /** Save and publish. Throws if the store cannot write: the mission in memory then stays as it was. */
-  private put(m: Mission): void {
+  /**
+   * Save and publish. Throws if the store cannot write: the mission in memory
+   * then stays as it was. `kick: false` is for a write that frees nothing (a
+   * task's wait text): it must not schedule the step that would write it again.
+   */
+  private put(m: Mission, opts: { kick?: boolean } = {}): void {
     const next = { ...m, updatedAt: this.now() };
     this.deps.store.save(next);
     this.missions.set(next.id, next);
     this.emitter.fire();
     // Something may have freed a slot for work that waits (#45).
-    if (this.verifyWaiters.size > 0 || this.queuedSince.size > 0) this.kickSoon();
+    if (opts.kick !== false && (this.verifyWaiters.size > 0 || this.queuedSince.size > 0)) this.kickSoon();
   }
 
   private patchTask(m: Mission, taskId: string, f: (t: Task) => Task): Mission {
