@@ -1055,6 +1055,27 @@ another browser on the Mac. Phones and other computers need [LAN access](#lan-ac
 - Sign-ins, failed sign-ins and new browsers are recorded in the access log
   (`~/.cache/agent-wrangler/access.log`), by id only.
 
+### As an app window on the Mac (#162)
+
+The workbench can be installed from Chrome as an app with its own window and Dock icon. It
+is the same page on the same daemon, over a direct WebSocket: no relay, no Supabase.
+
+1. Sign Chrome in: `aw web open` when Chrome is your default browser, or paste the link
+   `aw web url` prints into a Chrome tab.
+2. On `http://127.0.0.1:7391/`, click the install icon at the right of the address bar, or
+   **⋮ › Cast, save and share › Install page as app**.
+
+The window shares Chrome's cookies, so it is signed in as long as that Chrome profile is (30
+days from the last time the page loaded). Signed out, it says so and how to sign in again; sign
+in in a Chrome tab, then reload the window (⌘R). To remove it: in the window, **⋮ › Uninstall
+Agent Wrangler**. Installing grants nothing: the manifest and icons are the only files served
+without the sign-in cookie, and there is no service worker.
+
+The relay PWA ([Remote control](#remote-control-experimental), installed from the Netlify
+site) is for the phone away from home. On the Mac, use this one: the relay sends every click
+through Supabase, and its connection drops now and then. The two are separate apps, on
+separate origins, and can be installed side by side.
+
 ### LAN access
 
 Off by default. *Allow devices on my home network* (`web.lan.enabled`, under Browser in

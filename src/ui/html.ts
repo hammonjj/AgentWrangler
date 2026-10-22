@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import { installHeadHtml } from '../shared/installable';
 
 export function getNonce(): string {
   return crypto.randomBytes(16).toString('hex');
@@ -87,6 +88,11 @@ export interface WebviewHtmlOptions {
   meta?: Record<string, string>;
   /** The viewport meta's content. Absent, the plain one every host has always had. */
   viewport?: string;
+  /**
+   * The installable-app lines (#162): the manifest link, icons and theme colour. Set
+   * only by the browser workbench; it also adds `manifest-src 'self'` to the CSP.
+   */
+  installable?: boolean;
 }
 
 /** What any other host gets: unchanged since the first webview. */
@@ -110,13 +116,15 @@ export function renderWebviewHtml(opts: WebviewHtmlOptions): string {
   const bodyAttr = bodyClass ? ` class="${bodyClass}"` : '';
   const connect = connectSrc ? ` connect-src ${connectSrc};` : '';
   const scripts = [...preScripts, jsSrc].map((src) => `<script nonce="${nonce}" src="${src}"></script>`).join('\n');
+  const manifest = opts.installable ? " manifest-src 'self';" : '';
+  const install = opts.installable ? `\n${installHeadHtml()}` : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'; img-src ${cspSource} data:;${connect}">
-<meta name="viewport" content="${attr(opts.viewport ?? DEFAULT_VIEWPORT)}">${metas}
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'; img-src ${cspSource} data:;${connect}${manifest}">
+<meta name="viewport" content="${attr(opts.viewport ?? DEFAULT_VIEWPORT)}">${metas}${install}
 ${links}
 <title>${title}</title>
 </head>
@@ -147,6 +155,8 @@ export function renderBrowserWorkbenchHtml(opts: { asset: (name: string) => stri
     preScripts: [opts.asset('webshim.js')],
     connectSrc: opts.connectSrc,
     nonce: opts.nonce,
+    // An app window of its own in Chrome, on the Home Screen on a phone (#162).
+    installable: true,
   });
 }
 

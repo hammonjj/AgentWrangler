@@ -255,6 +255,63 @@ describe('web server: login link and device cookie', () => {
   });
 });
 
+describe('web server: install manifest and icons (#162)', () => {
+  beforeEach(() => {
+    fs.mkdirSync(path.join(webviewDir, 'icons'));
+    fs.writeFileSync(path.join(webviewDir, 'icons', 'icon-192.png'), 'png-192');
+    fs.writeFileSync(path.join(dir, 'dist', 'webview', 'icons.png'), 'not listed');
+  });
+
+  it('serves the manifest without a device cookie, as JSON, revalidated', async () => {
+    const r = await request('/manifest.webmanifest');
+    expect(r.status).toBe(200);
+    expect(r.headers['content-type']).toBe('application/manifest+json; charset=utf-8');
+    expect(r.headers['cache-control']).toBe('no-cache');
+    expect(r.headers['x-content-type-options']).toBe('nosniff');
+    expect(r.headers['set-cookie']).toBeUndefined();
+    expect(JSON.parse(r.body)).toMatchObject({ start_url: '/', display: 'standalone', name: 'Agent Wrangler' });
+    expect((await request('/manifest.webmanifest', { method: 'HEAD' })).status).toBe(200);
+  });
+
+  it('serves a listed icon without a device cookie; a missing one is 404', async () => {
+    const r = await request('/icons/icon-192.png');
+    expect(r.status).toBe(200);
+    expect(r.headers['content-type']).toBe('image/png');
+    expect(r.body).toBe('png-192');
+    expect((await request('/icons/icon-512.png')).status).toBe(404);
+  });
+
+  it('nothing else under /icons, or near it, skips the device cookie', async () => {
+    for (const p of ['/icons/', '/icons/other.png', '/icons.png', '/icons/../workbench.js', '/icons/%2e%2e/workbench.js', '/manifest.json', '/icons/icon-192.png/x']) {
+      expect((await request(p)).status, p).toBe(401);
+    }
+  });
+
+  it('keeps the Host and Origin checks', async () => {
+    expect((await request('/manifest.webmanifest', { headers: { host: `evil.example:${port}` } })).status).toBe(421);
+    expect((await request('/icons/icon-192.png', { headers: { host: `evil.example:${port}` } })).status).toBe(421);
+    expect((await request('/manifest.webmanifest', { method: 'POST' })).status).toBe(403);
+    expect((await request('/manifest.webmanifest', { method: 'POST', headers: { origin: `http://${host}` } })).status).toBe(405);
+  });
+
+  it("the signed-in page links the manifest and its CSP header allows it", async () => {
+    const page = await request('/', { headers: { cookie: `${DEVICE_COOKIE}=${await signIn()}` } });
+    expect(page.body).toContain('<link rel="manifest" href="/manifest.webmanifest">');
+    expect(String(page.headers['content-security-policy'])).toContain("manifest-src 'self'");
+  });
+
+  it('signed out, / on loopback is a page saying how to sign in, not a blank window', async () => {
+    const r = await request('/');
+    expect(r.status).toBe(401);
+    expect(r.headers['content-type']).toBe('text/html; charset=utf-8');
+    expect(r.body).toContain('aw web open');
+    expect(String(r.headers['content-security-policy'])).toContain("default-src 'none'");
+    // Anything else signed out is still the plain refusal.
+    const other = await request('/workbench.js');
+    expect(other.headers['content-type']).toBe('text/plain; charset=utf-8');
+  });
+});
+
 describe('web server: page and assets', () => {
   it('the page is no-store, with a fresh nonce per request and the CSP as a header', async () => {
     const cookie = `${DEVICE_COOKIE}=${await signIn()}`;

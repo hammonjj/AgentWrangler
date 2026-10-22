@@ -144,6 +144,15 @@ const configs = [web, relaySite, sessionHost, coreDaemon, cli, launcher];
 
 rmSync('dist/relay-site', { recursive: true, force: true });
 cpSync('src/webview/relayLoader/static', 'dist/relay-site', { recursive: true });
+
+/**
+ * The web icons (#162): one set, made from the app icon by `scripts/make-web-icons.sh`.
+ * The workbench serves them from `dist/webview/icons/` (`src/shared/installable.ts`);
+ * the relay site has them at its root, where its manifest and `sw.js` expect them.
+ */
+rmSync('dist/webview/icons', { recursive: true, force: true });
+cpSync('src/webview/icons', 'dist/webview/icons', { recursive: true });
+cpSync('src/webview/icons', 'dist/relay-site', { recursive: true });
 writeRelayProject();
 
 /**

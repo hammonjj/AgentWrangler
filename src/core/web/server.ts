@@ -23,7 +23,8 @@
  *    any other that passes is 405.
  * 3. `/login?code=…` exchanges a single-use code for a device cookie of the
  *    listener's scope (`aw web open`, on loopback). Everything else needs that
- *    cookie, or **401**, except pairing on the LAN.
+ *    cookie, or **401**, except pairing on the LAN and the install manifest and
+ *    its icons (#162, `installAsset`).
  *
  * Pairing (#137, `pairing.ts`, `pairPages.ts`):
  * - `/pair/new` on loopback, signed in: GET shows a button, POST starts an
@@ -41,7 +42,8 @@
  * Revoking a device (`WebDeviceStore.revoke`) closes its open WebSockets at
  * once (`onDidRevoke`), and its cookie is refused from then on.
  *
- * Only `dist/webview` is served (`AssetManifest`), plus, on loopback, the
+ * Only `dist/webview` is served (`AssetManifest`, and the fixed icon list in
+ * `src/shared/installable.ts` from `dist/webview/icons`), plus, on loopback, the
  * local CA for a device to install (`/ca.pem`, `/ca.mobileconfig`); data files
  * will come through their own allowlist later (§6).
  */
@@ -61,6 +63,7 @@ import type { WebFileRoutes } from './files';
 import { DIRS_PATH, FILES_PATH, UPLOAD_PATH } from '../../shared/files';
 import { PAIR_OFFER_PATH, type PairOfferReply } from '../../shared/pairOffer';
 import { REAUTH_PATH, REAUTH_STORAGE_KEY, REAUTH_TOKEN_PATH } from '../../shared/webReauth';
+import { INSTALL_ICONS, WEB_MANIFEST_PATH, webAppManifest } from '../../shared/installable';
 import { LoginCodes } from './loginLinks';
 import { caMobileconfig, MOBILECONFIG_CONTENT_TYPE } from './mobileconfig';
 import { PAIRING_LOCKOUT_MS, PairingOffers } from './pairing';
@@ -80,6 +83,13 @@ export const LAN_DEVICE_COOKIE = '__Host-aw_lan_device';
 /** LAN recovery (a browser that lost its device cookie): trade a kept token for a new cookie. */
 const LAN_NOT_SIGNED_IN =
   'Not signed in. This device has not been paired with Agent Wrangler on the Mac, or was unpaired. To pair it, run `aw web pair` on the Mac and scan the QR code.';
+/**
+ * Loopback, signed out (#162). The app window and the Chrome tabs share one cookie jar, so
+ * signing in once in Chrome (where `aw web open` lands when Chrome is the default browser)
+ * signs the window in too.
+ */
+const LOOPBACK_NOT_SIGNED_IN =
+  'This browser is not signed in to Agent Wrangler. Run `aw web open` in a terminal on this Mac (or open the link `aw web url` prints in this browser), then reload this page.';
 const COOKIE_MAX_AGE_S =Math.floor(DEVICE_TTL_MS / 1000);
 /** The pairing forms' token cookie (#137), per scope like the device cookies. */
 export const PAIR_FORM_COOKIE = 'aw_pair_form';
@@ -597,6 +607,8 @@ export class WebServer implements Disposable {
       this.pairForm(listener, req, res, url.searchParams.get('code') ?? '');
       return;
     }
+    // The install manifest and its icons (#162), before the device cookie: see `installAsset`.
+    if (this.installAsset(url.pathname, res)) return;
     if (url.pathname === '/login') {
       // A HEAD (a link preview, a prefetch) must not spend the code.
       if (req.method !== 'GET') {
@@ -617,6 +629,11 @@ export class WebServer implements Disposable {
       }
       if (listener.scope === 'lan' && url.pathname === '/' && req.method === 'GET') {
         this.reauthPage(res);
+        return;
+      }
+      // A page, not a line of text: an installed app window (#162) shows it with no address bar.
+      if (listener.scope === 'loopback' && url.pathname === '/' && req.method === 'GET') {
+        this.html(res, 401, pairMessagePage('Not signed in', LOOPBACK_NOT_SIGNED_IN));
         return;
       }
       text(
@@ -1013,7 +1030,7 @@ export class WebServer implements Disposable {
     }
     const csp =
       `default-src 'none'; style-src 'self'; script-src 'nonce-${nonce}'; img-src 'self' data:; ` +
-      `connect-src ${connectSrc}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+      `connect-src ${connectSrc}; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
     res.writeHead(200, {
       ...SECURITY_HEADERS,
       'content-type': 'text/html; charset=utf-8',
@@ -1022,6 +1039,34 @@ export class WebServer implements Disposable {
       'set-cookie': this.cookie(listener, req, cookie),
     });
     res.end(html);
+  }
+
+  /**
+   * The install manifest and its icons (#162), by exact path from a fixed list
+   * (`INSTALL_ICONS`): no name from the request reaches the filesystem. Answered
+   * without the device cookie, because a browser fetches a manifest without
+   * credentials (and iOS its touch icon) and would otherwise see a 401 and not
+   * offer to install. They hold nothing but the name and the icon, the same as the
+   * relay's public site; the Host check has already run, and the page they belong
+   * to still needs the cookie. Revalidated, not immutable: the names are not hashed.
+   */
+  private installAsset(pathname: string, res: http.ServerResponse): boolean {
+    if (pathname === WEB_MANIFEST_PATH) {
+      res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': 'application/manifest+json; charset=utf-8', 'cache-control': 'no-cache' });
+      res.end(`${JSON.stringify(webAppManifest())}\n`);
+      return true;
+    }
+    const name = Object.hasOwn(INSTALL_ICONS, pathname) ? INSTALL_ICONS[pathname] : undefined;
+    if (!name) return false;
+    fs.readFile(path.join(this.opts.webviewDir, 'icons', name), (err, body) => {
+      if (err) {
+        res.writeHead(404, SECURITY_HEADERS).end();
+        return;
+      }
+      res.writeHead(200, { ...SECURITY_HEADERS, 'content-type': 'image/png', 'cache-control': 'no-cache' });
+      res.end(body);
+    });
+    return true;
   }
 
   private asset(urlPath: string, res: http.ServerResponse): void {
