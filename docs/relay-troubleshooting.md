@@ -4,6 +4,9 @@ Notes from the first time this was chased down (2026-10-21), so the next look st
 here. The plan is `docs/plans/remote-control-supabase.md`; the setup is
 `docs/remote-control-setup.md`; click latency has its own benchmark in `docs/relay-benchmark.md`.
 
+If the loopback or LAN workbench is also empty or reconnecting, it is not the relay: see
+`docs/workbench-wont-load.md`.
+
 ## Which front end is it?
 
 "The web app" can mean two different things. Settle this first:

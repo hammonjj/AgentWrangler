@@ -36,7 +36,9 @@ checks), and `HostServices` has one implementation, `src/node/nodeHost.ts`.
   temp `HOME`: a packaged `ensure` talks to the real launchd label.
   Logs: `~/Library/Application Support/Agent Wrangler/logs/core-daemon.log` and
   `agent-wrangler.log` beside it. A remote (Netlify/PWA) tab that is slow or hangs:
-  start from `docs/relay-troubleshooting.md`.
+  start from `docs/relay-troubleshooting.md`. A loopback or LAN workbench that loads but shows no
+  sessions, or reconnects every ~10 s, with a busy daemon: start from `docs/workbench-wont-load.md`
+  (a scheduler hot loop once did this; follow-on hardening is #197).
 - `aw web open` — open the workbench (`http://127.0.0.1:7391/`) in the default browser, signed
   in. Routes are in the hash: `#/agents` (durable agents), `#/sessions` (the session table;
   bare `#/` too), `#/c/<key>`, `#/jobs` (scheduled jobs), `#/missions`, `#/analytics`, `#/preferences`. `aw web url` prints the link instead and refuses in an agent's shell, as do
