@@ -35,6 +35,7 @@ import type { InteractionTracer } from './interactionTrace';
 import { parseTraceId } from '../../shared/trace';
 import { createShellChannel, type ShellConversation } from './shellChannel';
 import { SHELL_PANE, WIRE_PROTOCOL, isCommandId, parseShellToHost, type AppActionName, type HostToShell } from '../../shared/shellProtocol';
+import { MAX_ASSEMBLED_CHARS, MAX_SOCKET_MESSAGE_BYTES, PartAssembler, mb, parseWirePart } from '../../shared/wireParts';
 
 /**
  * The part of a `ws` WebSocket a connection uses. A real socket from the listeners is one; the
@@ -56,7 +57,8 @@ export interface ClientSocket {
   close(code?: number, reason?: string): void;
   terminate(): void;
   on(event: 'message', listener: (data: RawData, isBinary: boolean) => void): unknown;
-  on(event: 'pong' | 'close' | 'error', listener: () => void): unknown;
+  on(event: 'pong' | 'close', listener: () => void): unknown;
+  on(event: 'error', listener: (err?: unknown) => void): unknown;
 }
 
 /**
@@ -294,6 +296,10 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
         tracer?.complete(connectionId, m);
         return;
       }
+      if (m.type === 'oversized') {
+        log(`web: ${connectionId} did not send a ${m.label} of ${mb(m.chars)}: over the ${mb(MAX_ASSEMBLED_CHARS)} limit`);
+        return;
+      }
       if (m.type === 'reconnected') {
         log(`web: ${connectionId} (${transportKind}) is a tab back after its last socket closed (${m.reason}), down ${(m.downMs / 1000).toFixed(1)} s`);
         return;
@@ -301,18 +307,40 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       shell.receive(body);
     };
 
+    // A long envelope arrives as `shell.part`s (`shared/wireParts.ts`), joined here.
+    const parts = new PartAssembler();
+
     const onMessage = (data: RawData, isBinary: boolean) => {
       alive = true;
       if (isBinary) return close(1003, 'text only');
+      onText(rawText(data), false);
+    };
+
+    const onText = (text: string, joined: boolean) => {
       let msg: unknown;
       try {
-        msg = JSON.parse(rawText(data));
+        msg = JSON.parse(text);
       } catch {
         return close(1007, 'not JSON');
       }
       if (!msg || typeof msg !== 'object') return;
       const m = msg as { pane?: unknown; body?: unknown; commandId?: unknown; cid?: unknown };
-      if (m.pane === SHELL_PANE) return onShell(m.body);
+      if (m.pane === SHELL_PANE) {
+        const part = parseWirePart(m.body);
+        if (part) {
+          // A joined envelope is a pane's; parts inside parts are not something the shim sends.
+          if (joined) return;
+          const r = parts.add(part);
+          if (r.kind === 'refused') log(`web: ${connectionId} sent a ${r.label} of ${mb(r.chars)} in parts; dropped it: ${r.reason}`);
+          else if (r.kind === 'done') {
+            log(`web: ${connectionId} sent a ${r.label} of ${mb(r.line.length)} in ${r.count} parts`);
+            onText(r.line, true);
+          }
+          return;
+        }
+        if ((m.body as { type?: unknown } | null)?.type === 'part') return;
+        return onShell(m.body);
+      }
       const cid = tracer ? parseTraceId(m.cid) : undefined;
       if (cid && tracer) tracer.begin(connectionId, cid, transportKind);
       // A pane that says `ready` has just (re)drawn from nothing: it is owed the table whatever
@@ -371,7 +399,15 @@ export function createBrowserConnections(opts: BrowserConnectionsOptions): Brows
       alive = true;
     });
     ws.on('close', () => close());
-    ws.on('error', () => close());
+    ws.on('error', (err?: unknown) => {
+      // `ws` refused a message over `maxPayload` (and closes with 1009): say so, since the
+      // tab's next socket will otherwise only report the code.
+      const code = (err as { code?: unknown } | undefined)?.code;
+      if (code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') {
+        log(`web: ${connectionId} sent a message over the ${mb(MAX_SOCKET_MESSAGE_BYTES)} socket limit; closing it (1009)`);
+      }
+      close();
+    });
   }
 
   return {

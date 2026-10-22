@@ -142,7 +142,12 @@ export type ShellToHost =
   /** What a row click cost in this tab, once the conversation rendered (#190). Ids and numbers only. */
   | ({ type: 'trace' } & TraceReport)
   /** The tab is back after its previous socket closed: why it closed, and how long it was down. For the log only. */
-  | { type: 'reconnected'; reason: string; downMs: number };
+  | { type: 'reconnected'; reason: string; downMs: number }
+  /**
+   * The tab did not send an envelope because it was over `MAX_ASSEMBLED_CHARS` (`wireParts.ts`):
+   * what it was (`conversation.send`) and how long. For the log only; never content.
+   */
+  | { type: 'oversized'; label: string; chars: number };
 
 /** A shell message as it arrives off the wire, checked. */
 export function parseShellToHost(body: unknown): ShellToHost | undefined {
@@ -166,6 +171,11 @@ export function parseShellToHost(body: unknown): ShellToHost | undefined {
     if (typeof reason !== 'string' || typeof downMs !== 'number' || !Number.isFinite(downMs) || downMs < 0) return undefined;
     // It goes to the log: printable text only, and short.
     return { type: 'reconnected', reason: reason.replace(/[^\x20-\x7e]/g, '?').slice(0, 120), downMs: Math.round(downMs) };
+  }
+  if (m.type === 'oversized') {
+    const { label, chars } = body as { label?: unknown; chars?: unknown };
+    if (typeof label !== 'string' || typeof chars !== 'number' || !Number.isInteger(chars) || chars < 0) return undefined;
+    return { type: 'oversized', label: label.replace(/[^A-Za-z0-9_.?-]/g, '?').slice(0, 82), chars };
   }
   if (m.type === 'notifications') {
     const p = (body as { permission?: unknown }).permission;

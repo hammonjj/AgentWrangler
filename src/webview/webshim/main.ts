@@ -49,6 +49,7 @@ import {
   type NotificationState,
 } from '../../shared/webCapabilities';
 import { formatRoute, tableShownForClasses } from '../../shared/appRoutes';
+import { MAX_1009_CLOSES, MAX_ASSEMBLED_CHARS, envelopeLabel, mb, oversizedResends, splitLine } from '../../shared/wireParts';
 import { REAUTH_STORAGE_KEY, REAUTH_TOKEN_PATH } from '../../shared/webReauth';
 import { ClickTrace } from '../common/clickTrace';
 import { openUrlHere, showHostView } from '../common/hostView';
@@ -99,12 +100,16 @@ const AUTH_PROBE_AFTER = 3;
 
 interface Unacked {
   line: string;
+  /** `pane.type`, for the parts' log line. */
+  label: string;
   /** A pane's `ready`: never resent, since every pane sends a fresh one on reconnect. */
   ready: boolean;
 }
 
 /** Pane envelopes the server has not acknowledged, by commandId, oldest first. */
 const unacked = new Map<string, Unacked>();
+/** Part ids for an envelope without a `commandId` (one is never resent). */
+let partSeq = 0;
 let socket: WebSocket | undefined;
 /** The current socket has opened and the server's `hello` matched. */
 let live = false;
@@ -115,6 +120,8 @@ let failedOpens = 0;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 /** Why the last live socket closed, and when: reported on the next handshake. */
 let lastDrop: { reason: string; at: number } | undefined;
+/** Sockets in a row the server closed with 1009 (message too big). */
+let tooBigCloses = 0;
 
 function connect(): void {
   retryTimer = undefined;
@@ -133,6 +140,16 @@ function connect(): void {
     if (socket !== ws) return;
     // Told to the daemon once this tab is back, so its log says why tabs drop.
     if (live) lastDrop = { reason: (event.reason || `code ${event.code ?? 'none'}`).slice(0, 120), at: Date.now() };
+    // 1009: something this tab sent was too big. Resent as it is, it would close the next
+    // socket too, so back off, and after a few give the long envelopes up. Counted until the
+    // long envelopes are acknowledged (a 1006 in between is the same loop seen less cleanly).
+    if (event.code === 1009) tooBigCloses++;
+    if (tooBigCloses >= MAX_1009_CLOSES) {
+      const dropped = oversizedResends(unacked);
+      for (const id of dropped) unacked.delete(id);
+      if (dropped.length > 0) toast('A message was too large for the connection and was not sent. Try fewer or smaller images.');
+      tooBigCloses = 0;
+    }
     socket = undefined;
     live = false;
     clickTrace.reset();
@@ -241,7 +258,8 @@ function onHello(protocol: number, build: string): void {
     return;
   }
   live = true;
-  attempt = 0;
+  // A socket that opens only to be closed for a message too big is not a recovery: keep backing off.
+  if (tooBigCloses === 0) attempt = 0;
   keepRecoveryToken();
   lastVisibility = undefined;
   sendVisibility();
@@ -262,7 +280,12 @@ function onHello(protocol: number, build: string): void {
     sendShell({ type: 'reconnected', reason: lastDrop.reason, downMs: Math.max(0, Date.now() - lastDrop.at) });
     lastDrop = undefined;
   }
-  for (const [id, u] of resend) if (unacked.has(id) && socket) socket.send(u.line);
+  for (const [id, u] of resend) if (unacked.has(id) && socket) sendLine(socket, u.line, id, u.label);
+}
+
+/** One envelope line, in parts when it is longer than one socket message may be (`wireParts.ts`). */
+function sendLine(ws: WebSocket, line: string, id: string, label: string): void {
+  for (const piece of splitLine(line, id, label)) ws.send(piece);
 }
 
 function onFrame(data: string): void {
@@ -279,6 +302,8 @@ function onFrame(data: string): void {
     if (body?.type === 'hello') return onHello(body.protocol, body.build);
     if (body?.type === 'ack') {
       for (const id of body.ids) unacked.delete(id);
+      // Every long envelope got through: whatever was closing sockets for size is over.
+      if (tooBigCloses > 0 && oversizedResends(unacked).length === 0) tooBigCloses = 0;
       return;
     }
     // Notices and host views are this shim's; prompts, toasts and navigation
@@ -498,14 +523,23 @@ const host: Bridge = {
   postMessage(original) {
     const message = clickTrace.stamp(original);
     const line = JSON.stringify(message);
+    const label = envelopeLabel(message);
+    if (line.length > MAX_ASSEMBLED_CHARS) {
+      // Refused here, where the user can still do something about it: kept, it would be
+      // sent again on every socket and refused every time.
+      toast(`That was too large to send (${mb(line.length)}; the limit is ${mb(MAX_ASSEMBLED_CHARS)}). Try fewer or smaller images.`);
+      sendShell({ type: 'oversized', label, chars: line.length });
+      return;
+    }
     const m = message as { commandId?: unknown; body?: { type?: unknown } } | null;
+    const partId = m && isCommandId(m.commandId) ? m.commandId : `p${++partSeq}`;
     // Every pane envelope has an id (`paneApi`); kept until acknowledged, so a
     // drop between sending and arriving is made good on the next socket.
     if (m && isCommandId(m.commandId)) {
-      unacked.set(m.commandId, { line, ready: m.body?.type === 'ready' });
+      unacked.set(m.commandId, { line, label, ready: m.body?.type === 'ready' });
       while (unacked.size > MAX_UNACKED) unacked.delete(unacked.keys().next().value as string);
     }
-    if (live && socket?.readyState === WebSocket.OPEN) socket.send(line);
+    if (live && socket?.readyState === WebSocket.OPEN) sendLine(socket, line, partId, label);
   },
   getState: readState,
   setState(state) {
