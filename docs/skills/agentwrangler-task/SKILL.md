@@ -49,6 +49,35 @@ proposal is shown. The work runs in sessions of its own and does not come back h
 
 `aw tasks` lists unfinished tasks and their state, if the user asks how one is going.
 
+## Checking on what you delegated
+
+`aw missions --mine` lists the missions this conversation's agent delegated, each with its
+checks and what it is waiting on (needs the user, route proposed, plan proposal, attempt failed,
+ready for review, merge confirmation). `aw mission <id>` shows one in detail: every task, every
+verification check and its outcome, the branch and the diff stat against the base. Both only
+read; use them instead of guessing, and tell the user what is waiting on them.
+
+## Finishing what you delegated (only with the grant)
+
+If you are a durable agent and the user turned on your **mission grant** (Preferences → Agents
+and status → Agent mission control; `aw missions` says whether it is on), you may act on
+missions **you delegated** whose checks **passed**:
+
+```bash
+aw mission accept <id> --finish pull-request   # accept the finished task and open a PR in one step
+aw mission finish <id> keep                     # or pull-request, discard
+aw mission finish <id> merge-local              # never merges: asks the user to confirm in Missions
+aw mission cancel <id>
+```
+
+- Anything unverified, another conversation's mission, or a grant that is off is refused, with
+  the reason. Don't retry it and don't look for another way; tell the user what it said.
+- `merge-local` only asks. Tell the user a merge waits for their **Confirm merge** in Missions,
+  then carry on without waiting.
+- Every attempt is audited and shown to the user under the mission.
+- Never act unasked: finish a mission when the user asked you to manage your missions, not
+  because a command exists.
+
 `aw task` (same options) is a shortcut for when the user explicitly wants **one task** and no
 planner. Prefer `aw delegate` otherwise.
 
@@ -68,4 +97,8 @@ Don't retry in a loop, and don't fall back to doing the work yourself unless the
 
 - The work's branch is cut from the repository's primary checkout (its `HEAD`), not from your
   worktree. If it depends on uncommitted or unmerged changes here, say so to the user first.
-- The agents doing the work can't push or merge. The user reviews the result and merges it.
+- The agents doing the work can't push or merge. The user reviews the result and merges it
+  (or, with the grant on, you finish it as above; a local merge still waits for the user).
+- `checks ? unverified` means the repository has no verification commands in its Agent Wrangler
+  policy, so nothing vouched for the result. Only the user can add checks; you can't declare
+  them from a mission.

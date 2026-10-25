@@ -1932,7 +1932,14 @@ export function createApp(host: HostServices): AgentWranglerApp {
             case 'agent-request': {
               // Through the one confirmation path (`approvals.ts`), whichever client pressed it.
               if (typeof op.requestId !== 'string') return;
-              const outcome = await missionGrants.confirm(op.requestId, op.approve === true);
+              let outcome;
+              try {
+                outcome = await missionGrants.confirm(op.requestId, op.approve === true);
+              } catch (e) {
+                // As the Merge button: a refused finish is recorded on the mission and shown beside its buttons, not twice.
+                if (e instanceof FinishRefused) return;
+                throw e;
+              }
               if (outcome === 'gone') throw new TaskError('That merge request no longer exists.');
               if (outcome === 'applied' && op.approve !== true) dialogs.flash('Merge declined. The branch stays as it is; finish it yourself when you are ready.');
               return;

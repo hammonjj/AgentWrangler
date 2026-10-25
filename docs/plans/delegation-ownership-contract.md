@@ -397,6 +397,12 @@ decided on 2026-10-01, §3). The user accepted each recommendation below as writ
 
 ---
 
+**Amended 2026-10-25** (`docs/plans/agent-mission-control.md`): Q2's "integration stays a user
+click" now has one opt-in exception. A durable agent whose **mission grant** the user turned on
+may accept, and finish with a pull request, keep or discard, a mission whose `origin` is one of
+its own conversations, once it is verified. A local merge still needs the user's click (**Confirm
+merge** in Missions). Off by default; every act audited.
+
 ## 11. Summary for #114/#105
 
 #114 owns: `DelegationOutcome`, `FollowUpObligation`, `CloseoutState` (§5, §7), their persisted

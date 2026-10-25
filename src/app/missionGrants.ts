@@ -196,9 +196,17 @@ export function createMissionGrants(deps: MissionGrantDeps): MissionGrants {
     finish: async (missionId, how) => {
       const runner = deps.missions();
       if (!runner) throw new Error('Tasks are off.');
-      const done = await runner.finishMission(missionId, how);
-      const r = done.finishResult;
-      deps.flash(`Mission merged${r?.note ? `: ${r.note}` : ''}.`);
+      const asked = doc.requests.filter((r) => r.missionId === missionId && r.state === 'confirmed').at(-1);
+      try {
+        const done = await runner.finishMission(missionId, how);
+        const r = done.finishResult;
+        deps.flash(`Mission merged${r?.note ? `: ${r.note}` : ''}.`);
+      } catch (e) {
+        // Confirmed, but the merge itself did not go through: the audit says so, and the mission shows why beside its buttons.
+        const why = e instanceof Error ? e.message : String(e);
+        if (asked) record({ missionId, agentId: asked.agentId, agentName: asked.agentName, act: 'finish', how, outcome: 'failed', reason: why.slice(0, 300) });
+        throw e;
+      }
     },
     flash: deps.flash,
     log: deps.log,
