@@ -109,6 +109,13 @@ Logs: `~/Library/Application Support/Agent Wrangler/logs/core-daemon.log`.
 - Long `down` times with a `resumed` reason mean the reconnect itself is slow: look at the lobby
   (`relay: lobby …`, `the lobby did not hear its own probe`) and at `OPEN_TIMEOUT_MS` in
   `connection.ts`.
+- A tab that comes back blank and deaf (empty conversation, composer dead, rows do nothing) while
+  the log shows a new `relay: tab opened` and no `is a tab back` line was a socket that delivered
+  the daemon's `hello` before its `open` event, so the panes' `ready`s were dropped (fixed
+  2026-10-24 in `RelayWebSocket.attach`). A relay reconnect logs `(relay) is a tab back`; if it
+  never does, the handshake is failing again.
+- Two `tab opened` lines per wake, the first `stopped answering` exactly two minutes later, was
+  the tab's open timeout running out during a slow join (it now starts when the connect is sent).
 - Hangs with no reconnect line at all mean the tab never decided the link was dead: check that
   the deployed loader is current (`curl -s https://agentwrangler.netlify.app/loader.js | grep -c 'no answer (quiet'`
   should print 1) and that the events above fire in the browser.
