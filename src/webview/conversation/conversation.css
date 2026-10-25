@@ -411,10 +411,14 @@ body,
    Above the transcript and below the header: what this conversation is an
    attempt of, what it ran on, and what can be done about it. Everything wraps,
    because the pane can be 300px wide inside a 2000px window and none of this
-   may push the conversation out of reach. */
+   may push the conversation out of reach. A long review list makes it taller
+   than a phone screen, so it is capped and scrolls on its own, as #delegated
+   does; flex-shrink lets the cap hold inside the column. */
 
 #taskStrip {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  max-height: 40%;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 4px;

@@ -2075,31 +2075,8 @@ function renderTask(): void {
     }
   }
 
-  // Why the verdict is what it is: one line per stage, plus the reason a
-  // failure is not being blamed on the attempt when it is not (#35). A
-  // verdict with no working shown is one the user has to take on trust.
-  if (t.verification) {
-    const v = t.verification;
-    if (v.baseIsRed) {
-      const note = document.createElement('div');
-      note.className = 'tsmeta base-red';
-      note.textContent = 'A check fails on the base commit too — the repository was already red.';
-      taskStrip.append(note);
-    }
-    if (v.stages.length > 0) {
-      const list = document.createElement('div');
-      list.className = 'tsstages';
-      for (const line of v.stages) {
-        const row = document.createElement('div');
-        row.className = 'tsstage';
-        row.textContent = line;
-        list.append(row);
-      }
-      taskStrip.append(list);
-    }
-    if (v.review) taskStrip.append(reviewPanel(v.review));
-  }
-
+  // The buttons come before the verdict's working: a review list can run to a
+  // screen on a phone, and what can be done must not be below it.
   const actions = document.createElement('div');
   actions.className = 'tsactions';
   if (t.verification?.logPath) {
@@ -2215,6 +2192,31 @@ function renderTask(): void {
       list.append(row);
     }
     taskStrip.append(list);
+  }
+
+  // Why the verdict is what it is: one line per stage, plus the reason a
+  // failure is not being blamed on the attempt when it is not (#35). A
+  // verdict with no working shown is one the user has to take on trust.
+  if (t.verification) {
+    const v = t.verification;
+    if (v.baseIsRed) {
+      const note = document.createElement('div');
+      note.className = 'tsmeta base-red';
+      note.textContent = 'A check fails on the base commit too — the repository was already red.';
+      taskStrip.append(note);
+    }
+    if (v.stages.length > 0) {
+      const list = document.createElement('div');
+      list.className = 'tsstages';
+      for (const line of v.stages) {
+        const row = document.createElement('div');
+        row.className = 'tsstage';
+        row.textContent = line;
+        list.append(row);
+      }
+      taskStrip.append(list);
+    }
+    if (v.review) taskStrip.append(reviewPanel(v.review));
   }
 }
 
