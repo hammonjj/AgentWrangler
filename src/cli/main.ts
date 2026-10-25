@@ -31,15 +31,24 @@ import {
   type ControlWebDevicesResult,
   type ControlWebPairResult,
   type ControlWebRevokeResult,
+  type ControlMissionsParams,
+  type ControlMissionsResult,
+  type ControlMissionParams,
+  type ControlMissionResult,
+  type ControlMissionActParams,
+  type ControlMissionActResult,
 } from '../core/control/protocol';
 import { encodeQr, qrToTerminal } from '../core/web/qr';
 import { execFile } from 'node:child_process';
 import * as path from 'node:path';
-import { agentEnvironment, originOf, parseArgs, webRefusal, USAGE, type Command } from './args';
+import { agentEnvironment, agentShellRefusal, originOf, parseArgs, USAGE, type Command } from './args';
 import { ATTACH_BACKLOG, AttachRenderer } from './attach';
 import { ControlClient } from './client';
 import {
   formatDelegation,
+  formatMission,
+  formatMissionAct,
+  formatMissions,
   formatOffline,
   formatProjects,
   formatProposal,
@@ -74,36 +83,12 @@ async function run(argv: string[]): Promise<number> {
     process.stdout.write(`aw (Agent Wrangler build ${BUILD_ID})\n`);
     return 0;
   }
-  if (cmd.kind === 'send' || cmd.kind === 'stop') {
-    const inside = agentEnvironment(process.env);
-    if (inside) {
-      process.stderr.write(
-        `aw ${cmd.kind}: refused, because this shell looks like ${inside}. ` +
-          'One agent must not drive another through aw; run it from your own terminal.\n',
-      );
-      return 3;
-    }
-  }
-  // An agent may name its own conversation, never another's: the same speed bump.
-  if (cmd.kind === 'rename' && cmd.ref !== undefined) {
-    const inside = agentEnvironment(process.env);
-    if (inside) {
-      process.stderr.write(`aw rename: refused, because this shell looks like ${inside}. Drop --session to name this conversation, or run it from your own terminal.\n`);
-      return 3;
-    }
-  }
-  // The same speed bump: a printed sign-in link is the whole workbench, every
-  // session's controls included. `aw web open` hands it to the browser instead.
-  if (cmd.kind === 'web' && cmd.action === 'url') {
-    const inside = agentEnvironment(process.env);
-    if (inside) {
-      process.stderr.write(`aw web url: refused, because this shell looks like ${inside}. Run it from your own terminal, or use aw web open.\n`);
-      return 3;
-    }
-  }
-  // Pairing prints a code that lets a device in as you, and revoking signs
-  // one of yours out: neither is for an agent to do (#137).
-  const refusal = webRefusal(cmd, agentEnvironment(process.env));
+  // The agent-shell speed bumps, in one list (`agentShellRefusal`): `send` and
+  // `stop` (one agent must not drive another), `rename --session` (an agent
+  // names only its own conversation), `web url` (a printed sign-in link is the
+  // whole workbench; `aw web open` hands it to the browser instead), and
+  // pairing and revoking (#137).
+  const refusal = agentShellRefusal(cmd, agentEnvironment(process.env));
   if (refusal) {
     process.stderr.write(`${refusal}\n`);
     return 3;
@@ -260,6 +245,33 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
       const r = await client.request<ControlTasksResult>('tasks');
       print(r, () => formatTasks(r.tasks, now), cmd.json);
       return 0;
+    }
+    case 'missions': {
+      const origin = originOf(process.env);
+      const r = await client.request<ControlMissionsResult>('missions', { all: cmd.all, mine: cmd.mine, ...(origin ? { origin } : {}) } satisfies ControlMissionsParams);
+      print(r, () => formatMissions(r, now, width()), cmd.json);
+      return 0;
+    }
+    case 'mission': {
+      const origin = originOf(process.env);
+      const r = await client.request<ControlMissionResult>('mission', { ref: cmd.ref, ...(origin ? { origin } : {}) } satisfies ControlMissionParams);
+      print(r, () => formatMission(r, now), cmd.json);
+      return 0;
+    }
+    case 'missionAct': {
+      // The grant is a durable agent's, so this runs as the agent whose
+      // conversation this shell is, never as you. From your own terminal,
+      // the Missions page is where you accept, finish or cancel.
+      const origin = originOf(process.env);
+      if (!origin) {
+        process.stderr.write(`aw mission ${cmd.act}: run this inside a durable agent's conversation, under its mission grant. To act on a mission yourself, use Missions in the app (aw web open).\n`);
+        return 2;
+      }
+      const params: ControlMissionActParams = { origin, ref: cmd.ref, act: cmd.act, ...(cmd.how ? { how: cmd.how } : {}), ...(cmd.task ? { task: cmd.task } : {}) };
+      // A finish can merge or push and open a PR, which takes longer than a read.
+      const r = await client.request<ControlMissionActResult>('mission.act', params, { timeoutMs: 180_000 });
+      print(r, () => formatMissionAct(r), cmd.json);
+      return r.outcome === 'done' || r.outcome === 'requested' ? 0 : 1;
     }
     case 'remember':
     case 'forget': {

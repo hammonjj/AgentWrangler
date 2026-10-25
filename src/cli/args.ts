@@ -27,6 +27,20 @@ export type Command =
   | { kind: 'delegate' | 'task'; objective: string | undefined; criteria: string[]; folder: string | undefined; harness: 'claude' | 'codex' | undefined; json: boolean }
   | { kind: 'tasks'; json: boolean }
   /**
+   * Agent mission control, read-only: missions with their state, task
+   * states, checks, branch, diff stat and what each waits on. `all`: finished
+   * ones too. `mine`: only the ones this conversation's agent delegated.
+   */
+  | { kind: 'missions'; json: boolean; all: boolean; mine: boolean }
+  | { kind: 'mission'; json: boolean; ref: string }
+  /**
+   * A durable agent acting on a mission it delegated, under its grant (off by
+   * default, set per agent in Preferences). Only from inside the agent's own
+   * conversation. `how`: the finish (required for `finish`, optional for
+   * `accept`); `merge-local` only ever asks the user.
+   */
+  | { kind: 'missionAct'; act: 'accept' | 'finish' | 'cancel'; ref: string; how?: 'merge-local' | 'pull-request' | 'keep' | 'discard'; task?: string; json: boolean }
+  /**
    * A durable agent proposes a memory update for its user to approve (#180):
    * `remember` adds an item (`text` undefined: read stdin), `forget` removes
    * one by id. Only from inside an agent's conversation, which is the origin.
@@ -68,6 +82,17 @@ Usage:
       --claude | --codex    which agent to prefer (default: let routing choose)
   aw task <objective…>      shortcut: always one task, no planner (same options as delegate)
   aw tasks                  tasks that are not finished
+  aw missions [--all] [--mine]  missions, read-only: state, each task's state and checks,
+                            branch, diff stat, and what each is waiting on
+                            (--all: finished ones too; --mine: only this agent's own)
+  aw mission <id>           one mission in detail (id: the full id, or 4+ characters of
+                            its start or end)
+  aw mission accept <id> [--task <key>] [--finish <how>]
+  aw mission finish <id> <how>   how: merge-local, pull-request, keep or discard
+  aw mission cancel <id>    from inside a durable agent's conversation, with its mission
+                            grant on (Preferences, off by default): act on a mission that
+                            agent delegated, once its checks passed. merge-local is never
+                            done by an agent: it asks you to confirm in Missions
   aw remember <text…>       from inside a durable agent's conversation: propose a memory note;
                             stored only once the user approves it in the app ("-" reads stdin)
       --kind <kind>         decision (default), preference, question or work
@@ -85,7 +110,7 @@ Usage:
   aw daemon status          whether it is running: pid, build, uptime
 
 <id> is a session id, a unique prefix of one (4+ characters), or a key like claude:<id>.
---json prints the raw result for status, sessions, session, projects, delegate, task, tasks, rename and web devices.
+--json prints the raw result for status, sessions, session, projects, delegate, task, tasks, missions, mission, rename and web devices.
 `;
 
 export function parseArgs(argv: readonly string[]): Command | { error: string } {
@@ -95,6 +120,8 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
   if (argv[0] === 'task' || argv[0] === 'delegate') return parseHandoff(argv[0], argv.slice(1));
   if (argv[0] === 'remember') return parseRemember(argv.slice(1));
   if (argv[0] === 'rename') return parseRename(argv.slice(1));
+  // Its options take values (`--task t1`, `--finish keep`).
+  if (argv[0] === 'mission') return parseMission(argv.slice(1));
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const words = argv.filter((a) => !a.startsWith('--') || a === '--');
   if (flags.has('--help') || argv.includes('-h')) return { kind: 'help' };
@@ -108,7 +135,7 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
   const takesRef = ['session', 'show', 'attach', 'stop'].includes(name ?? '');
   // `aw stop abcd -f` must not quietly stop without force, nor `aw stop a b` stop only one.
   const extra = rest.find((w, i) => w.startsWith('-') || i >= (takesRef ? 1 : 0));
-  const checked = ['status', 'sessions', 'ls', 'session', 'show', 'attach', 'stop', 'projects', 'tasks'];
+  const checked = ['status', 'sessions', 'ls', 'session', 'show', 'attach', 'stop', 'projects', 'tasks', 'missions'];
   if (extra !== undefined && checked.includes(name ?? '')) {
     return { error: extra.startsWith('-') ? `aw ${name}: unknown option ${extra}` : `aw ${name}: unexpected "${extra}"` };
   }
@@ -138,6 +165,8 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
       return allowed('--json') ?? { kind: 'projects', json };
     case 'tasks':
       return allowed('--json') ?? { kind: 'tasks', json };
+    case 'missions':
+      return allowed('--json', '--all', '--mine') ?? { kind: 'missions', json, all: flags.has('--all'), mine: flags.has('--mine') };
     case 'forget': {
       const bad = allowed('--json');
       if (bad) return bad;
@@ -224,6 +253,58 @@ function parseRemember(tail: readonly string[]): Command | { error: string } {
   return { kind: 'remember', text, memoryKind, json };
 }
 
+const FINISHES = ['merge-local', 'pull-request', 'keep', 'discard'] as const;
+type FinishArg = (typeof FINISHES)[number];
+const isFinish = (v: string | undefined): v is FinishArg => v !== undefined && (FINISHES as readonly string[]).includes(v);
+
+/**
+ * `aw mission <id> [--json]`, or one of the grant's three acts:
+ * `aw mission accept <id> [--task <key>] [--finish <how>] [--json]`,
+ * `aw mission finish <id> <how> [--json]`, `aw mission cancel <id> [--json]`.
+ */
+function parseMission(tail: readonly string[]): Command | { error: string } {
+  const words: string[] = [];
+  let json = false;
+  let task: string | undefined;
+  let finish: string | undefined;
+  for (let i = 0; i < tail.length; i++) {
+    const a = tail[i];
+    if (a === '--json') {
+      json = true;
+      continue;
+    }
+    if (a === '--task' || a === '--finish') {
+      const value = tail[i + 1];
+      if (value === undefined || value.startsWith('-')) return { error: `aw mission: ${a} needs a value.` };
+      if (a === '--task') task = value;
+      else finish = value;
+      i++;
+      continue;
+    }
+    if (a === '--help' || a === '-h') return { kind: 'help' };
+    if (a.startsWith('-')) return { error: `aw mission: unknown option ${a}` };
+    words.push(a);
+  }
+  const [first, ref, third, ...extra] = words;
+  if (!first) return { error: 'aw mission: which mission? Give its id (aw missions lists them).' };
+  if (first !== 'accept' && first !== 'finish' && first !== 'cancel') {
+    if (ref !== undefined) return { error: `aw mission: unexpected "${ref}"` };
+    if (task !== undefined || finish !== undefined) return { error: 'aw mission: --task and --finish go with accept.' };
+    return { kind: 'mission', json, ref: first };
+  }
+  const act = first;
+  if (!ref) return { error: `aw mission ${act}: which mission? Give its id (aw missions lists them).` };
+  if (extra.length > 0) return { error: `aw mission ${act}: unexpected "${extra[0]}"` };
+  if (act !== 'accept' && (task !== undefined || finish !== undefined)) return { error: `aw mission ${act}: --task and --finish go with accept.` };
+  if (act === 'finish') {
+    if (!isFinish(third)) return { error: 'aw mission finish: how? merge-local, pull-request, keep or discard.' };
+    return { kind: 'missionAct', act, ref, how: third, json };
+  }
+  if (third !== undefined) return { error: `aw mission ${act}: unexpected "${third}"` };
+  if (finish !== undefined && !isFinish(finish)) return { error: 'aw mission accept: --finish is merge-local, pull-request, keep or discard.' };
+  return { kind: 'missionAct', act, ref, ...(finish !== undefined ? { how: finish as FinishArg } : {}), ...(task !== undefined ? { task } : {}), json };
+}
+
 /** `aw rename [--session <id>] [--json] <name…>` or `aw rename [--session <id>] --clear`. `--` ends the options. */
 function parseRename(tail: readonly string[]): Command | { error: string } {
   const words: string[] = [];
@@ -308,6 +389,29 @@ function parseHandoff(kind: 'delegate' | 'task', tail: readonly string[]): Comma
   const objective = words.join(' ');
   if (objective.trim().length === 0) return { error: `aw ${kind}: the objective is empty.` };
   return { kind, objective, ...base };
+}
+
+/**
+ * Why a command will not run in this shell, or undefined (`inside` is
+ * `agentEnvironment(process.env)`). The one list of agent-shell refusals:
+ * `send` and `stop` (one agent must not drive another), `rename --session`
+ * (an agent names only its own conversation), `web url`, and `webRefusal`'s
+ * pairing and revoking. Agent mission control adds nothing here and removes
+ * nothing: `aw missions` and `aw mission` only read, and `aw mission
+ * accept|finish|cancel` acts as the agent, under its own grant, never as you.
+ */
+export function agentShellRefusal(cmd: Command, inside: string | undefined): string | undefined {
+  if (!inside) return undefined;
+  if (cmd.kind === 'send' || cmd.kind === 'stop') {
+    return `aw ${cmd.kind}: refused, because this shell looks like ${inside}. One agent must not drive another through aw; run it from your own terminal.`;
+  }
+  if (cmd.kind === 'rename' && cmd.ref !== undefined) {
+    return `aw rename: refused, because this shell looks like ${inside}. Drop --session to name this conversation, or run it from your own terminal.`;
+  }
+  if (cmd.kind === 'web' && cmd.action === 'url') {
+    return `aw web url: refused, because this shell looks like ${inside}. Run it from your own terminal, or use aw web open.`;
+  }
+  return webRefusal(cmd, inside);
 }
 
 /**

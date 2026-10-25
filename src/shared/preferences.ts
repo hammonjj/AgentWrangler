@@ -27,6 +27,7 @@ import { EFFORT_LEVELS, type EffortLevel, type ExecutionPolicy } from './orchest
 import { PRICE_FIELDS, type PriceField, type StoredPrice } from './orchestration/modelPrices';
 import type { TierListDraftEntry, TierRename } from './orchestration/tierListSave';
 import type { OPEN_TAB_MESSAGE, OrchestrationTabTarget } from './orchestration/orchestrationTabs';
+import type { MissionGrantAgentView } from './orchestration/missionGrant';
 
 export type PreferencesToHost =
   /** The window has rendered and wants the current values. */
@@ -62,7 +63,18 @@ export type PreferencesToHost =
   | { type: 'routingPolicy'; mode: LauncherRoutingMode; policy: ExecutionPolicy; overrideGate?: boolean }
   /** Revoke a browser device (#137): its credential stops working and its tabs disconnect. */
   | { type: 'revokeWebDevice'; id: string }
+  /** Turn one durable agent's mission grant on or off (agent mission control). Off by default. */
+  | { type: 'missionGrant'; agentId: string; enabled: boolean }
   | { type: 'close' };
+
+/** A `missionGrant` message's change, or nothing if it is not well formed. The host still checks the agent exists. */
+export function missionGrantChange(message: unknown): { agentId: string; enabled: boolean } | undefined {
+  if (!message || typeof message !== 'object') return undefined;
+  const m = message as { type?: unknown; agentId?: unknown; enabled?: unknown };
+  if (m.type !== 'missionGrant' || typeof m.agentId !== 'string' || m.agentId.length === 0 || m.agentId.length > 64) return undefined;
+  if (typeof m.enabled !== 'boolean') return undefined;
+  return { agentId: m.agentId, enabled: m.enabled };
+}
 
 /** One browser device in Preferences → Browser (#137). Never a credential. */
 export interface WebDeviceView {
@@ -238,6 +250,8 @@ export type HostToPreferences =
   | { type: 'status'; status: Record<string, SettingStatus> }
   /** The browser devices (#137), whole, whenever one is added, seen or revoked. */
   | { type: 'webDevices'; devices: WebDeviceView[] }
+  /** Every durable agent and whether its mission grant is on, whenever one changes. `error`: the last change was refused. */
+  | { type: 'missionGrants'; agents: MissionGrantAgentView[]; error?: string }
   /**
    * What an action did, shown in the window that asked rather than in a dialog
    * over it. A check with six separate results is a thing to read next to the

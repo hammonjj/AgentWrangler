@@ -46,12 +46,35 @@ export type PrincipalId = string & { readonly __principal: true };
 
 export interface Principal {
   readonly id: PrincipalId;
-  /** Only one kind today. A second kind is where roles would start. */
-  readonly kind: 'owner';
+  /**
+   * `owner`: the user. `agent`: a durable agent acting under its scoped
+   * mission grant (`docs/plans/agent-mission-control.md`), the one place a
+   * second kind exists. An agent principal may read, and ask for
+   * `mission.agent`; nothing else.
+   */
+  readonly kind: 'owner' | 'agent';
+  /** For `agent`: the durable agent's id. */
+  readonly agentId?: string;
 }
 
 /** The one principal there is: whoever owns this Mac's Agent Wrangler. */
 export const LOCAL_OWNER: Principal = Object.freeze({ id: 'local-owner' as PrincipalId, kind: 'owner' as const });
+
+/** A durable agent, as the principal of its own mission-control requests. Its id is `agent:<agentId>`. */
+export function agentPrincipal(agentId: string): Principal {
+  return Object.freeze({ id: `agent:${agentId}` as PrincipalId, kind: 'agent' as const, agentId });
+}
+
+/** A request a durable agent makes under its grant, through `via` (`aw` today). */
+export function agentContext(agentId: string, via: Via = 'cli'): RequestContext {
+  return Object.freeze({ principal: agentPrincipal(agentId), via });
+}
+
+/**
+ * What an agent principal may ask for at all. Which mission it may act on,
+ * and when, is the grant decision's (`grantDecision`), checked after this.
+ */
+export const AGENT_ACTIONS: ReadonlySet<ActionName> = new Set<ActionName>(['view.read', 'mission.agent']);
 
 /**
  * The channel a request arrived through.
@@ -152,6 +175,15 @@ export const ACTIONS = {
   'task.act': 'mutate',
   'mission.create': 'mutate',
   'mission.act': 'mutate',
+  /** Turn a durable agent's mission grant on or off (Preferences, owner only). */
+  'mission.grant': 'mutate',
+  /**
+   * A durable agent accepts, finishes or cancels a mission it delegated, under
+   * its grant (`aw mission accept|finish|cancel`). The only mutating action an
+   * agent principal is allowed; the grant decision then scopes it to the
+   * agent's own, verified missions, and a local merge waits for the user.
+   */
+  'mission.agent': 'mutate',
   'routing.decide': 'mutate',
   /** Mint a single-use browser login link (`aw web open`, #127). */
   'web.link': 'mutate',
@@ -192,13 +224,19 @@ export type AccessDecision = 'allow' | 'deny';
 export type Authorizer = (ctx: RequestContext, action: ActionName, resource?: ResourceRef) => AccessDecision;
 
 /**
- * The single-user policy: the owner may do anything, nobody else anything.
+ * The single-user policy: the owner may do anything; a durable agent acting
+ * under its grant may read and ask for `mission.agent`, nothing more; nobody
+ * else anything.
  *
- * Reads the principal and nothing else, which is what keeps a device or
- * connection id from ever standing in for an identity.
+ * Reads the principal and the action and nothing else, which is what keeps a
+ * device or connection id from ever standing in for an identity.
  */
-export const authorize: Authorizer = (ctx) =>
-  ctx.principal.kind === 'owner' && ctx.principal.id === LOCAL_OWNER.id ? 'allow' : 'deny';
+export const authorize: Authorizer = (ctx, action) => {
+  const p = ctx.principal;
+  if (p.kind === 'owner') return p.id === LOCAL_OWNER.id ? 'allow' : 'deny';
+  if (p.kind === 'agent') return typeof p.agentId === 'string' && p.agentId !== '' && p.id === `agent:${p.agentId}` && AGENT_ACTIONS.has(action) ? 'allow' : 'deny';
+  return 'deny';
+};
 
 /** One audit line for an access decision. Ids only. */
 export interface AccessAuditRecord {

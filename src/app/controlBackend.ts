@@ -12,6 +12,7 @@ import {
   RPC_NOT_FOUND,
   RPC_UNAUTHORIZED,
   RPC_UNSUPPORTED,
+  resolveMissionRef,
   resolveSessionRef,
   type ControlCommandOutcome,
   type ControlLifecycle,
@@ -31,7 +32,8 @@ import { ControlError, type ControlBackend, type ControlSubscription } from '../
 import { displayTitle, type AgentSession } from '../shared/model';
 import { TaskError } from '../orchestration/engine/taskRunner';
 import type { AgentWranglerApp } from './createApp';
-import { ownerContext, sessionRef, type AccessGate, type ActionName, type RequestContext } from '../core/access';
+import { agentContext, ownerContext, sessionRef, type AccessGate, type ActionName, type RequestContext } from '../core/access';
+import type { AgentMissionAct } from '../shared/orchestration/missionGrant';
 import { scopedMethods } from '../core/requestScope';
 
 export interface ControlBackendDeps {
@@ -102,6 +104,18 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       });
     }
     throw new ControlError(RPC_NOT_FOUND, `no session matches "${ref}"`);
+  };
+
+  /** A mission by id, unique prefix or unique suffix. A read: nothing acts on it before its own `admit`. */
+  const resolveMission = (ref: string): string => {
+    const found = resolveMissionRef(app.taskMissions(), ref);
+    if ('match' in found) return found.match.id;
+    if (found.error === 'ambiguous') {
+      throw new ControlError(RPC_AMBIGUOUS, `"${ref}" matches ${found.matches.length} missions`, {
+        matches: found.matches.map((m) => ({ key: m.id, sessionId: m.id, title: m.title })),
+      });
+    }
+    throw new ControlError(RPC_NOT_FOUND, `no mission matches "${ref}"`);
   };
 
   const handleFor = (s: AgentSession, what: string): SessionHandle => {
@@ -283,6 +297,57 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
     webDevices: () => {
       admit('view.read');
       return (deps.webDevices?.list() ?? []).map(deviceView);
+    },
+
+    // ---- agent mission control (docs/plans/agent-mission-control.md) ----
+
+    // Reads, as every other read: the owner's `view.read`. The origin only
+    // decides which missions are `yours`; it grants nothing here.
+    missions: (params) => {
+      admit('view.read');
+      const caller = app.missionGrants.callerOf(params.origin);
+      return {
+        missions: app.missionGrants.inspect({ all: params.all === true, mine: params.mine === true, ...(caller ? { caller } : {}) }),
+        ...(caller ? { caller: { agent: caller.name, granted: app.missionGrants.isGranted(caller.id) } } : {}),
+      };
+    },
+
+    mission: (params) => {
+      admit('view.read');
+      const caller = app.missionGrants.callerOf(params.origin);
+      const id = resolveMission(params.ref);
+      const mission = app.missionGrants.inspectOne(id, caller);
+      if (!mission) throw new ControlError(RPC_NOT_FOUND, `no mission matches "${params.ref}"`);
+      return { mission, ...(caller ? { caller: { agent: caller.name, granted: app.missionGrants.isGranted(caller.id) } } : {}) };
+    },
+
+    // The one mutation an agent may ask for. Not the owner's context: the
+    // request is made as the durable agent's own principal, so `authorize`
+    // decides it as that agent (`mission.agent`, nothing else), and the audit
+    // names the agent. The grant decision then scopes it to the agent's own,
+    // verified mission. A conversation that is not an agent's is refused
+    // before anything is resolved or run.
+    async missionAct(params) {
+      const caller = app.missionGrants.callerOf(params.origin);
+      if (!caller) {
+        throw new ControlError(
+          RPC_UNSUPPORTED,
+          "This conversation is not a durable agent's, so no mission grant applies. Act on the mission in the app's Missions page.",
+        );
+      }
+      const id = resolveMission(params.ref);
+      if (!deps.gate.admit(agentContext(caller.id), 'mission.agent', { kind: 'mission', id })) {
+        throw new ControlError(RPC_UNAUTHORIZED, 'not permitted: mission.agent');
+      }
+      const m = app.taskMission(id);
+      const taskId = params.task !== undefined && m ? (m.tasks.find((t) => t.id === params.task || t.key.toLowerCase() === params.task!.toLowerCase())?.id ?? params.task) : undefined;
+      const act: AgentMissionAct =
+        params.act === 'cancel'
+          ? { kind: 'cancel' }
+          : params.act === 'finish'
+            ? { kind: 'finish', how: params.how! }
+            : { kind: 'accept', ...(taskId ? { taskId } : {}), ...(params.how ? { finish: params.how } : {}) };
+      return app.missionGrants.act(caller, id, act);
     },
 
     webRevoke: (ref) => {

@@ -106,6 +106,8 @@ export function pendingKeyOf(missionId: string, op: MissionOp): { key: string; l
     case 'replan':
     case 'recheck-finish':
       return k(op.kind, OP_PENDING_LABEL[op.kind]);
+    case 'agent-request':
+      return k(`agent-request:${op.approve ? 'confirm' : 'decline'}`, op.approve ? 'Merging…' : 'Declining…');
     default:
       return undefined;
   }
@@ -178,7 +180,9 @@ function phaseChipsHtml(v: MissionView): string {
 
 function missionHtml(v: MissionView, snap: MissionsSnapshot, ui: MissionsUiState, nowMs: number): string {
   const open = isOpen(v, ui);
+  const asked = v.agentActivity?.pending;
   const chips =
+    (asked ? `<span class="mchip phase needs lt-needs" title="${esc(`${asked.agentName} asks to merge this mission. Nothing is merged until you confirm.`)}">Merge requested</span>` : '') +
     phaseChipsHtml(v) +
     missionChips(v, nowMs)
       // The phase chips say what the state chip did, without its ambiguity.
@@ -202,10 +206,34 @@ function missionHtml(v: MissionView, snap: MissionsSnapshot, ui: MissionsUiState
     } else {
       body += `<ol class="mtasks">${v.tasks.map((t, i) => (reviewing ? planTaskHtml(v, t, i, snap, ui) : taskRowHtml(v, t, nowMs, ui))).join('')}</ol>`;
     }
+    body += agentActivityHtml(v, ui);
     body += footerHtml(v, ui);
   }
   return `<section class="mission m-${esc(v.state)}${open ? '' : ' shut'}" data-mission="${esc(v.id)}">
 <div class="mhdr" data-mission-toggle><span class="twist">${open ? '▾' : '▸'}</span><span class="mtitle" title="${esc(v.objective)}">${esc(v.title)}</span><span class="mchips">${chips}</span></div>${body}</section>`;
+}
+
+/**
+ * Agent mission control: a merge a granted agent asked for, with Confirm
+ * merge and Decline, and the grant's latest audit lines for this mission.
+ * The two buttons go through the same pending-action pattern as the finish
+ * buttons, and the host answers through the one confirmation path.
+ */
+function agentActivityHtml(v: MissionView, ui: MissionsUiState): string {
+  const act = v.agentActivity;
+  if (!act) return '';
+  let html = '';
+  if (act.pending) {
+    const p = act.pending;
+    const confirm = opButton(ui, v, 'agent-request:confirm', 'Confirm merge', ' primary', 'Merge the mission branch into its base now, as Merge locally does');
+    const decline = opButton(ui, v, 'agent-request:decline', 'Decline', '', 'Leave the branch as it is; you can still finish it yourself');
+    html += `<div class="magent ask" role="status" data-agent-request="${esc(p.requestId)}"><span><b>${esc(p.agentName)}</b> asks to merge this mission locally. Its checks passed; nothing is merged until you confirm.</span>${confirm}${decline}</div>`;
+  }
+  if (act.audit.length > 0) {
+    const items = act.audit.map((a) => `<li class="ma-${esc(a.tone)}"><span class="ma-who">${esc(a.agentName)}</span> ${esc(a.text)} <span class="ma-when">${esc(new Date(a.at).toLocaleString())}</span></li>`).join('');
+    html += `<details class="magent log"><summary>Agent activity (${act.audit.length})</summary><ul>${items}</ul></details>`;
+  }
+  return html;
 }
 
 /** What the planner did (#44): a line, what a replan changed, and its risks and warnings. */
@@ -455,6 +483,10 @@ export function clickIntent(target: HTMLElement, snap: MissionsSnapshot | undefi
   if (missionOp === 'pause' || missionOp === 'pause-now') return { kind: 'op', missionId, op: { kind: 'pause', ...(missionOp === 'pause-now' ? { now: true } : {}) } };
   if (missionOp === 'resume') return { kind: 'op', missionId, op: { kind: 'resume' } };
   if (missionOp === 'plan-again' || missionOp === 'write-plan' || missionOp === 'replan') return { kind: 'op', missionId, op: { kind: missionOp } };
+  if (missionOp === 'agent-request:confirm' || missionOp === 'agent-request:decline') {
+    const requestId = target.closest<HTMLElement>('[data-agent-request]')?.dataset.agentRequest;
+    return requestId ? { kind: 'op', missionId, op: { kind: 'agent-request', requestId, approve: missionOp === 'agent-request:confirm' } } : undefined;
+  }
   const finish = target.closest<HTMLElement>('[data-finish]')?.dataset.finish;
   if (finish) return { kind: 'op', missionId, op: { kind: 'finish', how: finish as 'merge-local' } };
   const action = target.closest<HTMLElement>('[data-task-action]')?.dataset.taskAction;

@@ -15,6 +15,7 @@
 import { formatDuration } from '../model';
 import { formatTokens, formatUsd } from '../sessionUsage';
 import type { MissionPhaseView, TaskPhase } from './delegatedState';
+import type { MissionAgentActivityView } from './missionGrant';
 import type { PlanEdit, PlanIssueLevel } from './plan';
 import type { TaskRouteView, TaskVerificationView, TaskViewAction } from './taskView';
 import { routeChipText, taskStateLabel } from './taskView';
@@ -177,6 +178,12 @@ export interface MissionView {
   phase: MissionPhaseView;
   /** The conversation that delegated it, as a session key, when there is one. */
   originKey?: string;
+  /**
+   * Agent mission control: a local merge a granted agent asked for and the
+   * user has not answered, and the grant's latest audit lines for this
+   * mission. Absent when no agent ever acted on it.
+   */
+  agentActivity?: MissionAgentActivityView;
   createdAt: number;
   updatedAt: number;
 }
@@ -207,7 +214,9 @@ export type MissionOp =
   | { kind: 'plan-again' }
   | { kind: 'write-plan' }
   /** Replan the rest of a started mission (§11.4). */
-  | { kind: 'replan' };
+  | { kind: 'replan' }
+  /** The user's answer to a local merge a granted agent asked for (agent mission control). */
+  | { kind: 'agent-request'; requestId: string; approve: boolean };
 
 // ---------------------------------------------------------------------------
 // Formatters
