@@ -27,8 +27,10 @@ import {
   type RelayItem,
 } from '../../shared/relay';
 
-/** How long the daemon has to answer a connect before the Mac counts as unreachable. */
+/** How long the daemon has to answer a connect, once it is posted, before the Mac counts as unreachable. */
 const OPEN_TIMEOUT_MS = 12_000;
+/** How long joining the tab's own topic may take. */
+const JOIN_TIMEOUT_MS = 20_000;
 /**
  * The daemon pings every `RELAY_PING_MS`; `RELAY_SILENCE_MS` (three periods) without a frame
  * means it has dropped this tab or cannot reach it. Nothing else would say so: the channel stays
@@ -104,8 +106,8 @@ export class RelayConnection {
     this.codec = new RelayCodec(this.device.key, this.device.deviceId, topic, 'b2d');
     const channel = this.client.channel(topic, { config: { private: true, broadcast: { self: false, ack: true } } });
     this.channel = channel;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const opened = new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('mac-unreachable')), OPEN_TIMEOUT_MS);
       this.opened = (build) => {
         clearTimeout(timer);
         resolve(build);
@@ -123,6 +125,7 @@ export class RelayConnection {
     opened.catch(() => undefined);
     let subscribed = false;
     const joined = new Promise<void>((resolve, reject) => {
+      this.closeListeners.push((reason) => reject(new Error(reason)));
       channel.subscribe((status, err) => {
         if (status === 'SUBSCRIBED') {
           subscribed = true;
@@ -137,12 +140,19 @@ export class RelayConnection {
       });
     });
     try {
-      await joined;
+      // supabase-js reports a join it gave up on, but a join waiting on its socket coming back may wait longer.
+      const joinTimer = setTimeout(() => this.end('relay-unreachable'), JOIN_TIMEOUT_MS);
+      await joined.finally(() => clearTimeout(joinTimer));
       // Over REST: the lobby is the daemon's to sit on; a device only posts its request there.
       const lobby = this.client.channel(lobbyTopic(this.uid), { config: { private: true } });
       const r = await lobby.httpSend(RELAY_EVENT_CONNECT, await sealConnect(this.device.key, this.device.deviceId, this.uid, id, Date.now()));
       void this.client.removeChannel(lobby);
       if (!r.success) throw new Error(r.status === 401 || r.status === 403 ? 'not-owner' : 'relay-unreachable');
+      if (this.closed) throw new Error('closed');
+      // From the connect, not from the start: a join that waited on supabase-js rejoining after a
+      // sleep used up the window, and the daemon's `open` came just after the tab had given up,
+      // leaving the daemon a tab nobody answered for two minutes.
+      timer = setTimeout(() => this.end('mac-unreachable'), OPEN_TIMEOUT_MS);
     } catch (e) {
       // Not left subscribed to a channel nobody will answer on.
       this.end(e instanceof Error ? e.message : String(e));
@@ -332,14 +342,18 @@ export class RelayWebSocket extends EventTarget {
     // A Mac that has been updated since this page loaded: start over with its files.
     this.onBuild(c.build);
     c.onClose((reason) => this.finish(reason));
+    // Open before anything held is delivered: the daemon's `hello` usually came with `open`, and
+    // the webshim answers it at once (the panes' `ready`s on a reconnect). Delivered while still
+    // CONNECTING, those answers were dropped and the panes were left unbound.
+    this.readyState = 1;
+    this.dispatchEvent(new Event('open'));
+    if (c.closed) return;
     c.onItems((items) => {
       for (const item of items) {
         if (item.k === 'data') this.dispatchEvent(new MessageEvent('message', { data: item.line }));
         else if (item.k === 'ping') c.send({ k: 'pong' }, true);
       }
     });
-    this.readyState = 1;
-    this.dispatchEvent(new Event('open'));
   }
 
   send(data: string): void {
