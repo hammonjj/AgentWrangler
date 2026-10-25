@@ -16,6 +16,7 @@
  */
 
 import { emptyMemory, MAX_MEMORY_CHARS, memoryChars, memoryPrompt, MEMORY_PROPOSAL_INSTRUCTIONS, parseStoredMemory, type AgentMemory, type AgentMemoryItem, type AgentMemoryProposal } from './agentMemory';
+import type { AgentChildView } from './childConversations';
 import type { SessionProvider } from './harness';
 import type { SessionStatus } from './model';
 
@@ -439,6 +440,8 @@ export interface DurableAgentView {
   historyCount: number;
   /** Its earlier conversations, newest first (#181). */
   history: AgentHistoryView[];
+  /** The child conversations its conversations started and has not finished (#198), newest first. */
+  children: AgentChildView[];
   /** The continuity record and what the agent proposes for it (#180). */
   memory: AgentMemoryItem[];
   proposals: AgentMemoryProposal[];
@@ -491,7 +494,7 @@ export interface AgentSessionFacts {
   lastActivityAt: number;
 }
 
-export function agentView(agent: DurableAgent, lookup: (key: string) => AgentSessionFacts | undefined): DurableAgentView {
+export function agentView(agent: DurableAgent, lookup: (key: string) => AgentSessionFacts | undefined, children: AgentChildView[] = []): DurableAgentView {
   const currentKey = agent.current ? sessionKeyOf(agent.current) : undefined;
   const cur = currentKey ? lookup(currentKey) : undefined;
   return {
@@ -514,6 +517,7 @@ export function agentView(agent: DurableAgent, lookup: (key: string) => AgentSes
       const s = lookup(key);
       return { key, provider: h.provider, linkedAt: h.linkedAt, ...(s ? { title: s.title, status: s.status, lastActivityAt: s.lastActivityAt } : {}) };
     }),
+    children,
     memory: agent.memory.items,
     proposals: agent.memory.proposals,
     memoryChars: memoryChars(agent.memory.items),

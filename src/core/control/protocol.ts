@@ -53,10 +53,12 @@ export const RPC_AMBIGUOUS = -32005;
 /** The session exists, but not in a way that allows this (e.g. `send` to one AW does not run). */
 export const RPC_UNSUPPORTED = -32006;
 
-export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'agent.propose', 'rename', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke', 'missions', 'mission', 'mission.act'] as const;
+export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'agent.propose', 'rename', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke', 'missions', 'mission', 'mission.act', 'child.spawn', 'child.list', 'child.send', 'child.read', 'child.stop', 'child.done'] as const;
 export type ControlMethod = (typeof CONTROL_METHODS)[number];
 /** Methods that change something. Logged by the core (method and session, never content). */
-export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate', 'agent.propose', 'rename', 'mission.act'];
+export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate', 'agent.propose', 'rename', 'mission.act', 'child.spawn', 'child.send', 'child.stop', 'child.done'];
+/** The longest prompt `child.spawn` and text `child.send` accept. */
+export const MAX_CHILD_TEXT_CHARS = 50_000;
 /** The longest objective `task.propose` and `delegate` accept. An outcome, not a document. */
 export const MAX_TASK_OBJECTIVE_CHARS = 20_000;
 
@@ -457,6 +459,92 @@ export interface ControlMissionActResult {
   code?: string;
   message: string;
   mission?: ControlMissionView;
+}
+
+// ---- child conversations (#198, docs/plans/child-conversations.md) ----
+
+/**
+ * Every `child.*` method is asked from inside a durable agent's conversation
+ * (`origin`, required) and runs as that agent's principal: `authorize`
+ * allows it only on the agent's own children. A child, or any conversation
+ * that is not an agent's, is refused.
+ */
+export interface ControlChildOriginParams {
+  origin: { provider: 'claude' | 'codex'; sessionId: string };
+}
+
+/** `child.spawn`: a new conversation in a new worktree and branch, sent `prompt` first. */
+export interface ControlChildSpawnParams extends ControlChildOriginParams {
+  prompt: string;
+  /** Default: the agent's own harness. */
+  provider?: 'claude' | 'codex';
+  /** Any folder in the repository to cut from. Default: the calling conversation's folder. */
+  folder?: string;
+  /** A short name for the worktree and branch. Default: from the prompt. */
+  name?: string;
+}
+
+/** One child, as `child.list` and the other methods return it. `status` may grow. */
+export interface ControlChildView {
+  childId: string;
+  key: string;
+  provider: string;
+  branch: string;
+  worktree: string;
+  title?: string;
+  status?: string;
+  needsYou?: boolean;
+  lastActivityAt?: number;
+}
+
+export interface ControlChildSpawnResult {
+  child: ControlChildView;
+  repo: string;
+}
+
+export interface ControlChildListResult {
+  agent: string;
+  children: ControlChildView[];
+}
+
+/** `child.send|read|stop|done`: `ref` is a child id (its slug), a session id or prefix, or a key. */
+export interface ControlChildRefParams extends ControlChildOriginParams {
+  ref: string;
+}
+
+export interface ControlChildSendParams extends ControlChildRefParams {
+  text: string;
+}
+
+export interface ControlChildReadParams extends ControlChildRefParams {
+  /** How many of the newest blocks. Default 20, at most `MAX_SUBSCRIBE_BLOCKS`. */
+  last?: number;
+}
+
+export interface ControlChildReadResult {
+  child: ControlChildView;
+  /** Absent when Agent Wrangler does not run it right now. */
+  lifecycle?: ControlLifecycle;
+  /** Not frozen: AW's own block shape, as `subscribe` returns it. */
+  blocks: ConvBlock[];
+  truncated: boolean;
+  pending?: ControlPendingView;
+}
+
+export interface ControlChildStopParams extends ControlChildRefParams {
+  force?: boolean;
+}
+
+export interface ControlChildDoneParams extends ControlChildRefParams {
+  /** Remove it even with uncommitted or unmerged work, which is lost (an unmerged branch is kept). */
+  discard?: boolean;
+}
+
+export interface ControlChildDoneResult {
+  /** `done` or `refused`. May grow. */
+  outcome: string;
+  message: string;
+  child: ControlChildView;
 }
 
 /**

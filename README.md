@@ -865,6 +865,41 @@ agents, worktrees and checks stay on this Mac. Only the HTTP calls to the endpoi
 - **Then:** use *Set key…* for the key, *Probe*, *Qualify* and *Qualify tasks* per harness,
   and give the model a tier.
 
+## Child conversations
+
+A durable agent's conversation can start **child conversations** (#198): ordinary Claude or
+Codex conversations, each in its own git worktree and branch, that the agent drives, merges and
+cleans up itself. No proposal, Accept or Finish step. The design and its rules are in
+`docs/plans/child-conversations.md`.
+
+- **Spawning.** `aw child spawn "<prompt>"` from the agent's conversation cuts a branch
+  `child/<name>` from the HEAD of the conversation's repository (or `--folder <dir>`'s), in a
+  worktree beside it (`<repo>-child-<name>`, with `node_modules` linked when the checkout has
+  one), and starts a conversation there on the agent's harness (or `--claude`/`--codex`) with the
+  launcher's model and effort, sending the prompt first.
+- **Where you see them.** In Sessions (`#/sessions`) a child sits indented under its agent's
+  current conversation, folded and unfolded with the chevron on that row. A folded parent shows
+  *child needs you* while any child waits on a permission, a question or a plan; the child still
+  notifies as usual. If the parent conversation is not in the table, the child is an ordinary
+  row marked *child of …*. In Agents (`#/agents`) an agent's unfinished children are listed under
+  it; click one to open it. Open a child and talk to it like any conversation.
+- **Control is scoped to its own children.** `aw child list|read|send|stop|done` work only on
+  conversations that agent spawned. Every request runs as the agent's own principal through
+  `authorize()`, which refuses any other session, so a request that does not come through the CLI
+  is refused too. A child cannot spawn children of its own (one level), and is never the agent's
+  own conversation: it cannot be assigned to an agent.
+- **Merging.** The agent merges the child's branch to `main` itself, as CLAUDE.md says. The child
+  is told to commit on its branch and leave merging to the agent.
+- **Cleanup.** `aw child done <id>` checks the branch is merged into the repository's default
+  branch and the worktree is clean, stops the child, removes the worktree (never with `--force`),
+  deletes the merged branch, and archives the child. It refuses on a dirty or unmerged tree, or a
+  child still working, unless `--discard`, which throws that work away (an unmerged branch is
+  kept).
+- **Durable links.** The parent link is stored in the session's registry origin by the agent's
+  id, so it survives daemon restarts and Claude session id changes on resume or compaction.
+- **Guidance.** Durable agents are told how to use `aw child` instead of `aw delegate`. Other
+  conversations keep the delegation guidance for now (missions go in #199).
+
 ## Agent mission control
 
 A durable agent that delegates a lot (a product owner, say) can see where its missions are, and,
@@ -1001,6 +1036,10 @@ take turns, with no cooperation needed from the agent: the tool call is the requ
 | `aw mission accept <id> [--task <key>] [--finish <how>]` / `finish <id> <how>` / `cancel <id>` | From inside a durable agent's conversation with its **mission grant** on: act on a mission that agent delegated, once its checks passed. `merge-local` only asks you (see [Agent mission control](#agent-mission-control)). |
 | `aw remember [--kind decision\|preference\|question\|work] <text…>` | From inside a durable agent's conversation: propose a memory note. Nothing is stored until you approve it in the app. |
 | `aw forget <id>` | From inside a durable agent's conversation: propose removing a memory note by its id. |
+| `aw child spawn [--claude\|--codex] [--folder <dir>] [--name <n>] <prompt…>` | From inside a durable agent's conversation: start a child conversation in a new worktree and branch (see [Child conversations](#child-conversations)). Prints its id, worktree and branch. `-` reads the prompt from stdin. |
+| `aw child list` | That agent's children and their status. |
+| `aw child read <id> [--last N]` / `send <id> <text…>` / `stop <id> [--force]` | Read a child's newest messages, message it (an idle one resumes), or stop it. Its own children only. |
+| `aw child done <id> [--discard]` | Once the agent merged the child's branch: remove the worktree and archive the child. Refuses on unmerged or uncommitted work unless `--discard`. |
 | `aw web open` | Open the workbench in your default browser, signed in (see [Open in a browser](#open-in-a-browser)). |
 | `aw web url` | Print the single-use sign-in link instead of opening it. |
 | `aw web pair` | Pair a phone or tablet on your home network: prints a QR code and a code (see [Pairing a device](#pairing-a-device)). |
@@ -1067,6 +1106,7 @@ It respects `telemetry.enabled`. An older optional Claude Code skill is in
 - **It is a client of the core daemon, never a supervisor.** It talks only to the daemon's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new every time the daemon starts). It never connects to session hosts, and every command goes the same way as the equivalent click. Open tabs show a short notice when `aw` sends or stops something.
 - **With the daemon stopped**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the daemon starts) and what the daemon last recorded. Everything else says Agent Wrangler is not running.
 - **`delegate` and `task` are allowed there**, because they only ever create a proposal or a plan. Nothing runs until you accept it in the app, so an agent calling them can't start work you haven't seen.
+- **`aw child …` is allowed there**, and only does anything there: it acts as the durable agent whose conversation the shell is, and the core refuses it on any session that is not one of that agent's own children (see [Child conversations](#child-conversations)).
 - **`missions` and `mission` are allowed there** because they only read. `mission accept|finish|cancel` is allowed there too, and only there: it acts as the durable agent whose conversation the shell is, under that agent's own grant, never as you (see [Agent mission control](#agent-mission-control)).
 - **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12). `aw web url` refuses there too, for the same reason: the link it prints is the whole workbench. So do `aw web pair` (its code lets a device in as you) and `aw web devices revoke`.
 

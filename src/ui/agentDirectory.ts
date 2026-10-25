@@ -9,11 +9,14 @@ import type { Disposable } from '../core/events';
 import type { ImageAttachment } from '../shared/conversation';
 import type { AgentMemoryPaneView, DurableAgentView } from '../shared/durableAgents';
 import type { AgentSession } from '../shared/model';
+import type { ChildRowInfo } from '../shared/childConversations';
 
 export interface AgentDirectory {
   views(): DurableAgentView[];
   /** The agent a session belongs to, for its row: `current` when it is the conversation the agent continues. */
   ownerOf(provider: string, sessionId: string): { id: string; name: string; current: boolean } | undefined;
+  /** The child conversation a session is (#198), for its row: the agent, and the row it nests under. */
+  childOf?(provider: string, sessionId: string): ChildRowInfo | undefined;
   /** Show the agent's continuing conversation to the requesting client. Starts nothing. */
   open(id: string): void;
   /**

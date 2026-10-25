@@ -196,7 +196,8 @@ export function showsInterrupted(r: SessionRecord | undefined, now: number): boo
  * The one session to resume automatically at startup, if any: the newest
  * Claude session this restart interrupted, recent enough, and not one the
  * orchestrator owns (it offers Resume/Retry for those itself; orchestration
- * plan §1.3, A6).
+ * plan §1.3, A6). A child conversation (`{kind: 'child'}`, #198) is an
+ * ordinary conversation here, as is any origin kind this does not know.
  */
 export function autoResumeCandidate(interrupted: SessionRecord[], now: number): SessionRecord | undefined {
   const newest = interrupted.find((r) => r.provider === 'claude' && originKind(r.origin) !== 'orchestration');

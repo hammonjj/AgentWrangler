@@ -32,7 +32,8 @@ import { ControlError, type ControlBackend, type ControlSubscription } from '../
 import { displayTitle, type AgentSession } from '../shared/model';
 import { TaskError } from '../orchestration/engine/taskRunner';
 import type { AgentWranglerApp } from './createApp';
-import { agentContext, ownerContext, sessionRef, type AccessGate, type ActionName, type RequestContext } from '../core/access';
+import { agentContext, ownerContext, sessionRef, type AccessGate, type ActionName, type RequestContext, type ResourceRef } from '../core/access';
+import type { ChildEntry } from './childConversations';
 import type { AgentMissionAct } from '../shared/orchestration/missionGrant';
 import { scopedMethods } from '../core/requestScope';
 
@@ -127,6 +128,34 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
       );
     }
     return handle;
+  };
+
+  /** The durable agent the calling conversation is, or refuse: a child, or no agent's conversation, has no children to act on. */
+  const childCaller = (origin: { provider: string; sessionId: string }) => {
+    const caller = app.children.callerOf(origin);
+    if ('refused' in caller) throw new ControlError(RPC_UNAUTHORIZED, caller.message);
+    return caller.agent;
+  };
+  /** Authorise as the agent, or refuse the RPC. */
+  const admitChild = (agentId: string, action: ActionName, resource: ResourceRef): void => {
+    if (!deps.gate.admit(agentContext(agentId), action, resource)) {
+      throw new ControlError(RPC_UNAUTHORIZED, `not permitted: ${action} (an agent may act only on child conversations it started)`);
+    }
+  };
+  /**
+   * The child `ref` names, once the agent may act on it. Resolved first (a
+   * read), so the audit names the session and whose child it is; a session
+   * that is no child carries no owner, and `authorize` refuses it.
+   */
+  const childTarget = (agentId: string, action: ActionName, ref: string): ChildEntry => {
+    const found = app.children.resolve(ref);
+    if ('error' in found) {
+      if (found.error === 'ambiguous') throw new ControlError(RPC_AMBIGUOUS, `"${ref}" matches ${found.matches.length} sessions`, { matches: found.matches });
+      throw new ControlError(RPC_NOT_FOUND, `no child or session matches "${ref}"`);
+    }
+    admitChild(agentId, action, { kind: 'session', id: found.key, ...(found.entry ? { agentId: found.entry.origin.agentId } : {}) });
+    // `authorize` let it through, so it is this agent's child.
+    return found.entry!;
   };
 
   const describe = () => ({ build: deps.build, appPid: deps.appPid, startedAt: deps.startedAt });
@@ -348,6 +377,76 @@ export function createControlBackend(app: AgentWranglerApp, deps: ControlBackend
             ? { kind: 'finish', how: params.how! }
             : { kind: 'accept', ...(taskId ? { taskId } : {}), ...(params.how ? { finish: params.how } : {}) };
       return app.missionGrants.act(caller, id, act);
+    },
+
+    // ---- child conversations (#198, docs/plans/child-conversations.md) ----
+
+    // Every one runs as the calling durable agent's own principal, never the
+    // owner's: the conversation (`origin`) says which agent, a child or a
+    // conversation that is no agent's is refused before anything is resolved,
+    // and `authorize` allows the action only on that agent's own children
+    // (the target's child owner rides on the resource). Not refused in an
+    // agent's shell: scoped here instead.
+    async childSpawn(params) {
+      const agent = childCaller(params.origin);
+      admitChild(agent.id, 'child.spawn', { kind: 'agent', id: agent.id });
+      try {
+        const r = await app.children.spawn(agent, params.origin, params);
+        deps.flash?.(`${agent.name} started a child conversation (${r.child.branch})`);
+        return { child: r.child, repo: r.repo };
+      } catch (err) {
+        throw new ControlError(RPC_UNSUPPORTED, err instanceof Error ? err.message : String(err));
+      }
+    },
+
+    childList(params) {
+      const agent = childCaller(params.origin);
+      admitChild(agent.id, 'child.read', { kind: 'agent', id: agent.id });
+      return { agent: agent.name, children: app.children.list(agent.id) };
+    },
+
+    async childSend(params) {
+      const agent = childCaller(params.origin);
+      const entry = childTarget(agent.id, 'child.send', params.ref);
+      return app.children.send(entry, params.text);
+    },
+
+    childRead(params) {
+      const agent = childCaller(params.origin);
+      const entry = childTarget(agent.id, 'child.read', params.ref);
+      const handle = entry.live && app.sessions.list().includes(entry.live) ? entry.live : undefined;
+      const snap = handle?.snapshot();
+      const last = params.last ?? 20;
+      const blocks = snap ? snap.blocks.slice(-last) : [];
+      const row = app.store.get(entry.key) ?? handle?.liveSession;
+      const pending = row ? pendingOf(row, handle) : undefined;
+      return {
+        child: app.children.view(entry),
+        ...(handle ? { lifecycle: lifecycleOf(handle) } : {}),
+        blocks,
+        truncated: snap ? snap.truncated || blocks.length < snap.blocks.length : false,
+        ...(pending ? { pending } : {}),
+      };
+    },
+
+    async childStop(params) {
+      const agent = childCaller(params.origin);
+      const entry = childTarget(agent.id, 'child.stop', params.ref);
+      const outcome = await app.children.stop(entry, params.force === true);
+      if (outcome === 'gone') throw new ControlError(RPC_NOT_FOUND, `no session matches "${params.ref}"`);
+      return outcome;
+    },
+
+    async childDone(params) {
+      const agent = childCaller(params.origin);
+      const entry = childTarget(agent.id, 'child.done', params.ref);
+      try {
+        const r = await app.children.done(entry, params.discard === true);
+        if (r.outcome === 'done') deps.flash?.(`${agent.name} finished the child conversation ${entry.origin.childId}`);
+        return { ...r, child: app.children.view(entry) };
+      } catch (err) {
+        throw new ControlError(RPC_UNSUPPORTED, err instanceof Error ? err.message : String(err));
+      }
     },
 
     webRevoke: (ref) => {

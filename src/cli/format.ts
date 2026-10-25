@@ -3,6 +3,11 @@
  * returns text, so the tests pin the output exactly.
  */
 import type {
+  ControlChildDoneResult,
+  ControlChildListResult,
+  ControlChildReadResult,
+  ControlChildSpawnResult,
+  ControlChildView,
   ControlDelegateResult,
   ControlMissionActResult,
   ControlMissionCaller,
@@ -275,6 +280,45 @@ export function formatMissionAct(r: ControlMissionActResult): string {
   const lead = r.outcome === 'done' ? 'Done.' : r.outcome === 'requested' ? 'Requested.' : r.outcome === 'refused' ? `Refused (${r.code ?? 'refused'}).` : r.outcome === 'failed' ? 'Failed.' : `${r.outcome}.`;
   const tail = r.mission ? `\nNow: ${r.mission.state} — ${safe(r.mission.waitingOn.text)}` : '';
   return `${lead} ${safe(r.message)}${tail}`;
+}
+
+// ---- child conversations (#198) ----
+
+function childStatus(c: ControlChildView): string {
+  if (c.needsYou) return 'waiting on the user';
+  return c.status ? statusLabel(c.status) : 'not started';
+}
+
+export function formatChildSpawn(r: ControlChildSpawnResult): string {
+  const c = r.child;
+  return [
+    `Started a ${c.provider === 'codex' ? 'Codex' : 'Claude'} child conversation.`,
+    `  id:       ${safe(c.childId)}`,
+    `  session:  ${safe(c.key)}`,
+    `  worktree: ${safe(c.worktree)}`,
+    `  branch:   ${safe(c.branch)} (from the HEAD of ${safe(r.repo)})`,
+    '',
+    `Follow it with aw child read ${safe(c.childId)}. When it is finished, merge ${safe(c.branch)} to main yourself, then run aw child done ${safe(c.childId)}.`,
+  ].join('\n');
+}
+
+export function formatChildList(r: ControlChildListResult, now: number, width = 100): string {
+  if (r.children.length === 0) return `${safe(r.agent)} has no child conversations. Start one with aw child spawn "<prompt>".`;
+  const rows = r.children.map((c) => [c.childId, childStatus(c), c.provider, c.lastActivityAt ? ago(c.lastActivityAt, now) : '—', c.branch, c.title ?? '']);
+  return table(['ID', 'STATUS', 'HARNESS', 'ACTIVE', 'BRANCH', 'TITLE'], rows, width);
+}
+
+/** The head of `aw child read`; the blocks below it are rendered as `aw attach` renders them. */
+export function formatChildReadHead(r: ControlChildReadResult): string {
+  const c = r.child;
+  const lines = [`${safe(c.childId)}  ${childStatus(c)}${r.lifecycle ? ` (runner: ${r.lifecycle})` : ''}  ${safe(c.branch)}`];
+  if (r.pending) lines.push(`Waiting on the user: ${r.pending.kind}: ${clip(r.pending.summary, 200)}`);
+  if (!r.lifecycle) lines.push('Agent Wrangler is not running this child right now, so there are no recent messages to show. aw child send resumes it.');
+  return lines.join('\n');
+}
+
+export function formatChildDone(r: ControlChildDoneResult): string {
+  return `${r.outcome === 'done' ? 'Done.' : r.outcome === 'refused' ? 'Refused.' : `${safe(r.outcome)}.`} ${safe(r.message)}`;
 }
 
 // ---- the read-only view, when the app is not running ----

@@ -59,7 +59,19 @@ export type Command =
    * (`all`: hosted conversations end too, as ⌥⌘Q); `status` reads its manifest
    * and probes its socket. None of them need the control socket to answer.
    */
-  | { kind: 'daemon'; action: 'start' | 'stop' | 'status'; all: boolean; json: boolean };
+  | { kind: 'daemon'; action: 'start' | 'stop' | 'status'; all: boolean; json: boolean }
+  /**
+   * Child conversations (#198), from inside a durable agent's conversation
+   * only, on its own children only (scoped by the core, not here). `prompt` /
+   * `text` undefined: read stdin. `provider` undefined: the agent's own.
+   * `folder` undefined: the conversation's own folder.
+   */
+  | { kind: 'childSpawn'; prompt: string | undefined; provider?: 'claude' | 'codex'; folder?: string; name?: string; json: boolean }
+  | { kind: 'childList'; json: boolean }
+  | { kind: 'childSend'; ref: string; text: string | undefined }
+  | { kind: 'childRead'; ref: string; last?: number; json: boolean }
+  | { kind: 'childStop'; ref: string; force: boolean }
+  | { kind: 'childDone'; ref: string; discard: boolean; json: boolean };
 
 export const USAGE = `aw — Agent Wrangler from a terminal
 
@@ -97,6 +109,19 @@ Usage:
                             stored only once the user approves it in the app ("-" reads stdin)
       --kind <kind>         decision (default), preference, question or work
   aw forget <id>            from inside a durable agent's conversation: propose removing a note
+  aw child spawn "<prompt…>"  from inside a durable agent's conversation: start a child
+                            conversation in a new worktree and branch (child/<name>) cut from
+                            this repository's HEAD ("-" reads the prompt from stdin)
+      --claude | --codex    which harness (default: the agent's own)
+      --folder <dir>        another repository (default: this conversation's folder)
+      --name <name>         a short name for the worktree and branch (default: from the prompt)
+  aw child list             your children and their status
+  aw child read <id> [--last N]  a child's newest messages (default 20)
+  aw child send <id> <text…>     message a child ("-" reads stdin); an idle one resumes
+  aw child stop <id> [--force]   stop a child's process (--force: even mid-turn)
+  aw child done <id> [--discard] once you merged its branch: remove its worktree and archive
+                            it. Refuses while its branch is unmerged or its tree is dirty
+                            (--discard: throw that work away; an unmerged branch is kept)
   aw web open               open the workbench in your default browser, signed in
   aw web url                print a single-use sign-in link instead (good once, for 2 minutes)
   aw web pair               pair a phone or tablet on your home network: shows a QR code to
@@ -122,6 +147,8 @@ export function parseArgs(argv: readonly string[]): Command | { error: string } 
   if (argv[0] === 'rename') return parseRename(argv.slice(1));
   // Its options take values (`--task t1`, `--finish keep`).
   if (argv[0] === 'mission') return parseMission(argv.slice(1));
+  // Free text after the id or among options.
+  if (argv[0] === 'child') return parseChild(argv.slice(1));
   const flags = new Set(argv.filter((a) => a.startsWith('--')));
   const words = argv.filter((a) => !a.startsWith('--') || a === '--');
   if (flags.has('--help') || argv.includes('-h')) return { kind: 'help' };
@@ -305,6 +332,103 @@ function parseMission(tail: readonly string[]): Command | { error: string } {
   return { kind: 'missionAct', act, ref, ...(finish !== undefined ? { how: finish as FinishArg } : {}), ...(task !== undefined ? { task } : {}), json };
 }
 
+/**
+ * `aw child spawn|list|read|send|stop|done …` (#198). `send` takes everything
+ * after the id as the message, as `aw send` does; `spawn` takes options
+ * anywhere and the other words as the prompt, `--` ending the options.
+ */
+export function parseChild(tail: readonly string[]): Command | { error: string } {
+  const [action, ...rest] = tail;
+  const usage = 'aw child: spawn, list, read, send, stop or done? (aw help)';
+  if (action === undefined || action === '--help' || action === '-h' || action === 'help') return action ? { kind: 'help' } : { error: usage };
+  if (action === 'send') {
+    const ref = rest[0];
+    if (!ref || ref.startsWith('-')) return { error: 'aw child send: which child? Give its id, then the message.' };
+    const words = rest.slice(1);
+    if (words.length === 0) return { error: 'aw child send: what should it say? Give the message, or "-" to read it from stdin.' };
+    if (words.length === 1 && words[0] === '-') return { kind: 'childSend', ref, text: undefined };
+    const text = words.join(' ');
+    if (text.trim().length === 0) return { error: 'aw child send: the message is empty.' };
+    return { kind: 'childSend', ref, text };
+  }
+  if (action === 'spawn') {
+    const words: string[] = [];
+    let provider: 'claude' | 'codex' | undefined;
+    let folder: string | undefined;
+    let name: string | undefined;
+    let json = false;
+    for (let i = 0; i < rest.length; i++) {
+      const a = rest[i];
+      if (a === '--') {
+        words.push(...rest.slice(i + 1));
+        break;
+      }
+      if (a === '--folder' || a === '--name') {
+        const value = rest[i + 1];
+        if (value === undefined || value.startsWith('--')) return { error: `aw child spawn: ${a} needs a value.` };
+        if (a === '--folder') folder = value;
+        else name = value;
+        i++;
+        continue;
+      }
+      if (a === '--claude' || a === '--codex') {
+        const wanted = a === '--claude' ? 'claude' : 'codex';
+        if (provider && provider !== wanted) return { error: 'aw child spawn: give --claude or --codex, not both.' };
+        provider = wanted;
+        continue;
+      }
+      if (a === '--json') {
+        json = true;
+        continue;
+      }
+      if (a === '--help' || a === '-h') return { kind: 'help' };
+      if (a.startsWith('--')) return { error: `aw child spawn: unknown option ${a}` };
+      words.push(a);
+    }
+    if (words.length === 0) return { error: 'aw child spawn: what should the child do? Give a self-contained prompt, or "-" to read it from stdin.' };
+    const base = { kind: 'childSpawn' as const, ...(provider ? { provider } : {}), ...(folder !== undefined ? { folder } : {}), ...(name !== undefined ? { name } : {}), json };
+    if (words.length === 1 && words[0] === '-') return { ...base, prompt: undefined };
+    const prompt = words.join(' ');
+    if (prompt.trim().length === 0) return { error: 'aw child spawn: the prompt is empty.' };
+    return { ...base, prompt };
+  }
+  // list, read, stop, done: an id (not for list) and flags.
+  const words: string[] = [];
+  const flags = new Set<string>();
+  let last: number | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--last') {
+      const value = rest[i + 1];
+      const n = value === undefined ? NaN : Number(value);
+      if (!Number.isInteger(n) || n < 1) return { error: 'aw child read: --last needs a positive whole number.' };
+      last = n;
+      i++;
+      continue;
+    }
+    if (a === '--help' || a === '-h') return { kind: 'help' };
+    if (a.startsWith('-')) flags.add(a);
+    else words.push(a);
+  }
+  const allowed: Record<string, string[]> = { list: ['--json'], read: ['--json'], stop: ['--force'], done: ['--discard', '--json'] };
+  const ok = allowed[action];
+  if (!ok) return { error: `aw child: no command "${action}". ${usage.slice('aw child: '.length)}` };
+  const bad = [...flags].find((f) => !ok.includes(f));
+  if (bad) return { error: `aw child ${action}: unknown option ${bad}` };
+  if (last !== undefined && action !== 'read') return { error: `aw child ${action}: unknown option --last` };
+  const json = flags.has('--json');
+  if (action === 'list') {
+    if (words.length > 0) return { error: `aw child list: unexpected "${words[0]}"` };
+    return { kind: 'childList', json };
+  }
+  const [ref, extra] = words;
+  if (!ref) return { error: `aw child ${action}: which child? Give its id (aw child list shows them).` };
+  if (extra !== undefined) return { error: `aw child ${action}: unexpected "${extra}"` };
+  if (action === 'read') return { kind: 'childRead', ref, ...(last !== undefined ? { last } : {}), json };
+  if (action === 'stop') return { kind: 'childStop', ref, force: flags.has('--force') };
+  return { kind: 'childDone', ref, discard: flags.has('--discard'), json };
+}
+
 /** `aw rename [--session <id>] [--json] <name…>` or `aw rename [--session <id>] --clear`. `--` ends the options. */
 function parseRename(tail: readonly string[]): Command | { error: string } {
   const words: string[] = [];
@@ -399,6 +523,8 @@ function parseHandoff(kind: 'delegate' | 'task', tail: readonly string[]): Comma
  * pairing and revoking. Agent mission control adds nothing here and removes
  * nothing: `aw missions` and `aw mission` only read, and `aw mission
  * accept|finish|cancel` acts as the agent, under its own grant, never as you.
+ * `aw child …` (#198) is not refused here either: it is meant for an agent's
+ * shell, runs as that agent, and the core scopes it to its own children.
  */
 export function agentShellRefusal(cmd: Command, inside: string | undefined): string | undefined {
   if (!inside) return undefined;
