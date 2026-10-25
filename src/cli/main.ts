@@ -37,6 +37,13 @@ import {
   type ControlMissionResult,
   type ControlMissionActParams,
   type ControlMissionActResult,
+  type ControlChildSpawnParams,
+  type ControlChildSpawnResult,
+  type ControlChildListResult,
+  type ControlChildSendParams,
+  type ControlChildReadParams,
+  type ControlChildReadResult,
+  type ControlChildDoneResult,
 } from '../core/control/protocol';
 import { encodeQr, qrToTerminal } from '../core/web/qr';
 import { execFile } from 'node:child_process';
@@ -45,6 +52,10 @@ import { agentEnvironment, agentShellRefusal, originOf, parseArgs, USAGE, type C
 import { ATTACH_BACKLOG, AttachRenderer } from './attach';
 import { ControlClient } from './client';
 import {
+  formatChildDone,
+  formatChildList,
+  formatChildReadHead,
+  formatChildSpawn,
   formatDelegation,
   formatMission,
   formatMissionAct,
@@ -322,6 +333,13 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
       print(r, () => formatWebDevices(r.devices, now, width()), cmd.json);
       return 0;
     }
+    case 'childSpawn':
+    case 'childList':
+    case 'childSend':
+    case 'childRead':
+    case 'childStop':
+    case 'childDone':
+      return child(cmd, client, now);
     case 'webRevoke': {
       const r = await client.request<ControlWebRevokeResult>('web.devices.revoke', { id: cmd.id });
       process.stdout.write(`Revoked ${safe(r.device.name)} (${r.device.id.slice(0, 8)}). Its open tabs have been disconnected.\n`);
@@ -329,6 +347,87 @@ async function online(cmd: Command, client: ControlClient): Promise<number> {
     }
     default:
       return 2;
+  }
+}
+
+/**
+ * `aw child …` (#198). Runs as the durable agent whose conversation this
+ * shell is: the core refuses it from anywhere else, and on any session that
+ * is not one of that agent's own children.
+ */
+async function child(
+  cmd: Extract<Command, { kind: 'childSpawn' | 'childList' | 'childSend' | 'childRead' | 'childStop' | 'childDone' }>,
+  client: ControlClient,
+  now: number,
+): Promise<number> {
+  const origin = originOf(process.env);
+  if (!origin) {
+    process.stderr.write("aw child: run this inside a durable agent's conversation. Children belong to the agent that started them.\n");
+    return 2;
+  }
+  const print = (value: unknown, text: () => string, json: boolean) => process.stdout.write(`${json ? JSON.stringify(value, null, 2) : text()}\n`);
+  switch (cmd.kind) {
+    case 'childSpawn': {
+      const prompt = cmd.prompt ?? (await readStdin());
+      if (prompt.trim().length === 0) {
+        process.stderr.write('aw child spawn: the prompt is empty.\n');
+        return 2;
+      }
+      const params: ControlChildSpawnParams = {
+        origin,
+        prompt,
+        ...(cmd.provider ? { provider: cmd.provider } : {}),
+        ...(cmd.folder !== undefined ? { folder: path.resolve(cmd.folder) } : {}),
+        ...(cmd.name !== undefined ? { name: cmd.name } : {}),
+      };
+      // Cutting a worktree and starting a session takes longer than a read.
+      const r = await client.request<ControlChildSpawnResult>('child.spawn', params, { timeoutMs: 180_000 });
+      print(r, () => formatChildSpawn(r), cmd.json);
+      return 0;
+    }
+    case 'childList': {
+      const r = await client.request<ControlChildListResult>('child.list', { origin });
+      print(r, () => formatChildList(r, now, width()), cmd.json);
+      return 0;
+    }
+    case 'childSend': {
+      const text = cmd.text ?? (await readStdin());
+      if (text.trim().length === 0) {
+        process.stderr.write('aw child send: the message is empty.\n');
+        return 2;
+      }
+      const r = await client.request<ControlSendResult>('child.send', { origin, ref: cmd.ref, text } satisfies ControlChildSendParams, { timeoutMs: 120_000 });
+      if (r.outcome === 'applied') {
+        process.stdout.write('Sent.\n');
+        return 0;
+      }
+      process.stderr.write(r.reason ? `Not sent: ${r.reason}\n` : `Not sent (${String(r.outcome)}).\n`);
+      return 1;
+    }
+    case 'childRead': {
+      const r = await client.request<ControlChildReadResult>('child.read', { origin, ref: cmd.ref, ...(cmd.last ? { last: cmd.last } : {}) } satisfies ControlChildReadParams);
+      if (cmd.json) {
+        print(r, () => '', true);
+        return 0;
+      }
+      process.stdout.write(`${formatChildReadHead(r)}\n`);
+      const lines = new AttachRenderer().start(r.blocks, r.truncated);
+      if (lines.length > 0) process.stdout.write(`${lines.join('\n')}\n`);
+      return 0;
+    }
+    case 'childStop': {
+      const r = await client.request<ControlStopResult>('child.stop', { origin, ref: cmd.ref, force: cmd.force }, { timeoutMs: 60_000 });
+      const ok = r.outcome === 'stopped' || r.outcome === 'nothing';
+      (ok ? process.stdout : process.stderr).write(
+        r.outcome === 'stopped' ? 'Stopped. Its conversation and worktree are kept.\n' : r.outcome === 'working' ? 'Not stopped: it is working right now. Add --force to stop it anyway.\n' : r.outcome === 'nothing' ? 'Nothing to stop: it is not running.\n' : `Not stopped (${String(r.outcome)}).\n`,
+      );
+      return ok ? 0 : 1;
+    }
+    case 'childDone': {
+      const r = await client.request<ControlChildDoneResult>('child.done', { origin, ref: cmd.ref, discard: cmd.discard }, { timeoutMs: 120_000 });
+      print(r, () => formatChildDone(r), cmd.json);
+      return r.outcome === 'done' ? 0 : 1;
+    }
   }
 }
 

@@ -22,7 +22,9 @@ import type { SessionExecutors } from '../core/session/sessionExecutors';
 import type { SessionHandle } from '../core/session/sessionHandle';
 import type { SessionStore } from '../core/sessionStore';
 import type { HostDialogs, WorkbenchSurface } from '../host/hostServices';
-import { CONVERSATION_DELEGATION_INSTRUCTIONS, withConversationDelegation } from '../shared/conversationDelegation';
+import { CONVERSATION_DELEGATION_INSTRUCTIONS } from '../shared/conversationDelegation';
+import { withChildGuidance } from '../shared/childConversations';
+import type { ChildConversations } from './childConversations';
 import {
   agentDraftKey,
   agentIdOfDraftKey,
@@ -56,6 +58,8 @@ export interface DurableAgentDeps {
   surface: () => WorkbenchSurface | undefined;
   /** The scratch folder a Global agent works in, created on demand. */
   globalDir: () => string;
+  /** Child conversations (#198): listed under their agent, never assignable to one. */
+  children?: Pick<ChildConversations, 'list' | 'isChild' | 'resumeInstructions' | 'rowInfo'>;
   log: (line: string) => void;
 }
 
@@ -101,7 +105,8 @@ export function createDurableAgents(deps: DurableAgentDeps): DurableAgents {
   const instructionsFor = (agent: DurableAgent): string => {
     const file = readInstructionsFile(agent);
     if ('error' in file) throw new Error(file.error);
-    return withConversationDelegation(agentInstructions(agent, file.text));
+    // Durable agents hand work off through child conversations (#198), not `aw delegate`.
+    return withChildGuidance(agentInstructions(agent, file.text));
   };
 
   /**
@@ -145,7 +150,7 @@ export function createDurableAgents(deps: DurableAgentDeps): DurableAgents {
           agentView(a, (key) => {
             const s = store.get(key) ?? liveFor(key)?.liveSession;
             return s ? { status: s.status, title: displayTitle(s), ...(s.subtitle ? { subtitle: s.subtitle } : {}), lastActivityAt: s.lastActivityAt } : undefined;
-          }),
+          }, deps.children?.list(a.id) ?? []),
         ),
       );
     },
@@ -153,6 +158,7 @@ export function createDurableAgents(deps: DurableAgentDeps): DurableAgents {
       const held = agents.holderOf(provider, sessionId);
       return held ? { id: held.agent.id, name: held.agent.name, current: held.current } : undefined;
     },
+    childOf: (provider, sessionId) => deps.children?.rowInfo(provider, sessionId),
     open(id) {
       const agent = agents.get(id);
       if (!agent) return;
@@ -244,6 +250,8 @@ export function createDurableAgents(deps: DurableAgentDeps): DurableAgents {
       const agent = agents.get(agentId);
       if (!agent) return { error: 'That agent no longer exists.' };
       if (!s) return { error: 'That session is no longer in the table.' };
+      // A child works for its agent; it never becomes the agent itself (#198).
+      if (deps.children?.isChild(ref.provider, sessionId)) return { error: 'That is a child conversation of a durable agent, so it cannot become an agent\'s own conversation.' };
       if (!canAssign(agent, { provider: s.provider, cwd: s.cwd })) {
         return { error: agent.provider !== s.provider ? `${agent.name} runs on ${agent.provider === 'codex' ? 'Codex' : 'Claude'}.` : `${agent.name} works in ${agent.scope.kind === 'folder' ? agent.scope.dir : 'another folder'}.` };
       }
@@ -307,7 +315,7 @@ export function createDurableAgents(deps: DurableAgentDeps): DurableAgents {
       if ('error' in file) throw new Error(`${file.error} Your draft was kept.`);
       starting.add(id);
       try {
-        const instructions = withConversationDelegation(agentInstructions(agent, file.text));
+        const instructions = withChildGuidance(agentInstructions(agent, file.text));
         const handle = await sessions.launch(
           launchDefaults.request(agent.provider, cwd, {
             ...(agent.model ? { model: agent.model } : {}),
@@ -337,7 +345,7 @@ export function createDurableAgents(deps: DurableAgentDeps): DurableAgents {
     },
     memory: (id, op) => applyMemory(id, op),
     resumesOnType(provider, sessionId) {
-      return provider === 'codex' && agents.ownerOf(provider, sessionId) !== undefined;
+      return provider === 'codex' && (agents.ownerOf(provider, sessionId) !== undefined || deps.children?.isChild(provider, sessionId) === true);
     },
     onDidChange: (listener) => agents.onDidChange(listener),
   };
@@ -350,6 +358,9 @@ export function createDurableAgents(deps: DurableAgentDeps): DurableAgents {
       // session speaks as its new agent, an unassigned one as nobody's (#181).
       const held = agents.holderOf(ref.provider, ref.sessionId);
       if (held) return instructionsFor(held.agent);
+      // A child conversation (#198) is told it is one, every time, and never gets the delegation guidance.
+      const child = deps.children?.resumeInstructions(origin);
+      if (child !== undefined) return child;
       // Launched by an agent it no longer belongs to: drop that agent's role and memory.
       return agentIdOfOrigin(origin) !== undefined ? CONVERSATION_DELEGATION_INSTRUCTIONS : undefined;
     },

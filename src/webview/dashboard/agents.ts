@@ -151,7 +151,28 @@ ${toggle('history', `History ${a.historyCount}`, 'Earlier conversations with thi
 <button type="button" class="ag-btn" data-ag="pin" data-id="${id}" title="${a.pinned ? 'Stop listing it first' : 'List it first'}">${a.pinned ? 'Unpin' : 'Pin'}</button>
 <button type="button" class="ag-btn" data-ag="archive" data-id="${id}" title="${a.archived ? 'List it again' : 'Hide it from the list. Nothing is deleted; Show archived brings it back.'}">${a.archived ? 'Restore' : 'Archive'}</button>
 <button type="button" class="ag-btn danger" data-ag="delete" data-id="${id}" title="Forget this agent. Its sessions stay, unassigned.">Delete</button>
-</span>${panel === 'memory' ? memoryPanelHtml(a, ui) : panel === 'history' ? historyPanelHtml(a, ui, nowMs) : ''}</li>`;
+</span>${childrenHtml(a, nowMs)}${panel === 'memory' ? memoryPanelHtml(a, ui) : panel === 'history' ? historyPanelHtml(a, ui, nowMs) : ''}</li>`;
+}
+
+/**
+ * The child conversations the agent started and has not finished (#198),
+ * indented under it. Each opens like any conversation; the agent merges and
+ * finishes them itself (`aw child done`), so there are no buttons to press.
+ */
+function childrenHtml(a: DurableAgentView, nowMs: number): string {
+  if (a.children.length === 0) return '';
+  const rows = a.children
+    .map((c) => {
+      const status = c.needsYou
+        ? '<span class="ag-chip ag-st st-blocked">Needs you</span>'
+        : c.status
+          ? `<span class="ag-chip ag-st st-${esc(c.status)}">${esc(STATUS_TEXT[c.status] ?? capitalize(c.status))}</span>`
+          : '';
+      return `<li class="ag-child"><button type="button" class="ag-childopen" data-ag="histopen" data-key="${esc(c.key)}" data-id="${esc(a.id)}" title="${esc(`Open this child conversation. Worktree: ${c.worktree}`)}"><span class="ag-childname">${esc(c.title ?? c.childId)}</span>
+<span class="ag-meta"><span class="ag-chip">${esc(c.provider === 'codex' ? 'Codex' : 'Claude')}</span><span class="ag-chip" title="Its branch">${esc(c.branch)}</span>${status}${c.lastActivityAt ? `<span class="ag-age">${esc(formatAge(nowMs, c.lastActivityAt))} ago</span>` : ''}</span></button></li>`;
+    })
+    .join('');
+  return `<ul class="ag-children" aria-label="${esc(`${a.name}'s child conversations`)}">${rows}</ul>`;
 }
 
 function kindOptions(selected: AgentMemoryKind): string {

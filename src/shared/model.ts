@@ -190,6 +190,12 @@ export interface AgentSession {
    */
   durableAgent?: { id: string; name: string; current: boolean };
   /**
+   * The child conversation this is (#198; host decorates): the durable agent
+   * that started it, and `parentKey`, the row it nests under (the agent's
+   * current conversation). Never the agent's own conversation.
+   */
+  childOf?: { agentId: string; agentName: string; childId: string; parentKey?: string };
+  /**
    * Its process is stopped (SIGSTOP) and spending nothing until resumed (host
    * decorates from PauseService). A paused session keeps whatever `status` it
    * had when it was frozen — that status is simply no longer moving, which is

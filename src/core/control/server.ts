@@ -56,7 +56,18 @@ import {
   type ControlMissionActParams,
   type ControlMissionActResult,
   type StopOutcome,
+  type ControlChildSpawnParams,
+  type ControlChildSpawnResult,
+  type ControlChildListResult,
+  type ControlChildOriginParams,
+  type ControlChildSendParams,
+  type ControlChildReadParams,
+  type ControlChildReadResult,
+  type ControlChildStopParams,
+  type ControlChildDoneParams,
+  type ControlChildDoneResult,
   MAX_TASK_OBJECTIVE_CHARS,
+  MAX_CHILD_TEXT_CHARS,
 } from './protocol';
 
 /** A method failed in a way the client should be told about by code. */
@@ -112,6 +123,13 @@ export interface ControlBackend {
   mission(params: ControlMissionParams): ControlMissionResult;
   /** A durable agent acts on a mission it delegated, under its grant. Refusals are results, not errors. */
   missionAct(params: ControlMissionActParams): Promise<ControlMissionActResult>;
+  /** Child conversations (#198): each runs as the calling durable agent, on its own children only. */
+  childSpawn(params: ControlChildSpawnParams): Promise<ControlChildSpawnResult>;
+  childList(params: ControlChildOriginParams): ControlChildListResult;
+  childSend(params: ControlChildSendParams): Promise<ControlSendResult>;
+  childRead(params: ControlChildReadParams): ControlChildReadResult;
+  childStop(params: ControlChildStopParams): Promise<StopOutcome>;
+  childDone(params: ControlChildDoneParams): Promise<ControlChildDoneResult>;
 }
 
 export interface ControlServerOptions {
@@ -254,7 +272,9 @@ export class ControlServer implements Disposable {
             ? `memory ${p.op === 'forget' ? 'forget' : 'add'}`
             : method === 'mission.act'
               ? `${String(p.act)} ${String(p.ref)}`
-              : String(p.ref);
+              : method === 'child.spawn'
+                ? `${p.provider === 'codex' ? 'codex' : 'claude'} ${typeof p.name === 'string' ? p.name : ''}`
+                : String(p.ref);
       this.opts.log(`control socket: ${method} ${target.slice(0, 80)} by ${conn.client ?? '?'}`);
     }
     if (mutating && this.mutationsStopped) throw new ControlError(RPC_UNSUPPORTED, 'Agent Wrangler is quitting');
@@ -312,6 +332,20 @@ export class ControlServer implements Disposable {
         return backend.mission({ ref: ref(p), ...originParam(p, false) }) satisfies ControlMissionResult;
       case 'mission.act':
         return (await backend.missionAct(missionActParams(p))) satisfies ControlMissionActResult;
+      case 'child.spawn':
+        return (await backend.childSpawn(childSpawnParams(p))) satisfies ControlChildSpawnResult;
+      case 'child.list':
+        return backend.childList({ origin: childOrigin(p) }) satisfies ControlChildListResult;
+      case 'child.send':
+        return (await backend.childSend({ origin: childOrigin(p), ref: ref(p), text: childText(p.text, 'text') })) satisfies ControlSendResult;
+      case 'child.read': {
+        const last = typeof p.last === 'number' && Number.isFinite(p.last) ? Math.max(1, Math.min(MAX_SUBSCRIBE_BLOCKS, Math.floor(p.last))) : undefined;
+        return backend.childRead({ origin: childOrigin(p), ref: ref(p), ...(last !== undefined ? { last } : {}) }) satisfies ControlChildReadResult;
+      }
+      case 'child.stop':
+        return { outcome: await backend.childStop({ origin: childOrigin(p), ref: ref(p), force: p.force === true }) };
+      case 'child.done':
+        return (await backend.childDone({ origin: childOrigin(p), ref: ref(p), discard: p.discard === true })) satisfies ControlChildDoneResult;
       default:
         throw new ControlError(RPC_METHOD_NOT_FOUND, `no method ${req.method}`);
     }
@@ -473,6 +507,37 @@ export function missionActParams(p: Record<string, unknown>): ControlMissionActP
     act: p.act,
     ...(p.how !== undefined ? { how: p.how as ControlMissionActParams['how'] } : {}),
     ...(typeof p.task === 'string' ? { task: p.task } : {}),
+  };
+}
+
+/** A `child.*` method's origin: required, since the calling agent's conversation is who acts. */
+function childOrigin(p: Record<string, unknown>): { provider: 'claude' | 'codex'; sessionId: string } {
+  const o = p.origin as { provider?: unknown; sessionId?: unknown } | undefined;
+  if (o && (o.provider === 'claude' || o.provider === 'codex') && typeof o.sessionId === 'string' && /^[\w-]{4,128}$/.test(o.sessionId)) {
+    return { provider: o.provider, sessionId: o.sessionId };
+  }
+  throw new ControlError(RPC_INVALID_PARAMS, "run this inside a durable agent's own conversation: the conversation says which agent's children these are");
+}
+
+function childText(v: unknown, name: string): string {
+  if (typeof v !== 'string' || v.trim().length === 0) throw new ControlError(RPC_INVALID_PARAMS, `${name} is required`);
+  if (v.length > MAX_CHILD_TEXT_CHARS) throw new ControlError(RPC_INVALID_PARAMS, `${name} is longer than ${MAX_CHILD_TEXT_CHARS} characters`);
+  return v;
+}
+
+/** `child.spawn`'s params, checked for shape. Whether the caller may spawn is `authorize`'s. */
+export function childSpawnParams(p: Record<string, unknown>): ControlChildSpawnParams {
+  const origin = childOrigin(p);
+  const prompt = childText(p.prompt, 'prompt');
+  if (p.provider !== undefined && p.provider !== 'claude' && p.provider !== 'codex') throw new ControlError(RPC_INVALID_PARAMS, 'provider must be claude or codex');
+  if (p.folder !== undefined && (typeof p.folder !== 'string' || !path.isAbsolute(p.folder))) throw new ControlError(RPC_INVALID_PARAMS, 'folder must be an absolute path');
+  if (p.name !== undefined && (typeof p.name !== 'string' || p.name.trim().length === 0 || p.name.length > 80)) throw new ControlError(RPC_INVALID_PARAMS, 'name must be a short string');
+  return {
+    origin,
+    prompt,
+    ...(p.provider ? { provider: p.provider } : {}),
+    ...(typeof p.folder === 'string' ? { folder: p.folder } : {}),
+    ...(typeof p.name === 'string' ? { name: p.name.trim() } : {}),
   };
 }
 

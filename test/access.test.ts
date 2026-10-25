@@ -437,6 +437,7 @@ describe('control backend (aw): every method is authorised before it acts', () =
       return value;
     });
     const handle = { canSend: true, send: spy('handle.send', 'applied'), snapshot: () => ({ blocks: [], truncated: false, seq: 0 }) };
+    const kid = { key: KEY, provider: 'claude', sessionId: 'synthetic-1', origin: { kind: 'child', agentId: 'agent-a', childId: 'kid' } };
     const app = {
       store: { sessions: [session] },
       archive: { isArchived: () => false },
@@ -459,6 +460,19 @@ describe('control backend (aw): every method is authorised before it acts', () =
       },
       taskMissions: () => [{ id: '01SYNTHETICMISSION0001', title: 'Synthetic' }],
       taskMission: () => undefined,
+      children: {
+        callerOf: () => ({ agent: { id: 'agent-a', name: 'Synthetic PO' } }),
+        resolve: () => ({ key: KEY, entry: kid }),
+        view: () => ({ childId: 'kid', key: KEY }),
+        list: () => {
+          calls.push('children.list');
+          return [];
+        },
+        spawn: spy('children.spawn', { child: {}, repo: '/Users/test/proj' }),
+        send: spy('children.send', { outcome: 'applied' }),
+        stop: spy('children.stop', 'stopped'),
+        done: spy('children.done', { outcome: 'done', message: 'ok' }),
+      },
       missionGrants: {
         callerOf: () => ({ id: 'agent-a', name: 'Synthetic PO' }),
         isGranted: () => true,
@@ -516,6 +530,12 @@ describe('control backend (aw): every method is authorised before it acts', () =
     missions: (b) => b.missions({ all: true }),
     mission: (b) => b.mission({ ref: '0001' }),
     missionAct: (b) => b.missionAct({ origin: { provider: 'claude', sessionId: 'synthetic-1' }, ref: '0001', act: 'cancel' }),
+    childSpawn: (b) => b.childSpawn({ origin: { provider: 'claude', sessionId: 'synthetic-1' }, prompt: 'synthetic' }),
+    childList: (b) => b.childList({ origin: { provider: 'claude', sessionId: 'synthetic-1' } }),
+    childSend: (b) => b.childSend({ origin: { provider: 'claude', sessionId: 'synthetic-1' }, ref: 'kid', text: 'synthetic' }),
+    childRead: (b) => b.childRead({ origin: { provider: 'claude', sessionId: 'synthetic-1' }, ref: 'kid' }),
+    childStop: (b) => b.childStop({ origin: { provider: 'claude', sessionId: 'synthetic-1' }, ref: 'kid' }),
+    childDone: (b) => b.childDone({ origin: { provider: 'claude', sessionId: 'synthetic-1' }, ref: 'kid' }),
   };
 
   it.each(Object.entries(METHODS))('%s: refused → RPC_UNAUTHORIZED via cli, and nothing ran', async (name, call) => {
@@ -531,7 +551,7 @@ describe('control backend (aw): every method is authorised before it acts', () =
     expect(r.auth.asked).toHaveLength(1);
     // The grant's one mutation is asked as the agent's own principal, never as the owner.
     expect(r.auth.asked[0].ctx).toMatchObject(
-      name === 'missionAct' ? { principal: { id: 'agent:agent-a', kind: 'agent', agentId: 'agent-a' }, via: 'cli' } : { principal: LOCAL_OWNER, via: 'cli' },
+      name === 'missionAct' || name.startsWith('child') ? { principal: { id: 'agent:agent-a', kind: 'agent', agentId: 'agent-a' }, via: 'cli' } : { principal: LOCAL_OWNER, via: 'cli' },
     );
     expect(r.calls).toEqual([]);
   });

@@ -5,7 +5,7 @@
  * access policy for an agent principal. Fixtures are synthetic.
  */
 import { describe, expect, it } from 'vitest';
-import { AGENT_ACTIONS, ACTIONS, agentContext, authorize, createAccessGate, ownerContext, type AccessAuditRecord, type ActionName } from '../../src/core/access';
+import { AGENT_ACTIONS, ACTIONS, CHILD_ACTIONS, agentContext, authorize, createAccessGate, ownerContext, type AccessAuditRecord, type ActionName } from '../../src/core/access';
 import { createMissionGrants, MISSION_GRANTS_KEY, type GrantAgent, type GrantMissionRunner } from '../../src/app/missionGrants';
 import { runInRequest } from '../../src/core/requestScope';
 import { agentActivityOf, grantDecision, missionInspection, missionWait, type AgentMissionAct } from '../../src/shared/orchestration/missionGrant';
@@ -358,10 +358,11 @@ describe('the Missions page shows the grant', () => {
 describe('authorize(): an agent principal', () => {
   it('may read and ask for mission.agent, and nothing else — send, stop, settings, merges included', () => {
     const ctx = agentContext(PO.id);
+    // The child actions (#198) need a target that is the agent's own child; with none they are refused too.
     for (const action of Object.keys(ACTIONS) as ActionName[]) {
-      expect(authorize(ctx, action)).toBe(AGENT_ACTIONS.has(action) ? 'allow' : 'deny');
+      expect(authorize(ctx, action)).toBe(AGENT_ACTIONS.has(action) && !CHILD_ACTIONS.has(action) ? 'allow' : 'deny');
     }
-    expect([...AGENT_ACTIONS].sort()).toEqual(['mission.agent', 'view.read']);
+    expect([...AGENT_ACTIONS].sort()).toEqual(['child.done', 'child.read', 'child.send', 'child.spawn', 'child.stop', 'mission.agent', 'view.read']);
     expect(authorize(ctx, 'session.send')).toBe('deny');
     expect(authorize(ctx, 'mission.act')).toBe('deny');
     expect(authorize(ctx, 'mission.grant')).toBe('deny');

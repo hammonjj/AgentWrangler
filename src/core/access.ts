@@ -49,8 +49,9 @@ export interface Principal {
   /**
    * `owner`: the user. `agent`: a durable agent acting under its scoped
    * mission grant (`docs/plans/agent-mission-control.md`), the one place a
-   * second kind exists. An agent principal may read, and ask for
-   * `mission.agent`; nothing else.
+   * second kind exists. An agent principal may read, ask for
+   * `mission.agent`, and take the child actions on its own children (#198);
+   * nothing else.
    */
   readonly kind: 'owner' | 'agent';
   /** For `agent`: the durable agent's id. */
@@ -73,8 +74,27 @@ export function agentContext(agentId: string, via: Via = 'cli'): RequestContext 
 /**
  * What an agent principal may ask for at all. Which mission it may act on,
  * and when, is the grant decision's (`grantDecision`), checked after this.
+ * The child actions (#198) are scoped here, by `authorize`, to the agent's
+ * own children: see `childTargetAllowed`.
  */
-export const AGENT_ACTIONS: ReadonlySet<ActionName> = new Set<ActionName>(['view.read', 'mission.agent']);
+export const AGENT_ACTIONS: ReadonlySet<ActionName> = new Set<ActionName>(['view.read', 'mission.agent', 'child.spawn', 'child.send', 'child.read', 'child.stop', 'child.done']);
+
+/** The child-conversation actions (#198): an agent principal may take them only on its own children. */
+export const CHILD_ACTIONS: ReadonlySet<ActionName> = new Set<ActionName>(['child.spawn', 'child.send', 'child.read', 'child.stop', 'child.done']);
+
+/**
+ * Whether agent `agentId` may take child action `action` on `resource`.
+ * `child.spawn` and the listing read (`child.read` on an agent) name the
+ * agent itself; everything else names a session, which must be a child whose
+ * origin is that agent's. A session that is no child (no `agentId`), or
+ * another agent's child, is refused.
+ */
+export function childTargetAllowed(agentId: string, action: ActionName, resource: ResourceRef | undefined): boolean {
+  if (!resource) return false;
+  if (resource.kind === 'agent') return (action === 'child.spawn' || action === 'child.read') && resource.id === agentId;
+  if (resource.kind === 'session') return action !== 'child.spawn' && resource.agentId !== undefined && resource.agentId === agentId;
+  return false;
+}
 
 /**
  * The channel a request arrived through.
@@ -184,6 +204,17 @@ export const ACTIONS = {
    * agent's own, verified missions, and a local merge waits for the user.
    */
   'mission.agent': 'mutate',
+  /**
+   * Child conversations (#198): a durable agent starts, messages, reads, stops
+   * and finishes conversations it spawned itself (`aw child …`). Asked as the
+   * agent's own principal; `authorize` allows them only on the agent's own
+   * children (`childTargetAllowed`).
+   */
+  'child.spawn': 'mutate',
+  'child.send': 'mutate',
+  'child.read': 'read',
+  'child.stop': 'mutate',
+  'child.done': 'mutate',
   'routing.decide': 'mutate',
   /** Mint a single-use browser login link (`aw web open`, #127). */
   'web.link': 'mutate',
@@ -217,6 +248,11 @@ export interface ResourceRef {
   readonly id: string;
   /** A file's size in bytes (#139). A number says nothing about what is in it. */
   readonly size?: number;
+  /**
+   * A session: the durable agent whose child it is (#198), from its origin;
+   * absent when it is no child. What scopes an agent's child actions.
+   */
+  readonly agentId?: string;
 }
 
 export type AccessDecision = 'allow' | 'deny';
@@ -224,17 +260,22 @@ export type AccessDecision = 'allow' | 'deny';
 export type Authorizer = (ctx: RequestContext, action: ActionName, resource?: ResourceRef) => AccessDecision;
 
 /**
- * The single-user policy: the owner may do anything; a durable agent acting
- * under its grant may read and ask for `mission.agent`, nothing more; nobody
- * else anything.
+ * The single-user policy: the owner may do anything; a durable agent may read,
+ * ask for `mission.agent` under its grant, and take the child actions on its
+ * own children (#198), nothing more; nobody else anything.
  *
- * Reads the principal and the action and nothing else, which is what keeps a
- * device or connection id from ever standing in for an identity.
+ * Reads the principal, the action and, for an agent's child actions, the
+ * resource's kind, id and child owner. Never a device or connection id, which
+ * is what keeps one from ever standing in for an identity.
  */
-export const authorize: Authorizer = (ctx, action) => {
+export const authorize: Authorizer = (ctx, action, resource) => {
   const p = ctx.principal;
   if (p.kind === 'owner') return p.id === LOCAL_OWNER.id ? 'allow' : 'deny';
-  if (p.kind === 'agent') return typeof p.agentId === 'string' && p.agentId !== '' && p.id === `agent:${p.agentId}` && AGENT_ACTIONS.has(action) ? 'allow' : 'deny';
+  if (p.kind === 'agent') {
+    if (typeof p.agentId !== 'string' || p.agentId === '' || p.id !== `agent:${p.agentId}` || !AGENT_ACTIONS.has(action)) return 'deny';
+    if (CHILD_ACTIONS.has(action)) return childTargetAllowed(p.agentId, action, resource) ? 'allow' : 'deny';
+    return 'allow';
+  }
   return 'deny';
 };
 
@@ -293,7 +334,7 @@ export function createAccessGate(opts: { authorize?: Authorizer; audit?: AccessA
         via: ctx.via,
         action,
         ...(resource
-          ? { resource: { kind: resource.kind, id: resource.id, ...(resource.size !== undefined ? { size: resource.size } : {}) } }
+          ? { resource: { kind: resource.kind, id: resource.id, ...(resource.size !== undefined ? { size: resource.size } : {}), ...(resource.agentId !== undefined ? { agentId: resource.agentId } : {}) } }
           : {}),
         ...(ctx.deviceId !== undefined ? { deviceId: ctx.deviceId } : {}),
         ...(ctx.connectionId !== undefined ? { connectionId: ctx.connectionId } : {}),

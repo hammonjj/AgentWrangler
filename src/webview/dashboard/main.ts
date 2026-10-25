@@ -36,6 +36,7 @@ import { createJobsController } from './jobs';
 import { modelOptionsHtml } from './modelSelect';
 import type { JobView } from '../../shared/scheduledJobs';
 import { assignableAgents, type DurableAgentView } from '../../shared/durableAgents';
+import { childNeedsYou, nestChildren } from '../../shared/childConversations';
 import type { MemoryOp } from '../../shared/agentMemory';
 import type { AnalyticsSelection, AnalyticsView } from '../../shared/orchestration/analyticsView';
 import { orderProjects } from '../../shared/projectOrder';
@@ -86,6 +87,8 @@ type TableView = 'agents' | 'status' | 'project' | 'jobs' | 'missions' | 'analyt
 interface WebviewState {
   collapsed?: string[];
   expandedSubagents?: string[];
+  /** Parents whose child conversations are folded away (#198), as `kids:<agentId>`. */
+  collapsedChildren?: string[];
   tableView?: TableView;
   /** The Analytics view's filters (#49). */
   analytics?: AnalyticsSelection;
@@ -172,6 +175,12 @@ function saveColumns(next: ColumnPrefs): void {
 const saved = vscodeApi.getState();
 const collapsed = new Set<string>(saved?.collapsed ?? ['archived']);
 const expandedSubagents = new Set<string>(saved?.expandedSubagents ?? []);
+/**
+ * Parents whose children are folded (#198). By the agent's id, not the row's
+ * key: the parent row is the agent's current conversation, whose Claude id
+ * changes on resume and compaction. Children show unless folded.
+ */
+const collapsedChildren = new Set<string>(saved?.collapsedChildren ?? []);
 /** Nested rows opened to show progress, as `${sessionKey}|${subagentId}`; not saved, since the steps are not. */
 const openSubagentRows = new Set<string>();
 /** The latest steps the host sent for a nested row, by the same key. */
@@ -229,7 +238,7 @@ function sessionView(): 'status' | 'project' {
 }
 
 function saveState(): void {
-  vscodeApi.setState({ collapsed: [...collapsed], expandedSubagents: [...expandedSubagents], bannerDismissed, project, tableView, analytics: analyticsSel });
+  vscodeApi.setState({ collapsed: [...collapsed], expandedSubagents: [...expandedSubagents], collapsedChildren: [...collapsedChildren], bannerDismissed, project, tableView, analytics: analyticsSel });
 }
 
 /** Tell the browser's app shell, if there is one, which view is on screen (#133). */
@@ -366,7 +375,8 @@ function rowMenuHtml(): string {
     ...(s.durableAgent
       ? [`<button class="rmrow" role="menuitem" data-row-unassign title="${esc(`It stays a session, no longer ${s.durableAgent.name}'s.`)}">${esc(`Unassign from ${s.durableAgent.name}`)}</button>`]
       : []),
-    ...assignableAgents(agentViews ?? [], s, s.durableAgent?.id)
+    // A child conversation (#198) works for its agent and never becomes the agent itself.
+    ...(s.childOf ? [] : assignableAgents(agentViews ?? [], s, s.durableAgent?.id))
       .slice(0, 5)
       .map((a) => `<button class="rmrow" role="menuitem" data-row-assign="${esc(a.id)}" title="${esc(`Make this ${a.name}'s current conversation. Its current one moves to its history.`)}">${esc(`Assign to ${a.name}`)}</button>`),
   ];
@@ -427,6 +437,23 @@ function durableAgentChip(s: SessionDTO): string {
   return s.durableAgent.current
     ? `<span class="chip dagent" title="The current conversation of the agent ${name}. Open it from Agents or here: it is the same conversation.">${name}</span>`
     : `<span class="chip dagent earlier" title="An earlier conversation of the agent ${name}, in its history.">${name} · earlier</span>`;
+}
+
+/**
+ * A child conversation shown on its own row (#198): its parent conversation
+ * is not in the table, so it says whose child it is. Nested under its parent,
+ * the indent says that instead.
+ */
+function childChip(s: SessionDTO, nested: boolean): string {
+  if (!s.childOf || nested) return '';
+  const name = esc(s.childOf.agentName);
+  return `<span class="chip dagent child" title="A child conversation the agent ${name} started, in its own worktree.">child of ${name}</span>`;
+}
+
+/** Folded children, one of them waiting on you (#198): the parent row says so, since the child's row is out of sight. */
+function childNeedsYouChip(kids: readonly SessionDTO[] | undefined, folded: boolean): string {
+  if (!kids || !folded || !childNeedsYou(kids)) return '';
+  return '<span class="chip childask" title="A child conversation of this agent is waiting on you: unfold to see it.">child needs you</span>';
 }
 
 function pausedChip(s: SessionDTO): string {
@@ -913,7 +940,22 @@ function subagentSubrow(s: SessionDTO, span: number): string {
 </tr>`;
 }
 
-function rowHtml(s: SessionDTO, span: number): string {
+/**
+ * `kids`: this row's child conversations (#198), drawn indented beneath it
+ * unless folded. `child`: this row is one of them.
+ */
+function rowHtml(s: SessionDTO, span: number, nest: { kids?: SessionDTO[]; child?: boolean } = {}): string {
+  const kids = nest.kids && nest.kids.length > 0 ? nest.kids : undefined;
+  const foldKey = kids ? `kids:${kids[0].childOf!.agentId}` : '';
+  const folded = kids !== undefined && collapsedChildren.has(foldKey);
+  const childChevron = kids
+    ? `<button class="schevron kchevron" data-children-toggle="${esc(foldKey)}" aria-expanded="${folded ? 'false' : 'true'}" title="${esc(`${folded ? 'Show' : 'Hide'} ${kids.length} child conversation${kids.length === 1 ? '' : 's'}`)}">${folded ? '▸' : '▾'}</button>`
+    : '';
+  const kidsHtml = kids && !folded ? kids.map((k) => rowHtml(k, span, { child: true })).join('') : '';
+  return parentRowHtml(s, span, nest.child === true, childChevron, childNeedsYouChip(kids, folded)) + kidsHtml;
+}
+
+function parentRowHtml(s: SessionDTO, span: number, isChild: boolean, childChevron: string, kidsChip: string): string {
   // A nickname replaces the whole line, registry handle included: the point of
   // naming something is that the name is what you see. The title it came with
   // is not lost — it moves to the row's tooltip.
@@ -957,10 +999,10 @@ function rowHtml(s: SessionDTO, span: number): string {
   const unc = s.statusUncertain ? ' unc' : '';
   // A tab stop, opened with Enter like a click (#133): keyboard-only use has to
   // reach a conversation. `data-fk` keeps focus on it across repaints.
-  return `<tr class="row st-${s.status}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}${unc}" data-key="${esc(s.key)}" data-fk="row:${esc(s.key)}" tabindex="0" title="${esc(rowTitle(s))}">
+  return `<tr class="row st-${s.status}${isChild ? ' child' : ''}${s.archived ? ' archived' : ''}${s.paused ? ' paused' : ''}${est}${unc}" data-key="${esc(s.key)}" data-fk="row:${esc(s.key)}" tabindex="0" title="${esc(rowTitle(s))}">
   <td class="c-dot"><span class="dot" aria-hidden="true"></span></td>
   <td class="c-agent"><div class="agent">
-    <div class="title">${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${durableAgentChip(s)}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${unknownChip(s)}${rateLimitChip(s)}${statusChip(s)}${delegatedChips(s)}</span></div>
+    <div class="title">${childChevron}${subagentChevron}<span class="ttl">${titleLine}</span><span class="chips">${providerChip}${kidsChip}${durableAgentChip(s)}${childChip(s, isChild)}${taskChipsHtml(s)}${pausedChip(s)}${sharedChip(s)}${kindChip}${unknownChip(s)}${rateLimitChip(s)}${statusChip(s)}${delegatedChips(s)}</span></div>
     ${secondLine}
   </div></td>
   ${cols()
@@ -1702,13 +1744,18 @@ function render(): void {
   const span = cols().length + 3; // dot + agent + data columns + actions
   let html = `${bannerHtml()}${menuHtml()}${rowMenuHtml()}${tabsHtml()}<table>${headHtml()}`;
 
+  // The Project tab has no Archived group to put an archived row in — its
+  // groups are project names — so archived means gone from it, which is what
+  // its × relies on to take a finished agent off the table. The Status tab
+  // still shows them, collapsed, at the bottom, so nothing is unreachable.
+  const visible = tableView === 'project' ? sessions.filter((s) => !s.archived) : sessions;
+  // Child conversations (#198) are not rows of their own groups: they sit
+  // under their parent, whatever their own status. One whose parent is not
+  // shown stays an ordinary row.
+  const nest = nestChildren(visible);
+  for (const kids of nest.children.values()) kids.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   const groups = new Map<string, SessionDTO[]>();
-  for (const s of sessions) {
-    // The Project tab has no Archived group to put an archived row in — its
-    // groups are project names — so archived means gone from it, which is what
-    // its × relies on to take a finished agent off the table. The Status tab
-    // still shows them, collapsed, at the bottom, so nothing is unreachable.
-    if (tableView === 'project' && s.archived) continue;
+  for (const s of nest.top) {
     const group = tableView === 'status' ? sectionOf(s) : projectGroupOf(s);
     const list = groups.get(group);
     if (list) list.push(s);
@@ -1734,7 +1781,7 @@ function render(): void {
     const styleClass = tableView === 'status' ? ` st-${group}` : ' named';
     html += `<tbody class="grp${isCollapsed ? ' collapsed' : ''}" data-sec="${esc(collapseKey)}">
 <tr class="sec${styleClass}" tabindex="0" data-fk="sec:${esc(collapseKey)}" aria-expanded="${!isCollapsed}"><td colspan="${span}"><span class="twist">${isCollapsed ? '▸' : '▾'}</span>${esc(label)}<span class="count">${rows.length}</span></td></tr>`;
-    for (const s of rows) html += rowHtml(s, span);
+    for (const s of rows) html += rowHtml(s, span, { kids: nest.children.get(s.key) });
     html += '</tbody>';
   }
   html += '</table>';
@@ -2248,6 +2295,16 @@ app.addEventListener('click', (e) => {
       saveState();
       render();
     }
+    return;
+  }
+  if (schevron && schevron.dataset.childrenToggle) {
+    // Fold or unfold a parent's child conversations (#198); never opens the row.
+    const key = schevron.dataset.childrenToggle;
+    if (collapsedChildren.has(key)) collapsedChildren.delete(key);
+    else collapsedChildren.add(key);
+    saveState();
+    render();
+    e.stopPropagation();
     return;
   }
   if (schevron && schevron.dataset.subagentToggle) {

@@ -170,6 +170,7 @@ import type { TaskPaneSource } from '../ui/conversation/conversationHost';
 import { adoptActionFor } from '../ui/openTarget';
 import { resumeInTerminal } from '../ui/terminal';
 import { createDurableAgents } from './durableAgents';
+import { createChildConversations, type ChildConversations } from './childConversations';
 import { DurableAgentStore } from '../core/durableAgentStore';
 import { createJobDirectory, createScheduledJobs } from './scheduledJobs';
 import { runSessionKey } from '../shared/scheduledJobs';
@@ -334,6 +335,8 @@ export interface AgentWranglerApp {
    * guarded path a granted agent acts through.
    */
   missionGrants: MissionGrants;
+  /** Child conversations (#198): what `aw child …` runs, once `authorize` let the calling agent through. */
+  children: ChildConversations;
   /**
    * The app is quitting. Hosted Claude sessions are left running and adopted
    * on the next start, unless `includeHosted` (Quit and Stop All Agents),
@@ -2001,6 +2004,28 @@ export function createApp(host: HostServices): AgentWranglerApp {
     taskMenu: tasks ? (cwd, provider) => taskMenu(tasks, cwd, provider) : undefined,
   };
 
+  /** `aw stop` and a child's stop: the menu's Stop… without the dialog. A session mid-turn is left alone unless `force`. */
+  const stopSessionByKey = async (key: string, opts: { force?: boolean } = {}): Promise<StopOutcome | 'gone'> => {
+    const s = store.get(key);
+    if (!s) return 'gone';
+    if (!opts.force && (s.status === 'busy' || s.status === 'stuck' || s.status === 'blocked')) return 'working';
+    return closeSessionNow(s);
+  };
+
+  // Child conversations (#198): a durable agent's conversation spawns and drives its own.
+  const children = createChildConversations({
+    agents: durableAgentStore,
+    store,
+    sessions,
+    registry: sessionRegistry,
+    launchDefaults,
+    archive,
+    stopSession: stopSessionByKey,
+    // Typing to an idle child resumes it, as the pane does; `actions` is defined below and only called later.
+    resumeAndSend: (key, text) => actions.adoptAndSend(key, text, undefined, new AbortController().signal),
+    log,
+  });
+
   // Durable agents (#179): Agent Wrangler's own record, in its own state.
   const durableAgents = createDurableAgents({
     agents: durableAgentStore,
@@ -2011,6 +2036,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     dialogs,
     surface: () => surface,
     globalDir: globalConversationDir,
+    children,
     log,
   });
   host.subscribe({ dispose: () => durableAgents.dispose() });
@@ -2754,8 +2780,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
       try {
         const codex = store.get(key);
         if (codex?.provider === 'codex') {
-          // A durable agent's current Codex thread resumes when typed to (#181); any other takes *Take over here*.
-          if (!durableAgents.directory.ownerOf('codex', codex.sessionId)?.current) throw new Error('Take this Codex conversation over here first; your draft is preserved.');
+          // A durable agent's current Codex thread, or a child conversation (#198), resumes when typed to (#181); any other takes *Take over here*.
+          if (!durableAgents.directory.ownerOf('codex', codex.sessionId)?.current && !children.isChild('codex', codex.sessionId)) throw new Error('Take this Codex conversation over here first; your draft is preserved.');
           const runner = await adoptCodexSession(codex);
           if (!runner) throw new Error('Resume cancelled; your draft is preserved.');
           if (signal.aborted) throw new Error('Send cancelled; the conversation was resumed here but no message was sent.');
@@ -3397,12 +3423,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
       if (hostSupervisor.heldBy(sessionId)) return 'hosted';
       return 'external';
     },
-    async stopSession(key, opts = {}) {
-      const s = store.get(key);
-      if (!s) return 'gone';
-      if (!opts.force && (s.status === 'busy' || s.status === 'stuck' || s.status === 'blocked')) return 'working';
-      return closeSessionNow(s);
-    },
+    stopSession: stopSessionByKey,
+    children,
     proposeTask,
     delegate,
     proposeAgentMemory: (origin, input) => durableAgents.propose(origin, input),

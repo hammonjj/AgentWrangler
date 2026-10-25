@@ -3221,3 +3221,59 @@ body:has(#app.touch) .projmenu .pmbrowse {
   color: var(--aw-waiting);
   border-color: var(--aw-waiting);
 }
+
+/* ---- child conversations (#198) ----
+   A child row sits under its parent, indented by its agent cell, with a guide
+   line on the left. Sized off the pane like every row: the indent is small
+   enough to leave the title room at 300px, and narrow mode keeps it. */
+#app tr.row.child > td.c-agent .agent {
+  margin-left: 14px;
+  padding-left: 8px;
+  border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+}
+#app.narrow tr.row.child > td.c-agent .agent {
+  margin-left: 8px;
+  padding-left: 6px;
+}
+#app tr.row.child > td.c-dot {
+  opacity: 0.85;
+}
+#app .chip.childask {
+  border-color: var(--aw-waiting);
+  color: var(--aw-waiting);
+}
+#app .chip.dagent.child {
+  border-style: dotted;
+}
+#app :is(.agents, .jobs) .ag-children {
+  list-style: none;
+  margin: 0 8px 6px 18px;
+  padding: 0 0 0 8px;
+  border-left: 2px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#app.narrow :is(.agents, .jobs) .ag-children {
+  margin-left: 10px;
+}
+#app :is(.agents, .jobs) .ag-childopen {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  width: 100%;
+  padding: 3px 6px;
+  border: 0;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  font-size: 0.9em;
+}
+#app :is(.agents, .jobs) .ag-childopen:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.1));
+}
+#app :is(.agents, .jobs) .ag-childname {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

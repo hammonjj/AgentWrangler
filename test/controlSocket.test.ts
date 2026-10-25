@@ -42,6 +42,14 @@ const taskView: ControlTaskView = {
   createdAt: 0,
 };
 
+const childView = {
+  childId: 'fix-login-test',
+  key: 'claude:abcd1234',
+  provider: 'claude',
+  branch: 'child/fix-login-test',
+  worktree: '/Users/test/proj-child-fix-login-test',
+};
+
 function fakeBackend() {
   const calls: string[] = [];
   const origins: unknown[] = [];
@@ -121,6 +129,32 @@ function fakeBackend() {
       calls.push(`missionAct ${p.act} ${p.ref} ${p.how ?? '-'} ${p.task ?? '-'}`);
       origins.push(p.origin);
       return { outcome: 'requested', message: 'Asked the user.' };
+    },
+    childSpawn: async (p) => {
+      calls.push(`childSpawn ${p.provider ?? '-'} ${p.folder ?? '-'} ${p.name ?? '-'} ${p.prompt}`);
+      origins.push(p.origin);
+      return { child: { ...childView }, repo: '/Users/test/proj' };
+    },
+    childList: (p) => {
+      calls.push('childList');
+      origins.push(p.origin);
+      return { agent: 'PO', children: [childView] };
+    },
+    childSend: async (p) => {
+      calls.push(`childSend ${p.ref} ${p.text}`);
+      return { outcome: 'applied' };
+    },
+    childRead: (p) => {
+      calls.push(`childRead ${p.ref} ${p.last ?? '-'}`);
+      return { child: childView, blocks: [], truncated: false };
+    },
+    childStop: async (p) => {
+      calls.push(`childStop ${p.ref} ${p.force}`);
+      return 'stopped';
+    },
+    childDone: async (p) => {
+      calls.push(`childDone ${p.ref} ${p.discard}`);
+      return { outcome: 'refused', message: 'unmerged', child: childView };
     },
   };
   return { backend, calls, origins, emit: (e: SessionViewEvent) => emit?.(e), close: (r: 'ended') => close?.(r), disposed: () => disposed };
@@ -381,6 +415,41 @@ describe('control socket', () => {
     expect(logs.join('\n')).not.toContain('synthetic-session-1');
     server!.stopMutations();
     expect(await codeOf(client.request('mission.act', { origin, ref: 'ABCD', act: 'cancel' }))).toBe(RPC_UNSUPPORTED);
+    client.close();
+  });
+
+  it('child.* need an origin and well-formed params, and spawn is logged without its prompt (#198)', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    const origin = { provider: 'claude', sessionId: 'synthetic-session-1' };
+    // Without an origin there is no agent whose children these are.
+    expect(await codeOf(client.request('child.list', {}))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('child.spawn', { prompt: 'x' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('child.spawn', { origin, prompt: '  ' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('child.spawn', { origin, prompt: 'x', folder: 'relative/dir' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('child.spawn', { origin, prompt: 'x', provider: 'gpt' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('child.send', { origin, text: 'x' }))).toBe(RPC_INVALID_PARAMS);
+    await client.request('child.spawn', { origin, prompt: 'Secret synthetic prompt', provider: 'codex', name: 'login' });
+    await client.request('child.list', { origin });
+    await client.request('child.send', { origin, ref: 'fix-login-test', text: 'go on' });
+    await client.request('child.read', { origin, ref: 'fix-login-test', last: 9999 });
+    expect(await client.request('child.stop', { origin, ref: 'fix-login-test', force: true })).toEqual({ outcome: 'stopped' });
+    await client.request('child.done', { origin, ref: 'fix-login-test', discard: true });
+    expect(fake.calls).toEqual([
+      'childSpawn codex - login Secret synthetic prompt',
+      'childList',
+      'childSend fix-login-test go on',
+      'childRead fix-login-test 200',
+      'childStop fix-login-test true',
+      'childDone fix-login-test true',
+    ]);
+    expect(logs.join('\n')).not.toContain('Secret synthetic prompt');
+    expect(logs.join('\n')).not.toContain('synthetic-session-1');
+    server!.stopMutations();
+    expect(await codeOf(client.request('child.done', { origin, ref: 'fix-login-test' }))).toBe(RPC_UNSUPPORTED);
+    // Reads still work while quitting.
+    expect(await client.request('child.list', { origin })).toMatchObject({ agent: 'PO' });
     client.close();
   });
 

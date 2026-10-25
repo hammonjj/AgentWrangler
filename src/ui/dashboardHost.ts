@@ -324,8 +324,10 @@ export class DashboardHost {
       const hit = shared.get(s.key);
       const task = badges?.get(s.key);
       const durableAgent = this.agents?.ownerOf(s.provider, s.sessionId);
-      if (!hit && !task && !durableAgent) return s;
-      return { ...s, sharedCheckout: hit ?? s.sharedCheckout, task, ...(durableAgent ? { durableAgent } : {}) };
+      // A child conversation (#198) nests under its agent's current conversation, found by the agent's stable id.
+      const childOf = durableAgent ? undefined : this.agents?.childOf?.(s.provider, s.sessionId);
+      if (!hit && !task && !durableAgent && !childOf) return s;
+      return { ...s, sharedCheckout: hit ?? s.sharedCheckout, task, ...(durableAgent ? { durableAgent } : {}), ...(childOf ? { childOf } : {}) };
     });
     const projects = this.projects.value.map((p) => {
       if (p.dir === GLOBAL_PROJECT_DIR) return p;
