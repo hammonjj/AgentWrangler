@@ -1109,6 +1109,7 @@ function setPillReason(): void {
 
 function setMeta(session: SessionDTO): void {
   activeProvider = session.provider;
+  isDurableAgent = !!session.durableAgent;
   document.getElementById('findbar')!.hidden = activeProvider !== 'claude';
   document.getElementById('findtoggle')!.hidden = activeProvider !== 'claude';
   (notch as HTMLButtonElement).disabled = activeProvider !== 'claude';
@@ -1655,6 +1656,13 @@ let linked: LinkedWork[] = [];
 let convWait: WaitInfo | undefined;
 /** Whether the strip is folded to its one-line form. Per pane, not per conversation. */
 let delegatedOpen = true;
+/**
+ * Whether this conversation is a durable agent's. Agents manage their work as
+ * child conversations (#198), not missions, so their pane has no strip: a
+ * backlog of old missions crowded out the conversation on a phone. Missions
+ * stay reachable in #/missions.
+ */
+let isDurableAgent = false;
 
 /**
  * The strip under the header: one line per mission this conversation
@@ -1667,8 +1675,8 @@ let delegatedOpen = true;
  */
 function renderDelegated(): void {
   delegatedEl.replaceChildren();
-  delegatedEl.hidden = linked.length === 0;
-  if (linked.length === 0) return;
+  delegatedEl.hidden = linked.length === 0 || isDurableAgent;
+  if (delegatedEl.hidden) return;
   const needs = linked.filter((w) => w.needsYou).length;
   const head = document.createElement('button');
   head.className = 'dwhead';
