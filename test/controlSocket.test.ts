@@ -8,6 +8,7 @@ import { controlSocketPath, controlTokenPath, type RunDirs } from '../src/core/c
 import {
   RPC_AMBIGUOUS,
   RPC_INVALID_PARAMS,
+  RPC_NOT_FOUND,
   RPC_PROTOCOL_MISMATCH,
   RPC_UNAUTHORIZED,
   RPC_UNSUPPORTED,
@@ -106,6 +107,20 @@ function fakeBackend() {
     webRevoke: (id) => {
       calls.push(`webRevoke ${id}`);
       return { device: { id: 'device-synthetic-1', name: 'Safari on iOS', scope: 'lan', createdAt: 1, lastSeen: 1 } };
+    },
+    missions: (p) => {
+      calls.push(`missions all=${p.all} mine=${p.mine}`);
+      origins.push(p.origin);
+      return { missions: [] };
+    },
+    mission: (p) => {
+      calls.push(`mission ${p.ref}`);
+      throw new ControlError(RPC_NOT_FOUND, `no mission matches "${p.ref}"`);
+    },
+    missionAct: async (p) => {
+      calls.push(`missionAct ${p.act} ${p.ref} ${p.how ?? '-'} ${p.task ?? '-'}`);
+      origins.push(p.origin);
+      return { outcome: 'requested', message: 'Asked the user.' };
     },
   };
   return { backend, calls, origins, emit: (e: SessionViewEvent) => emit?.(e), close: (r: 'ended') => close?.(r), disposed: () => disposed };
@@ -342,6 +357,30 @@ describe('control socket', () => {
     expect(logs.join('\n')).not.toContain('Fix tray');
     server!.stopMutations();
     expect(await codeOf(client.request('rename', { ref: 'claude:abcd1234', name: 'x' }))).toBe(RPC_UNSUPPORTED);
+    client.close();
+  });
+
+  it('missions and mission are reads; mission.act needs an origin and a well-formed act, and is logged by act and ref only', async () => {
+    const fake = fakeBackend();
+    await serve(fake.backend);
+    const client = (await ControlClient.connect(dirs, { build: 'test' }))!;
+    const origin = { provider: 'claude', sessionId: 'synthetic-session-1' };
+    expect(await client.request('missions', { all: true, origin })).toEqual({ missions: [] });
+    expect(await codeOf(client.request('mission', { ref: 'ABCD' }))).toBe(RPC_NOT_FOUND);
+    // Without an origin there is no agent to act as.
+    expect(await codeOf(client.request('mission.act', { ref: 'ABCD', act: 'cancel' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('mission.act', { origin, ref: 'ABCD', act: 'merge' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('mission.act', { origin, ref: 'ABCD', act: 'finish' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('mission.act', { origin, ref: 'ABCD', act: 'finish', how: 'force-push' }))).toBe(RPC_INVALID_PARAMS);
+    expect(await codeOf(client.request('mission.act', { origin, ref: 'ABCD', act: 'cancel', how: 'keep' }))).toBe(RPC_INVALID_PARAMS);
+    const r = await client.request<{ outcome: string }>('mission.act', { origin, ref: 'ABCD', act: 'finish', how: 'merge-local' });
+    expect(r.outcome).toBe('requested');
+    expect(fake.calls).toEqual(['missions all=true mine=false', 'mission ABCD', 'missionAct finish ABCD merge-local -']);
+    expect(fake.origins).toEqual([origin, origin]);
+    expect(logs).toContain(`control socket: mission.act finish ABCD by aw pid ${process.pid}`);
+    expect(logs.join('\n')).not.toContain('synthetic-session-1');
+    server!.stopMutations();
+    expect(await codeOf(client.request('mission.act', { origin, ref: 'ABCD', act: 'cancel' }))).toBe(RPC_UNSUPPORTED);
     client.close();
   });
 

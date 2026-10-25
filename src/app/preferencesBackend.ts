@@ -61,6 +61,13 @@ export function createPreferencesBackend(opts: PreferencesBackendOptions): Prefe
       revoke: (id) => void devices.revoke(id),
       onDidChange: devices.onDidChange,
     },
+    // Agent mission control: one switch per durable agent, off by default.
+    // The host authorises `mission.grant` before `set` runs.
+    missionGrants: {
+      list: () => app.missionGrants.grantsView(),
+      set: (agentId, enabled) => app.missionGrants.setGrant(agentId, enabled),
+      onDidChange: (listener) => app.missionGrants.onDidChange(listener),
+    },
     // Orchestration → tier map (#29): the catalog, and each source's health
     // from the same usage reads the dashboard cards use.
     orchestration: {

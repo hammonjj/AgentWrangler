@@ -2168,6 +2168,46 @@ body:has(#app.narrow) #usage:not(.expanded) .unote {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: 1px;
 }
+/* Agent mission control: a merge a granted agent asked for, and the grant's audit lines. Wraps at 300 px. */
+#app .missions .magent.ask {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0;
+  padding: 4px 8px;
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  border-left: 3px solid var(--aw-waiting, var(--vscode-focusBorder));
+}
+#app .missions .magent.ask > span {
+  flex: 1 1 14em;
+  min-width: 0;
+}
+#app .missions .magent.log {
+  margin: 4px 0;
+  font-size: 0.88em;
+}
+#app .missions .magent.log summary {
+  cursor: pointer;
+  opacity: 0.8;
+}
+#app .missions .magent.log ul {
+  margin: 4px 0 0;
+  padding-left: 1.2em;
+}
+#app .missions .magent.log li {
+  overflow-wrap: anywhere;
+}
+#app .missions .magent.log .ma-who {
+  font-weight: 600;
+}
+#app .missions .magent.log .ma-when {
+  opacity: 0.6;
+}
+#app .missions .magent.log .ma-refused {
+  color: var(--vscode-errorForeground, #f48771);
+}
 /* The finish's own line under its buttons: under way, unknown, or why it failed. Its own row at any width. */
 #app .missions .mfinish {
   flex-basis: 100%;

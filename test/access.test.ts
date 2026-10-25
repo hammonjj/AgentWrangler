@@ -457,6 +457,21 @@ describe('control backend (aw): every method is authorised before it acts', () =
         calls.push('taskList');
         return [];
       },
+      taskMissions: () => [{ id: '01SYNTHETICMISSION0001', title: 'Synthetic' }],
+      taskMission: () => undefined,
+      missionGrants: {
+        callerOf: () => ({ id: 'agent-a', name: 'Synthetic PO' }),
+        isGranted: () => true,
+        inspect: () => {
+          calls.push('missionGrants.inspect');
+          return [];
+        },
+        inspectOne: () => {
+          calls.push('missionGrants.inspectOne');
+          return { missionId: '01SYNTHETICMISSION0001' };
+        },
+        act: spy('missionGrants.act', { outcome: 'done', message: 'ok' }),
+      },
     } as unknown as AgentWranglerApp;
     const auth = recordingAuthorizer(decision);
     const device = { id: 'device-synthetic-1', name: 'Safari on iOS', createdAt: 1, lastSeen: 1, principal: 'local-owner', scope: 'lan' as const };
@@ -498,9 +513,12 @@ describe('control backend (aw): every method is authorised before it acts', () =
     webPair: (b) => b.webPair(),
     webDevices: (b) => b.webDevices(),
     webRevoke: (b) => b.webRevoke('device-s'),
+    missions: (b) => b.missions({ all: true }),
+    mission: (b) => b.mission({ ref: '0001' }),
+    missionAct: (b) => b.missionAct({ origin: { provider: 'claude', sessionId: 'synthetic-1' }, ref: '0001', act: 'cancel' }),
   };
 
-  it.each(Object.entries(METHODS))('%s: refused → RPC_UNAUTHORIZED via cli, and nothing ran', async (_name, call) => {
+  it.each(Object.entries(METHODS))('%s: refused → RPC_UNAUTHORIZED via cli, and nothing ran', async (name, call) => {
     const r = rig('deny');
     let error: unknown;
     try {
@@ -511,8 +529,18 @@ describe('control backend (aw): every method is authorised before it acts', () =
     expect(error).toBeInstanceOf(ControlError);
     expect((error as ControlError).code).toBe(RPC_UNAUTHORIZED);
     expect(r.auth.asked).toHaveLength(1);
-    expect(r.auth.asked[0].ctx).toMatchObject({ principal: LOCAL_OWNER, via: 'cli' });
+    // The grant's one mutation is asked as the agent's own principal, never as the owner.
+    expect(r.auth.asked[0].ctx).toMatchObject(
+      name === 'missionAct' ? { principal: { id: 'agent:agent-a', kind: 'agent', agentId: 'agent-a' }, via: 'cli' } : { principal: LOCAL_OWNER, via: 'cli' },
+    );
     expect(r.calls).toEqual([]);
+  });
+
+  it('allowed, mission.act runs as the agent on the resolved mission (unique suffix), as mission.agent', async () => {
+    const r = rig('allow');
+    await r.backend.missionAct({ origin: { provider: 'claude', sessionId: 'synthetic-1' }, ref: '0001', act: 'finish', how: 'keep' });
+    expect(r.calls).toEqual(['missionGrants.act']);
+    expect(r.auth.asked.map((a) => [a.action, a.resource])).toEqual([['mission.agent', '01SYNTHETICMISSION0001']]);
   });
 
   it('allowed, pairing and revoking are audited by their own actions, revoke naming the resolved device (#137)', () => {

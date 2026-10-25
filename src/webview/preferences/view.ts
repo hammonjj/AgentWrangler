@@ -21,6 +21,7 @@ import { settingGroups, SETTINGS, type SettingSpec } from '../../shared/settings
 import { orchestrationTabTarget } from '../../shared/orchestration/orchestrationTabs';
 import { ORCHESTRATION_GROUP, consumeWritePending, onRoutingResult, onTierListResult, onWriteResult, openOrchestrationTab, renderOrchestration, setLocalEndpointResult, clearEndpointPending } from './orchestration';
 import { WEB_DEVICES_GROUP, createWebDevicesBlock, setWebDevices } from './webDevices';
+import { MISSION_GRANTS_GROUP, createMissionGrantsBlock, setMissionGrants } from './missionGrants';
 
 /** What carries this view's messages. */
 export interface PreferencesIO {
@@ -571,6 +572,8 @@ function render(): void {
     }
     // The browser devices (#137), after the settings that let them in.
     if (group === WEB_DEVICES_GROUP) section.appendChild(createWebDevicesBlock(post));
+    // Agent mission control: one switch per durable agent, off by default.
+    if (group === MISSION_GRANTS_GROUP) section.appendChild(createMissionGrantsBlock(post));
     main.appendChild(section);
   }
 
@@ -637,6 +640,10 @@ function onHostMessage(message: HostToPreferences | undefined): void {
   }
   if (message.type === 'webDevices') {
     setWebDevices(message.devices ?? []);
+    return;
+  }
+  if (message.type === 'missionGrants') {
+    setMissionGrants(message.agents ?? [], message.error);
     return;
   }
   if (message.type === 'localEndpointResult') {

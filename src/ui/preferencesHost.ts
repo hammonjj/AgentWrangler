@@ -26,6 +26,7 @@ import { localEndpointChange, type LocalEndpointChange } from '../shared/orchest
 import { tierListMessage, type TierListDraftEntry, type TierRename } from '../shared/orchestration/tierListSave';
 import {
   isSettingActionId,
+  missionGrantChange,
   modelPolicyChange,
   modelPriceChange,
   type ModelPriceChange,
@@ -40,6 +41,7 @@ import {
   type WebDeviceView,
 } from '../shared/preferences';
 import { SETTINGS } from '../shared/settings';
+import type { MissionGrantAgentView } from '../shared/orchestration/missionGrant';
 import type { PaneChannel } from './paneChannel';
 
 /**
@@ -64,6 +66,15 @@ export interface PreferencesBackend {
   webDevices?: {
     list(): WebDeviceView[];
     revoke(id: string): void;
+    onDidChange(listener: () => void): Disposable;
+  };
+  /**
+   * Agent mission control: every durable agent's grant, off by default. The
+   * host authorises `mission.grant` before calling `set`; this only does it.
+   */
+  missionGrants?: {
+    list(): MissionGrantAgentView[];
+    set(agentId: string, enabled: boolean): { ok: true } | { ok: false; error: string };
     onDidChange(listener: () => void): Disposable;
   };
   /** Orchestration → tier map. Absent: the section says there is nothing to show. */
@@ -125,6 +136,10 @@ export function preferencesRequest(m: PreferencesToHost): AccessRequest {
       const id = revokeWebDeviceId(m);
       return { action: 'web.device.revoke', resource: id ? { kind: 'device', id } : undefined };
     }
+    case 'missionGrant': {
+      const change = missionGrantChange(m);
+      return { action: 'mission.grant', resource: change ? { kind: 'agent', id: change.agentId } : undefined };
+    }
     default: {
       const unknown: never = m;
       void unknown;
@@ -157,6 +172,12 @@ export class PreferencesHost implements Disposable {
     if (backend.orchestration) this.subs.push(backend.orchestration.onDidChange(() => this.pushOrchestration()));
     if (backend.status) this.subs.push(backend.status.onDidChange(() => this.pushStatus()));
     if (backend.webDevices) this.subs.push(backend.webDevices.onDidChange(() => this.pushWebDevices()));
+    if (backend.missionGrants) this.subs.push(backend.missionGrants.onDidChange(() => this.pushMissionGrants()));
+  }
+
+  private pushMissionGrants(error?: string): void {
+    if (!this.active || !this.backend.missionGrants) return;
+    this.post({ type: 'missionGrants', agents: this.backend.missionGrants.list(), ...(error ? { error } : {}) });
   }
 
   dispose(): void {
@@ -183,6 +204,18 @@ export class PreferencesHost implements Disposable {
       this.pushStatus();
       this.pushWebDevices();
       this.pushOrchestration();
+      this.pushMissionGrants();
+      return;
+    }
+    if (message.type === 'missionGrant') {
+      const change = missionGrantChange(message);
+      if (!change || !backend.missionGrants) {
+        backend.log('preferences: refused a mission grant change');
+        return;
+      }
+      const r = backend.missionGrants.set(change.agentId, change.enabled);
+      if (!r.ok) backend.log(`preferences: refused a mission grant change: ${r.error}`);
+      this.pushMissionGrants(r.ok ? undefined : r.error);
       return;
     }
     if (message.type === 'close') {

@@ -49,6 +49,12 @@ import {
   type ControlWebDevicesResult,
   type ControlWebPairResult,
   type ControlWebRevokeResult,
+  type ControlMissionsParams,
+  type ControlMissionsResult,
+  type ControlMissionParams,
+  type ControlMissionResult,
+  type ControlMissionActParams,
+  type ControlMissionActResult,
   type StopOutcome,
   MAX_TASK_OBJECTIVE_CHARS,
 } from './protocol';
@@ -100,6 +106,12 @@ export interface ControlBackend {
   webDevices(): ControlWebDevice[];
   /** Revoke one by id or unique prefix (#137); its connections close at once. */
   webRevoke(id: string): ControlWebRevokeResult;
+  /** Missions, read-only (agent mission control). */
+  missions(params: ControlMissionsParams): ControlMissionsResult;
+  /** One mission, read-only. Throws `ControlError` when no mission matches. */
+  mission(params: ControlMissionParams): ControlMissionResult;
+  /** A durable agent acts on a mission it delegated, under its grant. Refusals are results, not errors. */
+  missionAct(params: ControlMissionActParams): Promise<ControlMissionActResult>;
 }
 
 export interface ControlServerOptions {
@@ -240,7 +252,9 @@ export class ControlServer implements Disposable {
           ? path.basename(String(p.folder ?? ''))
           : method === 'agent.propose'
             ? `memory ${p.op === 'forget' ? 'forget' : 'add'}`
-            : String(p.ref);
+            : method === 'mission.act'
+              ? `${String(p.act)} ${String(p.ref)}`
+              : String(p.ref);
       this.opts.log(`control socket: ${method} ${target.slice(0, 80)} by ${conn.client ?? '?'}`);
     }
     if (mutating && this.mutationsStopped) throw new ControlError(RPC_UNSUPPORTED, 'Agent Wrangler is quitting');
@@ -292,6 +306,12 @@ export class ControlServer implements Disposable {
         this.opts.log(`control socket: web.devices.revoke ${p.id.slice(0, 40)} by ${conn.client ?? '?'}`);
         return backend.webRevoke(p.id.trim()) satisfies ControlWebRevokeResult;
       }
+      case 'missions':
+        return backend.missions({ all: p.all === true, mine: p.mine === true, ...originParam(p, false) }) satisfies ControlMissionsResult;
+      case 'mission':
+        return backend.mission({ ref: ref(p), ...originParam(p, false) }) satisfies ControlMissionResult;
+      case 'mission.act':
+        return (await backend.missionAct(missionActParams(p))) satisfies ControlMissionActResult;
       default:
         throw new ControlError(RPC_METHOD_NOT_FOUND, `no method ${req.method}`);
     }
@@ -423,6 +443,36 @@ export function agentProposeParams(p: Record<string, unknown>): ControlAgentProp
     ...(kind !== undefined ? { kind } : {}),
     ...(text !== undefined ? { text } : {}),
     ...(itemId !== undefined ? { itemId } : {}),
+  };
+}
+
+/** A conversation reference as `aw` reads it from its agent's environment. `required`: refuse without one. */
+export function originParam(p: Record<string, unknown>, required: boolean): { origin?: { provider: 'claude' | 'codex'; sessionId: string } } {
+  const o = p.origin as { provider?: unknown; sessionId?: unknown } | undefined;
+  if (o && (o.provider === 'claude' || o.provider === 'codex') && typeof o.sessionId === 'string' && /^[\w-]{4,128}$/.test(o.sessionId)) {
+    return { origin: { provider: o.provider, sessionId: o.sessionId } };
+  }
+  if (required) throw new ControlError(RPC_INVALID_PARAMS, "run this inside the agent's own conversation: the grant is the agent's, and the conversation says which agent it is");
+  return {};
+}
+
+/** `mission.act`'s params, checked for shape. Whether it may run is the grant decision's. */
+export function missionActParams(p: Record<string, unknown>): ControlMissionActParams {
+  const { origin } = originParam(p, true);
+  if (p.act !== 'accept' && p.act !== 'finish' && p.act !== 'cancel') throw new ControlError(RPC_INVALID_PARAMS, 'act must be accept, finish or cancel');
+  const finishes = ['merge-local', 'pull-request', 'keep', 'discard'];
+  if (p.how !== undefined && (typeof p.how !== 'string' || !finishes.includes(p.how))) {
+    throw new ControlError(RPC_INVALID_PARAMS, 'how must be merge-local, pull-request, keep or discard');
+  }
+  if (p.act === 'finish' && p.how === undefined) throw new ControlError(RPC_INVALID_PARAMS, 'finish needs how: merge-local, pull-request, keep or discard');
+  if (p.act === 'cancel' && p.how !== undefined) throw new ControlError(RPC_INVALID_PARAMS, 'cancel takes no how');
+  if (p.task !== undefined && (typeof p.task !== 'string' || p.task.length === 0 || p.task.length > 64)) throw new ControlError(RPC_INVALID_PARAMS, 'task must be a task id or key');
+  return {
+    origin: origin!,
+    ref: ref(p),
+    act: p.act,
+    ...(p.how !== undefined ? { how: p.how as ControlMissionActParams['how'] } : {}),
+    ...(typeof p.task === 'string' ? { task: p.task } : {}),
   };
 }
 

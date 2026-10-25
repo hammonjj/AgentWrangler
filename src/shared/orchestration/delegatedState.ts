@@ -235,6 +235,17 @@ function outcomeOf(m: Mission): LinkedOutcome {
   };
 }
 
+/**
+ * C2 for any mission, finished or not: whether every required task's current
+ * attempt passed its checks. The same reading `missionPhase` puts in a
+ * finished mission's outcome, so the Missions page, the origin row and an
+ * agent's `aw missions` cannot disagree on what "verified" means.
+ */
+export function missionVerification(m: Mission): { verdict: LinkedOutcome['verification']; noChecks: boolean } {
+  const o = outcomeOf(m);
+  return { verdict: o.verification, noChecks: o.noChecks === true };
+}
+
 function integratedText(o: LinkedOutcome): { text: string; short: string } {
   const where = o.finish === 'pull-request' ? 'PR opened' : o.finish === 'keep' ? 'kept on its branch' : 'merged';
   const checked = o.verification === 'verified' ? 'verified' : o.verification === 'failed' ? 'checks failed' : o.noChecks ? 'unverified (no checks configured)' : 'unverified';

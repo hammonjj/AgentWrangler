@@ -865,6 +865,44 @@ agents, worktrees and checks stay on this Mac. Only the HTTP calls to the endpoi
 - **Then:** use *Set key…* for the key, *Probe*, *Qualify* and *Qualify tasks* per harness,
   and give the model a tier.
 
+## Agent mission control
+
+A durable agent that delegates a lot (a product owner, say) can see where its missions are, and,
+if you let it, finish the ones it delegated itself. The design and its threat model are in
+`docs/plans/agent-mission-control.md`.
+
+- **Reading is open to every agent.** `aw missions` and `aw mission <id>` show each mission's
+  state, its tasks' states, every verification check and its outcome, the branch, the diff stat
+  against the base, and what it is waiting on. Nothing changes.
+- **Acting needs a grant, off for every agent until you turn it on**: Preferences → Agents and
+  status → *Agent mission control*, one switch per durable agent. With it on, that agent may run
+  `aw mission accept`, `aw mission finish` and `aw mission cancel` from its own conversation, and
+  only on a mission that:
+  - it delegated itself (the mission's origin is one of that agent's conversations), and
+  - passed its verification checks. An `unverified` mission, including one in a repository with
+    no checks configured, is never acted on by an agent.
+- **A local merge always waits for you.** `aw mission finish <id> merge-local` (or `accept
+  --finish merge-local`) does not merge. The mission shows *Merge requested* with **Confirm
+  merge** and **Decline** in Missions, and a notification says so. `pull-request`, `keep` and
+  `discard` run at once, as the Missions page's buttons do.
+- **Accept can finish in the same step.** `aw mission accept <id> --finish pull-request` accepts
+  the task and opens the pull request, so an accepted task no longer sits in review unmerged.
+  The `aw tasks` label for that state now says *accepted, not merged yet*.
+- **Everything is audited.** Every attempt, refusal, merge request and your answer to it is
+  listed under the mission (*Agent activity*), and in the access audit log with the agent as
+  the principal.
+- `aw send`, `aw stop`, `aw web url`, `aw web pair` and `aw web devices revoke` still refuse in
+  an agent's shell. The grant adds one action an agent may ask for (`mission.agent`) and nothing
+  else.
+
+**Why tasks show `checks ? unverified`.** A task's checks come only from its repository's policy
+(below). A repository without a policy file has no verification commands, so nothing can vouch
+for the result, and a reviewer's opinion does not count as a check. The checks are frozen on a
+task when it is created, so a policy added later applies to new tasks. A mission cannot add its
+own commands: the policy is yours, and a model can only name commands it already lists. To clear
+`unverified` for a project, give it a policy with a command, for example a Unity project's test
+run in batch mode (see `docs/plans/agent-mission-control.md` §6 for one).
+
 ## Repository policies (orchestration)
 
 Orchestration (off by default, `orchestration.enabled`) reads what it must not guess about a
@@ -958,6 +996,9 @@ take turns, with no cooperation needed from the agent: the tool call is the requ
 | `aw delegate <objective…> [--criteria "a; b"] [--folder <dir>] [--claude\|--codex]` | Hand work over. A read-only planner decides whether it is one task or several, and the app waits for you to approve the proposal or the plan (see below). `-` reads the objective from stdin. |
 | `aw task <objective…>` (same options) | Shortcut: always one task, no planner. The app assesses and routes it, then waits for you to start it. |
 | `aw tasks` | Tasks that are not finished, with their state and branch. |
+| `aw missions [--all] [--mine]` | Missions, read-only: state, each task's state and checks, branch, diff stat against the base, and what each waits on (needs you, route proposed, plan proposal, attempt failed, ready for review, merge confirmation). `--mine`: only the ones this agent delegated. |
+| `aw mission <id>` | One mission in detail: every task, every check and its outcome. `<id>` is the full id or four or more characters of its start or end. |
+| `aw mission accept <id> [--task <key>] [--finish <how>]` / `finish <id> <how>` / `cancel <id>` | From inside a durable agent's conversation with its **mission grant** on: act on a mission that agent delegated, once its checks passed. `merge-local` only asks you (see [Agent mission control](#agent-mission-control)). |
 | `aw remember [--kind decision\|preference\|question\|work] <text…>` | From inside a durable agent's conversation: propose a memory note. Nothing is stored until you approve it in the app. |
 | `aw forget <id>` | From inside a durable agent's conversation: propose removing a memory note by its id. |
 | `aw web open` | Open the workbench in your default browser, signed in (see [Open in a browser](#open-in-a-browser)). |
@@ -1026,6 +1067,7 @@ It respects `telemetry.enabled`. An older optional Claude Code skill is in
 - **It is a client of the core daemon, never a supervisor.** It talks only to the daemon's control socket (`run/core.sock` in the app's support folder, 0600, with a token that is new every time the daemon starts). It never connects to session hosts, and every command goes the same way as the equivalent click. Open tabs show a short notice when `aw` sends or stops something.
 - **With the daemon stopped**, `aw status` and `aw sessions` still work, read-only: they list the session hosts that are still running (they reattach when the daemon starts) and what the daemon last recorded. Everything else says Agent Wrangler is not running.
 - **`delegate` and `task` are allowed there**, because they only ever create a proposal or a plan. Nothing runs until you accept it in the app, so an agent calling them can't start work you haven't seen.
+- **`missions` and `mission` are allowed there** because they only read. `mission accept|finish|cancel` is allowed there too, and only there: it acts as the durable agent whose conversation the shell is, under that agent's own grant, never as you (see [Agent mission control](#agent-mission-control)).
 - **`send` and `stop` refuse in a shell an agent is running** (Claude Code, Codex, or a session the app hosts), so an agent that has been prompt-injected is not one obvious command away from driving every other session. This is a speed bump, not a wall. Any process running as you can read the token, or clear its environment, and Agent Wrangler cannot stop a deliberately malicious one (see the security model in `docs/plans/session-lifecycle-architecture.md` §12). `aw web url` refuses there too, for the same reason: the link it prints is the whole workbench. So do `aw web pair` (its code lets a device in as you) and `aw web devices revoke`.
 
 ## Open in a browser

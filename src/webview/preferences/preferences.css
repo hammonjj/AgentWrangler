@@ -785,6 +785,19 @@
   flex: none;
 }
 
+/* Agents and status → Agent mission control: one switch per durable agent. */
+#prefsApp .pf-grant {
+  cursor: pointer;
+}
+
+#prefsApp .pf-grant .pf-check {
+  flex: none;
+}
+
+#prefsApp .pf-grant-error {
+  color: var(--vscode-errorForeground, #f48771);
+}
+
 /*
  * As a route of the browser shell (#135). The shell's page (`#awPage`) gives
  * the settings the whole window, so the sidebar and the settings scroll

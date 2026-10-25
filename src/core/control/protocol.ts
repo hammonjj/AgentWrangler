@@ -31,6 +31,8 @@
  */
 import type { SessionViewEvent } from '../session/sessionHandle';
 import type { ConvBlock } from '../../shared/conversation';
+import type { MissionInspection } from '../../shared/orchestration/missionGrant';
+import type { MissionFinish } from '../../shared/orchestration/types';
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 /** Beside the host sockets, or in the fallback run directory when that path is too long. */
@@ -51,10 +53,10 @@ export const RPC_AMBIGUOUS = -32005;
 /** The session exists, but not in a way that allows this (e.g. `send` to one AW does not run). */
 export const RPC_UNSUPPORTED = -32006;
 
-export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'agent.propose', 'rename', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke'] as const;
+export const CONTROL_METHODS = ['hello', 'status', 'sessions', 'session', 'subscribe', 'send', 'stop', 'projects', 'task.propose', 'delegate', 'tasks', 'agent.propose', 'rename', 'web.link', 'web.pair', 'web.devices', 'web.devices.revoke', 'missions', 'mission', 'mission.act'] as const;
 export type ControlMethod = (typeof CONTROL_METHODS)[number];
 /** Methods that change something. Logged by the core (method and session, never content). */
-export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate', 'agent.propose', 'rename'];
+export const MUTATING_CONTROL_METHODS: readonly ControlMethod[] = ['send', 'stop', 'task.propose', 'delegate', 'agent.propose', 'rename', 'mission.act'];
 /** The longest objective `task.propose` and `delegate` accept. An outcome, not a document. */
 export const MAX_TASK_OBJECTIVE_CHARS = 20_000;
 
@@ -388,6 +390,90 @@ export interface ControlWebDevicesResult {
 /** `web.devices.revoke {id}` (#137): `id` or a unique prefix of 4+ characters. Its connections close at once. */
 export interface ControlWebRevokeResult {
   device: ControlWebDevice;
+}
+
+// ---- agent mission control (docs/plans/agent-mission-control.md) ----
+
+/**
+ * One mission as `missions` and `mission` return it: state, each task's state
+ * and verification checks, branch, diff stat against the base, and what it is
+ * waiting on. Enumerations in it (`state`, `waitingOn.kind`, `phase`, a check's
+ * `outcome`) may grow: a reader shows a value it does not know as itself.
+ */
+export type ControlMissionView = MissionInspection;
+
+/** `missions`: read-only, from any shell. `origin` (self-reported) only decides which missions are `yours`. */
+export interface ControlMissionsParams {
+  /** Finished, failed and cancelled missions too. */
+  all?: boolean;
+  /** Only the missions this conversation's durable agent delegated. */
+  mine?: boolean;
+  origin?: { provider: 'claude' | 'codex'; sessionId: string };
+}
+
+/** Who is asking, when the conversation is a durable agent's: its name and whether its grant is on. */
+export interface ControlMissionCaller {
+  agent: string;
+  granted: boolean;
+}
+
+export interface ControlMissionsResult {
+  missions: ControlMissionView[];
+  caller?: ControlMissionCaller;
+}
+
+/** `mission {ref}`: one mission by id, unique prefix or unique suffix (4+ characters). */
+export interface ControlMissionParams {
+  ref: string;
+  origin?: { provider: 'claude' | 'codex'; sessionId: string };
+}
+
+export interface ControlMissionResult {
+  mission: ControlMissionView;
+  caller?: ControlMissionCaller;
+}
+
+/**
+ * `mission.act`: a durable agent acts on a mission it delegated, under its
+ * grant. Only from inside the agent's conversation (`origin` is required).
+ * Refused unless the agent's grant is on (Preferences, off by default), the
+ * mission is the agent's own, and its checks passed. `merge-local` is never
+ * done here: it becomes a request the user confirms in the app.
+ */
+export interface ControlMissionActParams {
+  origin: { provider: 'claude' | 'codex'; sessionId: string };
+  ref: string;
+  act: 'accept' | 'finish' | 'cancel';
+  /** For `finish` (required) and `accept` (optional: finish in the same step). */
+  how?: MissionFinish;
+  /** For `accept`: the task, by id or key (`t1`), when more than one is ready. */
+  task?: string;
+}
+
+export interface ControlMissionActResult {
+  /** `done`, `requested` (a merge waits for the user), `refused`, `failed`. May grow. */
+  outcome: string;
+  /** For `refused`: `not-an-agent`, `grant-off`, `wrong-origin`, `unverified`, `not-available`. May grow. */
+  code?: string;
+  message: string;
+  mission?: ControlMissionView;
+}
+
+/**
+ * A mission by what was typed: its id (any case), or a unique prefix or
+ * suffix of four characters or more. Mission ids are ULIDs, so missions made
+ * the same day share a prefix and a suffix is usually what tells them apart.
+ */
+export function resolveMissionRef<T extends { id: string }>(missions: readonly T[], ref: string): { match: T } | { error: 'notFound' } | { error: 'ambiguous'; matches: T[] } {
+  const wanted = ref.trim().toLowerCase();
+  if (wanted.length === 0) return { error: 'notFound' };
+  const exact = missions.find((m) => m.id.toLowerCase() === wanted);
+  if (exact) return { match: exact };
+  if (wanted.length < 4) return { error: 'notFound' };
+  const hits = missions.filter((m) => m.id.toLowerCase().startsWith(wanted) || m.id.toLowerCase().endsWith(wanted));
+  if (hits.length === 1) return { match: hits[0] };
+  if (hits.length > 1) return { error: 'ambiguous', matches: hits };
+  return { error: 'notFound' };
 }
 
 /**

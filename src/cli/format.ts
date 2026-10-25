@@ -4,6 +4,10 @@
  */
 import type {
   ControlDelegateResult,
+  ControlMissionActResult,
+  ControlMissionCaller,
+  ControlMissionResult,
+  ControlMissionsResult,
   ControlProject,
   ControlSession,
   ControlSessionResult,
@@ -206,6 +210,71 @@ export function formatTasks(tasks: readonly ControlTaskView[], now: number, widt
   if (tasks.length === 0) return 'No tasks.';
   const rows = tasks.map((t) => [t.title, t.state, ago(t.createdAt, now), t.branch ?? '', t.missionId]);
   return table(['TASK', 'STATE', 'CREATED', 'BRANCH', 'ID'], rows, width);
+}
+
+// ---- agent mission control ----
+
+const VERIFY_LABEL: Record<string, string> = { verified: '✓ verified', unverified: '? unverified', failed: '✗ failed', passed: '✓ verified', inconclusive: '~ inconclusive', error: '! check errored' };
+
+function verifyText(verdict: string, noChecks = false): string {
+  const label = VERIFY_LABEL[verdict] ?? verdict;
+  return verdict === 'unverified' && noChecks ? `${label} (no checks configured)` : label;
+}
+
+function diffText(d: { commits: number; filesChanged: number; insertions: number; deletions: number } | undefined): string {
+  return d ? `${d.filesChanged} file${d.filesChanged === 1 ? '' : 's'} +${d.insertions} −${d.deletions} (${d.commits} commit${d.commits === 1 ? '' : 's'})` : '—';
+}
+
+function callerLine(caller: ControlMissionCaller | undefined): string | undefined {
+  if (!caller) return undefined;
+  return caller.granted
+    ? `You are ${caller.agent}; mission control is on: you may accept, finish or cancel your own verified missions (a local merge asks the user).`
+    : `You are ${caller.agent}; mission control is off for you, so you can only read. The user turns it on in Preferences.`;
+}
+
+export function formatMissions(r: ControlMissionsResult, now: number, width = 100): string {
+  const head = callerLine(r.caller);
+  if (r.missions.length === 0) return [head, 'No missions.'].filter(Boolean).join('\n');
+  const rows = r.missions.map((m) => [
+    m.missionId,
+    m.origin === 'yours' ? 'yours' : m.origin === 'other' ? 'other' : '—',
+    verifyText(m.verification.verdict),
+    ago(m.updatedAt, now),
+    `${m.title} — ${m.waitingOn.text}`,
+  ]);
+  return [head, table(['ID', 'ORIGIN', 'CHECKS', 'UPDATED', 'MISSION — WAITING ON'], rows, width)].filter(Boolean).join('\n');
+}
+
+export function formatMission(r: ControlMissionResult, now: number): string {
+  const m = r.mission;
+  const lines = [
+    `${safe(m.title)}  (${m.missionId})`,
+    `  state:      ${m.state} — ${safe(m.phase)}`,
+    `  waiting on: ${safe(m.waitingOn.text)} [${m.waitingOn.kind}]`,
+    `  repo:       ${safe(m.repo)}  ${safe(m.baseRef)}${m.branch ? ` → ${safe(m.branch)}` : ''}`,
+    `  diff:       ${diffText(m.diff)} vs ${safe(m.baseRef)}`,
+    `  checks:     ${verifyText(m.verification.verdict, m.verification.noChecks)}`,
+    `  origin:     ${m.origin === 'yours' ? 'yours (this agent delegated it)' : m.origin === 'other' ? 'another conversation' : 'not a durable agent’s'}`,
+    `  updated:    ${ago(m.updatedAt, now)}`,
+  ];
+  if (m.finish) lines.push(`  finish:     ${m.finish}${m.finishResult?.pullRequestUrl ? ` ${m.finishResult.pullRequestUrl}` : m.finishResult?.mergeCommit ? ` at ${m.finishResult.mergeCommit.slice(0, 8)}` : ''}`);
+  lines.push('  tasks:');
+  for (const t of m.tasks) {
+    lines.push(`    ${t.key}  ${t.state}${t.attempt ? ` (attempt ${t.attempt.n} ${t.attempt.state})` : ''}  ${verifyText(t.verification.verdict)}  ${diffText(t.diff)}  ${safe(t.title)}`);
+    if (t.branch) lines.push(`        branch: ${safe(t.branch)}`);
+    if (t.verification.stages.length === 0) lines.push('        checks: none configured for this repository');
+    for (const s of t.verification.stages) {
+      lines.push(`        ${s.required ? 'required' : 'advisory'} ${safe(s.strategy)}: ${s.outcome ?? 'not run'}${s.summary ? ` — ${clip(s.summary, 80)}` : ''}`);
+    }
+  }
+  const head = callerLine(r.caller);
+  return [head, ...lines].filter(Boolean).join('\n');
+}
+
+export function formatMissionAct(r: ControlMissionActResult): string {
+  const lead = r.outcome === 'done' ? 'Done.' : r.outcome === 'requested' ? 'Requested.' : r.outcome === 'refused' ? `Refused (${r.code ?? 'refused'}).` : r.outcome === 'failed' ? 'Failed.' : `${r.outcome}.`;
+  const tail = r.mission ? `\nNow: ${r.mission.state} — ${safe(r.mission.waitingOn.text)}` : '';
+  return `${lead} ${safe(r.message)}${tail}`;
 }
 
 // ---- the read-only view, when the app is not running ----

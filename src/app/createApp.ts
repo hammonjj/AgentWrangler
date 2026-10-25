@@ -86,6 +86,7 @@ import { currentProposals, type RoutingProposalDecision } from '../shared/orches
 import type { LearnedRule } from '../shared/orchestration/routingProposals';
 import { ASSESSOR_VERSION } from '../orchestration/policy/assessment';
 import type { Mission } from '../shared/orchestration/types';
+import { createMissionGrants, type MissionGrants } from './missionGrants';
 import { attentionCount, linkedNotices, originKeyOf } from '../shared/orchestration/delegatedState';
 import type { DelegationAction, DelegationView, ProposalDecision, TaskProposalView, TaskView, TaskViewAction } from '../shared/orchestration/taskView';
 import { harnessLabel } from '../shared/harness';
@@ -324,6 +325,15 @@ export interface AgentWranglerApp {
   proposeAgentMemory(origin: { provider: string; sessionId: string }, input: unknown): { agentName: string; proposalId?: string };
   /** Tasks that are not finished, newest first. Empty while orchestration is off. */
   taskList(): TaskSummary[];
+  /** Every mission record, finished ones too. Empty while orchestration is off. */
+  taskMissions(): readonly Mission[];
+  taskMission(id: string): Mission | undefined;
+  /**
+   * Scoped agent mission control (`docs/plans/agent-mission-control.md`): the
+   * per-agent grants, the read-only mission views agents get, and the one
+   * guarded path a granted agent acts through.
+   */
+  missionGrants: MissionGrants;
   /**
    * The app is quitting. Hosted Claude sessions are left running and adopted
    * on the next start, unless `includeHosted` (Quit and Stop All Agents),
@@ -1780,6 +1790,32 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
   const showMissionRequests = new Emitter<string | undefined>();
 
+  // Durable agents' own record (#179), made here so mission control can ask whose a conversation is.
+  const durableAgentStore = new DurableAgentStore(host.globalState);
+
+  /**
+   * Scoped agent mission control (`docs/plans/agent-mission-control.md`):
+   * grants per durable agent, off by default; a granted agent may accept,
+   * finish or cancel only its own verified missions, and a local merge waits
+   * for the user's confirmation in Missions. Audited, and shown there.
+   */
+  const missionGrants = createMissionGrants({
+    storage: host.globalState,
+    missions: () => tasks,
+    agents: {
+      list: () => durableAgentStore.list,
+      get: (id) => durableAgentStore.get(id),
+      holderOf: (provider, sessionId) => durableAgentStore.holderOf(provider, sessionId)?.agent,
+      onDidChange: (listener) => durableAgentStore.onDidChange(() => listener()),
+    },
+    flash: (message, timeoutMs) => dialogs.flash(message, timeoutMs),
+    notify: (title, body, missionId) =>
+      outsideRequest(() =>
+        host.notify?.({ title, body, tag: `mission-grant:${missionId}`, onClick: () => showMissionRequests.fire(missionId) }),
+      ),
+    log,
+  });
+
   /**
    * The Missions view (#43): every mission as the table's third view draws it,
    * and the clicks it sends back — plan edits, Approve and start, a task's
@@ -1791,14 +1827,17 @@ export function createApp(host: HostServices): AgentWranglerApp {
           missions: tasks
             .list()
             // Open proposals (#81) are listed too: the tab's badge counts them, so the list must show them.
-            .map((m) =>
-              missionViewOf(m, {
+            .map((m) => {
+              const view = missionViewOf(m, {
                 actions: (taskId) => tasks.actions(m.id, taskId),
                 finishDefault: m.state === 'review' ? orchestration.repoPolicies?.forFolder(m.repoRoot)?.policy.finish.default : undefined,
                 canPlan: tasks.canPlan,
                 finishing: tasks.finishingOf(m.id),
-              }),
-            ),
+              });
+              // What granted agents asked and did here, and a merge waiting for the user's yes (agent mission control).
+              const agentActivity = missionGrants.activityFor(m.id);
+              return agentActivity ? { ...view, agentActivity } : view;
+            }),
           // A3: each ask once, over the same missions the list draws (#101).
           attention: attentionCount([], tasks.list()),
           tiers: models.catalog.tiers.map((t) => t.name),
@@ -1890,6 +1929,21 @@ export function createApp(host: HostServices): AgentWranglerApp {
             case 'write-plan':
               await tasks.writePlan(missionId);
               return;
+            case 'agent-request': {
+              // Through the one confirmation path (`approvals.ts`), whichever client pressed it.
+              if (typeof op.requestId !== 'string') return;
+              let outcome;
+              try {
+                outcome = await missionGrants.confirm(op.requestId, op.approve === true);
+              } catch (e) {
+                // As the Merge button: a refused finish is recorded on the mission and shown beside its buttons, not twice.
+                if (e instanceof FinishRefused) return;
+                throw e;
+              }
+              if (outcome === 'gone') throw new TaskError('That merge request no longer exists.');
+              if (outcome === 'applied' && op.approve !== true) dialogs.flash('Merge declined. The branch stays as it is; finish it yourself when you are ready.');
+              return;
+            }
             case 'open': {
               // The task's current attempt's conversation, in the right pane; never another window.
               const m = tasks.get(missionId);
@@ -1931,7 +1985,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
           const m = await tasks.createMission({ folder: cwd, objective });
           return m.id;
         },
-        onDidChange: (listener) => tasks.onDidChange(listener),
+        onDidChange: (listener) => {
+          const subs = [tasks.onDidChange(listener), missionGrants.onDidChange(listener)];
+          return { dispose: () => subs.forEach((s) => s.dispose()) };
+        },
         onDidRequestShow: (listener) => showMissionRequests.event(listener),
       }
     : undefined;
@@ -1946,7 +2003,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
 
   // Durable agents (#179): Agent Wrangler's own record, in its own state.
   const durableAgents = createDurableAgents({
-    agents: new DurableAgentStore(host.globalState),
+    agents: durableAgentStore,
     store,
     sessions,
     launchDefaults,
@@ -2294,7 +2351,8 @@ export function createApp(host: HostServices): AgentWranglerApp {
     }
     const task = m.tasks[0];
     const attempt = runnerAttempt(m);
-    if (m.state === 'review') return 'accepted — branch kept';
+    // Accepted is not finished: nothing is merged until a finish is chosen (merge, PR, keep or discard).
+    if (m.state === 'review') return 'accepted, not merged yet — merge, open a PR, keep or discard';
     if (task.recommendation && !attempt) return task.state === 'routed' ? 'route proposed — waiting for you' : 'needs you — no route recommended';
     if (task.state === 'needs-human') return attempt?.state === 'succeeded' ? 'ready for review' : `needs you — attempt ${attempt?.state ?? 'not started'}`;
     return attempt ? `attempt ${attempt.n} ${attempt.state}` : task.state;
@@ -3349,6 +3407,9 @@ export function createApp(host: HostServices): AgentWranglerApp {
     delegate,
     proposeAgentMemory: (origin, input) => durableAgents.propose(origin, input),
     taskList: () => (tasks ? tasks.list().filter((m) => !['completed', 'cancelled'].includes(m.state)).map(taskSummary) : []),
+    taskMissions: () => tasks?.list() ?? [],
+    taskMission: (id) => tasks?.get(id),
+    missionGrants,
     async stopAllForQuit(withinMs: number, opts: { includeHosted?: boolean } = {}) {
       // Claude sessions all run in hosts: an ordinary quit lets them go (in
       // `dispose`) and they keep running. Only Quit and Stop All Agents ends

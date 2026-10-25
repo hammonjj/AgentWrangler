@@ -16,6 +16,8 @@ import { currentRequest } from '../core/requestScope';
 import type { CommandOutcome, SessionHandle } from '../core/session/sessionHandle';
 import { displayLabel, type AgentSession } from '../shared/model';
 import type { PermissionDecisionOutcome, SessionActions } from '../ui/actions';
+import type { MissionConfirmationRequest } from '../shared/orchestration/missionGrant';
+import type { MissionFinish } from '../shared/orchestration/types';
 
 export type ApprovalActions = Pick<SessionActions, 'decidePermission' | 'answerQuestion' | 'decidePlan'>;
 
@@ -133,6 +135,73 @@ export function createApprovalActions(deps: ApprovalDeps): ApprovalActions {
       const outcome = await live.decidePlan(requestId, approve, feedback);
       if (outcome === 'applied') deps.log(`plan ${approve ? 'approved' : 'rejected'} for ${name}`);
       return settled(outcome, label, 'plan');
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Merge confirmations (agent mission control)
+// ---------------------------------------------------------------------------
+
+/**
+ * The user's answer to a local merge a granted agent asked for
+ * (`docs/plans/agent-mission-control.md`). An agent never moves the base
+ * branch on its own word: `aw mission finish <id> merge-local` records a
+ * request, and this is the one path that answers it, from whichever client
+ * the user pressed Confirm or Decline in. Same rule as the asks above: the
+ * request is settled before anything runs, so a second client pressing the
+ * same button gets `stale` and a line saying so, and the merge runs once.
+ */
+export interface MissionConfirmationDeps {
+  /** The request, whatever its state; undefined when there is no such request. */
+  get(requestId: string): MissionConfirmationRequest | undefined;
+  /** Settle it (`confirmed`, `declined`, `stale`). Only ever called on a pending request. */
+  settle(requestId: string, state: 'confirmed' | 'declined' | 'stale', reason?: string): void;
+  /**
+   * Why the merge may no longer go ahead, or undefined when it still may:
+   * the mission left review, a finish is under way, it is no longer verified.
+   * Re-read at the moment of the answer, never from when the agent asked.
+   */
+  recheck(request: MissionConfirmationRequest): string | undefined;
+  /** Run the finish the agent asked for, as the user. Rejects with a message the user should read. */
+  finish(missionId: string, how: MissionFinish): Promise<void>;
+  flash(message: string, timeoutMs?: number): void;
+  log(line: string): void;
+}
+
+export interface MissionConfirmations {
+  confirm(requestId: string, approve: boolean): Promise<'applied' | 'stale' | 'gone'>;
+}
+
+export function createMissionConfirmations(deps: MissionConfirmationDeps): MissionConfirmations {
+  const tell = (message: string, timeoutMs: number) => {
+    if (currentRequest()?.connectionId !== undefined) deps.flash(message, timeoutMs);
+    else deps.log(message);
+  };
+  return {
+    async confirm(requestId, approve) {
+      const r = deps.get(requestId);
+      if (!r) return 'gone';
+      if (r.state !== 'pending') {
+        tell(`Agent Wrangler: ${r.agentName}'s merge request has already been answered.`, 4000);
+        return 'stale';
+      }
+      if (!approve) {
+        deps.settle(requestId, 'declined');
+        deps.log(`mission ${r.missionId}: declined a merge requested by durable agent ${r.agentId}`);
+        return 'applied';
+      }
+      const why = deps.recheck(r);
+      if (why) {
+        deps.settle(requestId, 'stale', why);
+        tell(`Agent Wrangler: the merge can no longer go ahead: ${why}`, 6000);
+        return 'stale';
+      }
+      // Settled before the merge starts: a second Confirm from another client is stale, never a second merge.
+      deps.settle(requestId, 'confirmed');
+      deps.log(`mission ${r.missionId}: the user confirmed a merge requested by durable agent ${r.agentId}`);
+      await deps.finish(r.missionId, r.how);
+      return 'applied';
     },
   };
 }

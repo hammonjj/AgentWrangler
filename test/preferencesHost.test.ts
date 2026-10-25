@@ -454,6 +454,7 @@ const SAMPLES: Samples<PreferencesToHost> = {
   localEndpoint: [{ type: 'localEndpoint', change: { op: 'setKey', id: 'ep1' } }],
   routingPolicy: [{ type: 'routingPolicy', mode: 'manual', policy: {} }],
   revokeWebDevice: [{ type: 'revokeWebDevice', id: 'dev-a' }],
+  missionGrant: [{ type: 'missionGrant', agentId: 'agent-a', enabled: true }],
   close: [{ type: 'close' }],
 };
 const ALL = Object.values(SAMPLES).flat() as PreferencesToHost[];
@@ -515,5 +516,62 @@ describe('the connection remembers only what changes something', () => {
     expect(isMutatingPaneMessage('preferences', { type: 'localEndpoint', change: { op: 'clearKey', id: 'a' } })).toBe(true);
     // Unknown is a mutation.
     expect(isMutatingPaneMessage('preferences', { type: 'whatever' })).toBe(true);
+    expect(isMutatingPaneMessage('preferences', { type: 'missionGrant', agentId: 'agent-a', enabled: true })).toBe(true);
+  });
+});
+
+describe('Agent mission control in Preferences', () => {
+  function grantsRig(decision: 'allow' | 'deny' = 'allow') {
+    const views = [{ agentId: 'agent-a', name: 'Synthetic PO', granted: false }];
+    const sets: [string, boolean][] = [];
+    const changed = new Emitter<void>();
+    const r = rig({
+      decision,
+      backend: {
+        missionGrants: {
+          list: () => views,
+          set: (agentId, enabled) => {
+            sets.push([agentId, enabled]);
+            if (agentId !== 'agent-a') return { ok: false, error: 'No such agent.' };
+            views[0] = { ...views[0], granted: enabled };
+            return { ok: true };
+          },
+          onDidChange: changed.event,
+        },
+      },
+    });
+    return { ...r, sets, changed };
+  }
+
+  it('lists every agent with its grant off on ready, and a switch is authorised as mission.grant on that agent', async () => {
+    const r = grantsRig();
+    r.send({ type: 'ready' });
+    await flush();
+    expect(r.ofType('missionGrants')[0].agents).toEqual([{ agentId: 'agent-a', name: 'Synthetic PO', granted: false }]);
+    r.send({ type: 'missionGrant', agentId: 'agent-a', enabled: true });
+    await flush();
+    expect(r.sets).toEqual([['agent-a', true]]);
+    expect(r.audit.map((a) => [a.event, a.action, a.resource?.kind, a.resource?.id])).toEqual([['authorized', 'mission.grant', 'agent', 'agent-a']]);
+    expect(r.ofType('missionGrants').at(-1)!.agents[0].granted).toBe(true);
+  });
+
+  it('refused by the gate, nothing is set; a malformed change is never set', async () => {
+    const refused = grantsRig('deny');
+    refused.send({ type: 'missionGrant', agentId: 'agent-a', enabled: true });
+    await flush();
+    expect(refused.sets).toEqual([]);
+    expect(refused.audit[0]).toMatchObject({ event: 'refused-unauthorised', action: 'mission.grant' });
+    const r = grantsRig();
+    r.send({ type: 'missionGrant', agentId: 'agent-a', enabled: 'yes' });
+    await flush();
+    expect(r.sets).toEqual([]);
+  });
+
+  it('a refused write says why beside the list', async () => {
+    const r = grantsRig();
+    r.send({ type: 'ready' });
+    r.send({ type: 'missionGrant', agentId: 'agent-gone', enabled: true });
+    await flush();
+    expect(r.ofType('missionGrants').at(-1)!.error).toBe('No such agent.');
   });
 });
