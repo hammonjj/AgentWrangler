@@ -175,6 +175,24 @@ describe('PreferencesHost: changing a setting', () => {
     ]);
   });
 
+  it('says why a write failed, and sends the stored value back (#153)', async () => {
+    const r = rig({ update: async () => { throw new Error('EACCES: settings file is read-only'); } });
+    r.send({ type: 'ready' });
+    r.send({ type: 'set', key: 'pollIntervalSeconds', value: 7 });
+    await flush();
+    expect(r.ofType('settingRejected')).toEqual([{ type: 'settingRejected', key: 'pollIntervalSeconds', error: 'Could not save: EACCES: settings file is read-only' }]);
+    expect(r.ofType('values').at(-1)!.values['pollIntervalSeconds']).toBe(5);
+  });
+
+  it('says so when a set is refused outright (#153)', async () => {
+    const r = rig();
+    r.send({ type: 'ready' });
+    r.send({ type: 'set', key: 'pollIntervalSeconds', value: 'seven' });
+    await flush();
+    expect(r.ofType('settingRejected').map((m) => m.key)).toEqual(['pollIntervalSeconds']);
+    expect(r.updates).toEqual([]);
+  });
+
   it.each<[string, PreferencesToHost]>([
     ['an undeclared key', { type: 'set', key: 'somethingElse', value: true }],
     ['the qualified key', { type: 'set', key: 'agentWrangler.showUsage', value: true }],
@@ -237,6 +255,30 @@ describe('PreferencesHost: setting actions', () => {
     expect(r.ofType('actionResult')[0]).toMatchObject({ ok: false, lines: ['✗  Error: network down'] });
   });
 
+  it('ignores a second action while one is running, and accepts one after it ends (#153)', async () => {
+    let release: () => void = () => undefined;
+    let runs = 0;
+    const r = rig({
+      backend: {
+        runAction: () => {
+          runs++;
+          return new Promise((resolve) => { release = () => resolve({ ok: true, lines: ['✓  done'] }); });
+        },
+      },
+    });
+    r.send({ type: 'action', id: 'connectDiscord' });
+    r.send({ type: 'action', id: 'connectDiscord' });
+    r.send({ type: 'action', id: 'testRemote' });
+    await flush();
+    expect(runs).toBe(1);
+    expect(r.ofType('actionBusy')).toHaveLength(1);
+    release();
+    await flush();
+    r.send({ type: 'action', id: 'testRemote' });
+    await flush();
+    expect(runs).toBe(2);
+  });
+
   it('refuses an action that is not in the closed set', async () => {
     const r = rig();
     r.send({ type: 'action', id: 'rm -rf' });
@@ -277,6 +319,14 @@ describe('PreferencesHost: orchestration', () => {
     await flush();
     expect(r.calls).toEqual(['endpoint:probe']);
     expect(r.ofType('localEndpointResult')).toEqual([{ type: 'localEndpointResult', ok: true, lines: ['✓  done'] }]);
+  });
+
+  it('a local endpoint answer carries the request id the page sent, and drops a bad one (#152)', async () => {
+    const r = rig();
+    r.send({ type: 'localEndpoint', change: { op: 'probe', id: 'ep1' }, requestId: 'ep7' });
+    r.send({ type: 'localEndpoint', change: { op: 'probe', id: 'ep1' }, requestId: 'x'.repeat(65) });
+    await flush();
+    expect(r.ofType('localEndpointResult').map((m) => m.requestId)).toEqual(['ep7', undefined]);
   });
 
   it('a local endpoint that throws is reported, not raised', async () => {

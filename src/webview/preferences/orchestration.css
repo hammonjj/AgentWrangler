@@ -277,7 +277,9 @@
   background: var(--aw-surface-raised);
 }
 
-#prefsApp .aw-orch-btn:disabled {
+#prefsApp .aw-orch-btn:disabled,
+#prefsApp .aw-orch-btn[aria-disabled='true'],
+#prefsApp .aw-orch-switch[aria-disabled='true'] {
   opacity: 0.5;
   cursor: default;
 }

@@ -217,6 +217,12 @@ There is no usage-refresh button. A host handler for `refresh` exists, but nothi
   blocked until the host answers.
 - **Preferences Probe:** the host now pushes `busy` when the probe starts, so "Probing…" shows.
 
+- **Preferences (F5 #152, F6 #153):** Add endpoint, endpoint On and My own machine carry a request
+  id and stay busy until the host's `localEndpointResult` echoes it; Remove asks first and names
+  the key. A rejected `set`/`reset` posts `settingRejected` (shown in the row's status line while
+  the values push restores the field). Action buttons go off on click, the host runs one action
+  at a time, and the three Discord `fetch` calls time out after 15 s.
+
 ## 6. Follow-up issues
 
 Each is larger than a pane-only fix, or needs a decision. Filed 2026-10-04:

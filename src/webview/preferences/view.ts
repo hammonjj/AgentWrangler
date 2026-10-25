@@ -19,7 +19,7 @@ import './preferences.css';
 import type { HostToPreferences, OrchestrationPrefsView, PreferencesToHost, SettingActionId, SettingStatus } from '../../shared/preferences';
 import { settingGroups, SETTINGS, type SettingSpec } from '../../shared/settings';
 import { orchestrationTabTarget } from '../../shared/orchestration/orchestrationTabs';
-import { ORCHESTRATION_GROUP, consumeWritePending, onRoutingResult, onTierListResult, onWriteResult, openOrchestrationTab, renderOrchestration, setLocalEndpointResult } from './orchestration';
+import { ORCHESTRATION_GROUP, consumeWritePending, onRoutingResult, onTierListResult, onWriteResult, openOrchestrationTab, renderOrchestration, setLocalEndpointResult, clearEndpointPending } from './orchestration';
 import { WEB_DEVICES_GROUP, createWebDevicesBlock, setWebDevices } from './webDevices';
 
 /** What carries this view's messages. */
@@ -53,6 +53,8 @@ const dependents = new Map<string, HTMLElement>();
 const actionButtons = new Map<SettingActionId, HTMLButtonElement>();
 /** Where an action's result is written, per group. */
 const actionResults = new Map<string, HTMLElement>();
+/** An action was pressed and has not answered; every action button is off until it does. */
+let actionsRunning = false;
 let values: Record<string, string | boolean | number> = {};
 /** The controls, so an external change can be reflected without a re-render. */
 const controls = new Map<string, HTMLInputElement | HTMLSelectElement>();
@@ -101,6 +103,8 @@ function write(spec: SettingSpec, value: string | boolean | number): void {
   if (value === valueOf(spec)) return;
   values[spec.key] = value;
   markRow(spec);
+  // An earlier refusal is about the value before this one.
+  applyStatus(spec.key);
   // Something may be nested under this one, waiting to be shown.
   if (spec.type === 'boolean') syncReveal(spec.key);
   if (value === spec.default) post({ type: 'reset', key: spec.key });
@@ -475,8 +479,12 @@ function renderActions(parentKey: string): HTMLElement {
     button.textContent = action.label;
     button.title = action.title;
     button.addEventListener('click', () => {
-      // The host answers with `actionBusy` then `actionResult`; nothing is
-      // assumed here about how long it takes or whether it worked.
+      // Off at once (#153), not when `actionBusy` arrives a round trip later:
+      // a second click in that gap would start a second run. The host answers
+      // with `actionResult` whatever happened, which turns them back on.
+      if (actionsRunning) return;
+      setActionsBusy(true, action.id);
+      showActionResult(action.id, true, ['Working…']);
       post({ type: 'action', id: action.id });
     });
     actionButtons.set(action.id, button);
@@ -503,6 +511,7 @@ function showActionResult(id: SettingActionId, ok: boolean, lines: string[]): vo
 }
 
 function setActionsBusy(busy: boolean, running?: SettingActionId): void {
+  actionsRunning = busy;
   for (const [id, button] of actionButtons) {
     button.disabled = busy;
     if (id === running) button.classList.toggle('running', busy);
@@ -519,6 +528,7 @@ function render(): void {
   dependents.clear();
   actionButtons.clear();
   actionResults.clear();
+  actionsRunning = false;
 
   const groups = settingGroups();
   root.appendChild(renderNav([...groups, { group: ORCHESTRATION_GROUP }]));
@@ -606,6 +616,17 @@ function onHostMessage(message: HostToPreferences | undefined): void {
   if (message.type === 'actionResult') {
     setActionsBusy(false);
     showActionResult(message.id, message.ok, message.lines);
+    return;
+  }
+  if (message.type === 'settingRejected') {
+    // The values push that follows puts the field back; this says why. It
+    // sits in the row's status line, which a later `status` for the key replaces.
+    const line = rows.get(message.key)?.querySelector<HTMLElement>('.pf-status');
+    if (line) {
+      line.textContent = message.error;
+      line.classList.add('bad');
+      line.hidden = false;
+    }
     return;
   }
   if (message.type === 'status') {
@@ -704,6 +725,7 @@ export function mountPreferences(target: HTMLElement, wire: PreferencesIO): void
   orchestration = undefined;
   orchestrationBody = undefined;
   orchestrationStale = false;
+  clearEndpointPending();
   render();
   watchWidth(target);
   if (!wired) {

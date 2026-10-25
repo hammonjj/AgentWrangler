@@ -138,6 +138,8 @@ export class PreferencesHost implements Disposable {
   /** The page has said `ready`: until then it has no use for pushes. */
   private active = false;
   private disposed = false;
+  /** The action in flight, if any; `runAction` refuses another until it ends. */
+  private runningAction: SettingActionId | undefined;
 
   constructor(
     private readonly channel: PaneChannel,
@@ -261,9 +263,13 @@ export class PreferencesHost implements Disposable {
         backend.log('preferences: refused a local endpoint change');
         return;
       }
+      // The page's id comes back on the answer, so it knows which of its pending buttons to free (#152).
+      const raw = (message as { requestId?: unknown }).requestId;
+      const requestId = typeof raw === 'string' && raw.length > 0 && raw.length <= 64 ? raw : undefined;
+      const tag = requestId ? { requestId } : {};
       void run(change)
-        .then((r) => this.post({ type: 'localEndpointResult', ok: r.ok, lines: r.lines }))
-        .catch((err) => this.post({ type: 'localEndpointResult', ok: false, lines: [`✗  ${String(err)}`] }))
+        .then((r) => this.post({ type: 'localEndpointResult', ok: r.ok, lines: r.lines, ...tag }))
+        .catch((err) => this.post({ type: 'localEndpointResult', ok: false, lines: [`✗  ${String(err)}`], ...tag }))
         .finally(() => this.pushOrchestration());
       return;
     }
@@ -308,13 +314,16 @@ export class PreferencesHost implements Disposable {
     // changing a setting and does not get to write.
     const update = settingUpdate(message, (key) => BY_KEY.get(key));
     if (!update) {
-      backend.log(`preferences: refused ${String((message as { key?: unknown }).key).slice(0, 80)}`);
+      const key = String((message as { key?: unknown }).key).slice(0, 80);
+      backend.log(`preferences: refused ${key}`);
       // The page shows what it asked for; say what is true.
+      this.post({ type: 'settingRejected', key, error: 'That value is not allowed for this setting.' });
       this.push();
       return;
     }
     backend.settings.update(update.key, update.value).catch((err: unknown) => {
       backend.log(`preferences: could not write ${update.key}: ${String(err)}`);
+      this.post({ type: 'settingRejected', key: update.key, error: `Could not save: ${err instanceof Error ? err.message : String(err)}` });
       this.push();
     });
   }
@@ -332,12 +341,20 @@ export class PreferencesHost implements Disposable {
       return;
     }
     if (!this.backend.runAction) return;
+    // One at a time (#153): a second press while one runs would start a second token prompt or test.
+    if (this.runningAction) {
+      this.backend.log(`preferences: ignored ${id} while ${this.runningAction} is running`);
+      return;
+    }
+    this.runningAction = id;
     this.post({ type: 'actionBusy', id });
     try {
       const result = await this.backend.runAction(id);
       this.post({ type: 'actionResult', id, ok: result.ok, lines: result.lines });
     } catch (err) {
       this.post({ type: 'actionResult', id, ok: false, lines: [`✗  ${String(err)}`] });
+    } finally {
+      this.runningAction = undefined;
     }
     // Connecting or disconnecting changes what the rest of the page should
     // say about itself, and a token is not a setting, so nothing else would.

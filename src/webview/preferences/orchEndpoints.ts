@@ -10,15 +10,42 @@
 import type { OrchestrationPrefsView } from '../../shared/preferences';
 import type { SourceStatus } from '../../shared/orchestration/sourceHealth';
 import { sourceLabel } from '../../shared/harness';
-import type { LocalEndpointModelView, LocalEndpointView } from '../../shared/orchestration/localEndpoints';
+import type { LocalEndpointChange, LocalEndpointModelView, LocalEndpointView } from '../../shared/orchestration/localEndpoints';
 import { localSummaryText, type LocalModelSummary } from '../../shared/orchestration/localMetrics';
 import { button, crossLink, el, localContext, switchButton, tabHeader, type Post } from './orchCommon';
 
 /** The last thing a local endpoint change said, kept across redraws until the next one. */
 let localResult: { ok: boolean; lines: string[] } | undefined;
 
-export function setLocalEndpointResult(result: { ok: boolean; lines: string[] }): void {
+export function setLocalEndpointResult(result: { ok: boolean; lines: string[]; requestId?: string }): void {
   localResult = result.lines.length > 0 ? result : undefined;
+  // The host answers every request once, so this frees the control that sent it (#152).
+  for (const [key, id] of pending) if (id === result.requestId) pending.delete(key);
+}
+
+/** Controls waiting on the host, by key (`add`, `<id>:enable`, `<id>:mine`), with the request each sent. */
+const pending = new Map<string, string>();
+let requestCounter = 0;
+
+/** Forget what was waiting: the pane was drawn afresh and any answer is for a page that is gone. */
+export function clearEndpointPending(): void {
+  pending.clear();
+}
+
+/** Send a change under a key; a second send under the same key while one is out does nothing. */
+function sendOnce(post: Post, key: string, change: LocalEndpointChange): boolean {
+  if (pending.has(key)) return false;
+  const requestId = `ep${++requestCounter}`;
+  pending.set(key, requestId);
+  post({ type: 'localEndpoint', change, requestId });
+  return true;
+}
+
+/** Mark a control as waiting, without disabling it: it stays focusable and `aria-busy` says why it does nothing. */
+function markBusy(node: HTMLElement, key: string): void {
+  if (!pending.has(key)) return;
+  node.setAttribute('aria-disabled', 'true');
+  node.setAttribute('aria-busy', 'true');
 }
 
 const HEALTH_WORD: Record<string, string> = { reachable: 'Reachable', degraded: 'Degraded', down: 'Down', unknown: 'Unknown', off: 'Off' };
@@ -84,11 +111,14 @@ function renderLocal(
   name.type = 'text';
   name.placeholder = 'Name (optional)';
   name.dataset.focus = 'endpoint:name';
-  const add = button('Add endpoint', () => {
+  const add = button(pending.has('add') ? 'Adding…' : 'Add endpoint', () => {
     if (!url.value.trim()) return;
-    post({ type: 'localEndpoint', change: { op: 'add', url: url.value.trim(), ...(name.value.trim() ? { name: name.value.trim() } : {}) } });
+    if (!sendOnce(post, 'add', { op: 'add', url: url.value.trim(), ...(name.value.trim() ? { name: name.value.trim() } : {}) })) return;
+    add.textContent = 'Adding…';
+    markBusy(add, 'add');
   }, 'aw-orch-btn primary');
   add.dataset.focus = 'endpoint:add';
+  markBusy(add, 'add');
   form.append(urlLabel, url, nameLabel, name, add);
   section.appendChild(form);
   section.appendChild(el('p', 'aw-orch-caption', 'An endpoint not on this machine starts off. Turning it on sends task data off this machine.'));
@@ -164,16 +194,17 @@ function renderEndpoint(
   titles.appendChild(el('h5', 'aw-orch-card-title', e.name));
   const meta = [e.url, e.runtime ?? 'runtime unknown', e.slots ? `${e.slots} slot${e.slots === '1' ? '' : 's'}` : 'slots unknown', e.hasKey ? 'key in the keychain' : 'no key'];
   titles.appendChild(el('span', 'aw-orch-card-meta', meta.join(' · ')));
-  head.append(
-    dot(state),
-    titles,
-    switchButton({
-      label: `Endpoint on: ${e.name}${e.warning ? ` (${e.warning})` : ''}`,
-      pressed: e.enabled,
-      focusKey: `endpoint:${e.id}:on`,
-      onToggle: () => post({ type: 'localEndpoint', change: { op: 'enable', id: e.id, enabled: !e.enabled } }),
-    }),
-  );
+  const onKey = `${e.id}:enable`;
+  const power = switchButton({
+    label: `Endpoint on: ${e.name}${e.warning ? ` (${e.warning})` : ''}`,
+    pressed: e.enabled,
+    focusKey: `endpoint:${e.id}:on`,
+    onToggle: () => {
+      if (sendOnce(post, onKey, { op: 'enable', id: e.id, enabled: !e.enabled })) markBusy(power, onKey);
+    },
+  });
+  markBusy(power, onKey);
+  head.append(dot(state), titles, power);
   card.appendChild(head);
   if (e.warning) card.appendChild(el('p', 'aw-orch-field-error', `External: ${e.warning}`));
   card.appendChild(el('p', 'aw-orch-caption', `${HEALTH_WORD[state] ?? state} · ${e.health.reason} · harness endpoints: ${e.routes}`));
@@ -185,7 +216,13 @@ function renderEndpoint(
     own.checked = !!e.trustedLocal;
     own.dataset.focus = `endpoint:${e.id}:mine`;
     own.title = 'This is a machine you own on your network: treat it as local for routing, caps and labels.';
-    own.addEventListener('change', () => post({ type: 'localEndpoint', change: { op: 'setLocal', id: e.id, local: own.checked } }));
+    const mineKey = `${e.id}:mine`;
+    if (pending.has(mineKey)) own.disabled = true;
+    own.addEventListener('change', () => {
+      // A checkbox has already flipped by now: put it back if the send is refused.
+      if (sendOnce(post, mineKey, { op: 'setLocal', id: e.id, local: own.checked })) own.disabled = true;
+      else own.checked = !own.checked;
+    });
     mine.append(own, document.createTextNode('My own machine on this network: treat as local'));
     card.appendChild(mine);
   }
@@ -240,7 +277,11 @@ function renderEndpoint(
     if (!secretsAvailable) key.title = 'This system cannot encrypt secrets, so no key can be stored.';
     actions.appendChild(key);
   }
-  actions.append(el('span', 'aw-orch-spacer'), button('Remove', () => post({ type: 'localEndpoint', change: { op: 'remove', id: e.id } }), 'aw-orch-btn danger'));
+  actions.append(el('span', 'aw-orch-spacer'), button('Remove', () => {
+    const keyNote = e.hasKey ? ' Its key in the keychain is deleted too.' : '';
+    if (!window.confirm(`Remove the endpoint “${e.name}”?${keyNote}`)) return;
+    post({ type: 'localEndpoint', change: { op: 'remove', id: e.id } });
+  }, 'aw-orch-btn danger'));
   card.appendChild(actions);
   return card;
 }
