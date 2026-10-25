@@ -24,7 +24,7 @@ import { renderEndpointsTab } from './orchEndpoints';
 import { renderReportTab } from './orchReport';
 
 export { onRoutingResult } from './orchRouting';
-export { setLocalEndpointResult } from './orchEndpoints';
+export { clearEndpointPending, setLocalEndpointResult } from './orchEndpoints';
 export { onTierListResult } from './orchTiers';
 export { initUiPersistence, onWriteResult } from './orchUi';
 

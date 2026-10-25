@@ -195,6 +195,9 @@ const RECENT_TRANSCRIPT_WRITE_MS = 90_000;
  */
 const DELEGATE_WAIT_MS = 100_000;
 
+/** A Discord call from Preferences (connect, test) that has not answered by now ends, so the buttons come back (#153). */
+const DISCORD_CALL_TIMEOUT_MS = 15_000;
+
 /**
  * Icons for the session picker. VSCode renders `$(name)` as a codicon; a host
  * with no codicon font should strip them rather than show the source.
@@ -2433,6 +2436,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
     try {
       const res = await fetch('https://discord.com/api/v10/users/@me', {
         headers: { Authorization: `Bot ${token.trim()}` },
+        signal: AbortSignal.timeout(DISCORD_CALL_TIMEOUT_MS),
       });
       if (!res.ok) return { ok: false, lines: [`✗  Discord rejected that token (HTTP ${res.status}).`] };
       who = (await res.json()) as { username?: string };
@@ -2486,7 +2490,10 @@ export function createApp(host: HostServices): AgentWranglerApp {
     ok('A bot token is stored');
 
     const api = async (route: string) =>
-      fetch(`https://discord.com/api/v10${route}`, { headers: { Authorization: `Bot ${token}` } });
+      fetch(`https://discord.com/api/v10${route}`, {
+        headers: { Authorization: `Bot ${token}` },
+        signal: AbortSignal.timeout(DISCORD_CALL_TIMEOUT_MS),
+      });
 
     try {
       const me = await api('/users/@me');
@@ -2533,6 +2540,7 @@ export function createApp(host: HostServices): AgentWranglerApp {
         const posted = await fetch(`https://discord.com/api/v10/channels/${cfg.remoteChannelId}/messages`, {
           method: 'POST',
           headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(DISCORD_CALL_TIMEOUT_MS),
           body: JSON.stringify({
             embeds: [
               {

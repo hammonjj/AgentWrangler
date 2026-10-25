@@ -53,7 +53,7 @@ export type PreferencesToHost =
    */
   | { type: 'setTierList'; tiers: TierListDraftEntry[] | 'default'; renames: TierRename[] }
   /** Add, remove, turn on or off, key, probe or qualify a local endpoint (#51). */
-  | { type: 'localEndpoint'; change: LocalEndpointChange }
+  | { type: 'localEndpoint'; change: LocalEndpointChange; requestId?: string }
   /**
    * The global routing defaults, whole, from Orchestration → Routing defaults
    * (#40). `overrideGate`: the user pressed "Enable anyway" with the gate's
@@ -249,7 +249,9 @@ export type HostToPreferences =
   /** The model catalog changed, or the window just opened. */
   | { type: 'orchestration'; view: OrchestrationPrefsView }
   /** What a local endpoint change did, shown beside the endpoints. */
-  | { type: 'localEndpointResult'; ok: boolean; lines: string[] }
+  | { type: 'localEndpointResult'; ok: boolean; lines: string[]; requestId?: string }
+  /** A `set` or `reset` was refused or failed to write (#153); the values push that follows restores the field. */
+  | { type: 'settingRejected'; key: string; error: string }
   /** The routing defaults the window sent were saved, or refused and why (#40). */
   | { type: 'routingResult'; ok: boolean; errors: string[]; needsOverride?: boolean }
   /**
