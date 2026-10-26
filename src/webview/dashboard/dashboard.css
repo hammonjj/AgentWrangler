@@ -590,7 +590,10 @@ tr.sec .count {
   opacity: 0.8;
 }
 
-tbody.collapsed tr.row {
+/* A row's opened subagent list folds with it: left showing, it sits under the
+   section heading with no row above it, as if its parent had been removed. */
+tbody.collapsed tr.row,
+tbody.collapsed tr.subrow {
   display: none;
 }
 
