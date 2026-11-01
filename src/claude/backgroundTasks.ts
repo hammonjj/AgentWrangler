@@ -23,7 +23,7 @@
  *   A notification can name a task this transcript never launched (one started
  *   inside a subagent); that is simply ignored.
  */
-import type { BackgroundTaskCounts } from '../shared/model';
+import type { BackgroundTaskCounts, SubagentInfo } from '../shared/model';
 
 export type BackgroundTaskKind = 'subagent' | 'shell' | 'other';
 
@@ -129,6 +129,46 @@ export function liveTranscriptTasks(
   if (processStartedAtMs === undefined) return [...tasks];
   // A second of slack: the pid file and the transcript are stamped by different writes.
   return tasks.filter((t) => t.launchedAtMs === undefined || t.launchedAtMs >= processStartedAtMs - 1000);
+}
+
+/** What is known to be still running, for `settleDeadSubagents`. */
+export interface LiveBackgroundWork {
+  /** When this process started; work launched before it died with the old one. */
+  processStartedAtMs?: number;
+  /** Agent ids the last `Stop` listed as running; undefined when no `Stop` reported the field. */
+  hookTaskIds?: ReadonlySet<string>;
+  /**
+   * Launches before this instant were already running when the last `Stop`
+   * reported, so its list is the truth about them. Infinity between turns;
+   * undefined when not knowable (a turn whose start came from a log backlog).
+   */
+  hookListCoversBeforeMs?: number;
+}
+
+/**
+ * Mark done the subagents still shown working that are not running any more.
+ * A background subagent can die without a `<task-notification>` (killed, or
+ * its process exited), and then nothing in the transcript ever closes it. The
+ * `Stop` hook's list and the process start time both know better.
+ */
+export function settleDeadSubagents(
+  list: SubagentInfo[] | undefined,
+  live: LiveBackgroundWork,
+): SubagentInfo[] | undefined {
+  if (!list) return undefined;
+  const dead = (sa: SubagentInfo): boolean => {
+    if (sa.status !== 'working' || sa.launchedAtMs === undefined) return false;
+    if (live.processStartedAtMs !== undefined && sa.launchedAtMs < live.processStartedAtMs - 1000) return true;
+    // A working subagent with an agent id is a background one: a foreground result binds and closes it at once.
+    return (
+      sa.agentId !== undefined &&
+      live.hookTaskIds !== undefined &&
+      live.hookListCoversBeforeMs !== undefined &&
+      sa.launchedAtMs < live.hookListCoversBeforeMs &&
+      !live.hookTaskIds.has(sa.agentId)
+    );
+  };
+  return list.some(dead) ? list.map((sa) => (dead(sa) ? { ...sa, status: 'done' as const } : sa)) : list;
 }
 
 export function countTasks(tasks: readonly BackgroundTaskRef[]): BackgroundTaskCounts | undefined {

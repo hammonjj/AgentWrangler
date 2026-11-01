@@ -99,6 +99,8 @@ export interface SubagentInfo {
   model?: string;
   /** Launched with `run_in_background`: it outlives the turn that started it. */
   background?: boolean;
+  /** When the transcript recorded the launch; lets a provider retire one that died without notice. */
+  launchedAtMs?: number;
 }
 
 export interface AgentSession {

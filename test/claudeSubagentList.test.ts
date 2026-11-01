@@ -5,13 +5,14 @@ import { parseSummaryLines } from '../src/claude/transcriptTail';
 const line = (type: string, message: unknown) => JSON.stringify({ type, message, timestamp: '2024-01-01T12:00:00Z' });
 const taskNotif = (taskId: string) => JSON.stringify({ type: 'task-notification', task_id: taskId, timestamp: '2024-01-01T12:00:00Z' });
 const use = (name: string, id: string | undefined, input: Record<string, unknown>) => ({ type: 'tool_use', name, id, input });
+const launchedAtMs = Date.parse('2024-01-01T12:00:00Z');
 
 describe('Claude transcript subagent extraction', () => {
   it('extracts Agent tool_use launches under the tool-use id', () => {
     const lines = [line('assistant', { content: [use('Agent', 'toolu_1', { description: 'Code reviewer', subagent_type: 'reviewer' })] })];
     const partial = parseSummaryLines(lines);
     expect(partial.subagentListOpened).toEqual([
-      { id: 'toolu_1', label: 'Code reviewer', agentType: 'reviewer', background: false },
+      { id: 'toolu_1', label: 'Code reviewer', agentType: 'reviewer', background: false, launchedAtMs },
     ]);
   });
 
@@ -19,7 +20,7 @@ describe('Claude transcript subagent extraction', () => {
     const lines = [line('assistant', { content: [use('Task', 'toolu_2', { description: 'Run tests', run_in_background: true })] })];
     const partial = parseSummaryLines(lines);
     expect(partial.subagentListOpened).toEqual([
-      { id: 'toolu_2', label: 'Run tests', agentType: undefined, background: true },
+      { id: 'toolu_2', label: 'Run tests', agentType: undefined, background: true, launchedAtMs },
     ]);
   });
 
@@ -47,7 +48,7 @@ describe('Claude transcript subagent extraction', () => {
     ];
     const partial = parseSummaryLines(lines);
     expect(partial.subagentListOpened).toEqual([
-      { id: 'toolu_new', label: 'New agent', agentType: undefined, background: false },
+      { id: 'toolu_new', label: 'New agent', agentType: undefined, background: false, launchedAtMs },
     ]);
     expect(partial.subagentListClosed).toEqual(['toolu_old']);
   });
@@ -60,8 +61,8 @@ describe('Claude transcript subagent extraction', () => {
     ];
     const partial = parseSummaryLines(lines);
     expect(partial.subagentListOpened?.length).toBe(2);
-    expect(partial.subagentListOpened).toContainEqual({ id: 'toolu_a', label: 'First', agentType: undefined, background: false });
-    expect(partial.subagentListOpened).toContainEqual({ id: 'toolu_b', label: 'Second', agentType: undefined, background: false });
+    expect(partial.subagentListOpened).toContainEqual({ id: 'toolu_a', label: 'First', agentType: undefined, background: false, launchedAtMs });
+    expect(partial.subagentListOpened).toContainEqual({ id: 'toolu_b', label: 'Second', agentType: undefined, background: false, launchedAtMs });
   });
 
   it('ignores a launch with no tool-use id', () => {
@@ -74,7 +75,7 @@ describe('Claude transcript subagent extraction', () => {
     const lines = [line('assistant', { content: [use('Agent', 'toolu_abcdefgh1234', {})] })];
     const partial = parseSummaryLines(lines);
     expect(partial.subagentListOpened).toEqual([
-      { id: 'toolu_abcdefgh1234', label: 'toolu_ab', agentType: undefined, background: false },
+      { id: 'toolu_abcdefgh1234', label: 'toolu_ab', agentType: undefined, background: false, launchedAtMs },
     ]);
   });
 });
