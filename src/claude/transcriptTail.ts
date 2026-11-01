@@ -152,12 +152,14 @@ export type SummaryPartial = Pick<
   /** Ids of background tasks this chunk saw end. */
   tasksClosed?: string[];
   /** Subagents launched in this chunk. */
-  subagentListOpened?: Array<{ id: string; label: string; agentType?: string; background?: boolean }>;
+  subagentListOpened?: SubagentLaunch[];
   /** Ids of subagents this chunk saw complete: a tool-use id, or the agent id a task notification names. */
   subagentListClosed?: string[];
   /** Launches whose result named the subagent's own transcript, by tool-use id. */
   subagentListBound?: Array<{ id: string; agentId: string }>;
 };
+
+type SubagentLaunch = { id: string; label: string; agentType?: string; background?: boolean; launchedAtMs?: number };
 
 /** Cap on the reply text kept per transcript; `needsReply` only reads the tail anyway. */
 const MAX_REPLY_CHARS = 4000;
@@ -205,7 +207,7 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
         const model = obj.message?.model;
         if (typeof model === 'string' && model.length > 0 && !model.startsWith('<')) out.model = model;
         // Extract Agent/Task tool_use calls
-        extractSubagentLaunches(obj.message?.content, out);
+        extractSubagentLaunches(obj.message?.content, timestampMs(obj.timestamp), out);
         break;
       }
       case 'user': {
@@ -269,7 +271,7 @@ export function parseSummaryLines(lines: string[]): SummaryPartial {
 }
 
 /** Extract Agent/Task tool_use launches from assistant content. */
-function extractSubagentLaunches(content: unknown, out: SummaryPartial): void {
+function extractSubagentLaunches(content: unknown, launchedAtMs: number | undefined, out: SummaryPartial): void {
   if (!Array.isArray(content)) return;
   for (const block of content) {
     if (block?.type === 'tool_use') {
@@ -282,7 +284,7 @@ function extractSubagentLaunches(content: unknown, out: SummaryPartial): void {
           if (typeof id === 'string' && id) {
             const label = typeof input.description === 'string' && input.description ? input.description : id.slice(0, 8);
             const agentType = typeof input.subagent_type === 'string' ? input.subagent_type : undefined;
-            (out.subagentListOpened ??= []).push({ id, label, agentType, background: input.run_in_background === true });
+            (out.subagentListOpened ??= []).push({ id, label, agentType, background: input.run_in_background === true, launchedAtMs });
           }
         }
       }
@@ -321,7 +323,7 @@ function closeTasks(out: SummaryPartial, text: string): void {
  */
 function applySubagentChanges(
   prev: import('../shared/model').SubagentInfo[] | undefined,
-  opened: Array<{ id: string; label: string; agentType?: string; background?: boolean }>,
+  opened: SubagentLaunch[],
   closed: string[],
   bound: Array<{ id: string; agentId: string }> = [],
 ): import('../shared/model').SubagentInfo[] | undefined {
@@ -334,6 +336,7 @@ function applySubagentChanges(
       label: item.label,
       agentType: item.agentType,
       background: item.background || undefined,
+      launchedAtMs: item.launchedAtMs,
       status: 'working' as const,
       lastActivityAt: now,
     });

@@ -14,7 +14,13 @@ import { HookLog, hookLogDir, type PermissionBehavior } from './hookLog';
 import { suggestionDestination, suggestionLabels } from './permissionDetail';
 import { isSessionJsonlName, projectsDir, sessionsDir } from './paths';
 import { readRegistry, type RegistryEntry } from './registry';
-import { countTasks, liveTranscriptTasks, type BackgroundTaskRef } from './backgroundTasks';
+import {
+  countTasks,
+  liveTranscriptTasks,
+  settleDeadSubagents,
+  type BackgroundTaskRef,
+  type LiveBackgroundWork,
+} from './backgroundTasks';
 import { claudeRateLimitFromTranscript } from './rateLimit';
 import { blockClearedByClaude, deriveStatus, holdForBackground, turnOver, turnStartFor } from './status';
 import { TranscriptIndex, type IndexedTranscript } from './transcriptIndex';
@@ -68,6 +74,25 @@ export function backgroundTasksFor(
 ): BackgroundTaskRef[] {
   if (hook?.backgroundTasks !== undefined) return hook.backgroundTasks;
   return liveTranscriptTasks(summary?.backgroundTasks, processStartedAtMs);
+}
+
+/**
+ * What a live session's hooks and process say is still running, for
+ * retiring subagents that died without a notification. The last `Stop`'s list
+ * speaks for every launch before the turn in flight began (all of them,
+ * between turns); a launch in the current turn is not in it yet.
+ */
+export function liveBackgroundWork(
+  hook: Pick<HookSessionState, 'backgroundTasks' | 'turnStartedAtMs' | 'turnStartUncertain'> | undefined,
+  processStartedAtMs: number | undefined,
+): LiveBackgroundWork {
+  if (hook?.backgroundTasks === undefined) return { processStartedAtMs };
+  return {
+    processStartedAtMs,
+    hookTaskIds: new Set(hook.backgroundTasks.map((t) => t.id)),
+    hookListCoversBeforeMs:
+      hook.turnStartedAtMs === undefined ? Infinity : hook.turnStartUncertain ? undefined : hook.turnStartedAtMs,
+  };
 }
 
 const REGISTRY_DEBOUNCE_MS = 250;
@@ -268,7 +293,7 @@ export class ClaudeProvider implements AgentProvider {
       activeTool: status === 'busy' ? hook?.activeTool : undefined,
       progress: status === 'busy' && hook ? this.buildProgress(hook, now) : undefined,
       provider: this.id,
-      subagentList: withSubagentModels(s?.subagentList, idx?.path),
+      subagentList: withSubagentModels(settleDeadSubagents(s?.subagentList, liveBackgroundWork(hook, r.startedAt)), idx?.path),
       sessionId: r.sessionId,
       key: `${this.id}:${r.sessionId.toLowerCase()}`,
       name: r.name,
