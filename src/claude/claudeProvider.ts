@@ -69,10 +69,18 @@ function withSubagentModels(list: SubagentInfo[] | undefined, file: string | und
  */
 export function backgroundTasksFor(
   hook: Pick<HookSessionState, 'backgroundTasks'> | undefined,
-  summary: Pick<TranscriptSummary, 'backgroundTasks'> | undefined,
+  summary: Pick<TranscriptSummary, 'backgroundTasks' | 'subagentList'> | undefined,
   processStartedAtMs: number | undefined,
 ): BackgroundTaskRef[] {
-  if (hook?.backgroundTasks !== undefined) return hook.backgroundTasks;
+  if (hook?.backgroundTasks !== undefined) {
+    // The Stop list is a snapshot from when the turn ended. A task that ends
+    // afterwards writes its `<task-notification>` before the next turn (and
+    // the next Stop) refreshes it, so drop subagents the transcript already
+    // shows done: the rows say done, the chip must not say running.
+    const done = new Set<string>();
+    for (const sa of summary?.subagentList ?? []) if (sa.status === 'done' && sa.agentId) done.add(sa.agentId);
+    return done.size === 0 ? hook.backgroundTasks : hook.backgroundTasks.filter((t) => !(t.kind === 'subagent' && done.has(t.id)));
+  }
   return liveTranscriptTasks(summary?.backgroundTasks, processStartedAtMs);
 }
 
