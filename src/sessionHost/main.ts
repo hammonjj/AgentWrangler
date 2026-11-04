@@ -17,6 +17,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import { query as sdkQuery, type Options, type SpawnedProcess, type SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { ClaudeSdkSession, type QueryFn } from '../claude/runner/claudeSdkSession';
+import { loadPermissionRules } from '../claude/permissionRules';
 import { startTimeOf } from '../core/procStart';
 import { writeJsonAtomic } from '../core/session/manifestFile';
 import { parseLaunchPolicy } from '../shared/launchPolicy';
@@ -169,7 +170,18 @@ async function main(): Promise<void> {
       effort: boot.launch.effort,
       policy: policy?.claude,
     },
-    { query: (fake ? fakeQuery : sdkQuery) as QueryFn, binary: boot.launch.binary, log: say, sdkOptions, localKey: async () => localKey },
+    {
+      query: (fake ? fakeQuery : sdkQuery) as QueryFn,
+      binary: boot.launch.binary,
+      log: say,
+      sdkOptions,
+      localKey: async () => localKey,
+      // A subagent's ask the parent's own allow rules already cover needs no card.
+      // Opt out with AGENTWRANGLER_SUBAGENT_INHERIT=0.
+      ...(process.env.AGENTWRANGLER_SUBAGENT_INHERIT === '0'
+        ? {}
+        : { subagentRules: () => loadPermissionRules(boot.launch.cwd, process.env) }),
+    },
   );
 
   const idle = new IdleRule(0, monotonicMs());
