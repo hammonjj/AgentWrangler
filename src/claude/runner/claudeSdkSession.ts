@@ -20,6 +20,7 @@ import { InputQueue } from '../../core/runner/inputQueue';
 import { SeqLog } from '../../core/session/seqLog';
 import { parseLaunchPolicy, type ClaudeLaunchPolicy } from '../../shared/launchPolicy';
 import { localClaudeEnv } from '../../sessionHost/env';
+import { autoAllowSubagentAsk, type PermissionRules } from '../permissionPolicy';
 import {
   emptyHostState,
   reduceHostSnapshot,
@@ -113,6 +114,12 @@ export interface ClaudeSessionDeps {
   sdkOptions?: Partial<Options>;
   /** The core reads safeStorage, or the host receives the key over its authenticated socket. */
   localKey?: (ref: string) => Promise<string | undefined>;
+  /**
+   * The allow/deny rules the session runs under. When given, a subagent's ask
+   * those rules already cover is allowed without a card (see `permissionPolicy`).
+   * Called per ask, so an edited settings file applies at once.
+   */
+  subagentRules?: () => PermissionRules;
 }
 
 /** The end sequence's timings (playbook §7.1). */
@@ -425,6 +432,22 @@ export class ClaudeSdkSession {
       if (this.snap.state === 'ending' || this.snap.state === 'exited') {
         resolve({ behavior: 'deny', message: 'The session was closed.' });
         return;
+      }
+      if (this.deps.subagentRules) {
+        let covered = false;
+        try {
+          covered = autoAllowSubagentAsk(
+            { toolName, input, agentId: options.agentID, matchedAskRule: options.matchedAskRule },
+            this.deps.subagentRules(),
+          );
+        } catch (err) {
+          this.deps.log(`subagent rule check failed: ${String(err)}`);
+        }
+        if (covered) {
+          this.deps.log(`allowed a subagent ${toolName} ask from the parent's rules`);
+          resolve({ behavior: 'allow', updatedInput: input });
+          return;
+        }
       }
       const ask: RawAsk = {
         requestId,
