@@ -200,6 +200,13 @@ describe('which tasks count', () => {
     expect(ids(backgroundTasksFor(undefined, transcript, undefined))).toEqual(['old', 'new']);
     expect(backgroundTasksFor(undefined, undefined, undefined)).toEqual([]);
   });
+
+  it('drops Stop-list subagents the transcript already shows done (notification landed after the Stop)', () => {
+    const hook = { backgroundTasks: [{ id: 'a1', kind: 'subagent' as const }, { id: 'a2', kind: 'subagent' as const }, { id: 'sh', kind: 'shell' as const }] };
+    const sa = (agentId: string, status: 'working' | 'done') => ({ id: `t-${agentId}`, label: agentId, status, agentId });
+    expect(ids(backgroundTasksFor(hook, { subagentList: [sa('a1', 'done'), sa('a2', 'working')] }, undefined))).toEqual(['a2', 'sh']);
+    expect(ids(backgroundTasksFor(hook, { subagentList: [sa('a1', 'done'), sa('a2', 'done')] }, undefined))).toEqual(['sh']);
+  });
 });
 
 describe('holdForBackground', () => {
