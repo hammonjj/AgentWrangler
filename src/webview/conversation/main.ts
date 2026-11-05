@@ -55,7 +55,7 @@ import { isRemoteHost, paneApi } from '../common/paneApi';
 import { takeComposerFocus } from '../common/composerFocus';
 import { onSwitch } from '../common/conversationSwitch';
 import { renderSideBySide } from '../common/sideBySide';
-import { uploadFile } from '../common/upload';
+import { onUploadAck, uploadFile } from '../common/upload';
 import { trackTouch } from '../common/phone';
 import { CONV_NARROW_PX, isNarrowWidth } from '../../shared/phoneLayout';
 import { announceConversation } from '../common/shellBus';
@@ -2399,7 +2399,7 @@ function addFiles(files: File[]): void {
 
 async function uploadAndMention(file: File): Promise<void> {
   try {
-    const uploaded = await uploadFile(file, activeSession || 'none');
+    const uploaded = await uploadFile(file, activeSession || 'none', (chunk) => post({ type: 'uploadChunk', ...chunk }));
     post({ type: 'dropPaths', paths: [uploaded.path] });
   } catch (err) {
     note(err instanceof Error ? err.message : `Could not upload ${file.name}.`);
@@ -3216,6 +3216,9 @@ vscodeApi.onMessage((body) => {
         renderAttachments();
       }
       for (const text of m.notes) note(text);
+      break;
+    case 'uploadAck':
+      onUploadAck(m);
       break;
     case 'dictation':
       onDictationMessage(m);

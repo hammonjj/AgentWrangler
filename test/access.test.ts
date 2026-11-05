@@ -187,6 +187,7 @@ const CONVERSATION: Samples<ConversationToHost> = {
   openAttempt: [{ type: 'openAttempt', sessionKey: KEY }],
   dictate: [{ type: 'dictate', action: 'start' }],
   dictateAudio: [{ type: 'dictateAudio', mime: 'audio/webm', durationMs: 1000, data: 'AAAA' }],
+  uploadChunk: [{ type: 'uploadChunk', id: 'u1', name: 'a.txt', index: 0, count: 1, size: 3, data: 'AAAA' }],
   fileSuggest: [{ type: 'fileSuggest', query: 'a' }],
   dropPaths: [{ type: 'dropPaths', paths: ['/Users/test/proj/a.ts'] }],
 };
