@@ -38,10 +38,14 @@ import {
   FILENAME_HEADER,
   MAX_DIR_ENTRIES,
   MAX_UPLOAD_BYTES,
+  RELAY_UPLOAD_CHUNK_BYTES,
+  RELAY_UPLOAD_MAX_BYTES,
   UPLOAD_HEADER,
   type DirEntry,
   type DirListing,
   type DirProject,
+  type UploadAck,
+  type UploadChunk,
   type UploadResult,
 } from '../../shared/files';
 
@@ -51,6 +55,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_NAME_CHARS = 120;
 const MAX_KEY_CHARS = 256;
 const MAX_PATH_CHARS = 4096;
+const MAX_PENDING_UPLOADS = 8;
+const PENDING_UPLOAD_MS = 10 * 60 * 1000;
 
 const HEADERS: Readonly<Record<string, string>> = {
   'cache-control': 'no-store',
@@ -76,6 +82,7 @@ export interface WebFilesOptions {
   now?: () => number;
   /** Test knobs; the defaults are the product's. */
   maxUploadBytes?: number;
+  relayMaxUploadBytes?: number;
   uploadsPerMinute?: number;
   maxDirEntries?: number;
 }
@@ -97,6 +104,12 @@ export class WebFiles implements WebFileRoutes, Disposable {
   /** The one allowlist for what a browser may read: `GET /files`, and `/api/view` (#140) when given this. */
   readonly allowlist: PathAllowlist;
   private readonly recent = new Map<string, number[]>();
+  /** Relay uploads that have some chunks (#200), by the page's upload id. */
+  private readonly pending = new Map<
+    string,
+    { sessionKey: string; file: string; part: string; size: number; count: number; next: number; written: number; touched: number }
+  >();
+  private readonly relayMaxBytes: number;
   private timer: NodeJS.Timeout | undefined;
 
   constructor(private readonly opts: WebFilesOptions) {
@@ -104,6 +117,7 @@ export class WebFiles implements WebFileRoutes, Disposable {
     this.home = opts.home ?? os.homedir();
     this.now = opts.now ?? (() => Date.now());
     this.maxBytes = opts.maxUploadBytes ?? MAX_UPLOAD_BYTES;
+    this.relayMaxBytes = opts.relayMaxUploadBytes ?? RELAY_UPLOAD_MAX_BYTES;
     this.perMinute = opts.uploadsPerMinute ?? 30;
     this.maxEntries = opts.maxDirEntries ?? MAX_DIR_ENTRIES;
     this.allowlist = createPathAllowlist(() => [this.root, ...opts.downloadRoots()], { home: this.home });
@@ -233,6 +247,79 @@ export class WebFiles implements WebFileRoutes, Disposable {
     }
     const result: UploadResult = { path: file, name, size };
     this.json(res, 200, result);
+  }
+
+  // ---- chunked upload over the relay (#200) ----
+
+  /**
+   * One chunk of an upload that came down a pane socket instead of `POST /upload`. Same staging
+   * directory, file mode, name rule and rate limit; the caller has already passed the access gate.
+   * Chunks must arrive in order. The file appears under its final name only when the last one is
+   * written and the size matches, so a half-sent file is never offered as a path.
+   */
+  async stageChunk(deviceId: string | undefined, sessionKey: string, c: UploadChunk): Promise<UploadAck> {
+    const fail = async (error: string): Promise<UploadAck> => {
+      await this.dropPending(c.id);
+      return { id: c.id, index: c.index, error };
+    };
+    if (typeof c.id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(c.id)) return { id: String(c.id).slice(0, 64), index: c.index, error: 'Bad upload id.' };
+    const name = sanitizeName(encodeURIComponent(typeof c.name === 'string' ? c.name : ''));
+    if (name === undefined || !sessionKey || sessionKey.length > MAX_KEY_CHARS) return fail('Missing or bad file name or conversation.');
+    const limit = Math.min(this.maxBytes, this.relayMaxBytes);
+    if (!Number.isInteger(c.size) || c.size < 0) return fail('Bad file size.');
+    if (c.size > limit) return fail(`Over the ${Math.floor(limit / 1024 / 1024)} MB limit.`);
+    if (!Number.isInteger(c.count) || c.count < 1 || c.count > Math.ceil(limit / 1024) + 1) return fail('Bad chunk count.');
+    if (!Number.isInteger(c.index) || c.index < 0 || c.index >= c.count) return fail('Bad chunk index.');
+    if (typeof c.data !== 'string' || c.data.length > Math.ceil((RELAY_UPLOAD_CHUNK_BYTES * 4) / 3) + 8) return fail('Chunk too large.');
+    const bytes = Buffer.from(c.data, 'base64');
+    if (bytes.length > RELAY_UPLOAD_CHUNK_BYTES) return fail('Chunk too large.');
+
+    let up = this.pending.get(c.id);
+    if (c.index === 0) {
+      if (up) await this.dropPending(c.id);
+      if (this.pending.size >= MAX_PENDING_UPLOADS) this.expirePending();
+      if (this.pending.size >= MAX_PENDING_UPLOADS) return fail('Too many uploads in progress.');
+      if (!this.allowRate(deviceId ?? 'unknown')) return fail('Too many uploads; wait a minute.');
+      const dir = this.stagingDir(sessionKey);
+      await fs.promises.mkdir(this.root, { recursive: true, mode: 0o700 });
+      await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+      await fs.promises.chmod(this.root, 0o700);
+      await fs.promises.chmod(dir, 0o700);
+      const file = path.join(dir, `${crypto.randomUUID()}-${name}`);
+      up = { sessionKey, file, part: `${file}.part`, size: c.size, count: c.count, next: 0, written: 0, touched: this.now() };
+      this.pending.set(c.id, up);
+    } else if (!up || up.sessionKey !== sessionKey || up.size !== c.size || up.count !== c.count) {
+      return fail('The upload is not in progress. Send the file again.');
+    }
+    if (c.index !== up.next) return fail('A chunk was missed. Send the file again.');
+    if (up.written + bytes.length > up.size) return fail('The file is larger than it said.');
+
+    try {
+      await fs.promises.writeFile(up.part, bytes, { flag: c.index === 0 ? 'wx' : 'a', mode: 0o600 });
+      up.written += bytes.length;
+      up.next++;
+      up.touched = this.now();
+      if (up.next < up.count) return { id: c.id, index: c.index };
+      if (up.written !== up.size) return fail('The upload did not complete.');
+      await fs.promises.rename(up.part, up.file);
+      this.pending.delete(c.id);
+      return { id: c.id, index: c.index, result: { path: up.file, name, size: up.written } };
+    } catch (err) {
+      this.opts.log(`web: relay upload ${c.id} failed (${(err as Error).message})`);
+      return fail('The upload did not complete.');
+    }
+  }
+
+  private async dropPending(id: string): Promise<void> {
+    const up = this.pending.get(id);
+    this.pending.delete(id);
+    if (up) await fs.promises.rm(up.part, { force: true });
+  }
+
+  /** Forget uploads whose sender went quiet; their `.part` files are removed. */
+  private expirePending(): void {
+    const now = this.now();
+    for (const [id, up] of this.pending) if (now - up.touched > PENDING_UPLOAD_MS) void this.dropPending(id);
   }
 
   private allowRate(device: string): boolean {

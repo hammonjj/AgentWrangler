@@ -24,6 +24,7 @@ import type { SessionStore } from '../../core/sessionStore';
 import { imageMediaType, mentionForPath } from '../../shared/attachments';
 import type { ConversationCapabilities, ImageAttachment } from '../../shared/conversation';
 import { MAX_IMAGE_BYTES, rememberFullText } from '../../shared/conversation';
+import type { UploadAck, UploadChunk } from '../../shared/files';
 import type { ConversationToHost, HostToConversation } from '../../shared/messages';
 import { audioExtension, dictationUploadProblem } from '../../shared/webCapabilities';
 import type { Disposable } from '../../core/events';
@@ -70,6 +71,11 @@ export interface ConversationHostUi {
    * the host's, so they are refused before anything is `stat`ed or read.
    */
   allowRemotePath?(file: string): boolean;
+  /**
+   * Stage one chunk of a file a remote-control tab sent as a pane message (#200). The access
+   * gate has already admitted it. Absent: uploads over a pane socket are refused.
+   */
+  stageUploadChunk?(deviceId: string | undefined, sessionKey: string, chunk: UploadChunk): Promise<UploadAck>;
   /**
    * The daemon log, for what goes wrong between a pane and its host that the
    * pane cannot see (#196). Session keys only, never what was typed.
@@ -773,6 +779,15 @@ export class ConversationHost {
       case 'dictateAudio':
         await this.transcribeUpload(m);
         return;
+      case 'uploadChunk': {
+        // A remote-control tab has no `POST /upload` (#200): its files come as chunks, staged as that route stages them.
+        const { type: _type, ...chunk } = m;
+        const ack: UploadAck = this.ui.stageUploadChunk
+          ? await this.ui.stageUploadChunk(this.access.context.deviceId, this.session?.key ?? 'none', chunk)
+          : { id: chunk.id, index: chunk.index, error: 'Uploads are not available here.' };
+        this.post({ type: 'uploadAck', ...ack });
+        return;
+      }
       case 'openDiff':
         // No diff editor here means the card's own +/- block is all there is.
         // Saying so is better than a button that swallows the click.
@@ -1109,6 +1124,8 @@ export function conversationRequest(m: ConversationToHost, key: string | undefin
     case 'dictate':
     case 'dictateAudio':
       return { action: 'dictation.use' };
+    case 'uploadChunk':
+      return { action: 'file.upload', resource: { kind: 'file', id: String(m.id).slice(0, 64), size: m.size } };
     case 'send': {
       // The first message to a durable agent starts its session (#179).
       const agentId = agentIdOfDraftKey(m.sessionKey ?? key ?? '');

@@ -4,6 +4,7 @@
  */
 import type { DelegationOffer, DelegationOfferOutcome } from './delegationIntent';
 import type { ColumnPrefs } from './columns';
+import type { UploadAck, UploadChunk } from './files';
 import type {
   ComposerState,
   ConversationCapabilities,
@@ -360,6 +361,8 @@ export type HostToConversation =
    * taken (unreadable, or an image past the size limit).
    */
   | { type: 'dropped'; mentions: string[]; images: ImageAttachment[]; notes: string[] }
+  /** Answer to one `uploadChunk` (#200). */
+  | ({ type: 'uploadAck' } & UploadAck)
   | { type: 'delegationOffer'; offer?: DelegationOffer }
   | { type: 'sendResult'; requestId: string; error?: string; adopted?: boolean }
   | { type: 'error'; text: string }
@@ -439,6 +442,11 @@ export type ConversationToHost =
    * answers with a `dictation` message, as for `dictate`.
    */
   | { type: 'dictateAudio'; mime: string; durationMs: number; data: string }
+  /**
+   * One chunk of a file uploaded over the pane socket, because a remote-control tab has no
+   * `POST /upload` (#200). The host stages it and answers each chunk with an `uploadAck`.
+   */
+  | ({ type: 'uploadChunk' } & UploadChunk)
   /** An `@` is being typed: what files in the session's folder match so far. */
   | { type: 'fileSuggest'; query: string }
   /**

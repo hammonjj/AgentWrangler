@@ -76,7 +76,7 @@ These panes call daemon HTTP routes directly, which a relay page cannot reach:
 |---|---|---|
 | File view | `fileViewUrl` (`hostView.ts`) | Unavailable; say so |
 | Folder browser | `DIRS_PATH` (`folderBrowser.ts`) | Unavailable; say so |
-| Upload | `UPLOAD_PATH` (`upload.ts`) | Unavailable; say so |
+| Upload | `UPLOAD_PATH` (`upload.ts`) | Works (#200): `uploadChunk` / `uploadAck` pane messages, 96 KB chunks, each acknowledged before the next, 25 MB cap, staged by `WebFiles.stageChunk` through `authorize()` (`file.upload`). Same encrypted channel; no new listener or clear-text path |
 | Dictation | `DICTATION_PATH` | Browser dictation only |
 | LAN pairing pages | `/pair/*` | Not applicable |
 

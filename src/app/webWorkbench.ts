@@ -261,7 +261,7 @@ export function startWebWorkbench(opts: WebWorkbenchOptions): WebWorkbench {
       tracer,
       app,
       host,
-      ui: { ...ui, allowRemotePath: (p) => files.isStaged(p) },
+      ui: { ...ui, allowRemotePath: (p) => files.isStaged(p), stageUploadChunk: (device, key, chunk) => files.stageChunk(device, key, chunk) },
       clients,
       log,
       hostShell: opts.hostShell,

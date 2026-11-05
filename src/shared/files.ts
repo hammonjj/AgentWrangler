@@ -24,6 +24,36 @@ export const CONVERSATION_HEADER = 'x-aw-conversation';
 /** The largest upload, per file. */
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
+/**
+ * Over the relay (#200) a file goes down the encrypted pane socket as acknowledged chunks.
+ * The cap is lower than `MAX_UPLOAD_BYTES`: every byte is metered and base64 adds a third.
+ */
+export const RELAY_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+/** Raw bytes per chunk. Base64 makes it about 128 KB, well under the relay's 256 KB payload cap. */
+export const RELAY_UPLOAD_CHUNK_BYTES = 96 * 1024;
+
+/** One piece of a relay upload (a `uploadChunk` pane message without its `type`). */
+export interface UploadChunk {
+  /** Picked by the page; ties the chunks of one file together. */
+  id: string;
+  name: string;
+  /** 0-based; each chunk must be the one after the last acknowledged. */
+  index: number;
+  count: number;
+  /** The whole file's size in bytes. */
+  size: number;
+  /** This chunk's bytes, base64. */
+  data: string;
+}
+
+/** The host's answer to one `UploadChunk`. `result` comes with the last one; `error` ends the upload. */
+export interface UploadAck {
+  id: string;
+  index: number;
+  result?: UploadResult;
+  error?: string;
+}
+
 /** The reply to a good upload. `path` is on the host. */
 export interface UploadResult {
   path: string;
