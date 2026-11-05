@@ -1,7 +1,7 @@
 import { createBrowserDictation, isBrowserHost } from '../common/browserDictation';
 import { renderDelegationOffer } from '../common/delegationOffer';
 import './conversation.css';
-import { fileUriToPath, fileUrisToPaths } from '../../shared/attachments';
+import { fileUriToPath, fileUrisToPaths, mentionForPath } from '../../shared/attachments';
 import type {
   AskState,
   ComposerState,
@@ -2329,9 +2329,51 @@ msgEl.addEventListener('click', () => {
 /** Pasted images waiting to go with the next message, newest last. */
 let attachments: ImageAttachment[] = [];
 
+/**
+ * Uploaded files waiting to go with the next message: a tile each, like an image. The host path
+ * becomes an `@` mention at send time, so the box holds only what the user typed.
+ */
+interface FileChip {
+  /** On the host: where the upload was staged. */
+  path: string;
+  /** What the user picked, for the tile. */
+  name: string;
+}
+let fileChips: FileChip[] = [];
+
 function renderAttachments(): void {
-  attachmentsEl.hidden = attachments.length === 0;
+  attachmentsEl.hidden = attachments.length === 0 && fileChips.length === 0;
   attachmentsEl.textContent = '';
+  fileChips.forEach((f, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'attach attachfile';
+    chip.title = f.name;
+
+    const ext = document.createElement('span');
+    ext.className = 'attachext';
+    const dot = f.name.lastIndexOf('.');
+    ext.textContent = dot > 0 && dot < f.name.length - 1 ? f.name.slice(dot + 1, dot + 6).toUpperCase() : 'FILE';
+    chip.appendChild(ext);
+
+    const label = document.createElement('span');
+    label.className = 'attachname';
+    label.textContent = f.name;
+    chip.appendChild(label);
+
+    const x = document.createElement('button');
+    x.className = 'attachx';
+    x.textContent = '✕';
+    x.title = `Remove ${f.name}`;
+    x.setAttribute('aria-label', `Remove attached file ${f.name}`);
+    x.addEventListener('click', () => {
+      fileChips.splice(i, 1);
+      renderAttachments();
+      msgEl.focus();
+    });
+    chip.appendChild(x);
+
+    attachmentsEl.appendChild(chip);
+  });
   attachments.forEach((img, i) => {
     const chip = document.createElement('div');
     chip.className = 'attach';
@@ -2400,7 +2442,8 @@ function addFiles(files: File[]): void {
 async function uploadAndMention(file: File): Promise<void> {
   try {
     const uploaded = await uploadFile(file, activeSession || 'none', (chunk) => post({ type: 'uploadChunk', ...chunk }));
-    post({ type: 'dropPaths', paths: [uploaded.path] });
+    fileChips.push({ path: uploaded.path, name: uploaded.name || file.name });
+    renderAttachments();
   } catch (err) {
     note(err instanceof Error ? err.message : `Could not upload ${file.name}.`);
   }
@@ -2570,12 +2613,13 @@ function insertMentions(mentions: string[]): void {
 
 let activeSession = '';
 let activeProvider = 'claude';
-const drafts = new Map<string, { text: string; images: ImageAttachment[] }>();
+const drafts = new Map<string, { text: string; images: ImageAttachment[]; files: FileChip[] }>();
 let pendingSend: { id: string; text: string; session: string } | undefined;
 function sendMessage(): void {
   if (pendingSend) { post({ type: 'cancelSend' }); return; }
-  const text = msgEl.value.trim();
-  // An image on its own is a real message; only both being empty is a no-op.
+  // Uploaded files go as mentions after what was typed, as a dropped file would.
+  const text = [msgEl.value.trim(), ...fileChips.map((f) => mentionForPath('', f.path))].filter((t) => t !== '').join(' ');
+  // An image or a file on its own is a real message; only all being empty is a no-op.
   if (!text && attachments.length === 0) return;
   const requestId = String(Date.now());
   pendingSend = { id: requestId, text: msgEl.value, session: activeSession };
@@ -2703,7 +2747,7 @@ function resetDictationPreview(): void {
 function deliverDictated(text: string): void {
   const target = dict.session;
   if (target && target !== activeSession) {
-    const draft = drafts.get(target) ?? { text: '', images: [] };
+    const draft = drafts.get(target) ?? { text: '', images: [], files: [] };
     drafts.set(target, { ...draft, text: spliceDictation(draft.text, draft.text.length, text).value });
     note('Dictation finished after you switched conversations; the text is in the draft of the one you left.');
     return;
@@ -3036,7 +3080,7 @@ vscodeApi.onMessage((body) => {
       sendBtn.textContent = busy ? 'Stop' : 'Send';
       if (m.error) note(m.error);
       else {
-        msgEl.value = ''; attachments = []; renderAttachments(); autoGrow();
+        msgEl.value = ''; attachments = []; fileChips = []; renderAttachments(); autoGrow();
         if (m.adopted) {
           note('Session taken over here. Release hands it back to a terminal.');
           const undo = document.createElement('button'); undo.className = 'note-action'; undo.textContent = 'Undo takeover';
@@ -3053,11 +3097,11 @@ vscodeApi.onMessage((body) => {
       leaveAnalyticsDetail();
       renderDelegationOffer(document.getElementById('convDelegationOffer')!, undefined, () => {});
       if (activeSession !== m.session.key) {
-        if (activeSession) drafts.set(activeSession, { text: msgEl.value, images: [...attachments] });
+        if (activeSession) drafts.set(activeSession, { text: msgEl.value, images: [...attachments], files: [...fileChips] });
         if (pendingSend) post({ type: 'cancelSend' });
         activeSession = m.session.key;
         const draft = drafts.get(activeSession);
-        msgEl.value = draft?.text ?? ''; attachments = draft?.images ?? []; msgEl.readOnly = false;
+        msgEl.value = draft?.text ?? ''; attachments = draft?.images ?? []; fileChips = draft?.files ?? []; msgEl.readOnly = false;
         renderAttachments(); autoGrow();
         // Moving to another conversation ends a recording rather than letting
         // it carry on into a composer it was not started in. The text is
