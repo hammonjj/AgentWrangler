@@ -435,6 +435,18 @@ export async function deriveRelayPassword(email: string, password: string, itera
   return { authValue: [...auth].map((b) => b.toString(16).padStart(2, '0')).join(''), enrollKey: toBase64Url(await expand('aw enroll')) };
 }
 
+/**
+ * The one device a signed-in account stands for (no registration, no expiry). Both ends derive
+ * it from `enrollKey`, so any browser that knows the remote password has it and Supabase never
+ * sees it. Changing the password changes it, which revokes every browser at once.
+ */
+export async function deriveAccountDevice(enrollKey: string): Promise<{ deviceId: string; key: string }> {
+  const hkdf = await crypto.subtle.importKey('raw', fromBase64Url(enrollKey) as BufferSource, 'HKDF', false, ['deriveBits']);
+  const expand = async (info: string) =>
+    new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: encoder.encode(info) as BufferSource }, hkdf, 256));
+  return { deviceId: toBase64Url((await expand('aw account device id')).slice(0, 18)), key: toBase64Url(await expand('aw account device key')) };
+}
+
 /** A device asking to be enrolled. `c` seals `{ts, pub, label}` under the enrollment key. */
 export interface EnrollRequest {
   v: number;

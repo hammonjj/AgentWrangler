@@ -6,7 +6,10 @@ import {
   RELAY_EVENT_ENROLL,
   RELAY_EVENT_ENROLLED,
   connectionTopic,
+  deriveAccountDevice,
   deriveRelayPassword,
+  importRelayKey,
+  isRelayId,
   lobbyTopic,
   newEnrollKeyPair,
   newRelayId,
@@ -18,6 +21,19 @@ import {
   sealEnroll,
   sealEnrollReply,
 } from '../src/shared/relay';
+
+describe('account device', () => {
+  it('is the same on both ends, valid as a relay id and key, and changes with the password', async () => {
+    const a = await deriveRelayPassword('me@example.com', 'correct horse battery', 1000);
+    const b = await deriveRelayPassword('me@example.com', 'another long passphrase', 1000);
+    const one = await deriveAccountDevice(a.enrollKey);
+    expect(await deriveAccountDevice(a.enrollKey)).toEqual(one);
+    expect(isRelayId(one.deviceId)).toBe(true);
+    await expect(importRelayKey(one.key)).resolves.toBeDefined();
+    expect(one.key).not.toBe(a.enrollKey);
+    expect(await deriveAccountDevice(b.enrollKey)).not.toEqual(one);
+  });
+});
 
 const UID = '00000000-0000-4000-8000-000000000001';
 /** Few iterations: the derivation is the same, only slower in production. */

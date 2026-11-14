@@ -36,7 +36,11 @@ On the Mac, once Remote control says it is connected: Preferences › Remote con
 **Set password…**. The password is not stored anywhere. The Mac turns it into the Supabase
 password for your account and an enrollment key it keeps in the Keychain (plan §3.1). On the
 phone, open the site (or its Home Screen icon) and sign in with your account's email and that
-password. This also sets the phone up, and it shows under Browser › Devices as "(password)".
+password. Nothing is registered: the phone and the Mac both derive the same account device
+from the password (plan §3.1), so any browser that signs in works, with no expiry. It shows
+under Browser › Devices as "Signed-in browsers (password)". Changing the password, or turning
+password sign-in off, cuts every such browser off at once; they sign in again with the new one.
+(QR-paired devices still expire after 30 days unused.)
 
 ## 3. Make yourself the owner, then close sign-ups
 

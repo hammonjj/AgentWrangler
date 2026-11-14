@@ -157,6 +157,16 @@ Every per-user row cascades from `auth.users`, so deleting the account is one de
 
 ### 3.1 Password sign-in that enrolls the device (#187)
 
+> **Superseded in part (2026-11-14): no enrollment.** Per-device enrollment expired after 30
+> unused days (`DEVICE_TTL_MS`), which logged James's phones out. Password sign-in now derives one
+> *account device* on both ends: `HKDF(enrollKey, "aw account device id" | "aw account device key")`
+> (`deriveAccountDevice`). The loader derives it locally after `signInWithPassword`; the daemon
+> derives it from the stored `enrollKey` and accepts it in `keyOf`, never expiring. No `enroll`
+> round trip is made by the loader (the daemon still answers one). Revocation is a password
+> change (a new `enrollKey` is a new account device) or "off". Supabase still sees `authValue`
+> only; the key stays end-to-end. Trade-off: all password browsers share one device id, so Web
+> Push keeps one subscription (the latest).
+
 QR pairing fails for the case it was built for. iOS gives a Home Screen web app its own storage,
 so a key saved by Safari is not there. Nothing can open the pairing link inside the installed
 app, and the GitHub redirect can leave it. So the phone gets one form, email and password, that
