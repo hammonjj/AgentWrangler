@@ -39,7 +39,7 @@ import {
   type RelaySignIn,
 } from '../remote/relay/relayAuth';
 import type { RelayActionId, SettingStatus } from '../shared/preferences';
-import { RELAY_PASSWORD_MIN, deriveRelayPassword, newRelayKey, relayPairingLink } from '../shared/relay';
+import { RELAY_PASSWORD_MIN, deriveAccountDevice, deriveRelayPassword, newRelayKey, relayPairingLink } from '../shared/relay';
 import { RELAY_WORKBENCH_PAGE } from '../ui/html';
 import type { InteractionTracer } from '../core/web/interactionTrace';
 
@@ -103,6 +103,21 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
   let disposed = false;
   /** The enrollment key (#187), read from the Keychain at each sign-in; undefined while password sign-in is off. */
   let enrollKey: string | undefined;
+  /** The device every browser signed in with the password stands for; derived from `enrollKey`, never expires. */
+  let accountDevice: { deviceId: string; key: string } | undefined;
+  const setEnrollKey = async (key: string | undefined) => {
+    enrollKey = key;
+    // An unreadable stored key must not stop the link: it just leaves password sign-in off.
+    accountDevice = key ? await deriveAccountDevice(key).catch(() => undefined) : undefined;
+  };
+  /** The key for `id`: the account device (kept in the device list so it shows and can hold a push subscription), else a paired device. */
+  const relayKeyFor = (id: string): string | undefined => {
+    if (accountDevice && id === accountDevice.deviceId) {
+      if (!devices.relayKeyOf(id)) devices.issueRelay('Signed-in browsers (password)', accountDevice.key, id);
+      return accountDevice.key;
+    }
+    return devices.relayKeyOf(id);
+  };
   const enrollLimiter = new EnrollLimiter();
 
   const setState = (next: State) => {
@@ -219,7 +234,7 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
     if (!s.url || !s.anonKey) return setState({ kind: 'off', why: 'Set the Supabase project URL and anon key below, then sign in.' });
     if (!host.secrets.available) return setState({ kind: 'error', why: 'The macOS Keychain is not available, so the sign-in cannot be kept.' });
     const refreshToken = await host.secrets.get(RELAY_REFRESH_TOKEN_SECRET);
-    enrollKey = (await host.secrets.get(RELAY_ENROLL_KEY_SECRET).catch(() => undefined)) || undefined;
+    await setEnrollKey((await host.secrets.get(RELAY_ENROLL_KEY_SECRET).catch(() => undefined)) || undefined);
     if (mine !== generation) return;
     if (!refreshToken) return setState({ kind: 'off', why: 'Not signed in. Press “Sign in with GitHub…”.' });
     setState({ kind: 'connecting', why });
@@ -240,7 +255,7 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
       if (mine !== generation) return network.dispose();
       const link = await startRelayLink({
         network,
-        keyOf: (id) => devices.relayKeyOf(id),
+        keyOf: relayKeyFor,
         attach: (socket, context) => opts.attach(socket, context, build()),
         build,
         assets,
@@ -357,7 +372,10 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
       return { ok: false, lines: [`✗  Supabase refused the password: ${e instanceof Error ? e.message : String(e)}`] };
     }
     await host.secrets.store(RELAY_ENROLL_KEY_SECRET, values.enrollKey);
-    enrollKey = values.enrollKey;
+    const old = accountDevice?.deviceId;
+    await setEnrollKey(values.enrollKey);
+    // A new password is a new account device: the old one's browsers are cut off.
+    if (old && old !== accountDevice?.deviceId) devices.revoke(old);
     log('relay: the remote password was set');
     changed.fire();
     return {
@@ -371,9 +389,11 @@ export function startRelayService(opts: RelayServiceOptions): RelayService {
 
   async function clearPassword(): Promise<{ ok: boolean; lines: string[] }> {
     await host.secrets.delete(RELAY_ENROLL_KEY_SECRET);
-    enrollKey = undefined;
+    const old = accountDevice?.deviceId;
+    await setEnrollKey(undefined);
+    if (old) devices.revoke(old);
     changed.fire();
-    return { ok: true, lines: ['Password sign-in is off: no new device can sign in with it. Devices already set up keep working until you revoke them.'] };
+    return { ok: true, lines: ['Password sign-in is off: browsers signed in with it are cut off. Devices paired by QR code keep working until you revoke them.'] };
   }
 
   async function disconnect(): Promise<{ ok: boolean; lines: string[] }> {

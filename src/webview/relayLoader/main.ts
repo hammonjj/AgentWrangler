@@ -154,11 +154,7 @@ async function siteProject(): Promise<RelayProject | undefined> {
 function passwordForm(client: SupabaseClient, project: RelayProject, device: StoredDevice | undefined, error?: string): void {
   show(
     'Sign in',
-    [
-      device
-        ? 'Sign in with the email and remote password set on your Mac.'
-        : 'Sign in with your email and the remote password set on your Mac (Preferences › Remote control › Set password…). This also sets up this device.',
-    ],
+    ['Sign in with your email and the remote password set on your Mac (Preferences › Remote control › Set password…). Nothing else to set up.'],
     [],
   );
   if (error) {
@@ -198,23 +194,14 @@ function passwordForm(client: SupabaseClient, project: RelayProject, device: Sto
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
     submit.disabled = true;
-    submit.textContent = device ? 'Signing in…' : 'Signing in and setting up…';
+    submit.textContent = 'Signing in…';
     void (async () => {
-      const r = await signInWithPassword(client, email.value, password.value, !device);
-      if (!r.ok) {
-        const messages: Record<typeof r.why, string> = {
-          credentials: 'Wrong email or password.',
-          'not-owner': 'Supabase refused this account: it is not the project’s owner.',
-          unreachable: 'Could not reach Supabase. Check the connection and try again.',
-          'mac-silent':
-            'Signed in, but your Mac did not set this device up. Make sure it is awake with Remote control connected, and that password sign-in is on (Preferences › Remote control). After 5 wrong attempts it pauses for an hour.',
-          refused: 'Your Mac’s answer did not check out. Set the password on the Mac again, then retry.',
-        };
-        passwordForm(client, project, device, messages[r.why]);
-        return;
-      }
+      const r = await signInWithPassword(client, email.value, password.value);
+      if (!r.ok) return passwordForm(client, project, device, 'Wrong email or password.');
       localStorage.setItem('aw-email', email.value.trim());
-      if (r.device) await saveDevice({ deviceId: r.device.deviceId, key: await importRelayKey(r.device.key), project, pairedAt: Date.now() });
+      // Always replaced: the password is the credential, so a stored device from an older
+      // password or an expired pairing is simply swapped for the one this password gives.
+      await saveDevice({ deviceId: r.device.deviceId, key: await importRelayKey(r.device.key), project, pairedAt: Date.now() });
       location.reload();
     })().catch((e) => passwordForm(client, project, device, e instanceof Error ? e.message : String(e)));
   });
@@ -292,9 +279,12 @@ async function main(): Promise<void> {
       'Your Mac is not answering',
       [
         last ? `It last checked in ${new Date(last).toLocaleString()}.` : 'It has not checked in yet.',
-        'Make sure it is awake, Agent Wrangler is running, and Remote control is on and signed in. If this device was revoked, pair it again.',
+        'Make sure it is awake, Agent Wrangler is running, and Remote control is on and signed in. If the password changed on the Mac, or this device was paired with a QR code and has since been revoked, sign in again.',
       ],
-      [{ label: 'Try again', run: () => location.reload() }],
+      [
+        { label: 'Try again', run: () => location.reload() },
+        { label: 'Sign in again', tone: 'quiet', run: () => void forgetDevice().then(() => client.auth.signOut({ scope: 'local' })).then(() => location.reload()) },
+      ],
     );
     return;
   }
